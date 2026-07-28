@@ -41,6 +41,11 @@ struct AppState {
 /// Request params Wayfinder implements today. Only consulted when
 /// `strict_params` is on — by default unknown params are ignored, as Solr does
 /// (findings fact 8).
+///
+/// **Implementing a new param? Add it here.** Otherwise `strict_params = true`
+/// will 400 on a param Wayfinder actually supports. Known gaps waiting on their
+/// issues: `sort` (#2), the rest of the `facet.*` family (#3), `commitWithin` /
+/// `overwrite` / `softCommit` (#9).
 const SELECT_PARAMS: &[&str] = &[
     "q",
     "df",

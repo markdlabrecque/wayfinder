@@ -23,6 +23,44 @@ were executed in order by one agent instead:
 in `src/config.rs` were authored alongside the implementation rather than
 red-first. This work would benefit from a genuine `reviewer` pass.
 
+**Resolved:** the orchestrator dispatched a fresh independent `reviewer` against
+this diff, told specifically to treat the not-red-first `src/config.rs` unit
+tests as the prime suspect (tests shaped to fit the code rather than the spec).
+Outcome: **approved, mergeable as-is**, round 1 of 1 — the 2-round cap was not
+hit, so this work has had the full permitted review depth and no "needs further
+review" flag applies. **No must-fix items.** The reviewer re-ran the gates itself
+(38/38, `cargo fmt --check` clean, `cargo clippy --all-targets -- -D warnings`
+clean) and verified, beyond the claims in this report:
+
+- `#[serde(deny_unknown_fields, default)]` is on `ServerConfig` **and** all four
+  nested structs, so a typo inside `[query]` or `[indexing]` is rejected too —
+  not just a top-level one. This was the operator-facing promise of the ticket.
+- The missing-file path is *provably* behaviour-identical to pre-change `main`:
+  it checked `ServerConfig::default()`'s `doc_store_compression = "lz4"` and
+  `blocksize = 16384` against Tantivy 0.26.1's own `IndexSettings::default()`
+  under this project's default features, and `writer_threads = 1` /
+  `writer_heap = 32_000_000` against the values previously hardcoded in
+  `core_index.rs`.
+- The live-knob claims are honest: the `writer_heap`/doc-store proof reads
+  Tantivy's `meta.json` off disk rather than echoing back a parsed struct field.
+  Code comments, README table, and this report's table all agree on which knobs
+  are live and which are inert.
+- `git diff main -- tests/tracer_bullet.rs tests/common/` is empty — the
+  interface constraint held with zero call-site churn.
+- `rows_limit` clamps before use and cannot be bypassed; `start` correctly
+  untouched. `params.rs::keys()` is purely additive with no change to parsing or
+  echo semantics (#11's territory left alone).
+- Confirmed `result_large_err` / `collapsible_if` do not reproduce on this
+  toolchain **on `main` either** — so the tracer-bullet report's "pre-existing
+  lints" were a toolchain artifact, not debt this branch fixed or introduced.
+
+Reviewer follow-up applied immediately (trivial, orchestrator discretion): the
+`SELECT_PARAMS`/`UPDATE_PARAMS` consts in `src/lib.rs` now carry an inline note
+telling implementors to add their params there, naming the known gaps and their
+issues (`sort` → #2, `facet.*` → #3, `commitWithin`/`overwrite`/`softCommit` →
+#9). Previously that trap was documented only in this report, where a sibling
+implementor would not have seen it. Gates re-verified green after the edit.
+
 ## What was built
 
 New `src/config.rs` (~200 lines + unit tests): `ServerConfig` and four sections
