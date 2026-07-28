@@ -2,8 +2,11 @@
 //!
 //! Usage: `wayfinder <schema.toml> <data-dir> [bind-addr]`
 //! `bind-addr` defaults to `127.0.0.1:8983` (Solr's default port).
+//!
+//! The server config (PRD §6) comes from `WAYFINDER_CONFIG`; unset means all
+//! defaults, and so does a path that does not exist.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -18,7 +21,10 @@ async fn main() -> anyhow::Result<()> {
         })?);
     let bind_addr = args.next().unwrap_or_else(|| "127.0.0.1:8983".to_string());
 
-    let app = wayfinder::app(&schema_path, &data_dir)?;
+    let app = match std::env::var_os("WAYFINDER_CONFIG") {
+        Some(path) => wayfinder::app_with_config(&schema_path, &data_dir, Path::new(&path))?,
+        None => wayfinder::app(&schema_path, &data_dir)?,
+    };
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     println!("wayfinder listening on {bind_addr}");

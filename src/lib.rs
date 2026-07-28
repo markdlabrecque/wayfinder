@@ -10,10 +10,13 @@
 //! core, matching PRD open question 1's "single-core-per-process" lean.
 
 mod collector;
+mod config;
 mod core_index;
 mod error;
 mod params;
 pub mod schema;
+
+pub use config::ServerConfig;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -32,14 +35,58 @@ use params::Params;
 struct AppState {
     core_name: String,
     index: CoreIndex,
+    config: ServerConfig,
 }
 
-/// Builds the Wayfinder HTTP app for a single core, loading its schema from
-/// `schema_path` and storing/opening its Tantivy index under `data_dir`.
+/// Request params Wayfinder implements today. Only consulted when
+/// `strict_params` is on — by default unknown params are ignored, as Solr does
+/// (findings fact 8).
+///
+/// **Implementing a new param? Add it here.** Otherwise `strict_params = true`
+/// will 400 on a param Wayfinder actually supports. `sort` is listed because
+/// #11 validates it (a non-`fast` field is a 400); ordering itself lands with
+/// #2. Still missing, waiting on their issues: the rest of the `facet.*` family
+/// (#3), `commitWithin` / `overwrite` / `softCommit` (#9).
+const SELECT_PARAMS: &[&str] = &[
+    "q",
+    "df",
+    "fq",
+    "fl",
+    "rows",
+    "start",
+    "facet",
+    "facet.field",
+    "sort",
+    "wt",
+];
+const UPDATE_PARAMS: &[&str] = &["commit", "wt"];
+const PING_PARAMS: &[&str] = &["wt"];
+
+/// Builds the Wayfinder HTTP app for a single core with all server-config
+/// defaults (PRD §6). Use `app_with_config` to supply a config file.
 pub fn app(schema_path: &Path, data_dir: &Path) -> anyhow::Result<Router> {
-    let index = CoreIndex::open(schema_path, data_dir)?;
+    build(schema_path, data_dir, ServerConfig::default())
+}
+
+/// As `app`, with the server config read from `config_path`. A missing file
+/// means all defaults; unknown keys in a present file are an error.
+pub fn app_with_config(
+    schema_path: &Path,
+    data_dir: &Path,
+    config_path: &Path,
+) -> anyhow::Result<Router> {
+    let config = ServerConfig::load(config_path)?;
+    build(schema_path, data_dir, config)
+}
+
+fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::Result<Router> {
+    let index = CoreIndex::open(schema_path, data_dir, &config)?;
     let core_name = index.wf_schema.core.name.clone();
-    let state = Arc::new(AppState { core_name, index });
+    let state = Arc::new(AppState {
+        core_name,
+        index,
+        config,
+    });
 
     // `any`, not `get`/`post`: Solr's request handlers are method-agnostic —
     // `err_select_delete.json` shows DELETE /select served as a normal query,
@@ -140,6 +187,23 @@ fn check_sort(state: &AppState, params: &Params) -> Result<(), WfError> {
     Ok(())
 }
 
+/// Under `strict_params`, rejects the first request param Wayfinder does not
+/// implement — a development aid for finding gaps, off by default because Solr
+/// serves such requests normally and rejecting them would break real clients.
+fn check_params(state: &AppState, allowed: &[&str], params: &Params) -> Result<(), WfError> {
+    if !state.config.strict_params {
+        return Ok(());
+    }
+    match params.keys().find(|key| !allowed.contains(key)) {
+        None => Ok(()),
+        Some(unknown) => Err(WfError::bad_request(
+            "wayfinder::UnknownParam",
+            format!("unknown request parameter `{unknown}` (strict_params is on)"),
+        )
+        .with_params(params)),
+    }
+}
+
 async fn ping(
     State(state): State<Arc<AppState>>,
     AxPath(core): AxPath<String>,
@@ -147,6 +211,7 @@ async fn ping(
 ) -> Result<Response, WfError> {
     let params = Params::parse(query.as_deref().unwrap_or(""));
     check_core(&state, &core, &params, Envelope::WithParams)?;
+    check_params(&state, PING_PARAMS, &params)?;
     let body = json!({
         "responseHeader": {
             "status": 0,
@@ -173,6 +238,7 @@ async fn update(
         WfError::bad_request(class, msg).envelope(Envelope::NoParams)
     };
     check_core(&state, &core, &params, Envelope::NoParams)?;
+    check_params(&state, UPDATE_PARAMS, &params).map_err(|e| e.envelope(Envelope::NoParams))?;
 
     let docs: Value = serde_json::from_slice(&body).map_err(|e| {
         update_err(
@@ -214,6 +280,7 @@ async fn select(
 ) -> Result<Response, WfError> {
     let params = Params::parse(query.as_deref().unwrap_or(""));
     check_core(&state, &core, &params, Envelope::WithParams)?;
+    check_params(&state, SELECT_PARAMS, &params)?;
     check_sort(&state, &params)?;
 
     let default_field = params
@@ -253,10 +320,14 @@ async fn select(
         .get("start")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    // `rows_limit` is a Wayfinder cap with no Solr equivalent, so an
+    // over-limit request is clamped rather than rejected — a clamp keeps a
+    // client that asks for too much working, a 400 breaks it.
     let rows: usize = params
         .get("rows")
         .and_then(|s| s.parse().ok())
-        .unwrap_or(10);
+        .unwrap_or(10)
+        .min(state.config.query.rows_limit);
 
     let fl: Option<Vec<String>> = params
         .get("fl")

@@ -46,6 +46,11 @@ impl Params {
             .collect()
     }
 
+    /// Every param key present, in request order (repeated keys repeat).
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.pairs.iter().map(|(k, _)| k.as_str())
+    }
+
     /// Renders `responseHeader.params` per findings fact 5/6: raw string
     /// values, repeated keys folded into a JSON array.
     pub fn echo(&self) -> Value {
