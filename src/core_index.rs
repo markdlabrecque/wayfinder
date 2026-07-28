@@ -568,7 +568,19 @@ impl CoreIndex {
                         Key::F64(v) => *v,
                         Key::I64(v) => *v as f64,
                         Key::U64(v) => *v as f64,
-                        Key::Str(_) => 0.0, // unreachable for an F64 column
+                        // Genuinely unreachable, not just quiet-fallback
+                        // unreachable: the terms aggregation's `Key` variant
+                        // is decided by the underlying Tantivy column's own
+                        // type (`term_agg.rs`'s numeric vs. `ColumnType::Str`
+                        // branches), and `kind == Some(ValueKind::F64)` here
+                        // means this field was declared (and therefore
+                        // added, via `add_f64_field`) as an `f64` column — a
+                        // `Str` key can only come from a string/text column.
+                        // Loud per the sibling guard in `facet.rs`'s
+                        // `echo_range_end`, rather than a silent `0.0`.
+                        Key::Str(_) => {
+                            unreachable!("an F64-kind field's aggregation key was Key::Str")
+                        }
                     };
                     render_double(v)
                 } else {

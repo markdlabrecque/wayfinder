@@ -302,6 +302,22 @@ fn facet_ranges(
         // zero buckets (an empty span) there is no walked boundary to align
         // to, so the requested `end` is echoed verbatim — unpinned by any
         // fixture, but the least surprising fallback.
+        //
+        // ponytail: two more shapes past what is captured are unfixtured
+        // here. (a) The `F64` walk accumulates `lower + gap` bucket by
+        // bucket, so an *aligned* double request (start 0 / end 0.3 / gap
+        // 0.1) now echoes the walked `0.30000000000000004` rather than the
+        // requested `0.3` — a real behaviour change from plain `echo_bound`
+        // on a path no fixture exercises. (b) The date echo now goes through
+        // `echo_range_end` -> `format_date`, so a millisecond-precision
+        // request with an exactly-zero fraction (`end=2020-01-06T00:00:00.000Z`)
+        // echoes `...:00Z`, while `start` still echoes the request string
+        // verbatim via `echo_bound` — `start` and `end` now render by
+        // different rules for the same kind of value. The only cases actually
+        // captured are aligned-date (`facet_range_date.json`) and
+        // non-aligned-i64 (`facet_range_end_not_gap_aligned.json`); the
+        // raw-vs-normalised `start`/`end` asymmetry, and the float
+        // accumulation drift, both need a capture before relying on them.
         let end_echo = match bucket_spans.last() {
             Some((_, _, upper)) => echo_range_end(kind, *upper),
             None => echo_bound(kind, end),
@@ -397,6 +413,17 @@ fn range_buckets(
             while lower < end {
                 let upper = lower + gap;
                 out.push((
+                    // ponytail: this is the exact "5" vs "5.0" bug finding 39
+                    // just fixed for `facet.field` (`CoreIndex::term_facet` /
+                    // `render_double`) — an integral `facet.range` bucket
+                    // boundary on a double/float field renders `"0"`/`"10"`
+                    // here via plain `f64::to_string()`, not Java
+                    // `Double.toString`'s `"0.0"`/`"10.0"`. Out of this
+                    // issue's scope (no `facet.range` fixture on `price`/
+                    // `rating` was captured) and left unfixed, but it is the
+                    // same divergence, not a different one — revisit
+                    // alongside `render_double` if/when a range fixture on a
+                    // double/float field lands.
                     lower.to_string(),
                     RangeEnd::F64(lower),
                     RangeEnd::F64(upper),
