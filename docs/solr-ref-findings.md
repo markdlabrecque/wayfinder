@@ -170,51 +170,6 @@ container. Anything not a main-core GET is a `manifest-errors.tsv` row.
     DateMathParser (month lengths vary), so Wayfinder refuses them by name rather than silently
     rounding. Follow-up.
 
-## Findings from the issue #24 `facet.field` numeric/date capture
-
-Eleven new `manifest-errors.tsv` rows against the `facets` core (a `facets`-core GET, so not
-`manifest.tsv`), on the same 4-doc corpus `facet_range_*` uses (`r1..r4`, `views` pint,
-`created` pdate).
-
-21. **The issue-#24 premise was wrong: Solr does not enumerate a numeric/date term dictionary
-    for `facet.field` either.** `q=id:r1&facet.field=views` returns `"views":["5",1]` only —
-    `15`/`25`/`35` are absent, not present at 0 (`facet_field_numeric_subset.json`,
-    `facet_field_date_subset.json`). `pint`/`pdate` are Points-based fields with no term
-    dictionary to walk, so there is nothing for Solr to enumerate from. Wayfinder's existing
-    hit-set-only behaviour for numeric/date `facet.field` is therefore a match, not a gap.
-
-22. **The control that makes finding 21 trustworthy.** `facet_field_string_control_subset.json`
-    is the *same* container, core, corpus and hit set as finding 21, with `facet.field=id` (a
-    string field) instead: it still enumerates the whole dictionary,
-    `["r1",1,"r2",0,"r3",0,"r4",0]`. Same everything except the field's type, different
-    behaviour — proof finding 21 is field-type-driven and not an artifact of how the fixture was
-    captured.
-
-23. **Solr raises `facet.mincount` from 0 to 1 for a Points-based `facet.field`, and says so.**
-    Every fixture where a `facet.field` names `views`/`created` (numeric/date) *and* the
-    effective `facet.mincount` is 0 carries a `responseHeader.warnings` array with exactly one
-    string: `"Raising facet.mincount from 0 to 1, because field <name> is Points-based."`
-    (`facet_field_numeric_all.json` et al.). It is absent when `facet.mincount=1` is given
-    explicitly (`facet_field_numeric_mincount_one.json`) and absent for the string control
-    (`facet_field_string_control_subset.json`) and for every `facet_range_*` fixture — the raise
-    is specific to `facet.field`, not `facet.range`. The raise has no observable effect on the
-    counts in these fixtures (no zero-count numeric bucket exists for `min_doc_count: 0` to
-    introduce), so this is a header-honesty fact rather than a counting one. Wayfinder now emits
-    the same `responseHeader.warnings` key, verbatim wording, under the same gate (a `facet.field`
-    naming a non-string fast field, effective `facet.mincount == 0`).
-
-24. **Numeric/date facet terms order by value, not by the rendered string.**
-    `facet_field_numeric_sort_index_all.json` (`facet.sort=index`, whole corpus) orders `views` as
-    `5, 15, 25, 35` — value order, not the lexical `15, 25, 35, 5` a naive string sort on the
-    rendered term produces. The `facet.sort=count` tie-break
-    (`facet_field_numeric_sort_index.json`/`facet_field_numeric_sort_count.json`, four counts of 1)
-    is also value-ascending. This was a real bug in `src/facet.rs::facet_fields`, fixed by
-    carrying a typed sort key (`CoreIndex::FacetOrderKey`) out of `term_facet` alongside the
-    rendered term, rather than sorting the rendered string. `facet_field_date_sort_index_all.json`
-    does not by itself distinguish value order from lexical order (RFC3339 lexical order and
-    chronological order coincide for these dates), so it is asserted but not load-bearing for the
-    fix the way the numeric fixtures are.
-
 ## Differential harness (issue #1)
 
 `tests/differential.rs` + `tests/common/diff.rs` run the query set in `solr-ref/manifest.tsv`
@@ -456,3 +411,51 @@ cannot see any of them unless the `preserve_order` feature is on, which is why t
     order-insensitive on that object and why `params` is the one permanently exempt path in
     `key_order::EXEMPT_PATHS`. Every *other* object in the envelope is ordered on purpose and is
     compared.
+
+## Findings from the issue #24 `facet.field` numeric/date capture
+
+Claiming findings 27-30 (issue #25 landed concurrently and took 21-26 above).
+
+Eleven new `manifest-errors.tsv` rows against the `facets` core (a `facets`-core GET, so not
+`manifest.tsv`), on the same 4-doc corpus `facet_range_*` uses (`r1..r4`, `views` pint,
+`created` pdate).
+
+27. **The issue-#24 premise was wrong: Solr does not enumerate a numeric/date term dictionary
+    for `facet.field` either.** `q=id:r1&facet.field=views` returns `"views":["5",1]` only —
+    `15`/`25`/`35` are absent, not present at 0 (`facet_field_numeric_subset.json`,
+    `facet_field_date_subset.json`). `pint`/`pdate` are Points-based fields with no term
+    dictionary to walk, so there is nothing for Solr to enumerate from. Wayfinder's existing
+    hit-set-only behaviour for numeric/date `facet.field` is therefore a match, not a gap.
+
+28. **The control that makes finding 27 trustworthy.** `facet_field_string_control_subset.json`
+    is the *same* container, core, corpus and hit set as finding 27, with `facet.field=id` (a
+    string field) instead: it still enumerates the whole dictionary,
+    `["r1",1,"r2",0,"r3",0,"r4",0]`. Same everything except the field's type, different
+    behaviour — proof finding 27 is field-type-driven and not an artifact of how the fixture was
+    captured.
+
+29. **Solr raises `facet.mincount` from 0 to 1 for a Points-based `facet.field`, and says so.**
+    Every fixture where a `facet.field` names `views`/`created` (numeric/date) *and* the
+    effective `facet.mincount` is 0 carries a `responseHeader.warnings` array with exactly one
+    string: `"Raising facet.mincount from 0 to 1, because field <name> is Points-based."`
+    (`facet_field_numeric_all.json` et al.). It is absent when `facet.mincount=1` is given
+    explicitly (`facet_field_numeric_mincount_one.json`) and absent for the string control
+    (`facet_field_string_control_subset.json`) and for every `facet_range_*` fixture — the raise
+    is specific to `facet.field`, not `facet.range`. The raise has no observable effect on the
+    counts in these fixtures (no zero-count numeric bucket exists for `min_doc_count: 0` to
+    introduce), so this is a header-honesty fact rather than a counting one. Wayfinder now emits
+    the same `responseHeader.warnings` key, verbatim wording, under the same gate (a `facet.field`
+    naming a non-string fast field, effective `facet.mincount == 0`). Per finding 21 above,
+    `warnings` leads `responseHeader` (`warnings, status, QTime, params`), not trails it.
+
+30. **Numeric/date facet terms order by value, not by the rendered string.**
+    `facet_field_numeric_sort_index_all.json` (`facet.sort=index`, whole corpus) orders `views` as
+    `5, 15, 25, 35` — value order, not the lexical `15, 25, 35, 5` a naive string sort on the
+    rendered term produces. The `facet.sort=count` tie-break
+    (`facet_field_numeric_sort_index.json`/`facet_field_numeric_sort_count.json`, four counts of 1)
+    is also value-ascending. This was a real bug in `src/facet.rs::facet_fields`, fixed by
+    carrying a typed sort key (`CoreIndex::FacetOrderKey`) out of `term_facet` alongside the
+    rendered term, rather than sorting the rendered string. `facet_field_date_sort_index_all.json`
+    does not by itself distinguish value order from lexical order (RFC3339 lexical order and
+    chronological order coincide for these dates), so it is asserted but not load-bearing for the
+    fix the way the numeric fixtures are.

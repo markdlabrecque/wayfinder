@@ -98,7 +98,8 @@ gitignored — regenerate rather than trust this list if it ages):
     `"Raising facet.mincount from 0 to 1, because field <name> is Points-based."`
     (`facet_field_numeric_all.json`). Absent from every other fixture, including `facet.range`
     on the same fields and `facet.field` on a string column; Wayfinder emits the same key,
-    verbatim wording, under the same gate. Not a divergence — see findings 21-24.
+    verbatim wording, under the same gate, and leads `responseHeader` with it (`warnings, status,
+    QTime, params`), matching the fixture's key order. Not a divergence — see findings 27-30.
 
 ### What deliberately differs
 
