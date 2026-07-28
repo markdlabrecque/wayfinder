@@ -8,12 +8,16 @@
 //! Two things in here are deliberately *not* fixture comparisons:
 //!
 //! - **The dictionary-enumeration property.** Solr's `facet.field` enumerates
-//!   the whole term dictionary of the field, not the hit set: a query matching
-//!   one document still reports every other term at 0 (`facet_zero.json`,
-//!   `facet_subset.json`). Those assertions are written out term-by-term as
-//!   well as diffed against the fixture, because it is the one property a
-//!   hardcoded zero-fill could fake against a single fixture but not across
-//!   hit sets of different sizes.
+//!   the whole term dictionary of a **string** field, not the hit set: a query
+//!   matching one document still reports every other term at 0
+//!   (`facet_zero.json`, `facet_subset.json`). That is a property of Solr's
+//!   own string columns — a Points-based (numeric/date) field has no term
+//!   dictionary to enumerate, in Solr as much as in Wayfinder (issue #24,
+//!   `facet_field_numeric_all.json`, `facet_field_string_control_subset.json`)
+//!   — not a Wayfinder limitation. Those assertions are written out
+//!   term-by-term as well as diffed against the fixture, because it is the one
+//!   property a hardcoded zero-fill could fake against a single fixture but
+//!   not across hit sets of different sizes.
 //!
 //! - **Unfacetable fields.** Captured Solr contradicts the issue premise here:
 //!   `facet.field` on a non-docValues text field, on a stored-only field, and
@@ -1020,4 +1024,392 @@ async fn strict_params_accepts_every_implemented_facet_param() {
         StatusCode::OK,
         "every implemented facet param must pass strict mode, got {body}"
     );
+}
+
+// --- 14. facet.field on numeric/date fields (issue #24) --------------------
+//
+// Eleven fixtures captured against the same `facets` core / 4-doc corpus
+// `range_app()` mirrors:
+//
+//     r1 views=5  created=2020-01-02T00:00:00Z note=alpha
+//     r2 views=15 created=2020-01-03T00:00:00Z note=beta
+//     r3 views=25 created=2020-01-03T00:00:00Z note=alpha
+//     r4 views=35 created=2020-01-05T00:00:00Z
+//
+// The queries below are copied verbatim from the corresponding row in
+// `solr-ref/manifest-errors.tsv` (these are `facets`-core GETs, so the
+// differential harness does not pick them up).
+//
+// Ground truth establishes two things:
+//
+// 1. **The ticket premise is wrong.** Solr 9 does not enumerate a numeric or
+//    date term dictionary for `facet.field`: `pint`/`pdate` are point fields
+//    with no term dictionary to walk. `facet_field_string_control_subset`
+//    (same container, corpus, hit set, but `facet.field=id`, a string field)
+//    proves this is field-type-driven, not a broken capture — `id` *does*
+//    enumerate. Wayfinder's current hit-set-only behaviour for numeric/date
+//    is therefore already correct and must be pinned, not "fixed" into a
+//    fabricated zero-fill.
+// 2. **There is a real bug: ordering.** Solr orders numeric/date facet terms
+//    by *value*, not by the rendered string. `src/facet.rs`'s
+//    `facet_fields` sorts with `a.0.cmp(&b.0)` on the rendered string, which
+//    is lexical: `"15"`, `"25"`, `"35"`, `"5"` — wrong for `views`.
+
+#[tokio::test]
+async fn facet_field_numeric_all_matches_fixture() {
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=views&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_field_numeric_all");
+}
+
+#[tokio::test]
+async fn facet_field_numeric_subset_matches_fixture() {
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=id:r1&rows=0&facet=true&facet.field=views&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_field_numeric_subset");
+}
+
+#[tokio::test]
+async fn facet_field_date_all_matches_fixture() {
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=created&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_field_date_all");
+}
+
+#[tokio::test]
+async fn facet_field_date_subset_matches_fixture() {
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=id:r1&rows=0&facet=true&facet.field=created&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_field_date_subset");
+}
+
+#[tokio::test]
+async fn facet_field_numeric_sort_index_matches_fixture() {
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=id:r1&rows=0&facet=true&facet.field=views&facet.sort=index&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_field_numeric_sort_index");
+}
+
+#[tokio::test]
+async fn facet_field_numeric_sort_count_matches_fixture() {
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=id:r1&rows=0&facet=true&facet.field=views&facet.sort=count&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_field_numeric_sort_count");
+}
+
+#[tokio::test]
+async fn facet_field_numeric_sort_index_all_matches_fixture() {
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=views&facet.sort=index&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    // Value order (5, 15, 25, 35), not lexical order (15, 25, 35, 5) — the
+    // ordering bug this issue exists to pin.
+    assert_eq!(
+        flat_facet(&body, "views"),
+        expect_flat(&[
+            (Some("5"), 1),
+            (Some("15"), 1),
+            (Some("25"), 1),
+            (Some("35"), 1),
+        ]),
+        "facet.sort=index on a numeric field orders by value, not by the rendered string"
+    );
+    assert_matches_fixture(body, "facet_field_numeric_sort_index_all");
+}
+
+#[tokio::test]
+async fn facet_field_date_sort_index_all_matches_fixture() {
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=created&facet.sort=index&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    // Chronological order. Unlike `views`, lexical ISO-8601 string order
+    // happens to agree with chronological order here, so this assertion by
+    // itself does not discriminate a lexical-vs-value ordering bug for
+    // dates — it is still asserted, per the fixture, but the numeric
+    // assertions above are the ones that actually separate the two.
+    assert_eq!(
+        flat_facet(&body, "created"),
+        expect_flat(&[
+            (Some("2020-01-02T00:00:00Z"), 1),
+            (Some("2020-01-03T00:00:00Z"), 2),
+            (Some("2020-01-05T00:00:00Z"), 1),
+        ])
+    );
+    assert_matches_fixture(body, "facet_field_date_sort_index_all");
+}
+
+#[tokio::test]
+async fn facet_field_numeric_mincount_one_matches_fixture() {
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=id:r1&rows=0&facet=true&facet.field=views&facet.mincount=1&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_field_numeric_mincount_one");
+}
+
+#[tokio::test]
+async fn facet_field_numeric_json_nl_map_matches_fixture() {
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=id:r1&rows=0&facet=true&facet.field=views&json.nl=map&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_field_numeric_json_nl_map");
+}
+
+#[tokio::test]
+async fn facet_field_string_control_subset_matches_fixture() {
+    // The control: on the *same* core, corpus and hit set as the numeric/date
+    // cases above, `facet.field` on a string field still enumerates the whole
+    // dictionary (`r2`/`r3`/`r4` at 0) — proof that the absent-zero-fill
+    // behaviour above is field-type-driven, not a broken capture, and the
+    // regression guard that a fix to numeric/date ordering must not disable
+    // string term-dictionary enumeration.
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=id:r1&rows=0&facet=true&facet.field=id&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        flat_facet(&body, "id"),
+        expect_flat(&[
+            (Some("r1"), 1),
+            (Some("r2"), 0),
+            (Some("r3"), 0),
+            (Some("r4"), 0),
+        ]),
+        "a string field must still zero-fill terms outside the hit set"
+    );
+    assert_matches_fixture(body, "facet_field_string_control_subset");
+}
+
+// --- 15. no fabricated zero-fill for numeric/date, at two hit-set sizes ----
+//
+// Written out value-by-value (not only diffed against a fixture) because it
+// is the one property a fixture-shaped implementation could fake against a
+// single hit set but not across hit sets of different sizes — mirroring
+// section 2's treatment of the string dictionary-enumeration property.
+
+#[tokio::test]
+async fn numeric_facet_field_has_no_fabricated_zero_fill_one_hit() {
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=id:r1&rows=0&facet=true&facet.field=views&wt=json",
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(body["response"]["numFound"], 1, "hit set is one doc");
+    let flat = flat_facet(&body, "views");
+    assert_eq!(
+        flat,
+        expect_flat(&[(Some("5"), 1)]),
+        "views must contain exactly the one observed term, got {flat:?}"
+    );
+    assert!(
+        !flat.contains(&json!("15"))
+            && !flat.contains(&json!("25"))
+            && !flat.contains(&json!("35")),
+        "15/25/35 are reachable only through non-matching documents and must be absent \
+         entirely, not present at 0 — got {flat:?}"
+    );
+}
+
+#[tokio::test]
+async fn numeric_facet_field_has_no_fabricated_zero_fill_two_hits() {
+    // A second hit-set size, derived from the corpus rather than a fixture
+    // (no fixture was captured for this exact query): `id:r1 OR id:r3`
+    // matches r1 (views=5) and r3 (views=25), so an implementation that
+    // hardcoded the one-hit shape above cannot also satisfy this one.
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=id:r1%20OR%20id:r3&rows=0&facet=true&facet.field=views&wt=json",
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(body["response"]["numFound"], 2, "hit set is two docs");
+    let flat = flat_facet(&body, "views");
+    // Membership, not order: which terms are present/absent is the property
+    // under test here, and is independent of the ordering bug pinned by
+    // `facet_field_numeric_sort_index_all_matches_fixture` et al.
+    assert_eq!(
+        flat.len(),
+        4,
+        "exactly two terms (four flat entries: term, count, term, count), got {flat:?}"
+    );
+    assert!(
+        flat.contains(&json!("5")) && flat.contains(&json!("25")),
+        "the two observed terms must both be present, got {flat:?}"
+    );
+    assert!(
+        !flat.contains(&json!("15")) && !flat.contains(&json!("35")),
+        "15/35 belong to documents outside this hit set and must be absent entirely, \
+         got {flat:?}"
+    );
+    for count in [flat[1].clone(), flat[3].clone()] {
+        assert_eq!(
+            count,
+            json!(1),
+            "each observed term has count 1, got {flat:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn date_facet_field_has_no_fabricated_zero_fill_one_hit() {
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=id:r1&rows=0&facet=true&facet.field=created&wt=json",
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(body["response"]["numFound"], 1, "hit set is one doc");
+    let flat = flat_facet(&body, "created");
+    assert_eq!(
+        flat,
+        expect_flat(&[(Some("2020-01-02T00:00:00Z"), 1)]),
+        "created must contain exactly the one observed date, got {flat:?}"
+    );
+    assert!(
+        !flat.contains(&json!("2020-01-03T00:00:00Z"))
+            && !flat.contains(&json!("2020-01-05T00:00:00Z")),
+        "2020-01-03/2020-01-05 belong to documents outside this hit set and must be \
+         absent entirely, got {flat:?}"
+    );
+}
+
+#[tokio::test]
+async fn date_facet_field_counts_the_hit_set_not_the_whole_corpus() {
+    // `2020-01-03T00:00:00Z` has a corpus-wide count of 2 (r2 + r3). This
+    // query's hit set contains only r3, so the count for that same date must
+    // be 1, not the corpus-wide 2 — proof that even a term that *is* present
+    // is counted from the hit set, not fabricated from the dictionary.
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=id:r1%20OR%20id:r3&rows=0&facet=true&facet.field=created&wt=json",
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(body["response"]["numFound"], 2, "hit set is two docs");
+    assert_eq!(
+        flat_facet(&body, "created"),
+        expect_flat(&[
+            (Some("2020-01-02T00:00:00Z"), 1),
+            (Some("2020-01-03T00:00:00Z"), 1),
+        ]),
+        "2020-01-03T00:00:00Z must be 1 (hit-set count), not 2 (corpus-wide count)"
+    );
+}
+
+#[tokio::test]
+async fn date_facet_field_omits_a_dictionary_value_entirely_outside_the_hit_set() {
+    // r1 (2020-01-02) and r4 (2020-01-05) match; r2/r3 (2020-01-03, corpus
+    // count 2) do not. `2020-01-03T00:00:00Z` must be wholly absent, not
+    // present at 0 and not present at its corpus-wide count.
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=id:r1%20OR%20id:r4&rows=0&facet=true&facet.field=created&wt=json",
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(body["response"]["numFound"], 2, "hit set is two docs");
+    let flat = flat_facet(&body, "created");
+    assert_eq!(
+        flat,
+        expect_flat(&[
+            (Some("2020-01-02T00:00:00Z"), 1),
+            (Some("2020-01-05T00:00:00Z"), 1),
+        ]),
+        "created must contain exactly the two observed dates, got {flat:?}"
+    );
+    assert!(
+        !flat.contains(&json!("2020-01-03T00:00:00Z")),
+        "2020-01-03T00:00:00Z must be absent entirely, not present at 0 — got {flat:?}"
+    );
+}
+
+// --- 16. the date facet key must be Solr's RFC3339 string, not a raw i64 --
+
+#[tokio::test]
+async fn date_facet_field_key_is_rendered_as_solr_rfc3339_not_a_raw_i64() {
+    // Tantivy's date fast-field column is i64 nanoseconds since the epoch.
+    // `CoreIndex::term_facet` renders keys from the aggregation bucket's
+    // `key_as_string`/`Key`; if the date branch falls through to the
+    // generic `Key::I64`/`Key::U64` arm the key comes out as a nanosecond
+    // count, not Solr's `2020-01-02T00:00:00Z`.
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=id:r1&rows=0&facet=true&facet.field=created&wt=json",
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    let flat = flat_facet(&body, "created");
+    assert_eq!(
+        flat.len(),
+        2,
+        "exactly one term for a one-hit query, got {flat:?}"
+    );
+    assert_eq!(
+        flat[0],
+        json!("2020-01-02T00:00:00Z"),
+        "the key must be Solr's exact RFC3339 form — not an i64, not a nanosecond count, \
+         and not an offset form like `+00:00` — got {flat:?}"
+    );
+    assert_eq!(flat[1], json!(1));
 }

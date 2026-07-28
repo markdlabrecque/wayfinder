@@ -66,27 +66,33 @@ const MAX_RANGE_BUCKETS: usize = 65_536;
 /// clauses ready to be extended per facet.
 pub type BaseClauses = Vec<(Occur, Box<dyn Query>)>;
 
-/// Builds the whole `facet_counts` block. Every error is caused by the request
-/// (an unfacetable field, an unparseable `facet.query`, a bad range spec), so
-/// the caller renders them all as 400s.
+/// Builds the whole `facet_counts` block, plus any `responseHeader.warnings`
+/// it earned (issue #24 — Solr's own mincount-raise warning for a `facet.field`
+/// on a Points-based column). Every error is caused by the request (an
+/// unfacetable field, an unparseable `facet.query`, a bad range spec), so the
+/// caller renders them all as 400s.
 pub fn facet_counts(
     index: &CoreIndex,
     config: &ServerConfig,
     params: &Params,
     default_field: &str,
     base: &BaseClauses,
-) -> Result<Value> {
+) -> Result<(Value, Vec<String>)> {
     let as_map = params.get("json.nl") == Some("map");
 
-    Ok(json!({
-        "facet_queries": facet_queries(index, params, default_field, base)?,
-        "facet_fields": facet_fields(index, config, params, base, as_map)?,
-        "facet_ranges": facet_ranges(index, params, base, as_map)?,
-        // Out of scope (PRD §5 leaves them for later): the keys are present
-        // and empty because Solr always emits all five (findings fact 3).
-        "facet_intervals": {},
-        "facet_heatmaps": {},
-    }))
+    let (facet_fields, warnings) = facet_fields(index, config, params, base, as_map)?;
+    Ok((
+        json!({
+            "facet_queries": facet_queries(index, params, default_field, base)?,
+            "facet_fields": facet_fields,
+            "facet_ranges": facet_ranges(index, params, base, as_map)?,
+            // Out of scope (PRD §5 leaves them for later): the keys are present
+            // and empty because Solr always emits all five (findings fact 3).
+            "facet_intervals": {},
+            "facet_heatmaps": {},
+        }),
+        warnings,
+    ))
 }
 
 /// Clones `base` and adds `extra` as another `Must` clause.
@@ -119,17 +125,18 @@ fn facet_queries(
 }
 
 /// `facet.field`, repeatable — one key per field, each counted independently
-/// (`facet_multi_field.json`).
+/// (`facet_multi_field.json`). Returns the sub-object plus any
+/// `responseHeader.warnings` earned along the way.
 fn facet_fields(
     index: &CoreIndex,
     config: &ServerConfig,
     params: &Params,
     base: &BaseClauses,
     as_map: bool,
-) -> Result<Value> {
+) -> Result<(Value, Vec<String>)> {
     let fields = params.get_all("facet.field");
     if fields.is_empty() {
-        return Ok(json!({}));
+        return Ok((json!({}), Vec::new()));
     }
 
     let mincount: u64 = params
@@ -164,21 +171,44 @@ fn facet_fields(
     );
 
     let mut out = Map::new();
+    let mut warnings = Vec::new();
     for field_name in fields {
         check_facetable(&index.wf_schema, field_name)?;
 
+        // Solr's own behaviour (issue #24, `facet_field_numeric_all.json`):
+        // `facet.field` on a Points-based (numeric/date) column raises the
+        // effective `facet.mincount` from 0 to 1 and says so in
+        // `responseHeader.warnings`, verbatim wording included ("Points-based"
+        // is Solr's term, not a description of Wayfinder's own schema). It
+        // never applies to a string field — `facet_field_string_control_subset`
+        // has no such warning — and never to `facet.range`, which is a
+        // separate code path this function does not touch. The raise itself
+        // has no observable effect on the counts (no zero-count numeric bucket
+        // can exist for `min_doc_count: 0` to introduce), so it is purely a
+        // header-honesty concern; the actual `mincount` filtering below is
+        // left at its requested value.
+        let is_points_based = index
+            .wf_schema
+            .value_kind(field_name)
+            .is_some_and(|kind| kind != ValueKind::Text);
+        if is_points_based && mincount == 0 {
+            warnings.push(format!(
+                "Raising facet.mincount from 0 to 1, because field {field_name} is Points-based."
+            ));
+        }
+
         let mut counts = index.term_facet(field_name, &base_query)?;
-        counts.retain(|(_, count)| *count >= mincount);
+        counts.retain(|(_, _, count)| *count >= mincount);
         if by_index {
-            counts.sort_by(|a, b| a.0.cmp(&b.0));
+            counts.sort_by(|a, b| a.1.cmp(&b.1));
         } else {
-            counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            counts.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
         }
         counts.truncate(limit);
 
         let mut buckets: Vec<(Option<String>, u64)> = counts
             .into_iter()
-            .map(|(term, count)| (Some(term), count))
+            .map(|(term, _, count)| (Some(term), count))
             .collect();
         if missing {
             // Solr emits the `null` bucket last and unconditionally — it is not
@@ -192,7 +222,7 @@ fn facet_fields(
 
         out.insert(field_name.to_string(), render_buckets(&buckets, as_map));
     }
-    Ok(Value::Object(out))
+    Ok((Value::Object(out), warnings))
 }
 
 /// `facet.range` + `facet.range.start` / `.end` / `.gap`, repeatable per field.

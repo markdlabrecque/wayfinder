@@ -473,12 +473,19 @@ async fn select(
                 )
                 .collect(),
         };
-        body["facet_counts"] =
+        let (facet_counts, warnings) =
             facet::facet_counts(&state.index, &state.config, &params, &default_field, &base)
                 .map_err(|e| {
                     WfError::bad_request("wayfinder::FacetError", e.to_string())
                         .with_params(&params)
                 })?;
+        body["facet_counts"] = facet_counts;
+        // `responseHeader.warnings` is absent unless there is something to warn
+        // about (every fixture that isn't a Points-based `facet.field` at
+        // mincount 0 lacks the key) — never an empty array.
+        if !warnings.is_empty() {
+            body["responseHeader"]["warnings"] = json!(warnings);
+        }
     }
 
     Ok(axum::Json(body).into_response())
