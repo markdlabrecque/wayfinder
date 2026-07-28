@@ -351,11 +351,7 @@ const RANKED_RELEVANCE_ENTRIES: &[&str] = &["select_term"];
 const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[
     (
         "select_sort",
-        "`sort` unbuilt, PRD §7 explicitly out of tracer bullet, issue #2",
-    ),
-    (
-        "err_bad_sort",
-        "`sort` unbuilt, PRD §7 explicitly out of tracer bullet, issue #2",
+        "sort *ordering* unbuilt, issue #2 — #11 landed sort validation (so `err_bad_sort` now matches and is no longer listed here), but a valid `sort` is still accepted and ignored",
     ),
     (
         "facet_mincount",
