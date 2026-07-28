@@ -462,10 +462,27 @@ sort-clause validation produced no diffs at all. A green run is therefore necess
 sufficient for anything error-shaped, and every issue that produces errors (#4–#9) inherits this.
 The mitigation is per-feature: reduce a message to its *class* and compare that class against the
 fixture, so the fixture decides which error is correct without freezing either side's wording —
-see `sort_error_class()` in `tests/sort.rs`. There is a matching trap in the other direction:
-because `serde_json` is built without `preserve_order`, every emitted object is alphabetised, so
-comparing parsed values cannot detect key-order divergence at all (relevant to `json.nl=map`,
-where Solr's order is meaningful).
+see `sort_error_class()` in `tests/sort.rs`.
+
+**The matching trap in the other direction, now closed (issue #25).** Comparing parsed `Value`s
+cannot detect key-order divergence: parsing discards object order, and `serde_json` was originally
+built *without* `preserve_order`, so every object Wayfinder emitted was alphabetised. Solr's order
+is meaningful throughout — it serialises `SimpleOrderedMap`/`NamedList`, giving
+`responseHeader, response, facet_counts` at the top, `status, QTime, params` in the header,
+`numFound, start, numFoundExact, docs` in the response, `metadata, msg, code` in an error,
+`counts, gap, start, end` in a range facet, and under `json.nl=map` the facet order itself as the
+object's key order. `serde_json` is now built with `preserve_order`, every construction site already
+lists its keys in Solr's order, and the emitted order reproduces Solr's (findings 21–25).
+Enabling the feature does not weaken any existing assertion: `IndexMap`'s `PartialEq` compares as a
+map, so `Value == Value` — and therefore `assert_matches_fixture` and `tests/common/diff.rs` —
+stays order-*insensitive* and keeps exactly its previous meaning. The guard is consequently a
+separate, order-*sensitive* suite, `tests/json_key_order.rs`, which reads key order out of the
+document bytes via a hand-written `Deserialize` over `MapAccess` (`tests/common/key_order.rs`) so
+it cannot be neutered by a feature-flag change; it carries self-tests pinning that property and a
+tripwire test that names `preserve_order` if someone drops it. One path is permanently exempt:
+`responseHeader.params`, whose order in Solr is Java `HashMap` iteration order — neither request
+order nor alphabetical, and not reproducible by any implementation (findings 6, 26). The
+differential normaliser is order-insensitive there for the same reason.
 
 Without a captured client trace, the query set is written deliberately rather than observed,
 so weight it toward the edges: zero results, empty facets, pagination past the end,

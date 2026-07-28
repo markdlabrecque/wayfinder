@@ -348,3 +348,83 @@ column -t -s $'\t' "$HERE/manifest-errors.tsv"
 echo
 echo "captured $(wc -l < "$HERE/manifest.tsv" | tr -d ' ') manifest.tsv rows -> $OUT"
 echo "range-facet core '$RANGE_CORE' left in place on '$CONTAINER'"
+
+# --- JSON object key order (issue #25) -------------------------------------
+# Appended at the end per CLAUDE.md; adds rows only at the tail of
+# manifest-errors.tsv and never re-captures an existing fixture.
+#
+# Its OWN container on its OWN port, and its own core. Three reasons, all
+# learned the hard way:
+#   1. The `facets` core's fixtures are all `q=*:*&rows=0` captures, so adding
+#      docs to that core to widen the range would move `numFound` in every one
+#      of them -- re-capturing ground truth as a side effect, which the
+#      compatibility contract forbids.
+#   2. A wide range (0-200 by 10) and a term distribution where
+#      count-descending and alphabetical order differ both need their own
+#      corpus.
+#   3. Issue #24 was capturing against `wayfinder-solr-ref` on 8983 while this
+#      block was written. Two concurrent runs against one container is how
+#      fixtures got churned earlier in this project.
+# Same precedent as `wayfinder-solr-ref-strict` on 8984 and the
+# `schemaless_probe` core: separate container, separate port, separate core.
+KEYORDER_CONTAINER=wayfinder-solr-25
+KEYORDER_SOLR=http://localhost:8986/solr
+KEYORDER_CORE=keyorder
+if ! docker ps --format '{{.Names}}' | grep -qx "$KEYORDER_CONTAINER"; then
+  docker rm -f "$KEYORDER_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$KEYORDER_CONTAINER" -p 8986:8983 solr:9 \
+    solr-precreate "$KEYORDER_CORE" >/dev/null
+fi
+echo -n "waiting for key-order solr"
+for _ in $(seq 90); do
+  if curl -sf "$KEYORDER_SOLR/$KEYORDER_CORE/admin/ping?wt=json" >/dev/null 2>&1; then
+    echo " ok"; break
+  fi
+  echo -n "."; sleep 1
+done
+
+# `views`: pint with docValues -> facet.range over 0-200 by 10, so the bucket
+# keys ("0","10",...,"100","110",...) order differently numerically than
+# alphabetically ("100" sorts before "20").
+# `tag`: string, docValues, multiValued -> facet.field where count-descending
+# (apple 5, zebra 5, mango 2, banana 1) differs from alphabetical (apple,
+# banana, mango, zebra).
+curl -s "$KEYORDER_SOLR/$KEYORDER_CORE/schema" -H 'Content-Type: application/json' -d '{
+  "add-field": [
+    {"name":"views", "type":"pint",  "indexed":true, "stored":true, "docValues":true},
+    {"name":"tag",   "type":"string","indexed":true, "stored":true,
+     "docValues":true, "multiValued":true}
+  ]
+}' >/dev/null
+curl -sf "$KEYORDER_SOLR/$KEYORDER_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+  {"id":"k1","views":5,  "tag":["zebra","apple"]},
+  {"id":"k2","views":15, "tag":["zebra","apple"]},
+  {"id":"k3","views":45, "tag":["zebra","mango"]},
+  {"id":"k4","views":95, "tag":["zebra","apple"]},
+  {"id":"k5","views":105,"tag":["mango","banana"]},
+  {"id":"k6","views":155,"tag":["apple"]},
+  {"id":"k7","views":195,"tag":["apple"]},
+  {"id":"k8","views":125,"tag":["zebra"]}
+]' >/dev/null
+
+# Own capture helper: `capx` hardcodes the main `$SOLR` base, and these live on
+# another host:port. Sixth column records the base URL, exactly as the
+# strict-container rows in manifest-errors.tsv already do.
+capk() {  # capk <name> <path-after-core>
+  local name=$1 suffix=$2
+  curl -sg "$KEYORDER_SOLR/$KEYORDER_CORE/$suffix" \
+    -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$KEYORDER_CORE/$suffix" "" "$KEYORDER_SOLR" \
+    >> "$HERE/manifest-errors.tsv"
+  rm -f "$OUT/$name.status"
+}
+
+capk keyorder_range_wide_map \
+  'select?q=*:*&rows=0&facet=true&facet.range=views&facet.range.start=0&facet.range.end=200&facet.range.gap=10&json.nl=map&wt=json'
+capk keyorder_facet_field_map \
+  'select?q=*:*&rows=0&facet=true&facet.field=tag&json.nl=map&wt=json'
+capk keyorder_facet_field_map_index \
+  'select?q=*:*&rows=0&facet=true&facet.field=tag&facet.sort=index&json.nl=map&wt=json'
+
+echo "key-order core '$KEYORDER_CORE' left in place on '$KEYORDER_CONTAINER' (port 8986)"

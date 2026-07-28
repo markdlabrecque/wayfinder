@@ -1,0 +1,58 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":3,
+    "params":{
+      "facet.range":"views",
+      "q":"*:*",
+      "facet.range.gap":"10",
+      "json.nl":"map",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json",
+      "facet.range.start":"0",
+      "facet.range.end":"200"
+    }
+  },
+  "response":{
+    "numFound":8,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{ },
+    "facet_ranges":{
+      "views":{
+        "counts":{
+          "0":1,
+          "10":1,
+          "20":0,
+          "30":0,
+          "40":1,
+          "50":0,
+          "60":0,
+          "70":0,
+          "80":0,
+          "90":1,
+          "100":1,
+          "110":0,
+          "120":1,
+          "130":0,
+          "140":0,
+          "150":1,
+          "160":0,
+          "170":0,
+          "180":0,
+          "190":1
+        },
+        "gap":10,
+        "start":0,
+        "end":200
+      }
+    },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  }
+}

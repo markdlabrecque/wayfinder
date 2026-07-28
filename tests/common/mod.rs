@@ -17,6 +17,7 @@
 use std::path::Path;
 
 pub mod diff;
+pub mod key_order;
 
 use axum::Router;
 use axum::body::Body;

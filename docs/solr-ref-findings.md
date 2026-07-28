@@ -346,3 +346,76 @@ each because the claim had been inferred rather than captured (see finding 20).
       `direction_error_messages_match_solr_verbatim_including_pos` covers four fixtures with
       four different field-name lengths, because `pos` is arithmetic and a deliberately wrong
       `pos` otherwise passed the entire suite.
+
+## Findings from the issue #25 JSON key-order capture
+
+Solr serialises `SimpleOrderedMap`/`NamedList`, so **every object in its envelope has a
+meaningful, insertion-defined key order**, and almost none of it is alphabetical. The facts below
+are read out of the committed fixtures with an order-preserving parse; `serde_json::from_str::<Value>()`
+cannot see any of them unless the `preserve_order` feature is on, which is why the guard suite
+(`tests/json_key_order.rs`, helper `tests/common/key_order.rs`) reads key order out of the document
+*bytes* via `MapAccess` instead of out of a parsed `Value`.
+
+21. **The envelope's per-object key orders.** Every one of these is captured, and every one except
+    `facet_field`-under-`index`-sort differs from alphabetical:
+
+    | Object | Order | Alphabetical would be | Fixture |
+    |---|---|---|---|
+    | top level, plain select | `responseHeader, response` | same | `select_all.json` |
+    | top level, with facets | `responseHeader, response, facet_counts` | `facet_counts, responseHeader, response` | `facet_json_nl_map.json` |
+    | top level, error | `responseHeader, error` | `error, responseHeader` | `err_bad_syntax.json` |
+    | top level, bare error | `error` | same | `err_update_put.json` |
+    | top level, ping | `responseHeader, status` | same | `ping.json` |
+    | `responseHeader` | `status, QTime, params` | `QTime, params, status` | `select_all.json` |
+    | `response` | `numFound, start, numFoundExact, docs` | `docs, numFound, numFoundExact, start` | `select_all.json` |
+    | `error` | `metadata, msg, code` | `code, metadata, msg` | `err_bad_syntax.json`, and every other `err_sort_*` |
+    | `facet_counts` | `facet_queries, facet_fields, facet_ranges, facet_intervals, facet_heatmaps` | `facet_fields, facet_heatmaps, facet_intervals, facet_queries, facet_ranges` | `facet_json_nl_map.json` |
+    | `facet_ranges.<field>` | `counts, gap, start, end` | `counts, end, gap, start` | `keyorder_range_wide_map.json`, `facet_range_json_nl_map.json` |
+
+    Note `ping.json`'s `responseHeader` is `zkConnected, status, QTime, params` — the standalone
+    `zkConnected` leads. Wayfinder deliberately omits `zkConnected` (it is not SolrCloud), so this
+    is a membership divergence already covered elsewhere, not an ordering one.
+
+22. **Under `json.nl=map`, the object's key order *is* the facet order** — the map form carries the
+    same information as the flat alternating array (finding 1), including the ordering, which the
+    array expresses positionally and the map expresses as key order. Solr does not re-sort it. For
+    `facet.field` with the default `facet.sort=count`, that is count-descending with an index-order
+    tie-break: `keyorder_facet_field_map.json` gives `apple, zebra, mango, banana` for the counts
+    5, 5, 2, 1 — `apple` takes the 5-5 tie on term order, and the whole sequence is neither
+    alphabetical (`apple, banana, mango, zebra`) nor the reverse. Under `facet.sort=index` it is
+    term order, `apple, banana, mango, zebra` (`keyorder_facet_field_map_index.json`) — which
+    *happens* to be alphabetical, so that fixture alone can never detect the alphabetising bug and
+    the guard suite marks it as such.
+
+23. **`facet_ranges.<field>.counts` under `json.nl=map` is ascending *numeric* bucket order**, and
+    the bucket keys are strings, so this is exactly where a sorted map goes wrong.
+    `keyorder_range_wide_map.json` (0-200 by 10 over `views`) gives
+    `0, 10, 20, ... 90, 100, 110, ... 190`; alphabetised that becomes
+    `0, 10, 100, 110, ... 190, 20, 30, ...`. This is the single most decisive captured case for
+    key order, because the divergence is 18 keys wide and visible on the wire.
+
+24. **Doc field order is index-time input order — not `fl` order and not schema declaration
+    order.** `select_all.json`'s docs come back `id, body, category, _version_, _root_`, which is
+    the order the fields appeared in the indexing request, with Solr's internal fields appended.
+    It is *not* the managed-schema declaration order (where `_version_` and `_root_` are declared
+    up front, before the dynamically-added `body`/`category`), so the fixtures rule schema order
+    out directly. That `fl` order does not drive it was established by a live probe during the
+    issue-#25 investigation and is **not** pinned by any committed fixture — the only multi-field
+    `fl` capture, `select_term` (`fl=id,body`), lists its fields in input order anyway, so it
+    cannot discriminate. Treat the `fl` half as inferred, per finding 20's lesson.
+
+25. **Wayfinder's doc field order is *schema* order (`render_doc` in `src/core_index.rs`) and
+    coincides with Solr's for every committed corpus**, because each corpus was indexed with its
+    fields in schema order. So there is no divergence today, and the whole-envelope order
+    assertions pass over the docs as well — but the two rules are not the same rule, and a corpus
+    indexed out of schema order would separate them. Recorded so the next person does not read a
+    green suite as evidence that Wayfinder reproduces Solr's rule.
+
+26. **`responseHeader.params` order is not reproducible and is not a contract.** It is Java
+    `HashMap` iteration order: neither the request order nor alphabetical.
+    `facet_range_json_nl_map.json` echoes `facet.range, q, facet.range.gap, json.nl, rows, facet,
+    wt, facet.range.start, facet.range.end` for a request that sent them in a different order
+    entirely. This is the ordering half of finding 6, and it is why the differential normaliser is
+    order-insensitive on that object and why `params` is the one permanently exempt path in
+    `key_order::EXEMPT_PATHS`. Every *other* object in the envelope is ordered on purpose and is
+    compared.
