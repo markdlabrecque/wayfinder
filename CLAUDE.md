@@ -27,6 +27,24 @@ non-trivial work; it is the source of scope decisions.
 6. **Link the report, don't retype it.** Substantive work leaves a report in
    `docs/reports/YYYY-MM-DD-<slug>.md`; the PR body summarises and points at it.
 
+## Hot files, for parallel work
+
+The general rules for running several issues at once are in the global `~/.claude/CLAUDE.md`
+("Parallel batches"). What is specific to this repo is *which* files contend. Every v1 issue
+wants some of these, so assign ownership per branch before starting:
+
+| File | Who touches it | Notes |
+|---|---|---|
+| `src/lib.rs` | almost every issue | routing, handler bodies, `SELECT_PARAMS`/`UPDATE_PARAMS` |
+| `src/core_index.rs` | search/index features | the index-creation call is a repeat conflict site |
+| `tests/common/mod.rs` | every test suite | shared helpers; the `dead_code` allow lives here as an inner attribute — do not add a second one on `mod common;` |
+| `solr-ref/capture.sh` | anything capturing fixtures | append blocks at the end only |
+| `solr-ref/manifest.tsv` | anything capturing fixtures | core-relative GETs only, see below |
+| `docs/solr-ref-findings.md` | anything learning a Solr fact | append a numbered finding |
+
+Sequencing that has already proven necessary: error-envelope work lands before features that
+produce errors, and schema-layer work lands before features that need new field types.
+
 ## Compatibility contract
 
 - **Fixtures in `solr-ref/responses/` are ground truth.** Expected values in tests come from
