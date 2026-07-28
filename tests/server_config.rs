@@ -6,7 +6,9 @@
 //! schema and corpus from `tests/common` so behaviour changes here are visible
 //! against the same 5 documents the reference fixtures were captured from.
 
-#[allow(dead_code)]
+// The dead-code allow for partially-used shared helpers is an inner attribute
+// inside `tests/common/mod.rs`; repeating it here is a clippy error under
+// `-D warnings`.
 mod common;
 
 use std::path::{Path, PathBuf};
@@ -191,7 +193,7 @@ async fn strict_params_allows_every_implemented_param() {
     let (status, body) = get(
         &app,
         "select?q=lazy&df=body&fq=category:garden&fl=id,body&rows=2&start=0\
-         &facet=true&facet.field=category&wt=json",
+         &facet=true&facet.field=category&sort=score+desc&wt=json",
     )
     .await;
     assert_eq!(

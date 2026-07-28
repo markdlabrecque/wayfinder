@@ -43,9 +43,10 @@ struct AppState {
 /// (findings fact 8).
 ///
 /// **Implementing a new param? Add it here.** Otherwise `strict_params = true`
-/// will 400 on a param Wayfinder actually supports. Known gaps waiting on their
-/// issues: `sort` (#2), the rest of the `facet.*` family (#3), `commitWithin` /
-/// `overwrite` / `softCommit` (#9).
+/// will 400 on a param Wayfinder actually supports. `sort` is listed because
+/// #11 validates it (a non-`fast` field is a 400); ordering itself lands with
+/// #2. Still missing, waiting on their issues: the rest of the `facet.*` family
+/// (#3), `commitWithin` / `overwrite` / `softCommit` (#9).
 const SELECT_PARAMS: &[&str] = &[
     "q",
     "df",
@@ -55,6 +56,7 @@ const SELECT_PARAMS: &[&str] = &[
     "start",
     "facet",
     "facet.field",
+    "sort",
     "wt",
 ];
 const UPDATE_PARAMS: &[&str] = &["commit", "wt"];
