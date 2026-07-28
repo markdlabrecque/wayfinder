@@ -1,0 +1,11 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"Unknown command 'not' at [4]",
+    "code":400
+  }
+}

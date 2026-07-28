@@ -63,3 +63,35 @@ still giving a way to discover gaps during the Search API phase.
 Highlighting, stats, MLT, edismax, `/update` responses, `commitWithin`/`softCommit` behaviour,
 range facets. Add to `capture.sh` when those features come into scope — the script is meant to
 grow with the feature set.
+
+---
+
+## Findings from the issue #11 error-shape capture
+
+Four new fixtures, captured against the same `solr:9` container and corpus. Three of them are not
+core-relative GETs (other core, POST body, non-GET method), so they are indexed in
+`solr-ref/manifest-errors.tsv` (`name`, `status`, `method`, `url-after-/solr/`, `body`) rather than
+`manifest.tsv`, whose "core-relative GET" contract the differential harness (#1) depends on.
+
+12. **Missing `q` is not an error — and does not mean `*:*`.** `select?wt=json` returns HTTP 200,
+    `status: 0`, `numFound: 0`, `docs: []` (`err_missing_q.json`). This settles tracer-bullet review
+    follow-up 2: Wayfinder's `q`-defaults-to-`*:*` was a real divergence and is now fixed to match.
+
+13. **The error envelope has three shapes, and the difference is visible to clients:**
+    - `/select` errors: `responseHeader` *with* the `params` echo, plus `error`
+      (`err_bad_syntax.json`).
+    - `/update` errors: `responseHeader` with `status` + `QTime` but **no `params`** — `/update`
+      never echoes params (`err_update_bad_json.json`, confirming tracer-bullet follow-up 3).
+    - Unsupported HTTP method: **no `responseHeader` at all**, just the bare `error` block
+      (`err_update_put.json`).
+
+14. **Solr's request handlers are method-agnostic.** `DELETE /select?q=*:*` is served as a normal
+    query, 200 and all five docs (`err_select_delete.json`) — a 405 would be a divergence, so the
+    routes are registered with `any` rather than `get`/`post`. `/update` is the exception: `PUT`
+    returns 400 with the bare envelope above. `GET /update` was not captured.
+
+15. **An unknown core 404s with an HTML page, not JSON.** `err_missing_core.json` is Solr's
+    "Searching for Solr? You must type the correct path." easter egg.
+    **Deliberate divergence:** Wayfinder matches the 404 status but returns its normal JSON error
+    envelope, on the grounds that clients parse JSON and no client depends on the HTML. Wants PRD
+    ratification — it is the one place this branch knowingly does not match captured behaviour.

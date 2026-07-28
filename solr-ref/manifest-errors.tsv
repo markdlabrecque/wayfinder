@@ -1,0 +1,4 @@
+err_missing_core	404	GET	nosuchcore/select?q=*:*&wt=json	
+err_update_bad_json	400	POST	content/update?commit=true&wt=json	{not json
+err_select_delete	200	DELETE	content/select?q=*:*&wt=json	
+err_update_put	400	PUT	content/update?wt=json	[]
