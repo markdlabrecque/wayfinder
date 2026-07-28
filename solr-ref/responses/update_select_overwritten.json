@@ -1,0 +1,22 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"id:u7",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"u7",
+      "body":"replaced body",
+      "category":["keep"],
+      "_version_":1871993710506409984,
+      "_root_":"u7"
+    }]
+  }
+}

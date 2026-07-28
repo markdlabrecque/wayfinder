@@ -1,0 +1,22 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":3,
+    "params":{
+      "q":"id:u9",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"u9",
+      "body":"commit within doc",
+      "category":["keep"],
+      "_version_":1871993710964637696,
+      "_root_":"u9"
+    }]
+  }
+}

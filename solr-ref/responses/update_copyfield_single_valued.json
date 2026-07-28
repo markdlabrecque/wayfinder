@@ -1,0 +1,11 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":1
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","java.lang.IllegalArgumentException"],
+    "msg":"Exception writing document id u12 to the index; possible analysis error: DocValuesField \"alias\" appears more than once in this document (only one value is allowed per field)",
+    "code":400
+  }
+}

@@ -772,3 +772,219 @@ echo "  (docker rm -f $DEBT_CONTAINER to stop)"
 cap select_term_scored  'select?q=lazy&df=body&fl=id,score&rows=5&wt=json'
 cap select_quick_scored 'select?q=quick&df=body&fl=id,score&rows=5&wt=json'
 cap select_fl_reversed  'select?q=*:*&rows=2&fl=body,id&wt=json'
+
+# --- update pipeline: /update envelope, deletes, commit knobs (issue #9) -----
+# Appended block; nothing above is edited. Own container on its own port, per
+# the `wayfinder-solr-24`/`-32`/`-33` precedent: this block was written while
+# issue #8 owned the canonical container (8983), and the top of this script
+# rebuilds that container destructively. Same caveat as those blocks: NOT
+# runnable standalone -- it uses `$OUT`/`$HERE` from the top of the script, and
+# `capu`/`capup` append to `manifest-errors.tsv` unconditionally, so re-running
+# just this block duplicates its rows. Run the whole script.
+#
+# Everything here is a POST (or a deliberately-non-GET / non-reference-core
+# request), so every row goes to manifest-errors.tsv, never manifest.tsv.
+#
+# Deletes MUTATE the corpus, which is exactly what issue #26 warns about: a
+# probe must never leave a core unable to reproduce its own fixtures. This
+# block's answer is idempotency-by-reset: the first thing it does on every run
+# is delete-by-query *:* + commit (not captured) and reseed the same corpus,
+# so the capture sequence always starts from the same state no matter what a
+# previous run left behind. The captures below are strictly ordered and each
+# comment tracks the corpus state; do not reorder them.
+UPDATE9_CONTAINER=wayfinder-solr-9
+UPDATE9_SOLR=http://localhost:8989/solr
+UPDATE9_CORE=update9
+if ! docker ps --format '{{.Names}}' | grep -qx "$UPDATE9_CONTAINER"; then
+  docker rm -f "$UPDATE9_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$UPDATE9_CONTAINER" -p 8989:8983 \
+    solr:9 solr-precreate "$UPDATE9_CORE" >/dev/null
+fi
+echo -n "waiting for update9 solr"
+for _ in $(seq 60); do
+  if curl -sf "$UPDATE9_SOLR/$UPDATE9_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+  echo -n "."; sleep 1
+done
+
+# Schema: `title` is the single-valued docValues string for the
+# array-into-single-valued 400; `nick` -> `alias` is the copy-field pair whose
+# destination is single-valued (schema-layer follow-ups 1 and 2). `*_dt`
+# (dynamic pdate) already exists in the _default configset, which is what the
+# dynamic-date round trip uses (schema-layer follow-up 3). Tolerant re-run:
+# "field already exists" is fine, a genuinely broken schema surfaces on the
+# corpus POST below.
+curl -s "$UPDATE9_SOLR/$UPDATE9_CORE/schema" -H 'Content-Type: application/json' -d '{
+  "add-field": [
+    {"name":"body",    "type":"text_en","indexed":true, "stored":true},
+    {"name":"category","type":"string", "indexed":true, "stored":true,
+     "docValues":true, "multiValued":true},
+    {"name":"title",   "type":"string", "indexed":true, "stored":true, "docValues":true},
+    {"name":"nick",    "type":"string", "indexed":true, "stored":true, "docValues":true},
+    {"name":"alias",   "type":"string", "indexed":true, "stored":true, "docValues":true}
+  ],
+  "add-copy-field": [
+    {"source":"nick", "dest":"alias"}
+  ]
+}' >/dev/null
+
+# Reset + reseed (idempotency; NOT captured).
+curl -sf "$UPDATE9_SOLR/$UPDATE9_CORE/update?commit=true" -H 'Content-Type: application/json' \
+  -d '{"delete":{"query":"*:*"}}' >/dev/null
+curl -sf "$UPDATE9_SOLR/$UPDATE9_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+  {"id":"u1","body":"quick brown fox","category":["keep"]},
+  {"id":"u2","body":"lazy dog","category":["temp"]},
+  {"id":"u3","body":"lazy afternoon","category":["temp"]},
+  {"id":"u4","body":"garden path","category":["keep"]},
+  {"id":"u5","body":"nothing much here","category":["temp","keep"]}
+]' >/dev/null
+# Corpus is now exactly u1..u5.
+
+# POST helper, 6-column manifest-errors.tsv contract (the `cap_post` /
+# `update_unknown_field_*` precedent: name, status, method, url-after-/solr/,
+# body, base URL).
+capup() {  # capup <name> <url-after-/solr/> <json-body>
+  local name=$1 suffix=$2 body=$3
+  curl -sg "$UPDATE9_SOLR/$suffix" -H 'Content-Type: application/json' -d "$body" \
+    -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" POST "$suffix" "$body" "$UPDATE9_SOLR" \
+    >> "$HERE/manifest-errors.tsv"
+  rm -f "$OUT/$name.status"
+}
+# Arbitrary-method helper (GET /update, DELETE /admin/ping, unknown core),
+# same 6-column contract, empty body column.
+capu() {  # capu <name> <method> <url-after-/solr/>
+  local name=$1 method=$2 suffix=$3
+  curl -sg -X "$method" "$UPDATE9_SOLR/$suffix" \
+    -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" "$method" "$suffix" "" "$UPDATE9_SOLR" \
+    >> "$HERE/manifest-errors.tsv"
+  rm -f "$OUT/$name.status"
+}
+
+# --- the /update response envelope (issue #9 scope: "not yet captured") ------
+# Does a successful /update echo params? Carry anything besides
+# responseHeader? Same envelope for add / delete / commit?
+# u6 added WITHOUT commit: _default's autoCommit is maxTime 15s with
+# openSearcher=false and autoSoftCommit off, so u6 stays invisible to search
+# until a later explicit commit -- the immediately-following select is the
+# visibility baseline.
+capup update_add_nocommit "$UPDATE9_CORE/update?wt=json" \
+  '[{"id":"u6","body":"pending doc","category":["pending"]}]'
+capu update_select_uncommitted GET \
+  "$UPDATE9_CORE/select?q=id:u6&wt=json"
+# Explicit commit=true: u7 visible at once. (This commit also makes u6
+# visible; the corpus is now u1..u7.)
+capup update_add_commit "$UPDATE9_CORE/update?commit=true&wt=json" \
+  '[{"id":"u7","body":"committed doc","category":["keep"]}]'
+capu update_select_committed GET \
+  "$UPDATE9_CORE/select?q=id:u7&wt=json"
+
+# --- overwrite ---------------------------------------------------------------
+# Default overwrite=true: re-adding u7 replaces it (numFound stays 1, body is
+# the new one).
+capup update_overwrite_default "$UPDATE9_CORE/update?commit=true&wt=json" \
+  '[{"id":"u7","body":"replaced body","category":["keep"]}]'
+capu update_select_overwritten GET \
+  "$UPDATE9_CORE/select?q=id:u7&wt=json"
+# overwrite=false: a second live doc with the same uniqueKey.
+capup update_overwrite_false "$UPDATE9_CORE/update?commit=true&overwrite=false&wt=json" \
+  '[{"id":"u7","body":"duplicate body","category":["dup"]}]'
+capu update_select_overwrite_false GET \
+  "$UPDATE9_CORE/select?q=id:u7&wt=json"
+
+# --- deletes -----------------------------------------------------------------
+# Delete-by-id, object form. u7 exists twice (overwrite=false above): does a
+# delete by uniqueKey term remove BOTH? The select decides.
+capup update_delete_id_obj "$UPDATE9_CORE/update?commit=true&wt=json" \
+  '{"delete":{"id":"u7"}}'
+capu update_select_after_delete_id GET \
+  "$UPDATE9_CORE/select?q=id:u7&wt=json"
+# Delete-by-id, list form: u1 and u4 go. Corpus is now u2,u3,u5,u6.
+capup update_delete_id_list "$UPDATE9_CORE/update?commit=true&wt=json" \
+  '{"delete":["u1","u4"]}'
+capu update_select_after_delete_list GET \
+  "$UPDATE9_CORE/select?q=*:*&fl=id&rows=20&wt=json"
+# Delete-by-query on a TEXT field (`body:lazy`), not a string term: pins that
+# delete-by-query goes through the same analyzed-query semantics as /select
+# ("lazy" matches u2 "lazy dog" and u3 "lazy afternoon" via text_en analysis).
+# Corpus is now u5,u6.
+capup update_delete_query "$UPDATE9_CORE/update?commit=true&wt=json" \
+  '{"delete":{"query":"body:lazy"}}'
+capu update_select_after_delete_query GET \
+  "$UPDATE9_CORE/select?q=*:*&fl=id&rows=20&wt=json"
+
+# --- mixed-command body (capture decides scope, per the issue) ----------------
+# add + delete + commit in one body. The delete targets u6; the add is u8.
+# If accepted, corpus is now u5,u8.
+capup update_mixed_commands "$UPDATE9_CORE/update?wt=json" \
+  '{"add":{"doc":{"id":"u8","body":"mixed add","category":["keep"]}},"delete":{"id":"u6"},"commit":{}}'
+capu update_select_after_mixed GET \
+  "$UPDATE9_CORE/select?q=*:*&fl=id&rows=20&wt=json"
+
+# --- commitWithin / softCommit ------------------------------------------------
+# commitWithin=500ms, then a settle sleep well past the window before the
+# visibility select. Only the settled state is captured -- an immediate select
+# would race the window and capture nondeterministic ground truth.
+capup update_commitwithin "$UPDATE9_CORE/update?commitWithin=500&wt=json" \
+  '[{"id":"u9","body":"commit within doc","category":["keep"]}]'
+sleep 3
+capu update_select_commitwithin_visible GET \
+  "$UPDATE9_CORE/select?q=id:u9&wt=json"
+# softCommit=true with no commit param: is the request-end commit soft, and is
+# the doc immediately visible?
+capup update_softcommit "$UPDATE9_CORE/update?softCommit=true&wt=json" \
+  '[{"id":"u10","body":"soft committed doc","category":["keep"]}]'
+capu update_select_softcommit_visible GET \
+  "$UPDATE9_CORE/select?q=id:u10&wt=json"
+
+# --- GET /update (error-shapes follow-up 2: uncaptured, Wayfinder 400s it) ----
+capu update_get GET "$UPDATE9_CORE/update?wt=json"
+capu update_get_commit GET "$UPDATE9_CORE/update?commit=true&wt=json"
+
+# --- unknown core on /update and /admin/ping (error-shapes follow-ups 3-4) ----
+# err_missing_core only exercised GET /select; these pin whether the HTML 404
+# easter egg is endpoint- and method-agnostic.
+capup update_unknown_core "nosuchcore/update?commit=true&wt=json" \
+  '[{"id":"x","body":"y"}]'
+capu ping_unknown_core GET "nosuchcore/admin/ping?wt=json"
+capu ping_unknown_core_delete DELETE "nosuchcore/admin/ping?wt=json"
+
+# --- single-valued field given an array (schema-layer follow-up 1) ------------
+capup update_single_valued_array "$UPDATE9_CORE/update?commit=true&wt=json" \
+  '[{"id":"u11","title":["one","two"]}]'
+# --- copy-field into a single-valued destination (schema-layer follow-up 2) ---
+# The doc supplies `alias` AND `nick` (which copies into `alias`): two values
+# in a single-valued destination. The control (`nick` only) shows the copied
+# value alone is fine and what the stored `alias` looks like.
+capup update_copyfield_single_valued "$UPDATE9_CORE/update?commit=true&wt=json" \
+  '[{"id":"u12","nick":"nn","alias":"aa"}]'
+capup update_copyfield_single_ok "$UPDATE9_CORE/update?commit=true&wt=json" \
+  '[{"id":"u13","nick":"solo"}]'
+capu update_select_copyfield_dest GET \
+  "$UPDATE9_CORE/select?q=id:u13&fl=id,nick,alias&wt=json"
+
+# --- dynamic date round trip (schema-layer follow-up 3) ------------------------
+# `*_dt` is a dynamic pdate in the _default configset; the select pins both the
+# range-query behaviour and the stored rendering of the value.
+capup update_dynamic_date "$UPDATE9_CORE/update?commit=true&wt=json" \
+  '[{"id":"u14","when_dt":"2021-06-01T12:30:45Z"}]'
+capu update_select_dynamic_date GET \
+  "$UPDATE9_CORE/select?q=when_dt:%5B2021-01-01T00:00:00Z%20TO%202022-01-01T00:00:00Z%5D&fl=id,when_dt&wt=json"
+
+
+# --- single-valued edge: a ONE-element array is accepted ----------------------
+# Captured after the fact (same run, same corpus state): Solr unwraps a
+# one-element array into a single-valued field and stores the scalar, so only
+# arrays with MORE than one value are the 400 above.
+capup update_single_valued_array_one "$UPDATE9_CORE/update?commit=true&wt=json" \
+  '[{"id":"u15","title":["only"]}]'
+capu update_select_single_valued_array_one GET \
+  "$UPDATE9_CORE/select?q=id:u15&fl=id,title&wt=json"
+# Delete-by-id of an id that does not exist: 200, same bare envelope.
+capup update_delete_id_missing "$UPDATE9_CORE/update?commit=true&wt=json" \
+  '{"delete":{"id":"nosuch"}}'
+
+echo "update-pipeline core '$UPDATE9_CORE' left in place on '$UPDATE9_CONTAINER' (port 8989)"
+echo "  (docker rm -f $UPDATE9_CONTAINER to stop)"

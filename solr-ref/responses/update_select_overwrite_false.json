@@ -1,0 +1,28 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"id:u7",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"u7",
+      "body":"replaced body",
+      "category":["keep"],
+      "_version_":1871993710506409984,
+      "_root_":"u7"
+    },{
+      "id":"u7",
+      "body":"duplicate body",
+      "category":["dup"],
+      "_version_":1871993710584004608,
+      "_root_":"u7"
+    }]
+  }
+}

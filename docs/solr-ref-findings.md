@@ -698,3 +698,72 @@ relevance queries) and `select_fl_reversed` (`fl=body,id`, see finding 24's upda
     is not appended at the end or led at the front. Wayfinder builds `response` as a `Map`
     (rather than a `json!` object literal, which can't express a conditional key mid-object) to
     match this exactly (`src/lib.rs`, around the `response.insert("maxScore", ...)` call).
+
+
+---
+
+## Findings from the issue #9 update-pipeline capture
+
+Claiming findings 46-49 (31-41 are #31/#32/#33's; #8 has 42-45 — supersedes the earlier
+"claim from 42 up" note on issue #9).
+
+Thirty-four new `manifest-errors.tsv` rows against a new self-contained `update9` core
+(`wayfinder-solr-9`, port 8989) — POSTs and deliberately-non-GET requests, so nothing here
+touches `manifest.tsv`. Deletes mutate the corpus, so the block is idempotent-by-reset:
+every run starts with an uncaptured delete-by-query `*:*` + reseed of the same 5-doc corpus
+(`u1..u5`), and the captures are strictly ordered with the corpus state tracked in comments
+(the issue-#26 lesson, applied to a probe whose whole *purpose* is mutation).
+
+46. **The `/update` success envelope is the bare `responseHeader` and nothing else — for every
+    command shape.** Add-without-commit, add-with-commit, delete-by-id (object and list forms),
+    delete-by-query, delete of a nonexistent id, and a mixed-command body all return exactly
+    `{"responseHeader":{"status":0,"QTime":N}}` (`update_add_nocommit.json`,
+    `update_add_commit.json`, `update_delete_id_obj.json`, `update_delete_id_list.json`,
+    `update_delete_query.json`, `update_delete_id_missing.json`, `update_mixed_commands.json`).
+    No `params` echo ever (finding 13's error-shape rule holds for successes too), no per-command
+    keys, and deleting an id that matches nothing is still a 200. Mixed-command bodies
+    (`{"add":{"doc":{...}},"delete":{"id":...},"commit":{}}`) are accepted and executed —
+    add, delete and commit all took effect in one request (`update_select_after_mixed.json`) —
+    so they are in scope per the issue's "capture decides".
+
+47. **`GET /update` is not a method error — Solr 400s an empty *content stream*, and a GET that
+    only commits is a 200.** Bare `GET /update?wt=json` answers 400 `missing content stream`
+    with the `/update` (no-params) error envelope (`update_get.json`) — a body problem, not a
+    method problem, unlike PUT's bare-envelope `Unsupported method` (finding 13/14). And
+    `GET /update?commit=true&wt=json` is a **200** that really commits (`update_get_commit.json`).
+    Wayfinder previously rejected every non-POST as an unsupported method by analogy; that was
+    wrong for GET on both counts (error-shapes follow-up 2, settled).
+
+48. **Overwrite, delete and commit semantics, pinned.** (a) Default `overwrite=true` replaces:
+    re-adding an existing id keeps `numFound` at 1 with the new body
+    (`update_select_overwritten.json`). (b) `overwrite=false` really duplicates: two live docs
+    with the same uniqueKey (`update_select_overwrite_false.json`). (c) Delete-by-id is a term
+    delete on the uniqueKey and removes **all** docs with that key — both `overwrite=false`
+    duplicates went in one `{"delete":{"id":"u7"}}` (`update_select_after_delete_id.json`).
+    (d) Delete-by-query goes through the same analyzed query semantics as `/select`:
+    `{"delete":{"query":"body:lazy"}}` on a `text_en` field deleted both `lazy dog` and
+    `lazy afternoon` (`update_select_after_delete_query.json`). (e) A one-element array into a
+    single-valued field is unwrapped and accepted (`update_single_valued_array_one.json`,
+    stored as the scalar per `update_select_single_valued_array_one.json`); **more** than one
+    value is the 400 `multiple values encountered for non multiValued field`
+    (`update_single_valued_array.json`), and a copy-field landing a second value in a
+    single-valued destination is the same 400 family (`update_copyfield_single_valued.json`,
+    with `update_copyfield_single_ok.json`/`update_select_copyfield_dest.json` as the
+    one-copied-value control). A dynamic `*_dt` date round-trips: stored RFC3339-Z in, identical
+    string out, range-queryable (`update_select_dynamic_date.json`).
+
+49. **Visibility: an uncommitted add is invisible; `commitWithin` and `softCommit` both end
+    visible; unknown-core behaviour is endpoint-agnostic for GET/POST.** The `_default`
+    configset's hard autocommit has `openSearcher=false`, so an add with no commit param stays
+    unsearchable (`update_select_uncommitted.json`: `numFound: 0`). `commitWithin=500` makes the
+    doc searchable once the window has passed (`update_select_commitwithin_visible.json`,
+    captured after a 3 s settle — an immediate select would race the window, so only the settled
+    state is pinned). `softCommit=true` with no `commit` param commits at request end and the doc
+    is immediately visible (`update_select_softcommit_visible.json`). Unknown core on POST
+    `/update` and GET `/admin/ping` is the same 404 HTML easter egg as finding 15's `/select`
+    (`update_unknown_core.json`, `ping_unknown_core.json`) — Wayfinder's ratified
+    JSON-instead-of-HTML divergence extends to those endpoints unchanged (error-shapes
+    follow-ups 3-4, settled). One wrinkle: `DELETE` on an unknown core's `/admin/ping` is a
+    Jetty-level **405 with an empty body** (`ping_unknown_core_delete.json`), not the 404 page;
+    Wayfinder stays method-agnostic and serves its JSON 404 there too — same divergence family,
+    noted rather than matched.
