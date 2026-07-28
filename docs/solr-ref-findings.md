@@ -60,9 +60,22 @@ still giving a way to discover gaps during the Search API phase.
 
 ## Not yet captured
 
-Highlighting, stats, MLT, edismax, `/update` responses, `commitWithin`/`softCommit` behaviour,
-range facets. Add to `capture.sh` when those features come into scope — the script is meant to
-grow with the feature set.
+Highlighting, stats, MLT, edismax, `/update` responses, `commitWithin`/`softCommit` behaviour.
+Range facets were captured by issue #3 (findings 16-18) — what is still missing there is
+`facet.range.other` / `.include` / `.hardend`, month/year date-math gaps, `facet.prefix`,
+`facet.method`, `facet.pivot`, interval and heatmap faceting, `f.<field>.facet.*` per-field
+overrides, and `json.nl=map` combined with `facet.missing` (a `null` key in an object).
+
+Also uncaptured, and a **known Wayfinder divergence** rather than just a gap: `facet.field` on a
+*numeric or date* field. Tantivy 0.26.1 only walks the term dictionary to fill zero-count buckets
+for string columns (`aggregation/bucket/term_agg.rs:1024-1053`); its numeric/date branches
+(`:1054-1112`) map only the values the hit set produced. So Wayfinder reports numeric/date facet
+values present in the hit set and silently drops a value reachable only through a non-matching
+document, where Solr would report it at 0. Capture a numeric `facet.field` on the `facets` core
+before relying on it — see the `ponytail:` on `CoreIndex::term_facet`.
+
+Add to `capture.sh` when those features come into scope — the script is meant to grow with the
+feature set.
 
 ---
 
@@ -95,6 +108,68 @@ core-relative GETs (other core, POST body, non-GET method), so they are indexed 
     **Deliberate divergence:** Wayfinder matches the 404 status but returns its normal JSON error
     envelope, on the grounds that clients parse JSON and no client depends on the HTML. Wants PRD
     ratification — it is the one place this branch knowingly does not match captured behaviour.
+
+---
+
+## Findings from the issue #3 faceting capture
+
+Twelve new `manifest.tsv` rows on the untouched main core, plus seven new `manifest-errors.tsv`
+rows. (That file gained nine rows in this run, but two of them —
+`update_unknown_field_schemaless` and `update_unknown_field_strict` — belong to issue #10, whose
+fixtures were committed while their manifest rows never were; re-running `capture.sh` backfilled
+them.)
+`facet.range` needs a numeric or date field, and adding one to the `content` core would rewrite
+ground truth for every doc-returning fixture, so the range corpus lives in a **second core**
+(`facets`, 4 docs, `views` pint + `created` pdate + `note` string-stored-only) on the same
+container. Anything not a main-core GET is a `manifest-errors.tsv` row.
+
+16. **The issue-#3 premise was wrong: Solr never errors on a facet it cannot build.**
+    `facet.field` on `body` (text_en, indexed, stored, **no** docValues) returns HTTP 200 with
+    `"body":[]` (`facet_non_docvalues_text.json`). So does a stored-only field that is neither
+    indexed nor docValues (`facet_stored_only_field.json`, `note` on the `facets` core), and so
+    does a field that **does not exist at all** (`facet_unknown_field.json`, `"nosuchfield":[]`).
+    All three are `status: 0`, present-and-empty, no warning anywhere in the response.
+
+    That is precisely the silent-empty-counts behaviour tracer-bullet review follow-up 1 names as
+    a bug: the client cannot tell "this field has no values" from "I asked for something
+    impossible". **Deliberate divergence:** Tantivy cannot aggregate a non-`fast` column at all,
+    and Wayfinder answers all three with a hard 400 in the Solr error envelope
+    (`can not facet on undefined field: <name>` / `can not facet on a field w/o fast values
+    (docValues): <name>`, mirroring finding 11's `sort` wording). **Wants PRD ratification**, the
+    same treatment as finding 15's unknown-core divergence — it is a knowing mismatch with
+    captured behaviour, chosen because the captured behaviour is wrong.
+
+    These three fixtures are therefore in `manifest-errors.tsv` rather than `manifest.tsv`, even
+    though they *are* core-relative GETs: a `manifest.tsv` row would demand a permanent
+    `EXPECTED_DIVERGENCES` entry, and that list is a self-expiring to-do list, not a home for
+    accepted divergences.
+
+17. **The empty array is a property of the default `fc` facet method, not of the field.**
+    `facet.field=body&facet.method=enum` on that same non-docValues field **does** enumerate the
+    term dictionary — `["dog",2,"lazi",2,"quick",2,"afternoon",1,...]`, the stemmed `text_en`
+    tokens (`facet_non_docvalues_text_enum.json`). Solr's `enum` method walks the inverted index
+    instead of the uninverted field, so the data is reachable; the default just declines to reach
+    it. `facet.method` is out of scope for #3 (Wayfinder has one implementation, the fast-field
+    aggregation), recorded so nobody later concludes from finding 16 that Solr *cannot* facet a
+    non-docValues field.
+
+18. **`facet_ranges` envelope — the part that is not guessable.** From
+    `facet_range_numeric.json` / `facet_range_date.json` / `facet_range_json_nl_map.json`:
+    - `facet_ranges.<field>` is `{"counts": ..., "gap": ..., "start": ..., "end": ...}` and
+      nothing else when `facet.range.other` is unset — no `before`/`after`/`between` keys.
+    - **Bucket keys are strings even for a numeric field**: `"counts":["0",1,"10",1,...]`.
+    - **`gap`/`start`/`end` are JSON numbers for a numeric field** (`"gap":10, "start":0,
+      "end":40`) **and strings for a date field**, with the gap echoed *verbatim as the date-math
+      expression* rather than normalised (`"gap":"+1DAY"`).
+    - `json.nl=map` turns `counts` into an object (`{"0":1,"10":1,...}`) and leaves
+      `gap`/`start`/`end` untouched.
+    - **Empty interior buckets are emitted, at 0**: the date capture has
+      `"2020-01-01T00:00:00Z",0` and `"2020-01-04T00:00:00Z",0` between populated buckets.
+
+    Only day-granularity date gaps are in scope: `+1MONTH`/`+1YEAR` need a calendar-aware
+    DateMathParser (month lengths vary), so Wayfinder refuses them by name rather than silently
+    rounding. Follow-up.
+
 ## Differential harness (issue #1)
 
 `tests/differential.rs` + `tests/common/diff.rs` run the query set in `solr-ref/manifest.tsv`
@@ -120,10 +195,16 @@ hand-edit the manifest or fixtures.
 ### Expected-divergence list
 
 `tests/differential.rs::EXPECTED_DIVERGENCES` names manifest entries with a *known, currently
-real* Wayfinder-vs-Solr divergence caused by an unbuilt feature (not a harness bug) — e.g.
-`sort` (issue #2) and advanced faceting: `facet.mincount`/`limit`/`missing`/`query`,
-`json.nl=map`, full term-dictionary enumeration for zero/all-filtered facets (issue #3). Each
-entry carries a mandatory reason naming the owning issue.
+real* Wayfinder-vs-Solr divergence caused by an unbuilt feature (not a harness bug) — currently
+`sort` *ordering* (issue #2), plus `ping` for the reason below. The seven faceting entries it
+used to carry (`facet.mincount`/`limit`/`missing`/`query`, `json.nl=map`, term-dictionary
+enumeration for the zero/all-filtered facets) were deleted when issue #3 landed and they stopped
+diverging. Each entry carries a mandatory reason naming the owning issue.
+
+Note what does **not** belong here: an *accepted, permanent* divergence (finding 15's unknown
+core, finding 16's unfacetable-field 400). Those get their fixtures in `manifest-errors.tsv` and
+a numbered finding, because this list is a to-do list that fails when an entry stops diverging —
+an accepted divergence parked here would sit unexpiring forever.
 
 This list is a to-do, not a permanent skip. The whole-query-set test still runs every one of
 those entries and computes their real diff; it just doesn't count a listed entry's diff as a

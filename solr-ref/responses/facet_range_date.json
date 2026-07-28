@@ -1,0 +1,36 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2,
+    "params":{
+      "facet.range":"created",
+      "q":"*:*",
+      "facet.range.gap":"+1DAY",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json",
+      "facet.range.start":"2020-01-01T00:00:00Z",
+      "facet.range.end":"2020-01-06T00:00:00Z"
+    }
+  },
+  "response":{
+    "numFound":4,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{ },
+    "facet_ranges":{
+      "created":{
+        "counts":["2020-01-01T00:00:00Z",0,"2020-01-02T00:00:00Z",1,"2020-01-03T00:00:00Z",2,"2020-01-04T00:00:00Z",0,"2020-01-05T00:00:00Z",1],
+        "gap":"+1DAY",
+        "start":"2020-01-01T00:00:00Z",
+        "end":"2020-01-06T00:00:00Z"
+      }
+    },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  }
+}

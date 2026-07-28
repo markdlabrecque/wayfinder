@@ -352,40 +352,15 @@ const RANKED_RELEVANCE_ENTRIES: &[&str] = &["select_term"];
 // `err_bad_sort` match, and #2 landed the ordering itself, which made
 // `select_sort` — plus the sixteen `select_sort_*` / `err_sort_*` entries added
 // with it — match too. Both are gone from this list, as designed.
-const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[
-    (
-        "facet_mincount",
-        "advanced faceting unbuilt (full term-dictionary enumeration, mincount/limit/missing/query/json.nl), issue #3",
-    ),
-    (
-        "facet_limit",
-        "advanced faceting unbuilt (full term-dictionary enumeration, mincount/limit/missing/query/json.nl), issue #3",
-    ),
-    (
-        "facet_missing",
-        "advanced faceting unbuilt (full term-dictionary enumeration, mincount/limit/missing/query/json.nl), issue #3",
-    ),
-    (
-        "facet_query",
-        "advanced faceting unbuilt (full term-dictionary enumeration, mincount/limit/missing/query/json.nl), issue #3",
-    ),
-    (
-        "facet_json_nl_map",
-        "advanced faceting unbuilt (full term-dictionary enumeration, mincount/limit/missing/query/json.nl), issue #3",
-    ),
-    (
-        "facet_zero",
-        "advanced faceting unbuilt (full term-dictionary enumeration, mincount/limit/missing/query/json.nl), issue #3",
-    ),
-    (
-        "facet_all_filtered",
-        "advanced faceting unbuilt (full term-dictionary enumeration, mincount/limit/missing/query/json.nl), issue #3",
-    ),
-    (
-        "ping",
-        "`responseHeader.params` carries Solr ping-handler artifacts incl. a per-run `rid` counter no implementation can reproduce; see the same carve-out in `tracer_bullet.rs::ping_reports_ok`",
-    ),
-];
+// Faceting (issue #3) used to hold seven entries here — `facet_mincount`,
+// `facet_limit`, `facet_missing`, `facet_query`, `facet_json_nl_map`,
+// `facet_zero`, `facet_all_filtered`. Real fast-field aggregation over the whole
+// term dictionary made all seven match, so they are gone too. `ping` is the only
+// entry left, and it is the one that can never expire.
+const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[(
+    "ping",
+    "`responseHeader.params` carries Solr ping-handler artifacts incl. a per-run `rid` counter no implementation can reproduce; see the same carve-out in `tracer_bullet.rs::ping_reports_ok`",
+)];
 
 /// The `EXPECTED_DIVERGENCES` reason for `name`, or `None` if `name` is not
 /// in the list. Every entry has a mandatory reason by construction (the list

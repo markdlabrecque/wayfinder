@@ -1,0 +1,28 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "facet.query":"category:nosuchvalue",
+      "q":"*:*",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facet_counts":{
+    "facet_queries":{
+      "category:nosuchvalue":0
+    },
+    "facet_fields":{ },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  }
+}

@@ -57,8 +57,8 @@ pub struct Query {
     /// Solr has no equivalent request cap, so over-limit requests are clamped
     /// rather than rejected — a clamp keeps working clients working.
     pub rows_limit: usize,
-    /// Hard cap on `facet.limit`. Exposed now, applied when `facet.limit`
-    /// lands (issue #3 owns that param).
+    /// Hard cap on `facet.limit`, clamping over-limit requests like
+    /// `rows_limit` does. Live since issue #3 landed `facet.limit`.
     pub facet_limit_max: usize,
 }
 

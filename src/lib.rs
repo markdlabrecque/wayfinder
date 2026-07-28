@@ -1,9 +1,10 @@
 //! Wayfinder: a Solr-wire-compatible search server on top of Tantivy.
 //!
-//! This is the tracer bullet (PRD §7) — one thin vertical slice through
+//! Grown from the tracer bullet (PRD §7) — one thin vertical slice through
 //! every layer, kept and iterated on rather than a spike: TOML schema ->
 //! Tantivy schema, `/update` (JSON add + commit), `/select` (`q`, `fq`,
-//! `fl`, `rows`, `start`, one `facet.field`), and `/admin/ping`.
+//! `fl`, `rows`, `start`, and the `facet.*` family — see `crate::facet`),
+//! and `/admin/ping`.
 //!
 //! `sort` was out of the tracer-bullet scope and has since landed (issue #2).
 //! Deliberately out of scope here (PRD §7): highlighting, edismax, stats,
@@ -14,6 +15,7 @@ mod collector;
 mod config;
 mod core_index;
 mod error;
+mod facet;
 mod params;
 pub mod schema;
 
@@ -28,6 +30,7 @@ use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use serde_json::{Value, json};
+use tantivy::query::{EmptyQuery, Occur, Query, QueryClone};
 
 use collector::{SortClause, SortKey};
 use core_index::CoreIndex;
@@ -45,10 +48,13 @@ struct AppState {
 /// (findings fact 8).
 ///
 /// **Implementing a new param? Add it here.** Otherwise `strict_params = true`
-/// will 400 on a param Wayfinder actually supports. `sort` is fully
-/// implemented as of #2 — validated by #11, ordered by #2.
-/// Still missing, waiting on their issues: the rest of the `facet.*` family
-/// (#3), `commitWithin` / `overwrite` / `softCommit` (#9).
+/// will 400 on a param Wayfinder actually supports. `sort` is fully implemented
+/// as of #2 — validated by #11, ordered by #2. The `facet.*` family landed with
+/// #3; still absent from it, and so still unlisted: `facet.method`,
+/// `facet.prefix`, `facet.pivot`, interval and heatmap faceting,
+/// `facet.range.other` / `.include` / `.hardend`, and `f.<field>.facet.*`
+/// per-field overrides. Also still missing, waiting on their issues:
+/// `commitWithin` / `overwrite` / `softCommit` (#9).
 const SELECT_PARAMS: &[&str] = &[
     "q",
     "df",
@@ -58,6 +64,16 @@ const SELECT_PARAMS: &[&str] = &[
     "start",
     "facet",
     "facet.field",
+    "facet.query",
+    "facet.limit",
+    "facet.mincount",
+    "facet.sort",
+    "facet.missing",
+    "facet.range",
+    "facet.range.start",
+    "facet.range.end",
+    "facet.range.gap",
+    "json.nl",
     "sort",
     "wt",
 ];
@@ -363,8 +379,8 @@ async fn select(
     // No `q` matches nothing — it does *not* default to `*:*`. Solr answers 200
     // with an empty result set (`err_missing_q.json`), which resolves
     // tracer-bullet review follow-up 2 against the fixture.
-    let hits = match params.get("q") {
-        None => Vec::new(),
+    let parsed = match params.get("q") {
+        None => None,
         Some(q) => {
             let query = state.index.parse_query(q, &default_field).map_err(|e| {
                 WfError::bad_request("wayfinder::SyntaxError", e.to_string()).with_params(&params)
@@ -377,14 +393,18 @@ async fn select(
                         .with_params(&params)
                 })?);
             }
-
-            state
-                .index
-                .search(query.as_ref(), &filter_queries, &sort)
-                .map_err(|e| {
-                    WfError::internal("wayfinder::SearchError", e.to_string()).with_params(&params)
-                })?
+            Some((query, filter_queries))
         }
+    };
+
+    let hits = match &parsed {
+        None => Vec::new(),
+        Some((query, filter_queries)) => state
+            .index
+            .search(query.as_ref(), filter_queries, &sort)
+            .map_err(|e| {
+                WfError::internal("wayfinder::SearchError", e.to_string()).with_params(&params)
+            })?,
     };
 
     let num_found = hits.len();
@@ -433,27 +453,32 @@ async fn select(
         }
     });
 
+    // `facet=true` gates the whole block; `facet.field` alone does not turn
+    // faceting on and the key stays absent (findings fact 4).
     if params.get("facet") == Some("true") {
-        let facet_field = params.get("facet.field");
-        let mut facet_fields = serde_json::Map::new();
-        if let Some(field_name) = facet_field {
-            let counted = state.index.facet_counts(field_name, &hits).map_err(|e| {
-                WfError::bad_request("wayfinder::FacetError", e.to_string()).with_params(&params)
-            })?;
-            let mut flat = Vec::with_capacity(counted.len() * 2);
-            for (term, count) in counted {
-                flat.push(Value::String(term));
-                flat.push(Value::from(count));
-            }
-            facet_fields.insert(field_name.to_string(), Value::Array(flat));
-        }
-        body["facet_counts"] = json!({
-            "facet_queries": {},
-            "facet_fields": facet_fields,
-            "facet_ranges": {},
-            "facet_intervals": {},
-            "facet_heatmaps": {},
-        });
+        // Facet counts are aggregated over a *real* query (`q` AND every `fq`),
+        // not over `hits`: Solr enumerates the field's whole term dictionary,
+        // which the hit list cannot see. `search` filters post-hoc with
+        // `retain`, so the Boolean query is rebuilt here rather than reused.
+        let base: facet::BaseClauses = match &parsed {
+            // No `q` matches nothing, so neither does any facet — but the term
+            // dictionary is still enumerated, at 0, exactly as `facet_zero`
+            // shows for a `q` that matches nothing.
+            None => vec![(Occur::Must, Box::new(EmptyQuery) as Box<dyn Query>)],
+            Some((query, filter_queries)) => std::iter::once((Occur::Must, query.box_clone()))
+                .chain(
+                    filter_queries
+                        .iter()
+                        .map(|fq| (Occur::Must, fq.box_clone())),
+                )
+                .collect(),
+        };
+        body["facet_counts"] =
+            facet::facet_counts(&state.index, &state.config, &params, &default_field, &base)
+                .map_err(|e| {
+                    WfError::bad_request("wayfinder::FacetError", e.to_string())
+                        .with_params(&params)
+                })?;
     }
 
     Ok(axum::Json(body).into_response())
