@@ -751,3 +751,24 @@ capd facet_json_nl_map_missing "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.
 
 echo "facet-debt core '$DEBT_CORE' left in place on '$DEBT_CONTAINER' (port 8988)"
 echo "  (docker rm -f $DEBT_CONTAINER to stop)"
+
+# --- ranked-relevance scores + fl order (issue #31) -------------------------
+# Appended block; nothing above is edited. Runs against the canonical
+# `$CONTAINER`/`$CORE` (reused `cap()`), same shared schema/5-doc corpus as the
+# tracer-bullet block at the top of this script — so these three rows go in
+# `manifest.tsv`, not `manifest-errors.tsv`.
+#
+# `select_term_scored`/`select_quick_scored`: `fl=id,score` on the two free-text
+# queries the differential harness already treats as ranked-relevance entries,
+# so `diff_ranked_ids` has a real fixture with per-doc `score` and
+# `response.maxScore` to exercise its tolerance path against, not just the
+# synthetic unit tests (differential-harness follow-up 1-2).
+#
+# `select_fl_reversed`: `fl=body,id`, reversed from every other multi-field
+# `fl` capture (`select_term`'s `fl=id,body` cannot discriminate order from
+# `fl`, since input order and `fl` order coincide there). Pins finding 24's
+# "doc key order is input order, not `fl` order" half on a committed fixture
+# instead of a live probe only.
+cap select_term_scored  'select?q=lazy&df=body&fl=id,score&rows=5&wt=json'
+cap select_quick_scored 'select?q=quick&df=body&fl=id,score&rows=5&wt=json'
+cap select_fl_reversed  'select?q=*:*&rows=2&fl=body,id&wt=json'
