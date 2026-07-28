@@ -1144,4 +1144,20 @@ async fn a_numeric_column_absent_from_one_segment_still_reads_as_zero() {
 
     assert_eq!(status, 200);
     assert_eq!(ids(&body), fixture_ids("sort_mv_int_asc"));
+
+    // Segment 2 (`[s5]`) also has no `weight` or `created` column at all — s5
+    // is missing both — so this same two-segment app exercises the F64 and
+    // Date arms of `SegmentSortColumn::Absent`'s zero default too (review
+    // round 1: the `nums` assertion above only covers the I64 arm). Same
+    // fixtures as the single-segment tests, so any segment-aware special
+    // casing of an absent column would show up as a divergence from them.
+    let (status, body) =
+        sortdebt_get(&app, "select?q=*:*&sort=weight+asc&fl=id,weight&wt=json").await;
+    assert_eq!(status, 200);
+    assert_eq!(ids(&body), fixture_ids("sort_float_asc"));
+
+    let (status, body) =
+        sortdebt_get(&app, "select?q=*:*&sort=created+asc&fl=id,created&wt=json").await;
+    assert_eq!(status, 200);
+    assert_eq!(ids(&body), fixture_ids("sort_date_asc"));
 }

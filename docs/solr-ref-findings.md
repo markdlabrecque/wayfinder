@@ -462,7 +462,7 @@ Eleven new `manifest-errors.tsv` rows against the `facets` core (a `facets`-core
 
 ## Findings from the issue #32 sort-debt capture
 
-Claiming findings 34-37 (issue #31 reserved 31-33). Twenty new `manifest-errors.tsv` rows
+Claiming findings 34-37 (issue #31 reserved 31-33). Twenty-two new `manifest-errors.tsv` rows
 against a new `sortdebt` core (own container `wayfinder-solr-32`, port 8987 — not the
 `content` core, so none of these are `manifest.tsv` rows). Corpus `s1..s6`: `category`
 string, `views` pint, `weight` pfloat, `created` pdate, `nums` multiValued pint, with
