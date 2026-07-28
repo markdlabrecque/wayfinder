@@ -2,11 +2,11 @@ err_missing_core	404	GET	nosuchcore/select?q=*:*&wt=json
 err_update_bad_json	400	POST	content/update?commit=true&wt=json	{not json
 err_select_delete	200	DELETE	content/select?q=*:*&wt=json	
 err_update_put	400	PUT	content/update?wt=json	[]
-update_unknown_field_schemaless	200	POST	content/update?commit=true	[{"id":"probe_unknown_field","body":"probe","nosuchfield":"x"}]	http://localhost:8983/solr
+update_unknown_field_schemaless	200	POST	schemaless_probe/update?commit=true	[{"id":"probe_unknown_field","body":"probe","nosuchfield":"x"}]	http://localhost:8983/solr
 update_unknown_field_strict	400	POST	content/update?commit=true	[{"id":"probe_unknown_field","body":"probe","nosuchfield":"x"}]	http://localhost:8984/solr
 facet_non_docvalues_text	200	GET	content/select?q=*:*&rows=0&facet=true&facet.field=body&wt=json	
 facet_non_docvalues_text_enum	200	GET	content/select?q=*:*&rows=0&facet=true&facet.field=body&facet.method=enum&wt=json	
-facet_unknown_field	200	GET	content/select?q=*:*&rows=0&facet=true&facet.field=nosuchfield&wt=json	
+facet_unknown_field	400	GET	content/select?q=*:*&rows=0&facet=true&facet.field=nosuchfield&wt=json	
 facet_range_numeric	200	GET	facets/select?q=*:*&rows=0&facet=true&facet.range=views&facet.range.start=0&facet.range.end=40&facet.range.gap=10&wt=json	
 facet_range_date	200	GET	facets/select?q=*:*&rows=0&facet=true&facet.range=created&facet.range.start=2020-01-01T00:00:00Z&facet.range.end=2020-01-06T00:00:00Z&facet.range.gap=%2B1DAY&wt=json	
 facet_range_json_nl_map	200	GET	facets/select?q=*:*&rows=0&facet=true&facet.range=views&facet.range.start=0&facet.range.end=40&facet.range.gap=10&json.nl=map&wt=json	

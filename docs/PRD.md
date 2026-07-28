@@ -112,15 +112,24 @@ chosen. Nothing may be added here without the same two things.
    error. Clients parse JSON; none depends on that HTML, and serving it would mean carrying a
    second response format solely to reproduce a joke. (findings 15, issue #11)
 
-2. **A facet Wayfinder cannot build is a 400, where Solr returns 200 with empty counts.**
-   `facet_non_docvalues_text.json`, `facet_stored_only_field.json` and `facet_unknown_field.json`
-   show Solr answering `status: 0` with `"<field>":[]` for a non-docValues field, a stored-only
-   field, and a field that does not exist at all — no warning anywhere in the response. That is
-   the one captured behaviour this project rejects on the merits: the client cannot distinguish
-   "this field has no values" from "you asked for something impossible", which is exactly the
-   silent-empty-counts failure the tracer-bullet review flagged. Tantivy cannot aggregate a
-   non-`fast` column at all, so the honest answer is a hard 400 in the Solr error envelope,
-   worded to mirror the `sort` equivalent in finding 11. (issue #3's finding 16)
+2. **A facet on an existing but unfacetable field is a 400, where Solr returns 200 with empty
+   counts.** `facet_non_docvalues_text.json` and `facet_stored_only_field.json` show Solr
+   answering `status: 0` with `"<field>":[]` for a non-docValues field and for a stored-only
+   field — no warning anywhere in the response. That is the one captured behaviour this project
+   rejects on the merits: the client cannot distinguish "this field has no values" from "you asked
+   for something impossible", which is exactly the silent-empty-counts failure the tracer-bullet
+   review flagged. Tantivy cannot aggregate a non-`fast` column at all, so the honest answer is a
+   hard 400 in the Solr error envelope, worded to mirror the `sort` equivalent in finding 11.
+   (issue #3's finding 16, narrowed by issue #26)
+
+   **Scope note, and a caution about how this list gets built.** As first ratified this divergence
+   also covered a facet on a field that *does not exist*, on the strength of a fixture showing
+   Solr returning 200 with an empty array. That fixture was captured against a container whose
+   schema `capture.sh`'s own schemaless probe had polluted, so the "unknown" field existed. On a
+   clean container Solr 400s, exactly as Wayfinder does, so unknown facet fields were never a
+   divergence. A ratified divergence is only as good as the cleanliness of the fixture behind it —
+   which is why every entry here must name its fixture, and why `capture.sh` must leave the
+   reference core able to reproduce its own captures.
 
 3. **An unknown field in an incoming document is rejected, where Solr's `_default` configset
    auto-adds it.** That configset is *schemaless* (`update.autoCreateFields` defaults to true), so

@@ -141,12 +141,22 @@ cap_post() {  # cap_post <name> <path-with-query> <json-body> [base-url] [core]
   rm -f "$OUT/$name.status"
 }
 
-# Schemaless side, on the main container. `commit=false` and a delete-by-id
-# afterwards keep the 5-doc reference corpus intact for every other fixture.
+# Schemaless side. This runs on its OWN core, not `content`, and that is load
+# bearing: the probe's whole point is that Solr auto-adds the unknown field, and
+# Solr cannot then delete it (an auto-generated copy-field directive references
+# it). Running it on `content` permanently adds `nosuchfield` to the reference
+# core's schema, after which `err_unknown_field`'s query (`q=nosuchfield:x`)
+# resolves and returns 200 instead of 400 — so the container could no longer
+# reproduce the very fixtures this script had just captured, and the live
+# differential mode failed on it (issue #26). Deleting the probe doc is not
+# enough; the schema change is what persists.
+PROBE_CORE=schemaless_probe
+# `solr create` rather than the CREATE admin API: the API needs an instanceDir
+# that already holds a configset, which a fresh name does not.
+docker exec "$CONTAINER" solr create -c "$PROBE_CORE" >/dev/null 2>&1 || true
 cap_post update_unknown_field_schemaless 'update?commit=true' \
-  '[{"id":"probe_unknown_field","body":"probe","nosuchfield":"x"}]'
-curl -s "$SOLR/$CORE/update?commit=true" -H 'Content-Type: application/json' \
-  -d '{"delete":{"id":"probe_unknown_field"}}' >/dev/null
+  '[{"id":"probe_unknown_field","body":"probe","nosuchfield":"x"}]' \
+  "$SOLR" "$PROBE_CORE"
 
 # Strict side, its own container/port.
 STRICT_CONTAINER=wayfinder-solr-ref-strict

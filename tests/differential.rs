@@ -501,12 +501,23 @@ fn live_solr_matches_committed_query_set() {
     let entries = load_manifest(&manifest_path());
     let mut failures = Vec::new();
     for entry in &entries {
+        // `EXPECTED_DIVERGENCES` applies here exactly as it does hermetically,
+        // and for a sharper reason: this mode compares live Solr against
+        // *captured Solr*, so `ping`'s per-run `rid` counter differs from one
+        // Solr run to the next. A listed entry failing here is the list being
+        // right, not the harness finding a bug.
+        let divergence_reason = expected_divergence_reason(&entry.name);
+
         let (status, actual) = common::diff::fetch_live(&base_url, &entry.path);
         if status != entry.status {
-            failures.push(format!(
+            let msg = format!(
                 "{}: HTTP status {} vs expected {}",
                 entry.name, status, entry.status
-            ));
+            );
+            match divergence_reason {
+                Some(reason) => eprintln!("{msg}\n  (expected divergence: {reason})"),
+                None => failures.push(msg),
+            }
             continue;
         }
 
@@ -514,8 +525,22 @@ fn live_solr_matches_committed_query_set() {
         let expected_n = normalize(expected);
         let actual_n = normalize(actual);
         let report = diff(&expected_n.value, &actual_n.value);
-        if !report.diffs.is_empty() {
-            failures.push(format!("{}: {:?}", entry.name, report.diffs));
+        match (report.diffs.is_empty(), divergence_reason) {
+            // Self-expiring in this mode too: an entry that stops diverging
+            // must be removed, or the list quietly becomes a lie here while
+            // the hermetic run still polices it.
+            (true, Some(reason)) => failures.push(format!(
+                "{}: EXPECTED_DIVERGENCES says this should still diverge ({reason}), but it \
+                 matches live Solr — remove this entry from EXPECTED_DIVERGENCES in \
+                 tests/differential.rs",
+                entry.name
+            )),
+            (false, Some(reason)) => eprintln!(
+                "{}: {:?}\n  (expected divergence: {reason})",
+                entry.name, report.diffs
+            ),
+            (false, None) => failures.push(format!("{}: {:?}", entry.name, report.diffs)),
+            (true, None) => {}
         }
     }
 

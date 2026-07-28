@@ -1,6 +1,6 @@
 {
   "responseHeader":{
-    "status":0,
+    "status":400,
     "QTime":0,
     "params":{
       "q":"*:*",
@@ -16,13 +16,9 @@
     "numFoundExact":true,
     "docs":[ ]
   },
-  "facet_counts":{
-    "facet_queries":{ },
-    "facet_fields":{
-      "nosuchfield":[ ]
-    },
-    "facet_ranges":{ },
-    "facet_intervals":{ },
-    "facet_heatmaps":{ }
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"undefined field: \"nosuchfield\"",
+    "code":400
   }
 }
