@@ -451,20 +451,29 @@ impl CoreIndex {
     /// also why this needs a `fast` (docValues) field and why a non-`fast` one is
     /// refused by the caller rather than silently answered with an empty array.
     ///
-    /// ponytail: that dictionary enumeration is **string-only**. In tantivy
-    /// 0.26.1 the `min_doc_count == 0` term-dictionary stream that inserts the
-    /// zero-count buckets sits inside the `ColumnType::Str` branch
+    /// For a numeric or date field this does **not** happen, and issue #24
+    /// established that this is a match for Solr rather than a Wayfinder gap:
+    /// Solr itself does not enumerate a term dictionary for a Points-based
+    /// field (`facet_field_numeric_all.json`, `facet_field_date_all.json` list
+    /// only hit-set values, and `facet_field_string_control_subset.json` on the
+    /// same core/corpus/hit-set proves the difference is field-type-driven, not
+    /// a capture artifact — Solr's own `responseHeader.warnings` even says why:
+    /// *"...because field views is Points-based."*). In tantivy 0.26.1 the
+    /// `min_doc_count == 0` term-dictionary stream that inserts the zero-count
+    /// buckets sits inside the `ColumnType::Str` branch
     /// (`term_agg.rs:1024-1053`); the numeric/date/bool branches
-    /// (`:1054-1112`) only map the entries the hit set actually produced. So a
-    /// `facet.field` on an `int`/`date` field reports only values present in the
-    /// hit set, and a value reachable only through a non-matching document is
-    /// silently dropped — a real divergence from Solr, with no fixture covering
-    /// it yet. Fixing it needs either a Tantivy change or a per-value count
-    /// pass; string faceting is what this issue targets.
+    /// (`:1054-1112`) only map the entries the hit set actually produced, which
+    /// is exactly Solr's own behaviour.
     ///
     /// Returned unsorted and unfiltered: `facet.mincount` / `facet.sort` /
-    /// `facet.limit` are response-shaping concerns and live in `crate::facet`.
-    pub fn term_facet(&self, field_name: &str, query: &dyn Query) -> Result<Vec<(String, u64)>> {
+    /// `facet.limit` are response-shaping concerns and live in `crate::facet`,
+    /// which also needs an order-preserving sort key alongside the rendered
+    /// term — see `FacetOrderKey`.
+    pub fn term_facet(
+        &self,
+        field_name: &str,
+        query: &dyn Query,
+    ) -> Result<Vec<(String, FacetOrderKey, u64)>> {
         const AGG_NAME: &str = "wf_terms";
 
         let mut aggs = Aggregations::default();
@@ -508,21 +517,133 @@ impl CoreIndex {
             ));
         };
 
+        let kind = self.wf_schema.value_kind(field_name);
+
         Ok(buckets
             .iter()
             .map(|bucket| {
+                // The rendered term is exactly what shipped before: Tantivy's
+                // own `key_as_string` for a `Bool` column (the only variant
+                // `into_final_result` in tantivy 0.26.1's
+                // `intermediate_agg_result.rs:728-734` ever sets it for — not
+                // reachable today since `ValueKind` has no `Bool`, kept
+                // defensively rather than as a live path), otherwise the raw
+                // key. A **date** column's terms bucket is *not* `key_as_string`
+                // at all: `term_agg.rs:1054-1060` inserts
+                // `IntermediateKey::Str(format_date(val))` directly, so the key
+                // Tantivy hands back is already `Key::Str(rfc3339)` and falls
+                // into the plain `Key::Str` arm below.
                 let term = match (&bucket.key_as_string, &bucket.key) {
                     (Some(s), _) => s.clone(),
                     (None, Key::Str(s)) => s.clone(),
                     (None, Key::I64(v)) => v.to_string(),
                     (None, Key::U64(v)) => v.to_string(),
-                    // ponytail: numeric `facet.field` keys are rendered
-                    // straight from the aggregation key. Only `string` fields
-                    // are pinned by a fixture so far.
+                    // ponytail: this renders straight from the aggregation
+                    // key via `v.to_string()`, which is exact for the
+                    // integral doubles issue #24 actually captured (`pint`,
+                    // and `pdate`'s underlying key once normalised) but not
+                    // necessarily for a genuine `float`/`double` field: Rust's
+                    // `f64::to_string()` and Solr's own float formatting can
+                    // disagree (e.g. an integral double rendering as `"5"`
+                    // here vs `pdouble`'s `"5.0"`). No fixture pins
+                    // `facet.field` on a `float`/`double` column yet — only
+                    // `pint`/`pdate` were captured — so this stays open until
+                    // one is.
                     (None, Key::F64(v)) => v.to_string(),
                 };
-                (term, bucket.doc_count)
+                // The sort key is separate from the rendered term because the
+                // string is lossy: `"15"` sorts before `"5"` lexically but
+                // after it by value (issue #24). For a date field the term
+                // *is* the rendered RFC3339 string (see above), so ordering by
+                // it naively is ordering lexically, not chronologically. Those
+                // two coincide for this corpus because `DateOptions::default()`
+                // is `DateTimePrecision::Seconds` (fixed-width `…:SSZ` keys —
+                // `tantivy-common-0.11.0/src/datetime.rs:18`), but would not
+                // for sub-second precision. Rather than leave that as a
+                // precision-dependent ceiling, parse the date field's term
+                // back into an instant and sort by that directly — it is a
+                // small, local fix and removes the dependency on precision
+                // entirely.
+                let order = if kind == Some(ValueKind::Date) {
+                    match OffsetDateTime::parse(&term, &Rfc3339) {
+                        Ok(dt) => FacetOrderKey::F64(
+                            dt.unix_timestamp() as f64 + dt.nanosecond() as f64 / 1e9,
+                        ),
+                        // Should not happen — `term` came from Tantivy's own
+                        // `format_date`, which always emits RFC3339 — but fall
+                        // back to the (still correct for this corpus) lexical
+                        // order rather than panicking or dropping the bucket.
+                        Err(_) => FacetOrderKey::Str(term.clone()),
+                    }
+                } else {
+                    FacetOrderKey::from(&bucket.key)
+                };
+                (term, order, bucket.doc_count)
             })
             .collect())
+    }
+}
+
+/// An order-preserving sort key for one facet-term bucket, carried alongside
+/// the rendered `String` term so `facet::facet_fields` can order numeric/date
+/// terms by *value* (issue #24) while string terms keep byte-lexical order.
+/// The rendered string is lossy — `"15"` sorts before `"5"` — so the fix has
+/// to happen while the key still has its type, which is here, not after
+/// `term_facet` has already collapsed it.
+#[derive(Clone)]
+pub enum FacetOrderKey {
+    Str(String),
+    I64(i64),
+    U64(u64),
+    /// Also carries a date bucket's sort key: seconds-since-epoch plus a
+    /// fractional-second remainder, reconstructed by parsing the bucket's
+    /// rendered RFC3339 term back into an instant (`term_facet`), since the
+    /// sort key for a date is the instant, not its rendered string.
+    F64(f64),
+}
+
+impl From<&Key> for FacetOrderKey {
+    fn from(key: &Key) -> Self {
+        match key {
+            Key::Str(s) => FacetOrderKey::Str(s.clone()),
+            Key::I64(v) => FacetOrderKey::I64(*v),
+            Key::U64(v) => FacetOrderKey::U64(*v),
+            Key::F64(v) => FacetOrderKey::F64(*v),
+        }
+    }
+}
+
+impl FacetOrderKey {
+    /// A mismatched-variant pair is not just a theoretical guard: tantivy
+    /// 0.26.1 calls `NumericalValue::normalize()` per bucket for an `f64`
+    /// column (`term_agg.rs:1096-1109`), so one aggregation over a
+    /// `float`/`double` field can freely mix `U64`/`I64` (exactly-integral
+    /// values) and `F64` (fractional ones) across its own buckets. The
+    /// fallback below is total and lossless for that case: `normalize()` only
+    /// substitutes `U64`/`I64` when the value is exactly representable as one,
+    /// so `as_f64` loses nothing converting back, and the comparator can never
+    /// panic on `NaN` — `serde_json` numbers cannot represent `NaN`, so it
+    /// never reaches a bucket key in the first place.
+    pub fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use FacetOrderKey::*;
+        match (self, other) {
+            (Str(a), Str(b)) => a.cmp(b),
+            (I64(a), I64(b)) => a.cmp(b),
+            (U64(a), U64(b)) => a.cmp(b),
+            (F64(a), F64(b)) => a.total_cmp(b),
+            _ => self
+                .as_f64()
+                .partial_cmp(&other.as_f64())
+                .unwrap_or(std::cmp::Ordering::Equal),
+        }
+    }
+
+    fn as_f64(&self) -> f64 {
+        match self {
+            FacetOrderKey::Str(_) => 0.0,
+            FacetOrderKey::I64(v) => *v as f64,
+            FacetOrderKey::U64(v) => *v as f64,
+            FacetOrderKey::F64(v) => *v,
+        }
     }
 }

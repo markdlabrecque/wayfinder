@@ -93,6 +93,13 @@ gitignored — regenerate rather than trust this list if it ages):
    code and status, not the message.
 10. Sorting on a non-`docValues` field is a hard 400, not a silent fallback. Same constraint
     as Wayfinder's `fast = true` requirement.
+11. `responseHeader.warnings` (a JSON array of strings) appears when Solr raises the effective
+    `facet.mincount` from 0 to 1 for a `facet.field` on a Points-based (numeric/date) column —
+    `"Raising facet.mincount from 0 to 1, because field <name> is Points-based."`
+    (`facet_field_numeric_all.json`). Absent from every other fixture, including `facet.range`
+    on the same fields and `facet.field` on a string column; Wayfinder emits the same key,
+    verbatim wording, under the same gate, and leads `responseHeader` with it (`warnings, status,
+    QTime, params`), matching the fixture's key order. Not a divergence — see findings 27-30.
 
 ### What deliberately differs
 

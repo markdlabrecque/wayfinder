@@ -1,0 +1,30 @@
+{
+  "responseHeader":{
+    "warnings":["Raising facet.mincount from 0 to 1, because field views is Points-based."],
+    "status":0,
+    "QTime":1,
+    "params":{
+      "q":"*:*",
+      "facet.field":"views",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json",
+      "facet.sort":"index"
+    }
+  },
+  "response":{
+    "numFound":4,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{
+      "views":["5",1,"15",1,"25",1,"35",1]
+    },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  }
+}

@@ -29,7 +29,7 @@ use axum::extract::{Path as AxPath, RawQuery, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tantivy::query::{EmptyQuery, Occur, Query, QueryClone};
 
 use collector::{SortClause, SortKey};
@@ -439,23 +439,15 @@ async fn select(
         })?);
     }
 
-    let mut body = json!({
-        "responseHeader": {
-            "status": 0,
-            "QTime": 0,
-            "params": params.echo(),
-        },
-        "response": {
-            "numFound": num_found,
-            "start": start,
-            "numFoundExact": true,
-            "docs": docs,
-        }
-    });
-
     // `facet=true` gates the whole block; `facet.field` alone does not turn
-    // faceting on and the key stays absent (findings fact 4).
-    if params.get("facet") == Some("true") {
+    // faceting on and the key stays absent (findings fact 4). Computed *before*
+    // `responseHeader` is built, not after: Solr's own `responseHeader` key
+    // order is `warnings, status, QTime, params` — `warnings` leads, it does
+    // not trail (finding 29 / issue #24) — and `serde_json`'s `preserve_order`
+    // feature (issue #25) means the order keys are inserted in is now the order
+    // they are emitted in, so `warnings` has to be known before the object
+    // literal is written.
+    let facet_result = if params.get("facet") == Some("true") {
         // Facet counts are aggregated over a *real* query (`q` AND every `fq`),
         // not over `hits`: Solr enumerates the field's whole term dictionary,
         // which the hit list cannot see. `search` filters post-hoc with
@@ -473,12 +465,45 @@ async fn select(
                 )
                 .collect(),
         };
-        body["facet_counts"] =
+        Some(
             facet::facet_counts(&state.index, &state.config, &params, &default_field, &base)
                 .map_err(|e| {
                     WfError::bad_request("wayfinder::FacetError", e.to_string())
                         .with_params(&params)
-                })?;
+                })?,
+        )
+    } else {
+        None
+    };
+    let warnings = facet_result
+        .as_ref()
+        .map(|(_, warnings)| warnings.as_slice())
+        .unwrap_or_default();
+
+    // `responseHeader.warnings` is absent unless there is something to warn
+    // about (every fixture that isn't a Points-based `facet.field` at
+    // mincount 0 lacks the key) — never an empty array — and, when present,
+    // leads the object rather than trailing it.
+    let mut response_header = Map::new();
+    if !warnings.is_empty() {
+        response_header.insert("warnings".to_string(), json!(warnings));
+    }
+    response_header.insert("status".to_string(), json!(0));
+    response_header.insert("QTime".to_string(), json!(0));
+    response_header.insert("params".to_string(), json!(params.echo()));
+
+    let mut body = json!({
+        "responseHeader": response_header,
+        "response": {
+            "numFound": num_found,
+            "start": start,
+            "numFoundExact": true,
+            "docs": docs,
+        }
+    });
+
+    if let Some((facet_counts, _)) = facet_result {
+        body["facet_counts"] = facet_counts;
     }
 
     Ok(axum::Json(body).into_response())

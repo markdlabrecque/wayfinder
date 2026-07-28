@@ -356,3 +356,98 @@ async fn error_envelope_key_order_matches_solr() {
     assert_keys_match_fixture(&text, "err_bad_syntax", "error", true);
     assert_same_key_order(&text, "err_bad_syntax");
 }
+
+// --- 5. `responseHeader.warnings` leads, not trails (issue #24) ------------
+//
+// Solr's `responseHeader` for a Points-based `facet.field` at effective
+// `facet.mincount == 0` is `warnings, status, QTime, params`
+// (`facet_field_numeric_all.json`) — `warnings` is the *first* key, not the
+// last. Building `responseHeader` as a `serde_json::json!` object literal and
+// then doing `body["responseHeader"]["warnings"] = ...` afterwards would
+// insert it at the end under `preserve_order` (issue #25): this is exactly the
+// kind of divergence `assert_matches_fixture` (order-insensitive `Value`
+// equality) cannot see, and the reason this suite reads raw bytes instead.
+
+/// Mirrors `tests/faceting.rs::RANGE_SCHEMA_TOML` / `range_corpus`, which is
+/// the same schema and corpus the `facets` Solr core in
+/// `solr-ref/capture.sh` builds — duplicated locally rather than shared
+/// across integration-test binaries, the same choice `keyorder_app` above
+/// makes for the `keyorder` core.
+const FACETS_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "views"
+type = "int"
+stored = true
+fast = true
+
+[[fields]]
+name = "created"
+type = "date"
+stored = true
+fast = true
+
+[[fields]]
+name = "note"
+type = "string"
+stored = true
+"#;
+
+fn facets_corpus() -> Value {
+    json!([
+        {"id":"r1","views":5, "created":"2020-01-02T00:00:00Z","note":"alpha"},
+        {"id":"r2","views":15,"created":"2020-01-03T00:00:00Z","note":"beta"},
+        {"id":"r3","views":25,"created":"2020-01-03T00:00:00Z","note":"alpha"},
+        {"id":"r4","views":35,"created":"2020-01-05T00:00:00Z"}
+    ])
+}
+
+async fn facets_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), FACETS_SCHEMA_TOML).expect("app must build");
+    let (status, body) = post_docs(&app, &facets_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the facets corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
+/// `responseHeader` itself: `warnings, status, QTime, params`, not the
+/// alphabetical `QTime, params, status, warnings` and not
+/// `status, QTime, params, warnings` either (the order a naive
+/// `body["responseHeader"]["warnings"] = ...` append would produce).
+#[tokio::test]
+async fn response_header_warnings_leads_not_trails() {
+    let (app, _dir) = facets_app().await;
+    let (status, text) = get_text(
+        &app,
+        CORE,
+        "select?q=*:*&rows=0&facet=true&facet.field=views&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "numeric facet.field must be a 200: {text}"
+    );
+    assert_keys_match_fixture(&text, "facet_field_numeric_all", "responseHeader", true);
+    assert_same_key_order(&text, "facet_field_numeric_all");
+}
