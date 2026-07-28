@@ -52,6 +52,24 @@ fn render_value<'a>(v: impl tantivy::schema::Value<'a>) -> Value {
     Value::Null
 }
 
+/// Renders an `f64` the way Java's `Double.toString` renders a `pdouble`/
+/// `pfloat` facet key (finding 39): an integral value gets a trailing `.0`
+/// (`5.0`, `12.0`); a fractional one is unchanged from Rust's own
+/// `to_string` for the shapes this issue's fixtures pin (`0.25`, `7.5`).
+///
+/// ponytail: this is not full `Double.toString` — Java switches to
+/// scientific notation outside `1e-3..1e7`, and Rust's `f64::to_string`
+/// disagrees with Java on digit count/rounding in general. No fixture pins
+/// either of those; only the plain-decimal integral/fractional shapes above
+/// are captured, so that is the ceiling here.
+fn render_double(v: f64) -> String {
+    if v == v.trunc() && v.is_finite() {
+        format!("{v:.1}")
+    } else {
+        v.to_string()
+    }
+}
+
 fn as_text<'a>(field: &str, v: &'a Value) -> Result<&'a str> {
     v.as_str()
         .ok_or_else(|| anyhow!("field `{field}` expects a string value, got {v}"))
@@ -533,42 +551,57 @@ impl CoreIndex {
                 // `IntermediateKey::Str(format_date(val))` directly, so the key
                 // Tantivy hands back is already `Key::Str(rfc3339)` and falls
                 // into the plain `Key::Str` arm below.
-                let term = match (&bucket.key_as_string, &bucket.key) {
-                    (Some(s), _) => s.clone(),
-                    (None, Key::Str(s)) => s.clone(),
-                    (None, Key::I64(v)) => v.to_string(),
-                    (None, Key::U64(v)) => v.to_string(),
-                    // ponytail: this renders straight from the aggregation
-                    // key via `v.to_string()`, which is exact for the
-                    // integral doubles issue #24 actually captured (`pint`,
-                    // and `pdate`'s underlying key once normalised) but not
-                    // necessarily for a genuine `float`/`double` field: Rust's
-                    // `f64::to_string()` and Solr's own float formatting can
-                    // disagree (e.g. an integral double rendering as `"5"`
-                    // here vs `pdouble`'s `"5.0"`). No fixture pins
-                    // `facet.field` on a `float`/`double` column yet — only
-                    // `pint`/`pdate` were captured — so this stays open until
-                    // one is.
-                    (None, Key::F64(v)) => v.to_string(),
+                // A `pdouble`/`pfloat` column renders Java `Double.toString`
+                // (finding 39): an integral double is `"5.0"`, never `"5"`.
+                // Tantivy's own aggregation *normalises* an exactly-integral
+                // double to a `U64`/`I64` key variant
+                // (`NumericalValue::normalize`, `term_agg.rs:1096-1109`), so
+                // this decision cannot be driven by the bucket key's variant
+                // or value — only the schema's own declared `ValueKind::F64`
+                // says "this column is a double/float", regardless of which
+                // key variant a particular bucket happened to normalise to.
+                // `views` (an `I64` column) must keep rendering `"5"` for the
+                // exact same underlying value, which is exactly why this is
+                // schema-driven and not variant- or value-sniffed.
+                let term = if kind == Some(ValueKind::F64) {
+                    let v = match &bucket.key {
+                        Key::F64(v) => *v,
+                        Key::I64(v) => *v as f64,
+                        Key::U64(v) => *v as f64,
+                        Key::Str(_) => 0.0, // unreachable for an F64 column
+                    };
+                    render_double(v)
+                } else {
+                    match (&bucket.key_as_string, &bucket.key) {
+                        (Some(s), _) => s.clone(),
+                        (None, Key::Str(s)) => s.clone(),
+                        (None, Key::I64(v)) => v.to_string(),
+                        (None, Key::U64(v)) => v.to_string(),
+                        (None, Key::F64(v)) => v.to_string(),
+                    }
                 };
                 // The sort key is separate from the rendered term because the
                 // string is lossy: `"15"` sorts before `"5"` lexically but
                 // after it by value (issue #24). For a date field the term
                 // *is* the rendered RFC3339 string (see above), so ordering by
-                // it naively is ordering lexically, not chronologically. Those
-                // two coincide for this corpus because `DateOptions::default()`
-                // is `DateTimePrecision::Seconds` (fixed-width `…:SSZ` keys —
-                // `tantivy-common-0.11.0/src/datetime.rs:18`), but would not
-                // for sub-second precision. Rather than leave that as a
-                // precision-dependent ceiling, parse the date field's term
-                // back into an instant and sort by that directly — it is a
-                // small, local fix and removes the dependency on precision
-                // entirely.
+                // it naively is ordering lexically, not chronologically —
+                // which happens to coincide with chronological order for
+                // fixed-width same-precision keys, but is still the wrong
+                // thing to order by in general (e.g. a fraction rendered with
+                // a different number of digits, or two precisions mixed).
+                // Parsing the term back into an exact instant and sorting by
+                // that removes the dependency on rendering shape entirely —
+                // it does not merely "remove the dependency on precision":
+                // this issue's own millisecond-precision fixtures resolve
+                // well inside the ~200ns an `f64`-seconds key (the previous
+                // carrier) can distinguish near a 2020s epoch, so the
+                // ms-ordering fixtures alone would not have caught a
+                // precision-loss regression there — nanoseconds-since-epoch
+                // in an `i128` carrier is exact instead of merely "precise
+                // enough for the corpus captured so far".
                 let order = if kind == Some(ValueKind::Date) {
                     match OffsetDateTime::parse(&term, &Rfc3339) {
-                        Ok(dt) => FacetOrderKey::F64(
-                            dt.unix_timestamp() as f64 + dt.nanosecond() as f64 / 1e9,
-                        ),
+                        Ok(dt) => FacetOrderKey::Nanos(dt.unix_timestamp_nanos()),
                         // Should not happen — `term` came from Tantivy's own
                         // `format_date`, which always emits RFC3339 — but fall
                         // back to the (still correct for this corpus) lexical
@@ -595,11 +628,16 @@ pub enum FacetOrderKey {
     Str(String),
     I64(i64),
     U64(u64),
-    /// Also carries a date bucket's sort key: seconds-since-epoch plus a
-    /// fractional-second remainder, reconstructed by parsing the bucket's
-    /// rendered RFC3339 term back into an instant (`term_facet`), since the
-    /// sort key for a date is the instant, not its rendered string.
     F64(f64),
+    /// A date bucket's sort key: nanoseconds since the Unix epoch,
+    /// reconstructed by parsing the bucket's rendered RFC3339 term back into
+    /// an instant (`term_facet`). `i128` because `OffsetDateTime::
+    /// unix_timestamp_nanos` is (year range aside) exact; an earlier version
+    /// of this carried seconds-plus-fractional-remainder as an `f64` instead,
+    /// which is lossy far below one nanosecond once the seconds component is
+    /// a real epoch value — see `term_facet`'s comment for why this issue's
+    /// millisecond fixtures do not by themselves prove that lossiness away.
+    Nanos(i128),
 }
 
 impl From<&Key> for FacetOrderKey {
@@ -631,6 +669,11 @@ impl FacetOrderKey {
             (I64(a), I64(b)) => a.cmp(b),
             (U64(a), U64(b)) => a.cmp(b),
             (F64(a), F64(b)) => a.total_cmp(b),
+            // `term_facet` only ever produces `Nanos` for a date column and
+            // always for every bucket of it, so this is the exact comparison
+            // that matters for dates — never the lossy `as_f64` fallback
+            // below.
+            (Nanos(a), Nanos(b)) => a.cmp(b),
             _ => self
                 .as_f64()
                 .partial_cmp(&other.as_f64())
@@ -644,6 +687,10 @@ impl FacetOrderKey {
             FacetOrderKey::I64(v) => *v as f64,
             FacetOrderKey::U64(v) => *v as f64,
             FacetOrderKey::F64(v) => *v,
+            // Only reachable through a mismatched-variant pair, which
+            // `term_facet` never actually produces for a date column (see
+            // `cmp`'s `Nanos` arm) — kept total rather than panicking.
+            FacetOrderKey::Nanos(v) => *v as f64,
         }
     }
 }

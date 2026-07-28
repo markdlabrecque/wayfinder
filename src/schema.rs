@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use tantivy::schema::{
-    DateOptions, Field, IndexRecordOption, JsonObjectOptions, NumericOptions, STRING, Schema,
-    TextFieldIndexing, TextOptions,
+    DateOptions, DateTimePrecision, Field, IndexRecordOption, JsonObjectOptions, NumericOptions,
+    STRING, Schema, TextFieldIndexing, TextOptions,
 };
 use tantivy::tokenizer::{
     Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer, StopWordFilter, TextAnalyzer,
@@ -491,7 +491,14 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
                 builder.add_f64_field(&fc.name, numeric_options(fc.stored, fc.fast))
             }
             ResolvedType::Date => {
-                let mut opts = DateOptions::default().set_indexed();
+                // Solr's `pdate` is millisecond precision; `DateOptions`'
+                // own default is seconds (issue #33 / finding 40), which
+                // collapses two values inside the same second into one fast
+                // column value — and so one facet bucket, undercounting a
+                // real Solr divergence (`facet_field_date_ms_all.json`).
+                let mut opts = DateOptions::default()
+                    .set_indexed()
+                    .set_precision(DateTimePrecision::Milliseconds);
                 if fc.stored {
                     opts = opts.set_stored();
                 }
