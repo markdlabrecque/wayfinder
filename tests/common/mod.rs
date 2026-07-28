@@ -5,11 +5,18 @@
 //! corpus used to capture `solr-ref/responses/*.json`, and provides thin
 //! request/response helpers plus fixture-comparison normalisation.
 //!
-//! Shared by several integration-test binaries, each of which uses only some of
-//! these helpers — so unused-code warnings here are expected, not a signal.
+//! Each integration test file is its own crate that pulls this module in via
+//! `mod common;`, and no single test file calls every helper here —
+//! `differential.rs` never calls `normalize_envelope`/`assert_matches_fixture`,
+//! `tracer_bullet.rs` never calls anything in `diff`, and neither of those calls
+//! `app_with_schema`/`post_docs`. `dead_code` is suppressed at the module root
+//! rather than per-item because which helpers are "unused" depends on which
+//! binary is compiling this module, not on the code itself.
 #![allow(dead_code)]
 
 use std::path::Path;
+
+pub mod diff;
 
 use axum::Router;
 use axum::body::Body;
