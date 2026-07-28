@@ -21,41 +21,13 @@
 // rejects the duplicate under `-D warnings`.
 mod common;
 
-use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
 
-use common::{CORE, fixture, get, indexed_app};
-
-/// Issues an arbitrary method/path/body against `app`. `common::get` only does
-/// GET, and these tests need POST/PUT/DELETE. Kept local rather than added to
-/// `tests/common/mod.rs` to avoid colliding with the concurrent #1 harness
-/// branch, which owns that file.
-async fn request(
-    app: &Router,
-    method: &str,
-    path_and_query: &str,
-    body: Option<&str>,
-) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method(method)
-        .uri(format!("/solr/{CORE}/{path_and_query}"))
-        .header("content-type", "application/json")
-        .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.expect("transport-level ok");
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.expect("body").to_bytes();
-    let body = if bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&bytes).expect("error responses must be valid JSON")
-    };
-    (status, body)
-}
+use common::{fixture, get, indexed_app, request};
 
 /// Asserts an error response matches the named fixture on the contract above.
 fn assert_error_shape(status: StatusCode, body: &Value, fixture_name: &str) {

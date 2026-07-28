@@ -184,6 +184,70 @@ pub async fn get(app: &Router, path_and_query: &str) -> (StatusCode, Value) {
     (status, body)
 }
 
+/// Issues an arbitrary method/full-path request against `app` and returns
+/// the HTTP status plus parsed JSON body (or `Value::Null` for an empty
+/// body). "Full-path" means `path_and_query` is everything after `/solr/`,
+/// including the core segment — e.g. `content/update?commit=true&wt=json`
+/// or `nosuchcore/select?q=*:*&wt=json`. This is the variant the
+/// `manifest-errors.tsv` runner (`tests/differential.rs`) needs, since its
+/// rows name their own core, sometimes one Wayfinder does not have at all.
+///
+/// Consolidated from `tests/error_shapes.rs`'s local `request()` (issue #31
+/// follow-up — deferred there only to avoid colliding with the
+/// then-concurrent #1 branch, which owns this file).
+pub async fn request_full(
+    app: &Router,
+    method: &str,
+    path_and_query: &str,
+    body: Option<&str>,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method(method)
+        .uri(format!("/solr/{path_and_query}"))
+        .header("content-type", "application/json")
+        .body(match body {
+            Some(b) => Body::from(b.to_string()),
+            None => Body::empty(),
+        })
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(req)
+        .await
+        .expect("request must not fail at the transport level");
+    let status = resp.status();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("response body must be readable")
+        .to_bytes();
+    let body: Value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("response body must be valid JSON")
+    };
+    (status, body)
+}
+
+/// Thin core-relative wrapper over `request_full`, for callers (like
+/// `tests/error_shapes.rs`) that only ever address `CORE`. Mirrors `get()`'s
+/// relationship to a full-path request, but for arbitrary methods/bodies.
+pub async fn request(
+    app: &Router,
+    method: &str,
+    core_relative_path_and_query: &str,
+    body: Option<&str>,
+) -> (StatusCode, Value) {
+    request_full(
+        app,
+        method,
+        &format!("{CORE}/{core_relative_path_and_query}"),
+        body,
+    )
+    .await
+}
+
 /// Loads a captured reference fixture from `solr-ref/responses/<name>.json`.
 pub fn fixture(name: &str) -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))

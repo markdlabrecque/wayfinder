@@ -200,48 +200,99 @@ fn diff_at(path: &str, expected: &Value, actual: &Value, report: &mut DiffReport
     }
 }
 
-/// Ranked-ID-list comparison for free-text relevance queries (PRD §8:
-/// "compare ranked ID lists, not just result sets"). Order matters: an
-/// identical multiset of ids in a different order is a `Diff`, not a pass.
-pub fn diff_ranked_ids(expected_ids: &[String], actual_ids: &[String]) -> Vec<Diff> {
-    let mut diffs = Vec::new();
-    if expected_ids.len() != actual_ids.len() {
-        diffs.push(Diff {
-            path: "response.docs".to_string(),
-            expected: format!("{} ids", expected_ids.len()),
-            actual: format!("{} ids", actual_ids.len()),
-        });
-    }
-    let n = expected_ids.len().max(actual_ids.len());
-    for i in 0..n {
-        let e = expected_ids
-            .get(i)
-            .map(String::as_str)
-            .unwrap_or("<missing>");
-        let a = actual_ids.get(i).map(String::as_str).unwrap_or("<missing>");
-        if e != a {
-            diffs.push(Diff {
-                path: format!("response.docs[{i}].id"),
-                expected: e.to_string(),
-                actual: a.to_string(),
-            });
-        }
-    }
-    diffs
+/// One ranked-relevance doc: an `id` plus its `score`, when the response
+/// carried one (issue #31 follow-up: no fixture's `fl` used to include
+/// `score`, so this path was exercised only by synthetic tests. Now that
+/// `select_term_scored`/`select_quick_scored` do, `diff_ranked_ids` compares
+/// scores for real, not just id order).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RankedDoc {
+    pub id: String,
+    pub score: Option<f64>,
 }
 
-/// Extracts `response.docs[].id` as an ordered `Vec<String>`, for use with
-/// `diff_ranked_ids`.
-pub fn doc_ids(envelope: &Value) -> Vec<String> {
+/// Extracts `response.docs[]` as an ordered `Vec<RankedDoc>` (`id` plus
+/// `score` when present), for use with `diff_ranked_ids`. Callers must feed
+/// `diff_ranked_ids` this real doc data — not a pre-stripped id list — so the
+/// score-tolerance path actually runs against real fixtures.
+pub fn ranked_docs(envelope: &Value) -> Vec<RankedDoc> {
     envelope
         .pointer("/response/docs")
-        .and_then(|d| d.as_array())
+        .and_then(Value::as_array)
         .map(|docs| {
             docs.iter()
-                .filter_map(|d| d.get("id").and_then(|v| v.as_str()).map(String::from))
+                .map(|doc| RankedDoc {
+                    id: doc
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| panic!("doc missing string `id`: {doc}"))
+                        .to_string(),
+                    score: doc.get("score").and_then(Value::as_f64),
+                })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Ranked-ID-list comparison for free-text relevance queries (PRD §8:
+/// "compare ranked ID lists, not just result sets"). Order matters: an
+/// identical multiset of ids in a different order is a `Diff`, not a pass.
+///
+/// When either side's doc at a position carries a `score`, the scores are
+/// compared under `score_tolerance()` instead of exact equality, and the
+/// comparison is always recorded in `DiffReport::touched` — whether or not it
+/// passed — the same way the generic differ in `diff_at` logs every
+/// tolerance application. A doc with a score on one side and none on the
+/// other is a diff, not silently skipped: present-vs-missing is real
+/// information the harness must not throw away. Order comparison (the `id`
+/// list) stays primary and independent of the score check.
+pub fn diff_ranked_ids(expected: &[RankedDoc], actual: &[RankedDoc]) -> DiffReport {
+    let mut report = DiffReport::default();
+
+    let expected_ids: Vec<&str> = expected.iter().map(|d| d.id.as_str()).collect();
+    let actual_ids: Vec<&str> = actual.iter().map(|d| d.id.as_str()).collect();
+    if expected_ids != actual_ids {
+        report.diffs.push(Diff {
+            path: "response.docs[].id".to_string(),
+            expected: format!("{expected_ids:?}"),
+            actual: format!("{actual_ids:?}"),
+        });
+    }
+
+    let n = expected.len().max(actual.len());
+    for i in 0..n {
+        let e_score = expected.get(i).and_then(|d| d.score);
+        let a_score = actual.get(i).and_then(|d| d.score);
+        if e_score.is_none() && a_score.is_none() {
+            continue;
+        }
+        let path = format!("response.docs[{i}].score");
+        report.touched.push(path.clone());
+        match (e_score, a_score) {
+            (Some(ef), Some(af)) => {
+                if (ef - af).abs() > score_tolerance() {
+                    report.diffs.push(Diff {
+                        path,
+                        expected: ef.to_string(),
+                        actual: af.to_string(),
+                    });
+                }
+            }
+            (Some(ef), None) => report.diffs.push(Diff {
+                path,
+                expected: ef.to_string(),
+                actual: "<missing>".to_string(),
+            }),
+            (None, Some(af)) => report.diffs.push(Diff {
+                path,
+                expected: "<missing>".to_string(),
+                actual: af.to_string(),
+            }),
+            (None, None) => unreachable!("checked above"),
+        }
+    }
+
+    report
 }
 
 /// One line of `solr-ref/manifest.tsv`: `name<TAB>status<TAB>path-with-query`,
@@ -316,4 +367,167 @@ pub fn fetch_live(base_url: &str, path_and_query: &str) -> (u16, Value) {
     let value: Value = serde_json::from_str(body.trim())
         .unwrap_or_else(|e| panic!("response body from {url} must be valid JSON: {e}"));
     (status, value)
+}
+
+/// One line of `solr-ref/manifest-errors.tsv`'s 6-column format: `name,
+/// status, method, url-after-/solr/, body, [base-url]`. `body` and
+/// `base_url` may be empty/absent columns — `None` when so, never an empty
+/// `Some("")` — since a present-but-empty body (e.g. a GET) is different from
+/// no body column at all only in this format's intent, and callers
+/// (`common::request_full`, live `curl -X ... -d ...`) need to tell "send no
+/// body" apart from "send an empty body".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestErrorEntry {
+    pub name: String,
+    pub status: u16,
+    pub method: String,
+    /// The URL after `/solr/`, e.g. `content/update?commit=true&wt=json` or
+    /// `facets/select?q=*:*&wt=json` — core-qualified, unlike
+    /// `ManifestEntry::path` which is always relative to the one core
+    /// `manifest.tsv` GETs against.
+    pub url: String,
+    pub body: Option<String>,
+    /// Defaults to the canonical `http://localhost:8983/solr` base when the
+    /// column is absent — every row without one belongs to the reference
+    /// container on the default port.
+    pub base_url: Option<String>,
+}
+
+/// Loads `solr-ref/manifest-errors.tsv`'s 6-column format, skipping blank
+/// lines and `#`-comment lines exactly like `load_manifest` — but that
+/// function stays untouched (3-column format only); this is a new,
+/// independent loader (issue #31: "keep `load_manifest` untouched for the
+/// 3-column file").
+pub fn load_manifest_errors(path: &Path) -> Vec<ManifestErrorEntry> {
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("read manifest-errors {}: {e}", path.display()));
+    raw.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let mut cols = line.split('\t');
+            let name = cols
+                .next()
+                .unwrap_or_else(|| panic!("manifest-errors line missing name column: {line:?}"))
+                .to_string();
+            let status: u16 = cols
+                .next()
+                .unwrap_or_else(|| panic!("manifest-errors line missing status column: {line:?}"))
+                .parse()
+                .unwrap_or_else(|e| panic!("manifest-errors status column must be a u16: {e}"));
+            let method = cols
+                .next()
+                .unwrap_or_else(|| panic!("manifest-errors line missing method column: {line:?}"))
+                .to_string();
+            let url = cols
+                .next()
+                .unwrap_or_else(|| panic!("manifest-errors line missing url column: {line:?}"))
+                .to_string();
+            let body = cols.next().filter(|s| !s.is_empty()).map(str::to_string);
+            let base_url = cols.next().filter(|s| !s.is_empty()).map(str::to_string);
+            ManifestErrorEntry {
+                name,
+                status,
+                method,
+                url,
+                body,
+                base_url,
+            }
+        })
+        .collect()
+}
+
+/// Live counterpart of `fetch_live`, for `manifest-errors.tsv` rows: issues
+/// `<method>` (optionally with `-d <body>`) against
+/// `<base_url>/<path_and_query>` and returns the HTTP status plus parsed JSON
+/// body. Only ever called under `WAYFINDER_DIFF_SOLR=1`.
+pub fn fetch_live_full(
+    base_url: &str,
+    method: &str,
+    path_and_query: &str,
+    body: Option<&str>,
+) -> (u16, Value) {
+    let (status, raw) = fetch_live_full_raw(base_url, method, path_and_query, body);
+    let value: Value = serde_json::from_str(raw.trim()).unwrap_or_else(|e| {
+        panic!(
+            "response body from {base_url}/{path_and_query} must be valid JSON: {e} (body: \
+             {raw:?})"
+        )
+    });
+    (status, value)
+}
+
+/// Status-only counterpart of `fetch_live_full`, for rows whose expected
+/// body is not JSON at all (`err_missing_core`'s HTML easter egg is the one
+/// `ACCEPTED_DIVERGENCES` member with a non-JSON fixture) — `fetch_live_full`
+/// would panic trying to parse it, but the live counterpart of an accepted
+/// divergence only ever needs to re-confirm the status code.
+pub fn fetch_live_status(
+    base_url: &str,
+    method: &str,
+    path_and_query: &str,
+    body: Option<&str>,
+) -> u16 {
+    fetch_live_full_raw(base_url, method, path_and_query, body).0
+}
+
+/// Shared curl plumbing for `fetch_live_full`/`fetch_live_status`: issues
+/// `<method>` (optionally with `-d <body>`) against
+/// `<base_url>/<path_and_query>` and returns the HTTP status plus the raw
+/// response text, unparsed.
+fn fetch_live_full_raw(
+    base_url: &str,
+    method: &str,
+    path_and_query: &str,
+    body: Option<&str>,
+) -> (u16, String) {
+    let url = format!("{base_url}/{path_and_query}");
+    let mut args = vec![
+        "-sg".to_string(),
+        "-w".to_string(),
+        "\n%{http_code}".to_string(),
+        "-X".to_string(),
+        method.to_string(),
+    ];
+    if let Some(b) = body {
+        args.push("-d".to_string());
+        args.push(b.to_string());
+    }
+    args.push(url.clone());
+    let output = std::process::Command::new("curl")
+        .args(&args)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run curl against {url}: {e}"));
+    assert!(
+        output.status.success(),
+        "curl exited non-zero fetching {url}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    let (body, status) = text
+        .rsplit_once('\n')
+        .unwrap_or_else(|| panic!("curl output for {url} missing trailing status line: {text:?}"));
+    let status: u16 = status
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("curl status code for {url} must be numeric: {e}"));
+    (status, body.to_string())
+}
+
+/// A quick reachability probe for a manifest-errors row's effective base
+/// URL, so an absent per-issue container (8984/8985/8986) is a printed,
+/// named skip rather than a silent one or a hard failure. The default 8983
+/// base must always answer — a row on it that fails this probe is a real
+/// problem, not a skip.
+pub fn live_reachable(base_url: &str) -> bool {
+    // `admin/ping`-shaped probe: any HTTP response at all (even a 404) means the
+    // base URL has something listening, which is all this needs to know — the
+    // per-row status/JSON comparisons are the harness's own job, not this
+    // probe's. A short `--max-time` keeps an absent per-issue container
+    // (8984/8985/8986) from stalling the whole test.
+    std::process::Command::new("curl")
+        .args(["-sg", "-o", "/dev/null", "--max-time", "2", base_url])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
