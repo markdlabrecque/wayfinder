@@ -19,6 +19,7 @@ mod error;
 mod facet;
 mod highlight;
 mod params;
+mod query;
 pub mod schema;
 mod stats;
 
@@ -598,6 +599,25 @@ async fn update(
     Ok(update_success())
 }
 
+/// Maps a `CoreIndex::parse_query` failure to the right `WfError` shape:
+/// finding 45's one 500 (a regex that parses as a query but fails automaton
+/// compilation — `query::QueryError::Internal`, carried through
+/// `parse_query`'s `anyhow::Error` via `From`) gets the trace-carrying,
+/// no-`metadata` envelope `err_regex_bad_class.json` pins; every other
+/// failure (unknown field, bad syntax, an unclosed regex, a prefix query on
+/// a numeric field) is an ordinary 400 `wayfinder::SyntaxError`, as before
+/// this issue.
+fn query_parse_error(e: anyhow::Error, params: &Params) -> WfError {
+    match e.downcast_ref::<query::QueryError>() {
+        Some(query::QueryError::Internal(_)) => {
+            WfError::internal("wayfinder::RegexCompileError", e.to_string())
+                .with_trace(e.to_string())
+                .with_params(params)
+        }
+        _ => WfError::bad_request("wayfinder::SyntaxError", e.to_string()).with_params(params),
+    }
+}
+
 async fn select(
     State(state): State<Arc<AppState>>,
     AxPath(core): AxPath<String>,
@@ -619,16 +639,19 @@ async fn select(
     let parsed = match params.get("q") {
         None => None,
         Some(q) => {
-            let query = state.index.parse_query(q, &default_field).map_err(|e| {
-                WfError::bad_request("wayfinder::SyntaxError", e.to_string()).with_params(&params)
-            })?;
+            let query = state
+                .index
+                .parse_query(q, &default_field)
+                .map_err(|e| query_parse_error(e, &params))?;
 
             let mut filter_queries = Vec::new();
             for fq in params.get_all("fq") {
-                filter_queries.push(state.index.parse_query(fq, &default_field).map_err(|e| {
-                    WfError::bad_request("wayfinder::SyntaxError", e.to_string())
-                        .with_params(&params)
-                })?);
+                filter_queries.push(
+                    state
+                        .index
+                        .parse_query(fq, &default_field)
+                        .map_err(|e| query_parse_error(e, &params))?,
+                );
             }
             Some((query, filter_queries))
         }

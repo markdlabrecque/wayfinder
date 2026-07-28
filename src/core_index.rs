@@ -19,8 +19,11 @@ use tantivy::aggregation::{
     AggContextParams, AggregationCollector, AggregationLimitsGuard, DEFAULT_BUCKET_LIMIT, Key,
 };
 use tantivy::collector::{Count, DocSetCollector};
-use tantivy::query::{AllQuery, Query, QueryParser};
-use tantivy::schema::OwnedValue;
+use tantivy::query::{
+    AllQuery, BooleanQuery, BoostQuery, EmptyQuery, ExistsQuery, Occur, Query, QueryParser,
+    RegexQuery, TermQuery,
+};
+use tantivy::schema::{Field, IndexRecordOption, OwnedValue};
 use tantivy::snippet::SnippetGenerator;
 use tantivy::time::OffsetDateTime;
 use tantivy::time::format_description::well_known::Rfc3339;
@@ -31,6 +34,7 @@ use tantivy::{
 
 use crate::collector::{AllScoredHits, SortClause};
 use crate::config::ServerConfig;
+use crate::query::{self, QueryError};
 use crate::schema::{self, ValueKind, WayfinderSchema};
 
 /// Ceiling on how many distinct terms one `facet.field` enumerates. Tantivy's
@@ -258,6 +262,27 @@ fn run_scheduler(weak: std::sync::Weak<CommitState>) {
             .wait_timeout(deadline, wait)
             .expect("commit deadline condvar poisoned");
     }
+}
+
+/// One `Should`-joined `TermQuery` per entry in `terms` — an `EmptyQuery`
+/// when there are none, never an empty (and therefore ill-defined)
+/// `BooleanQuery`.
+fn terms_to_should_query(field: Field, terms: Vec<String>) -> Box<dyn Query> {
+    if terms.is_empty() {
+        return Box::new(EmptyQuery);
+    }
+    let clauses: Vec<(Occur, Box<dyn Query>)> = terms
+        .into_iter()
+        .map(|text| {
+            let term = Term::from_field_text(field, &text);
+            let query: Box<dyn Query> = Box::new(TermQuery::new(
+                term,
+                IndexRecordOption::WithFreqsAndPositions,
+            ));
+            (Occur::Should, query)
+        })
+        .collect();
+    Box::new(BooleanQuery::new(clauses))
 }
 
 pub struct CoreIndex {
@@ -626,12 +651,29 @@ impl CoreIndex {
     }
 
     /// Parses a Solr `q` (or `fq`) query string into a Tantivy query.
-    /// `*:*` is special-cased to `AllQuery`, matching Solr's match-all idiom;
-    /// everything else goes through Tantivy's own query parser using
-    /// `default_field` for bare (non-`field:value`) terms.
+    /// `*:*` is special-cased to `AllQuery`, matching Solr's match-all idiom.
+    ///
+    /// Before falling through to Tantivy's own grammar, `query::detect` gets
+    /// first look at the *whole* string: fuzzy (`term~`, `term~N`),
+    /// wildcard/prefix (`te?t`, `test*`, `*mals`, `field:*`) and regex
+    /// (`/pattern/`) are constructs Tantivy's own `QueryParser` does not
+    /// implement at all (see `crate::query`'s module doc for exactly how it
+    /// silently mangles each one instead of erroring), so they are built
+    /// directly here rather than coaxed out of it. Everything else — ranges,
+    /// boosts, phrases, boolean composition — is unchanged: Tantivy's parser
+    /// already gets those right against the fixtures.
     pub fn parse_query(&self, query_str: &str, default_field_name: &str) -> Result<Box<dyn Query>> {
         if query_str.trim() == "*:*" {
             return Ok(Box::new(AllQuery));
+        }
+        if let Some((atomic, boost)) = query::detect(query_str) {
+            let built = self
+                .build_atomic(atomic, default_field_name)
+                .map_err(anyhow::Error::from)?;
+            return Ok(match boost {
+                Some(b) => Box::new(BoostQuery::new(built, b)),
+                None => built,
+            });
         }
         let default_field = self
             .wf_schema
@@ -679,20 +721,186 @@ impl CoreIndex {
         query_str.replace("*:*", "*")
     }
 
+    /// Builds the Tantivy `Query` for one `query::Atomic` clause detected by
+    /// `parse_query`. A missing/unfielded fuzzy or wildcard clause resolves
+    /// against `default_field_name` (the bare `laz*&df=body` shape); regex
+    /// and field-exists always carry their own field (`query::detect` never
+    /// emits those two without one).
+    fn build_atomic(
+        &self,
+        atomic: query::Atomic,
+        default_field_name: &str,
+    ) -> Result<Box<dyn Query>, QueryError> {
+        match atomic {
+            query::Atomic::FieldExists { field } => self.build_field_exists(&field),
+            query::Atomic::Fuzzy {
+                field,
+                term,
+                distance_raw,
+            } => {
+                let field_name = field.as_deref().unwrap_or(default_field_name);
+                self.build_fuzzy(field_name, &term, &distance_raw)
+            }
+            query::Atomic::Wildcard { field, glob } => {
+                let field_name = field.as_deref().unwrap_or(default_field_name);
+                self.build_wildcard(field_name, &glob)
+            }
+            query::Atomic::Regex { field, pattern } => self.build_regex(&field, &pattern),
+            query::Atomic::RegexUnclosed => Err(QueryError::Syntax(
+                "unclosed regex literal: expected a matching `/`".to_string(),
+            )),
+        }
+    }
+
+    fn field_or_err(&self, field_name: &str) -> Result<Field, QueryError> {
+        self.wf_schema
+            .field(field_name)
+            .ok_or_else(|| QueryError::Syntax(format!("undefined field \"{field_name}\"")))
+    }
+
+    /// `field:*` / `field:[* TO *]` — every doc carrying any value for
+    /// `field` (finding 43's field-exists idiom; also the range-syntax
+    /// equivalent, finding 44's `range_str_star_both`).
+    fn build_field_exists(&self, field_name: &str) -> Result<Box<dyn Query>, QueryError> {
+        self.field_or_err(field_name)?;
+        Ok(Box::new(ExistsQuery::new(field_name.to_string(), false)))
+    }
+
+    /// `field:term~[N]` — finding 42. Lowercased (never stemmed) on an
+    /// analyzed text field, left alone on an unanalyzed `string`/`keyword`
+    /// one; on a numeric/date field, always a 200 with 0 hits (fuzzy syntax
+    /// is accepted everywhere, it just never matches there — no term
+    /// dictionary makes edit-distance meaningful). Scored, not
+    /// constant-score: every distinct term within the resolved edit distance
+    /// becomes its own `TermQuery`, `Should`-joined, so BM25 tf/idf/length
+    /// norm apply exactly as they would to an ordinary term query landing on
+    /// the same term.
+    fn build_fuzzy(
+        &self,
+        field_name: &str,
+        term_raw: &str,
+        distance_raw: &str,
+    ) -> Result<Box<dyn Query>, QueryError> {
+        let field = self.field_or_err(field_name)?;
+        if self.wf_schema.value_kind(field_name) != Some(ValueKind::Text) {
+            return Ok(Box::new(EmptyQuery));
+        }
+        let distance = query::resolve_fuzzy_distance(distance_raw);
+        let term_text = if self.wf_schema.is_raw_string(field_name) {
+            term_raw.to_string()
+        } else {
+            term_raw.to_lowercase()
+        };
+        let matches = self
+            .matching_terms(field, &term_text, distance)
+            .map_err(|e| QueryError::Internal(e.to_string()))?;
+        Ok(terms_to_should_query(field, matches))
+    }
+
+    /// `[field:]glob` — finding 43. Lowercased (never stemmed) on an
+    /// analyzed text field, left alone on `string`/`keyword`; a numeric/date
+    /// field 400s (`qwild_int.json`'s "Can't run prefix queries on numeric
+    /// fields" — there is no term dictionary to walk there). Constant-score,
+    /// matching Lucene's own multi-term rewrite (finding 43).
+    fn build_wildcard(&self, field_name: &str, glob: &str) -> Result<Box<dyn Query>, QueryError> {
+        let field = self.field_or_err(field_name)?;
+        if self.wf_schema.value_kind(field_name) != Some(ValueKind::Text) {
+            return Err(QueryError::Syntax(format!(
+                "can't run prefix queries on numeric fields: \"{field_name}\""
+            )));
+        }
+        let normalized = if self.wf_schema.is_raw_string(field_name) {
+            glob.to_string()
+        } else {
+            glob.to_lowercase()
+        };
+        let pattern = query::glob_to_regex(&normalized);
+        RegexQuery::from_pattern(&pattern, field)
+            .map(|q| Box::new(q) as Box<dyn Query>)
+            .map_err(|e| QueryError::Syntax(e.to_string()))
+    }
+
+    /// `field:/pattern/` — finding 43/45. Anchored whole-term, case-sensitive,
+    /// no analysis at all, over the *indexed* (post-analysis, e.g. stemmed)
+    /// terms; constant-score. A pattern that fails automaton compilation
+    /// (e.g. an unbalanced character class) is finding 45's one 500, not a
+    /// 400 — this is the only place that error can come from, since
+    /// `query::detect` already turned an unclosed `/regex` into
+    /// `Atomic::RegexUnclosed` (a 400) before this is ever reached.
+    fn build_regex(&self, field_name: &str, pattern: &str) -> Result<Box<dyn Query>, QueryError> {
+        let field = self.field_or_err(field_name)?;
+        RegexQuery::from_pattern(pattern, field)
+            .map(|q| Box::new(q) as Box<dyn Query>)
+            .map_err(|e| QueryError::Internal(e.to_string()))
+    }
+
+    /// Every distinct term in `field`'s term dictionary (across every
+    /// segment) within `distance` of `term_text` — the scored-fuzzy
+    /// building block `build_fuzzy` turns into a `Should`-joined
+    /// `BooleanQuery` of `TermQuery`s.
+    fn matching_terms(&self, field: Field, term_text: &str, distance: u8) -> Result<Vec<String>> {
+        let searcher = self.reader.searcher();
+        let mut out = std::collections::BTreeSet::new();
+        for segment_reader in searcher.segment_readers() {
+            let inverted_index = segment_reader.inverted_index(field)?;
+            let mut stream = inverted_index.terms().stream()?;
+            while stream.advance() {
+                let Ok(text) = std::str::from_utf8(stream.key()) else {
+                    continue;
+                };
+                if query::levenshtein(term_text, text) <= distance as usize {
+                    out.insert(text.to_string());
+                }
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+
     /// Rewrites `name:value` to `_dynamic.name:value` (or `_dynamic_text.`) for
     /// every `name` that is not a declared field but does match a
     /// `[[dynamic_fields]]` pattern, since that is where its values are indexed.
     ///
-    /// ponytail: a scan for `<ident>:` rather than a real query-syntax parser.
-    /// Ceiling: a field name appearing inside a quoted phrase would also be
-    /// rewritten. Revisit if/when the query layer grows its own parser (#8).
+    /// ponytail: a scan for `<ident>:` rather than a real query-syntax parser,
+    /// with one exception the scan does track: a double- or single-quoted
+    /// span is copied through verbatim, `<ident>:` and all, never rewritten —
+    /// a colon inside a quoted phrase is a literal phrase character, not a
+    /// field query (finding 45's `phrase_with_colon`; the regression test is
+    /// `tests/query_types.rs::dynamic_field_rewrite_must_not_apply_inside_a_quoted_phrase`).
+    /// Everything else about this being a scan rather than a real parser
+    /// still stands — revisit if/when the query layer needs more than that
+    /// (#8).
     fn rewrite_dynamic_fields(&self, query_str: &str) -> String {
         if self.wf_schema.dynamic_fields.is_empty() {
             return query_str.to_string();
         }
         let mut out = String::with_capacity(query_str.len());
         let mut ident = String::new();
-        for ch in query_str.chars() {
+        let mut in_quote: Option<char> = None;
+        let mut chars = query_str.chars();
+        while let Some(ch) = chars.next() {
+            if let Some(quote) = in_quote {
+                out.push(ch);
+                if ch == '\\' {
+                    // Copy an escaped character through untouched too —
+                    // this scan never rewrites inside quotes at all, so the
+                    // exact escape semantics do not matter here, only that
+                    // the quote's own closing delimiter is not mistaken for
+                    // an escaped one.
+                    if let Some(escaped) = chars.next() {
+                        out.push(escaped);
+                    }
+                } else if ch == quote {
+                    in_quote = None;
+                }
+                continue;
+            }
+            if ch == '"' || ch == '\'' {
+                out.push_str(&ident);
+                ident.clear();
+                out.push(ch);
+                in_quote = Some(ch);
+                continue;
+            }
             if ch.is_alphanumeric() || ch == '_' || ch == '.' {
                 ident.push(ch);
                 continue;

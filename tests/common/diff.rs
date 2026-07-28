@@ -29,8 +29,11 @@ pub struct Normalized {
 /// - drops `_version_` / `_root_` from every doc in `response.docs`
 ///   (Wayfinder's explicit default-`fl` decision, finding 9 — reuses/extends
 ///   `normalize_envelope` in `tests/common/mod.rs`, does not duplicate it).
-/// - on an error envelope, drops `error.msg` and `error.metadata` (finding
-///   10) — `error.code` and the HTTP status are the only parts compared.
+/// - on an error envelope, drops `error.msg`, `error.metadata`, and
+///   `error.trace` (finding 10, extended by finding 45's captured 500 —
+///   `error.trace` is a Java stack trace, free text no other engine can
+///   reproduce) — `error.code` and the HTTP status are the only parts
+///   compared.
 ///
 /// Timestamps are in scope per the PRD but no current fixture has a
 /// date-ish field, so there is deliberately no format-handling hook here yet
@@ -69,6 +72,12 @@ pub fn normalize(mut value: Value) -> Normalized {
         }
         if error.remove("metadata").is_some() {
             touched.push("error.metadata".to_string());
+        }
+        // `err_regex_bad_class.json`'s one 500 carries a Java stack trace —
+        // free text no other engine can reproduce, same rationale as
+        // `error.msg` above (finding 10, extended by finding 45).
+        if error.remove("trace").is_some() {
+            touched.push("error.trace".to_string());
         }
     }
 
