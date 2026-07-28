@@ -33,6 +33,8 @@ use tantivy::collector::{Collector, SegmentCollector};
 use tantivy::columnar::{Column, StrColumn};
 use tantivy::{DateTime, DocAddress, DocId, Score, SegmentOrdinal, SegmentReader};
 
+use crate::schema::ValueKind;
+
 /// What a single sort clause orders by.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SortKey {
@@ -47,11 +49,25 @@ pub enum SortKey {
 pub struct SortClause {
     pub key: SortKey,
     pub descending: bool,
+    /// The schema-declared value kind of `key`, when it is a `Field` — `None`
+    /// for `Score` (never missing, so the kind is never consulted). Only used
+    /// to pick the *type* of a segment-wide missing default when the field's
+    /// column is entirely `Absent` in a segment (finding 36/37): an absent
+    /// column carries no type information of its own, so the clause has to
+    /// carry it in from the schema instead (`check_sort` resolves it via
+    /// `WayfinderSchema::value_kind`, which already folds in any custom
+    /// `[[field_types]]` — those only ever resolve to `Text`, so there is no
+    /// numeric/date custom-type case this can miss).
+    pub value_kind: Option<ValueKind>,
 }
 
 impl SortClause {
-    pub fn new(key: SortKey, descending: bool) -> SortClause {
-        SortClause { key, descending }
+    pub fn new(key: SortKey, descending: bool, value_kind: Option<ValueKind>) -> SortClause {
+        SortClause {
+            key,
+            descending,
+            value_kind,
+        }
     }
 }
 
@@ -72,6 +88,11 @@ impl SortValue {
         match (self, other) {
             (SortValue::Str(a), SortValue::Str(b)) => a.cmp(b),
             (SortValue::I64(a), SortValue::I64(b)) => a.cmp(b),
+            // `unwrap_or(Equal)` is currently unreachable: `a`/`b` are either a
+            // relevance score (never NaN) or a `pfloat` fast-field value, and
+            // `serde_json` has no NaN literal to parse into one. If a NaN ever
+            // did reach here, the consequence is a possible `sort_by` panic
+            // (a non-total order), not UB.
             (SortValue::F64(a), SortValue::F64(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
             _ => Ordering::Equal,
         }
@@ -100,7 +121,7 @@ impl AllScoredHits {
     /// fixtures pin.
     pub fn new(mut clauses: Vec<SortClause>) -> AllScoredHits {
         if clauses.is_empty() {
-            clauses.push(SortClause::new(SortKey::Score, true));
+            clauses.push(SortClause::new(SortKey::Score, true, None));
         }
         AllScoredHits { clauses }
     }
@@ -109,9 +130,15 @@ impl AllScoredHits {
         for (i, clause) in self.clauses.iter().enumerate() {
             let ord = match (&a.keys[i], &b.keys[i]) {
                 (None, None) => Ordering::Equal,
-                // Missing sorts last in *both* directions, so the direction is
-                // deliberately not applied here (finding: `select_sort_mv_asc`
-                // and `select_sort_mv_desc` both put doc5 last).
+                // `None` only reaches here for a string-typed key now: numeric/
+                // float/date clauses materialise a missing value as 0 (or the
+                // epoch) before this comparator ever runs (finding 36/37,
+                // `SegmentSortColumn::value`/`Absent`), so this arm is reached
+                // only by `SortKey::Field` on a `Str`/`Absent(None)` column.
+                // Missing sorts last in *both* directions for those, so the
+                // direction is deliberately not applied here (finding:
+                // `select_sort_mv_asc` and `select_sort_mv_desc` both put doc5
+                // last).
                 (None, Some(_)) => Ordering::Greater,
                 (Some(_), None) => Ordering::Less,
                 (Some(x), Some(y)) => {
@@ -177,8 +204,12 @@ enum SegmentSortColumn {
     F64(Column<f64>),
     Date(Column<DateTime>),
     /// The field is fast in the schema but has no column in this segment (no
-    /// document in it carried a value). Every document reads as missing.
-    Absent,
+    /// document in it carried a value). Every document in this segment reads
+    /// as `missing`: `None` for a string-typed field (missing-last, finding
+    /// 16), or the type's zero value for a numeric/float/date-typed field
+    /// (missing-as-zero, finding 36/37) — resolved once at `open` time from
+    /// `clause.value_kind`, since the absent column itself carries no type.
+    Absent(Option<SortValue>),
 }
 
 impl SegmentSortColumn {
@@ -203,14 +234,28 @@ impl SegmentSortColumn {
         if let Some(col) = fast.column_opt::<DateTime>(name)? {
             return Ok(SegmentSortColumn::Date(col));
         }
-        Ok(SegmentSortColumn::Absent)
+        let missing = match clause.value_kind {
+            Some(ValueKind::I64) => Some(SortValue::I64(0)),
+            Some(ValueKind::F64) => Some(SortValue::F64(0.0)),
+            // Dates collapse into `I64` timestamps elsewhere in this module
+            // (see `SortValue`'s doc comment); the epoch is timestamp 0.
+            Some(ValueKind::Date) => Some(SortValue::I64(0)),
+            Some(ValueKind::Text) | None => None,
+        };
+        Ok(SegmentSortColumn::Absent(missing))
     }
 
     /// This document's sort value for the clause, applying Lucene's
     /// `SortedSetSortField`/`SortedNumericSortField` selector: the minimum of a
     /// multi-valued field under `asc`, the maximum under `desc`. Single-valued
-    /// fields are unaffected (min == max), and a document with no value yields
-    /// `None`, which the comparator sorts last regardless of direction.
+    /// fields are unaffected (min == max).
+    ///
+    /// A document with no value is type-dependent (findings 16/36/37): a
+    /// string-typed field yields `None`, which the comparator sorts last
+    /// regardless of direction; a numeric/float/date-typed field materialises
+    /// the value `0` (epoch for dates) *before* the direction/comparison ever
+    /// runs, so it participates in ordering like any other value rather than
+    /// being pinned last or first.
     fn value(
         &self,
         doc: DocId,
@@ -220,7 +265,7 @@ impl SegmentSortColumn {
     ) -> Option<SortValue> {
         match self {
             SegmentSortColumn::Score => Some(SortValue::F64(score as f64)),
-            SegmentSortColumn::Absent => None,
+            SegmentSortColumn::Absent(missing) => missing.clone(),
             SegmentSortColumn::Str(col) => {
                 // The term dictionary is ordered, so selecting the min/max
                 // ordinal selects the min/max string.
@@ -232,7 +277,8 @@ impl SegmentSortColumn {
                 }
             }
             SegmentSortColumn::I64(col) => {
-                select(col.values_for_doc(doc), descending).map(SortValue::I64)
+                let selected = select(col.values_for_doc(doc), descending).unwrap_or(0);
+                Some(SortValue::I64(selected))
             }
             SegmentSortColumn::F64(col) => {
                 // `f64` is not `Ord`, so `select` cannot be reused here.
@@ -242,10 +288,14 @@ impl SegmentSortColumn {
                 } else {
                     values.reduce(f64::min)
                 };
-                selected.map(SortValue::F64)
+                Some(SortValue::F64(selected.unwrap_or(0.0)))
             }
-            SegmentSortColumn::Date(col) => select(col.values_for_doc(doc), descending)
-                .map(|d| SortValue::I64(d.into_timestamp_nanos())),
+            SegmentSortColumn::Date(col) => {
+                let selected = select(col.values_for_doc(doc), descending)
+                    .map(|d| d.into_timestamp_nanos())
+                    .unwrap_or(0);
+                Some(SortValue::I64(selected))
+            }
         }
     }
 }

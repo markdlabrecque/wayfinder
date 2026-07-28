@@ -197,44 +197,63 @@ fn check_sort(state: &AppState, params: &Params) -> Result<Vec<SortClause>, WfEr
         return Ok(Vec::new());
     };
 
+    // Rewritten clause grammar (finding 34/35, issue #32). Scanned with an
+    // absolute cursor into `sort` rather than `split(',')`: a comma does NOT
+    // delimit the field token (`,id` is one token, which is exactly how the
+    // leading/doubled-comma fixtures end up as *field* errors — the glued
+    // token simply fails field resolution), and everything after the field
+    // token up to the next comma (or end of spec) is the direction, checked
+    // as a single trimmed chunk rather than split further — which is what
+    // makes `sort=id asc garbage` a direction error instead of a silently
+    // dropped extra token.
     let mut clauses = Vec::new();
-    let mut offset = 0usize;
-    for raw in sort.split(',') {
-        let clause_start = offset;
-        offset += raw.len() + 1; // +1 for the comma that `split` consumed
-        let clause = raw.trim();
-        if clause.is_empty() {
-            continue;
+    let mut pos = 0usize;
+    loop {
+        // Skip whitespace between clauses. Also the mechanism for "no more
+        // clauses": an empty or all-whitespace spec, or a trailing comma
+        // followed only by whitespace/end, lands here with nothing left.
+        let ws = sort[pos..]
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(sort.len() - pos);
+        pos += ws;
+        if pos >= sort.len() {
+            break;
         }
-        let mut tokens = clause.split_whitespace();
-        let field_name = tokens.next().unwrap_or(clause);
 
-        // Direction first, field second. `err_sort_direction_before_field.json`
-        // (`sort=body sideways` -> the direction error, not the field error) is
-        // the only captured spec that separates the two within-clause orders.
-        let descending = match tokens.next() {
-            Some("asc") => false,
-            Some("desc") => true,
-            // `pos` mirrors Solr's parser position — the offset just past this
-            // clause's field name: `pos=2` for `'id sideways'`
-            // (`err_sort_bad_direction.json`), `pos=5` for `'score sideways'`
-            // (`err_sort_score_bad_direction.json`), `pos=4` for
-            // `'body sideways'` (`err_sort_direction_before_field.json`). Three
-            // different field-name lengths, so a constant offset is ruled out.
-            //
-            // INFERRED, not captured: that the offset is absolute within the
-            // whole spec rather than relative to the clause. Every captured
-            // fixture has `clause_start == 0`, so the two are indistinguishable.
-            // Reaching the difference needs a spec whose earlier clauses are
-            // fully valid (`sort=id asc,id sideways` — Wayfinder emits `pos=9`);
-            // uncaptured. Contained risk: `error.msg` is outside the
-            // compatibility contract (finding 10).
+        // FIELD: the next whitespace-delimited token, starting at `pos`. A
+        // comma does not delimit it.
+        let field_len = sort[pos..]
+            .find(char::is_whitespace)
+            .unwrap_or(sort.len() - pos);
+        let field_end = pos + field_len;
+        let field_name = &sort[pos..field_end];
+
+        // DIRECTION: from just past the field token to the next comma or end
+        // of spec, trimmed, checked as one chunk against `asc`/`desc`.
+        let dir_start = field_end;
+        let comma_rel = sort[dir_start..].find(',');
+        let dir_end = dir_start + comma_rel.unwrap_or(sort.len() - dir_start);
+        let direction_raw = &sort[dir_start..dir_end];
+
+        // Direction first, field second (finding 18/34).
+        //
+        // `pos` mirrors Solr's parser position — the *absolute* offset within
+        // the whole spec just past this clause's field token, leading
+        // whitespace included (finding 35): `pos=2` for `'id sideways'`
+        // (`err_sort_bad_direction.json`), `pos=9` for the second clause of
+        // `'id asc,id sideways'` (`err_sort_second_clause_bad_direction.json`),
+        // `pos=15` — past the *whole* second field token — for
+        // `'id asc,category'` (`err_sort_second_clause_no_direction.json`),
+        // and `pos=4` with leading spaces preserved for `'  id sideways'`
+        // (`err_sort_leading_whitespace.json`).
+        let descending = match direction_raw.trim() {
+            "asc" => false,
+            "desc" => true,
             _ => {
-                let pos = clause_start + (raw.len() - raw.trim_start().len()) + field_name.len();
                 return Err(WfError::bad_request(
                     "wayfinder::BadSort",
                     format!(
-                        "Can't determine a Sort Order (asc or desc) in sort spec '{sort}', pos={pos}"
+                        "Can't determine a Sort Order (asc or desc) in sort spec '{sort}', pos={dir_start}"
                     ),
                 )
                 .with_params(params));
@@ -270,7 +289,28 @@ fn check_sort(state: &AppState, params: &Params) -> Result<Vec<SortClause>, WfEr
                 Some(f) => SortKey::Field(f.name.clone()),
             }
         };
-        clauses.push(SortClause::new(key, descending));
+
+        // The schema's declared value kind travels with the clause so the
+        // collector can materialise a segment-wide-absent column's missing
+        // value as the right *type* (finding 36/37) — `score` has none, it is
+        // never missing. `value_kind` already resolves any custom
+        // `[[field_types]]`, which only ever produce `Text`, so there is no
+        // numeric/date custom-type case this can miss.
+        let value_kind = match &key {
+            SortKey::Score => None,
+            SortKey::Field(name) => state.index.wf_schema.value_kind(name),
+        };
+        clauses.push(SortClause::new(key, descending, value_kind));
+
+        // Consume at most one comma after a valid clause. A trailing comma
+        // (no more clauses after it) is fine; anything else — a second
+        // consecutive comma, more text with no comma — starts the next loop
+        // iteration as a new clause, whose field token then starts with a
+        // comma and fails field resolution (the leading/doubled-comma cases).
+        match comma_rel {
+            Some(rel) => pos = dir_start + rel + 1,
+            None => break,
+        }
     }
     Ok(clauses)
 }
