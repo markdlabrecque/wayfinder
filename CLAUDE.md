@@ -57,7 +57,11 @@ produce errors, and schema-layer work lands before features that need new field 
   the end of `capture.sh`** so concurrent branches merge mechanically.
 - **Never re-capture existing fixtures as a side effect.** Re-running `capture.sh` rewrites all
   of them, and `QTime`/`_version_`/`rid` churn dirties every branch's diff. If you must re-run
-  it, restore the committed fixtures afterwards (`git checkout -- solr-ref/`).
+  it, restore the fixtures afterwards — but note `git checkout -- solr-ref/` restores **tracked**
+  files only. Fixtures your branch captured but has not yet committed are untracked, and a
+  checkout silently leaves them as the freshly-churned versions. Commit new fixtures first, or
+  back up `solr-ref/responses/` and `manifest.tsv` outside the repo before re-running and restore
+  from that.
 - **`solr-ref/manifest.tsv` holds core-relative GETs only** — the differential harness GETs
   every row in it verbatim. Anything else (other core, POST body, non-GET method) belongs in
   `manifest-errors.tsv`.
