@@ -523,3 +523,68 @@ discriminable at all.
     selector rather than a direction flip; and `s6` (max `5`) sorting *above* the missing
     `s5` under desc while `s5` sits between `-10` and `10` under asc is the multiValued
     confirmation of missing-as-zero.
+
+## Findings from the issue #33 facet-debt capture (error precedence, float/date rendering, unpinned semantics)
+
+Claiming findings 38-41 (issues #31 and #32 have 31-33 and 34-37 reserved, per issue #33).
+
+Twenty-two new `manifest-errors.tsv` rows against a new self-contained `facets33` core
+(`wayfinder-solr-33`, port 8988), on a 5-doc corpus (`r1..r5`) with `views` pint, `price`
+pdouble, `rating` pfloat, `stamp` pdate (millisecond values), `tag` string (docValues, absent
+from r4/r5), `note` string stored-only. The container is the issue-33 block's own, so no
+schemaless probe ever touched it; `facet_err_field_single.json`'s clean
+`undefined field: "nosuchfield"` is the proof the schema is unpolluted (the issue-#26 lesson).
+
+38. **Error precedence among broken facet params is `facet.range` > `facet.query` >
+    `facet.field`, one error per response.** Singles first
+    (`facet_err_{query,field,range}_single.json`): an unparseable `facet.query` is a 400
+    SyntaxError, an undefined `facet.field` is a 400 `undefined field`, and a `facet.range` on a
+    string field is a 400 `Unable to range facet on field:tag{...}`. Every pair and the
+    all-three combo report exactly one error: query+field -> the query error
+    (`facet_err_query_field.json`), query+range -> the range error
+    (`facet_err_query_range.json`), field+range -> the range error
+    (`facet_err_field_range.json`), all three -> the range error (`facet_err_all_three.json`).
+    Wayfinder evaluated field -> query -> range (the issue-#24 hoist), which is exactly
+    backwards; fixed to range -> query -> field. Also captured, the #30 shape verbatim:
+    an invalid `facet.query` plus a stored-only (unfacetable-in-Wayfinder) `facet.field`
+    reports the query SyntaxError (`facet_err_query_vs_unfacetable.json`) — in Solr the
+    unfacetable half is not an error at all (ratified divergence 2), so the query error
+    surfacing over it is consistent with both engines and needs no divergence entry.
+
+39. **A `pdouble`/`pfloat` facet key renders as Java `Double.toString`, so an integral double is
+    `"5.0"`, never `"5"`.** `facet_field_double_all.json` keys `price` as
+    `"5.0", "0.25", "7.5", "12.0"`; `facet_field_float_all.json` renders `pfloat` identically
+    (`"5.0"`, `"7.5"`). Wayfinder rendered the Tantivy aggregation key via `f64::to_string()`,
+    which emits `"5"` for integral values — and worse, Tantivy normalises an exactly-integral
+    double to a `U64`/`I64` *key variant* (`NumericalValue::normalize`), so the fix must be
+    driven by the schema's declared kind (`ValueKind::F64`), not by sniffing the key's variant
+    or value. Ordering is by value throughout: `facet.sort=index` gives
+    `0.25, 5.0, 7.5, 12.0` (`facet_field_double_sort_index_all.json`), and the default count
+    sort tie-breaks value-ascending (`facet_field_double_all.json`: 5.0 at 2, then
+    0.25/7.5/12.0 at 1 each) — finding 30 extended to doubles.
+
+40. **A millisecond-precision `pdate` facet keeps distinct millisecond buckets and renders the
+    fraction only when non-zero.** `facet_field_date_ms_all.json` keys `stamp` as
+    `"2020-01-02T00:00:00.123Z"` and `"2020-01-02T00:00:00.456Z"` (two distinct buckets inside
+    the same second) and renders the whole-second value as `"2020-01-05T00:00:00Z"` — no
+    trailing `.000`. Order is chronological (`facet_field_date_ms_sort_index_all.json`).
+    Wayfinder's fast date column was `DateOptions::default()` = seconds precision, which would
+    have collapsed the two same-second values into one bucket of 2 — a real divergence, fixed by
+    declaring millisecond precision (Solr's `pdate` precision) on the fast column.
+
+41. **Four previously-unpinned semantics, now pinned.** (a) The `facet.missing` null bucket is
+    exempt from both `facet.limit` and `facet.mincount`: at `facet.limit=1` it survives after
+    the one kept term (`facet_missing_with_limit.json`), and at `facet.mincount=3` — above its
+    own count of 2 — it still appears, alone (`facet_missing_with_mincount_three.json`,
+    with `facet_missing_with_mincount_two.json` as the intermediate control). Wayfinder already
+    matched. (b) A `facet.range` span not divisible by the gap (start 0, end 22, gap 10,
+    `hardend` unset) extends the last bucket to the gap boundary — `[20,30)` counts the 25 —
+    and echoes the *gap-aligned* `end: 30`, not the requested 22
+    (`facet_range_end_not_gap_aligned.json`). Wayfinder's bucket walk already extended; the
+    echoed `end` was the requested value verbatim, fixed. (c) `json.nl=arrarr` renders each
+    bucket as a two-element array `[["apple",2],["banana",1]]` and `json.nl=arrmap` as a
+    one-entry object `[{"apple":2},{"banana":1}]` (`facet_json_nl_arrarr.json`,
+    `facet_json_nl_arrmap.json`); Wayfinder rendered both flat, fixed. (d) Under
+    `json.nl=map` + `facet.missing`, the null bucket's object key is the empty string
+    (`facet_json_nl_map_missing.json`: `{"apple":2,"banana":1,"":2}`) — exactly what Wayfinder
+    already emitted; the `ponytail:` guess in `render_buckets` is now a captured fact.

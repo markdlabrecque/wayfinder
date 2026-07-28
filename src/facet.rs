@@ -66,6 +66,32 @@ const MAX_RANGE_BUCKETS: usize = 65_536;
 /// clauses ready to be extended per facet.
 pub type BaseClauses = Vec<(Occur, Box<dyn Query>)>;
 
+/// Solr's `json.nl` (named-list) rendering for a bucket list: the default is
+/// the flat alternating array (`["apple",2,"banana",1]`); `map` turns it into
+/// an object (`facet_json_nl_map.json`); `arrarr` nests each bucket as a
+/// two-element array (`facet_json_nl_arrarr.json`) and `arrmap` as a
+/// one-entry object per bucket (`facet_json_nl_arrmap.json`, finding 41c).
+/// Applies identically to `facet_fields.<name>` and
+/// `facet_ranges.<name>.counts`; `gap`/`start`/`end` are never affected.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JsonNl {
+    Flat,
+    Map,
+    ArrArr,
+    ArrMap,
+}
+
+impl JsonNl {
+    fn from_params(params: &Params) -> JsonNl {
+        match params.get("json.nl") {
+            Some("map") => JsonNl::Map,
+            Some("arrarr") => JsonNl::ArrArr,
+            Some("arrmap") => JsonNl::ArrMap,
+            _ => JsonNl::Flat,
+        }
+    }
+}
+
 /// Builds the whole `facet_counts` block, plus any `responseHeader.warnings`
 /// it earned (issue #24 — Solr's own mincount-raise warning for a `facet.field`
 /// on a Points-based column). Every error is caused by the request (an
@@ -78,14 +104,24 @@ pub fn facet_counts(
     default_field: &str,
     base: &BaseClauses,
 ) -> Result<(Value, Vec<String>)> {
-    let as_map = params.get("json.nl") == Some("map");
+    let nl = JsonNl::from_params(params);
 
-    let (facet_fields, warnings) = facet_fields(index, config, params, base, as_map)?;
+    // Evaluation order is `facet.range` -> `facet.query` -> `facet.field`
+    // (finding 38 / issue #30): when more than one facet param is broken at
+    // once, Solr reports exactly one error and that precedence decides which.
+    // The *emitted* key order of `facet_counts` below stays
+    // queries/fields/ranges/intervals/heatmaps regardless — that is a
+    // separate, order-sensitive contract (`tests/json_key_order.rs`) — so the
+    // results are hoisted into bindings here, evaluated range-first, and only
+    // placed into the `json!` object in the unchanged key order.
+    let facet_ranges = facet_ranges(index, params, base, nl)?;
+    let facet_queries = facet_queries(index, params, default_field, base)?;
+    let (facet_fields, warnings) = facet_fields(index, config, params, base, nl)?;
     Ok((
         json!({
-            "facet_queries": facet_queries(index, params, default_field, base)?,
+            "facet_queries": facet_queries,
             "facet_fields": facet_fields,
-            "facet_ranges": facet_ranges(index, params, base, as_map)?,
+            "facet_ranges": facet_ranges,
             // Out of scope (PRD §5 leaves them for later): the keys are present
             // and empty because Solr always emits all five (findings fact 3).
             "facet_intervals": {},
@@ -132,7 +168,7 @@ fn facet_fields(
     config: &ServerConfig,
     params: &Params,
     base: &BaseClauses,
-    as_map: bool,
+    nl: JsonNl,
 ) -> Result<(Value, Vec<String>)> {
     let fields = params.get_all("facet.field");
     if fields.is_empty() {
@@ -220,7 +256,7 @@ fn facet_fields(
             buckets.push((None, absent as u64));
         }
 
-        out.insert(field_name.to_string(), render_buckets(&buckets, as_map));
+        out.insert(field_name.to_string(), render_buckets(&buckets, nl));
     }
     Ok((Value::Object(out), warnings))
 }
@@ -235,7 +271,7 @@ fn facet_ranges(
     index: &CoreIndex,
     params: &Params,
     base: &BaseClauses,
-    as_map: bool,
+    nl: JsonNl,
 ) -> Result<Value> {
     let fields = params.get_all("facet.range");
     if fields.is_empty() {
@@ -258,8 +294,37 @@ fn facet_ranges(
         let end = required(params, "facet.range.end", field_name)?;
         let gap = required(params, "facet.range.gap", field_name)?;
 
+        let bucket_spans = range_buckets(field_name, kind, start, end, gap)?;
+        // A span not divisible by the gap extends the last bucket to the gap
+        // boundary (`[20,30)` for start 0/end 22/gap 10) and Solr echoes THAT
+        // aligned boundary back as `end`, not the requested value (finding
+        // 41b, `facet_range_end_not_gap_aligned.json`: end 30, not 22). With
+        // zero buckets (an empty span) there is no walked boundary to align
+        // to, so the requested `end` is echoed verbatim — unpinned by any
+        // fixture, but the least surprising fallback.
+        //
+        // ponytail: two more shapes past what is captured are unfixtured
+        // here. (a) The `F64` walk accumulates `lower + gap` bucket by
+        // bucket, so an *aligned* double request (start 0 / end 0.3 / gap
+        // 0.1) now echoes the walked `0.30000000000000004` rather than the
+        // requested `0.3` — a real behaviour change from plain `echo_bound`
+        // on a path no fixture exercises. (b) The date echo now goes through
+        // `echo_range_end` -> `format_date`, so a millisecond-precision
+        // request with an exactly-zero fraction (`end=2020-01-06T00:00:00.000Z`)
+        // echoes `...:00Z`, while `start` still echoes the request string
+        // verbatim via `echo_bound` — `start` and `end` now render by
+        // different rules for the same kind of value. The only cases actually
+        // captured are aligned-date (`facet_range_date.json`) and
+        // non-aligned-i64 (`facet_range_end_not_gap_aligned.json`); the
+        // raw-vs-normalised `start`/`end` asymmetry, and the float
+        // accumulation drift, both need a capture before relying on them.
+        let end_echo = match bucket_spans.last() {
+            Some((_, _, upper)) => echo_range_end(kind, *upper),
+            None => echo_bound(kind, end),
+        };
+
         let mut buckets = Vec::new();
-        for (key, lower, upper) in range_buckets(field_name, kind, start, end, gap)? {
+        for (key, lower, upper) in bucket_spans {
             let bucket = RangeQuery::new(
                 Bound::Included(lower.to_term(field)),
                 Bound::Excluded(upper.to_term(field)),
@@ -271,10 +336,10 @@ fn facet_ranges(
         out.insert(
             field_name.to_string(),
             json!({
-                "counts": render_buckets(&buckets, as_map),
+                "counts": render_buckets(&buckets, nl),
                 "gap": echo_bound(kind, gap),
                 "start": echo_bound(kind, start),
-                "end": echo_bound(kind, end),
+                "end": end_echo,
             }),
         );
     }
@@ -283,7 +348,7 @@ fn facet_ranges(
 
 /// One end of a range-facet bucket, in the field's own type so the range query
 /// gets an exact `Term` rather than a lossy `f64`.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum RangeEnd {
     I64(i64),
     F64(f64),
@@ -348,6 +413,17 @@ fn range_buckets(
             while lower < end {
                 let upper = lower + gap;
                 out.push((
+                    // ponytail: this is the exact "5" vs "5.0" bug finding 39
+                    // just fixed for `facet.field` (`CoreIndex::term_facet` /
+                    // `render_double`) — an integral `facet.range` bucket
+                    // boundary on a double/float field renders `"0"`/`"10"`
+                    // here via plain `f64::to_string()`, not Java
+                    // `Double.toString`'s `"0.0"`/`"10.0"`. Out of this
+                    // issue's scope (no `facet.range` fixture on `price`/
+                    // `rating` was captured) and left unfixed, but it is the
+                    // same divergence, not a different one — revisit
+                    // alongside `render_double` if/when a range fixture on a
+                    // double/float field lands.
                     lower.to_string(),
                     RangeEnd::F64(lower),
                     RangeEnd::F64(upper),
@@ -409,6 +485,27 @@ fn echo_bound(kind: ValueKind, raw: &str) -> Value {
         ValueKind::I64 => raw.parse::<i64>().map(Value::from).unwrap_or(json!(raw)),
         ValueKind::F64 => raw.parse::<f64>().map(Value::from).unwrap_or(json!(raw)),
         _ => json!(raw),
+    }
+}
+
+/// Echoes a walked bucket boundary (a `RangeEnd`, already typed) the same way
+/// `echo_bound` echoes a requested one: a JSON number for a numeric field, an
+/// RFC3339 string for a date field — used for the gap-aligned `end` (finding
+/// 41b), where the value comes from the bucket walk rather than straight off
+/// the request string.
+fn echo_range_end(kind: ValueKind, end: RangeEnd) -> Value {
+    match (kind, end) {
+        (ValueKind::I64, RangeEnd::I64(v)) => json!(v),
+        (ValueKind::F64, RangeEnd::F64(v)) => json!(v),
+        (ValueKind::Date, RangeEnd::Date(v)) => match format_date(v.into_utc()) {
+            Ok(s) => json!(s),
+            Err(_) => Value::Null,
+        },
+        // `range_buckets` only ever produces the `RangeEnd` variant matching
+        // its own `kind` argument, so a mismatch here would be a Wayfinder
+        // bug, not a request one — panicking is louder than silently
+        // rendering the wrong shape.
+        (kind, end) => unreachable!("range end variant {end:?} does not match field kind {kind:?}"),
     }
 }
 
@@ -476,30 +573,68 @@ fn format_date(value: OffsetDateTime) -> Result<String> {
         .map_err(|e| anyhow!("could not render date bucket key: {e}"))
 }
 
-/// Renders a bucket list either as Solr's flat alternating array (default) or
-/// as an object under `json.nl=map` (findings fact 1). `None` is the
-/// `facet.missing` bucket's literal `null` key.
-fn render_buckets(buckets: &[(Option<String>, u64)], as_map: bool) -> Value {
-    if as_map {
-        let mut map = Map::new();
-        for (term, count) in buckets {
-            // ponytail: `json.nl=map` plus `facet.missing` has no fixture — a
-            // JSON object cannot have a `null` key, and this renders it as the
-            // empty string. Capture it before relying on it.
-            let key = term.clone().unwrap_or_default();
-            map.insert(key, json!(count));
+/// Renders a bucket list as Solr's `json.nl` shape (findings fact 1, finding
+/// 41c): `Flat`'s alternating array (default), `Map`'s object, `ArrArr`'s
+/// nested two-element arrays, or `ArrMap`'s nested one-entry objects. Applies
+/// identically to `facet_fields.<name>` and `facet_ranges.<name>.counts`.
+/// `None` is the `facet.missing` bucket's literal `null` key.
+fn render_buckets(buckets: &[(Option<String>, u64)], nl: JsonNl) -> Value {
+    match nl {
+        JsonNl::Map => {
+            let mut map = Map::new();
+            for (term, count) in buckets {
+                // `json.nl=map` plus `facet.missing` keys the null bucket as
+                // the empty string — a JSON object cannot have a `null` key,
+                // and this is exactly what Wayfinder already did before it
+                // was pinned by a fixture (`facet_json_nl_map_missing.json`,
+                // finding 41d).
+                let key = term.clone().unwrap_or_default();
+                map.insert(key, json!(count));
+            }
+            Value::Object(map)
         }
-        return Value::Object(map);
+        JsonNl::ArrArr => Value::Array(
+            buckets
+                .iter()
+                .map(|(term, count)| {
+                    // ponytail: no fixture pins `arrarr` plus `facet.missing`
+                    // together; a JSON array *can* hold a `null` element
+                    // (unlike `arrmap`'s object keys), so the null bucket's
+                    // term renders as JSON `null` here, consistent with the
+                    // flat array's own treatment of it above.
+                    let key = match term {
+                        Some(term) => json!(term),
+                        None => Value::Null,
+                    };
+                    json!([key, count])
+                })
+                .collect(),
+        ),
+        JsonNl::ArrMap => Value::Array(
+            buckets
+                .iter()
+                .map(|(term, count)| {
+                    // ponytail: no fixture pins `arrmap` plus `facet.missing`
+                    // — a JSON object key still cannot be `null`, so this
+                    // mirrors `Map`'s empty-string choice rather than
+                    // inventing a new shape. Capture before relying on it.
+                    let key = term.clone().unwrap_or_default();
+                    json!({ key: count })
+                })
+                .collect(),
+        ),
+        JsonNl::Flat => {
+            let mut flat = Vec::with_capacity(buckets.len() * 2);
+            for (term, count) in buckets {
+                flat.push(match term {
+                    Some(term) => json!(term),
+                    None => Value::Null,
+                });
+                flat.push(json!(count));
+            }
+            Value::Array(flat)
+        }
     }
-    let mut flat = Vec::with_capacity(buckets.len() * 2);
-    for (term, count) in buckets {
-        flat.push(match term {
-            Some(term) => json!(term),
-            None => Value::Null,
-        });
-        flat.push(json!(count));
-    }
-    Value::Array(flat)
 }
 
 /// Refuses a facet Tantivy cannot compute, rather than returning empty counts.

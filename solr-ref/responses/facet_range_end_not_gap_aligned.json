@@ -1,0 +1,36 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":7,
+    "params":{
+      "facet.range":"views",
+      "q":"*:*",
+      "facet.range.gap":"10",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json",
+      "facet.range.start":"0",
+      "facet.range.end":"22"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{ },
+    "facet_ranges":{
+      "views":{
+        "counts":["0",1,"10",1,"20",1],
+        "gap":10,
+        "start":0,
+        "end":30
+      }
+    },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  }
+}

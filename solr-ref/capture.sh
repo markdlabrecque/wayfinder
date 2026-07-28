@@ -638,3 +638,116 @@ echo "numeric/date facet.field core '$FACET_CORE' left in place on '$FACET_CONTA
 echo "  (docker rm -f $FACET_CONTAINER to stop)"
 echo "sort-debt core '$SORTDEBT_CORE' left in place on '$SORTDEBT_CONTAINER' (port 8987)"
 echo "  (docker rm -f $SORTDEBT_CONTAINER to stop)"
+
+# --- facet debt: float/date rendering, unpinned semantics, error precedence --
+# (issues #33 / #30.) Appended block; nothing above is edited.
+#
+# Own container on its own port, per the `wayfinder-solr-24` precedent above:
+# this block was written while issues #31 (canonical container, 8983) and #32
+# (8987) were running concurrently, and the top of this script rebuilds the
+# reference container destructively. Same caveat as the #24 block: NOT runnable
+# standalone — it uses `$OUT`/`$HERE` from the top of the script, and `capd`
+# appends to `manifest-errors.tsv` unconditionally, so re-running just this
+# block duplicates its rows. Run the whole script.
+#
+# The core is its own (`facets33`): the debt items need field types the
+# `facets` core lacks (`pdouble`, `pfloat`, a millisecond-precision `pdate`,
+# a single-valued docValues string with gaps for `facet.missing`).
+DEBT_CONTAINER=wayfinder-solr-33
+DEBT_SOLR=http://localhost:8988/solr
+DEBT_CORE=facets33
+if ! docker ps --format '{{.Names}}' | grep -qx "$DEBT_CONTAINER"; then
+  docker rm -f "$DEBT_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$DEBT_CONTAINER" -p 8988:8983 \
+    solr:9 solr-precreate "$DEBT_CORE" >/dev/null
+fi
+echo -n "waiting for facet-debt solr"
+for _ in $(seq 60); do
+  if curl -sf "$DEBT_SOLR/$DEBT_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+  echo -n "."; sleep 1
+done
+curl -s "$DEBT_SOLR/$DEBT_CORE/schema" -H 'Content-Type: application/json' -d '{
+  "add-field": [
+    {"name":"views", "type":"pint",    "indexed":true, "stored":true, "docValues":true},
+    {"name":"price", "type":"pdouble", "indexed":true, "stored":true, "docValues":true},
+    {"name":"rating","type":"pfloat",  "indexed":true, "stored":true, "docValues":true},
+    {"name":"stamp", "type":"pdate",   "indexed":true, "stored":true, "docValues":true},
+    {"name":"tag",   "type":"string",  "indexed":true, "stored":true, "docValues":true},
+    {"name":"note",  "type":"string",  "indexed":false,"stored":true, "docValues":false}
+  ]
+}' >/dev/null
+# `price` mixes integral (5.0, 12.0) and fractional (7.5, 0.25) doubles so the
+# rendered key settles `"5"` vs `"5.0"`. `stamp` has two values inside the SAME
+# second differing only in milliseconds (.123 vs .456) so millisecond rendering
+# and chronological-vs-lexical ordering are both discriminated. `tag` is absent
+# from r4/r5 so `facet.missing` has a 2-doc null bucket.
+curl -sf "$DEBT_SOLR/$DEBT_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+  {"id":"r1","views":5, "price":5.0,  "rating":5.0,"stamp":"2020-01-02T00:00:00.123Z","tag":"apple", "note":"alpha"},
+  {"id":"r2","views":15,"price":7.5,  "rating":7.5,"stamp":"2020-01-02T00:00:00.456Z","tag":"apple"},
+  {"id":"r3","views":25,"price":5.0,  "rating":5.0,"stamp":"2020-01-03T12:34:56.789Z","tag":"banana"},
+  {"id":"r4","views":35,"price":12.0, "stamp":"2020-01-05T00:00:00Z"},
+  {"id":"r5","views":45,"price":0.25}
+]' >/dev/null
+
+# Same 6-column manifest-errors.tsv contract as `capf` above.
+capd() {  # capd <name> <url-after-/solr/>
+  local name=$1 suffix=$2
+  curl -sg "$DEBT_SOLR/$suffix" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$suffix" "" "$DEBT_SOLR" \
+    >> "$HERE/manifest-errors.tsv"
+  rm -f "$OUT/$name.status"
+}
+
+# --- error precedence (#30): one broken family at a time, then every pair, ---
+# --- then all three. Singles are the controls that name each family's own ----
+# --- error; the combos are what decide precedence. ---------------------------
+# Family Q: unparseable facet.query. Family F: facet.field on an undefined
+# field (Solr 400s on undefined; an *unfacetable* field is 200-empty in Solr —
+# ratified divergence 2 — so it cannot carry a Solr-side precedence signal;
+# see facet_err_query_vs_unfacetable below for that case). Family R:
+# facet.range on a string field.
+capd facet_err_query_single "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.query=views:[bad&wt=json"
+capd facet_err_field_single "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.field=nosuchfield&wt=json"
+capd facet_err_range_single "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.range=tag&facet.range.start=0&facet.range.end=10&facet.range.gap=5&wt=json"
+capd facet_err_query_field  "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.query=views:[bad&facet.field=nosuchfield&wt=json"
+capd facet_err_query_range  "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.query=views:[bad&facet.range=tag&facet.range.start=0&facet.range.end=10&facet.range.gap=5&wt=json"
+capd facet_err_field_range  "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.field=nosuchfield&facet.range=tag&facet.range.start=0&facet.range.end=10&facet.range.gap=5&wt=json"
+capd facet_err_all_three    "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.query=views:[bad&facet.field=nosuchfield&facet.range=tag&facet.range.start=0&facet.range.end=10&facet.range.gap=5&wt=json"
+# The #30 shape verbatim: invalid facet.query + *unfacetable* (stored-only)
+# facet.field. In Solr the field half is not an error at all, so this pins
+# that the query error still surfaces despite the 200-empty field.
+capd facet_err_query_vs_unfacetable "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.query=views:[bad&facet.field=note&wt=json"
+
+# --- "5" vs "5.0" (#33 item 2): facet.field on pdouble / pfloat --------------
+capd facet_field_double_all            "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.field=price&wt=json"
+capd facet_field_double_subset         "$DEBT_CORE/select?q=id:r1&rows=0&facet=true&facet.field=price&wt=json"
+capd facet_field_double_sort_index_all "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.field=price&facet.sort=index&wt=json"
+capd facet_field_float_all             "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.field=rating&wt=json"
+
+# --- millisecond-precision date facet (#33 item 3) ---------------------------
+capd facet_field_date_ms_all            "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.field=stamp&wt=json"
+capd facet_field_date_ms_subset         "$DEBT_CORE/select?q=id:r1&rows=0&facet=true&facet.field=stamp&wt=json"
+capd facet_field_date_ms_sort_index_all "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.field=stamp&facet.sort=index&wt=json"
+
+# --- unpinned facet semantics (#33 item 4) -----------------------------------
+# facet.missing vs facet.limit: does the null bucket survive a limit of 1?
+capd facet_missing_with_limit "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.field=tag&facet.missing=true&facet.limit=1&wt=json"
+# facet.missing vs facet.mincount: null bucket counts 2. mincount=2 keeps
+# apple(2) and drops banana(1); mincount=3 drops every real term. Whether the
+# null bucket appears at 3 says whether it is subject to mincount at all.
+capd facet_missing_with_mincount_two   "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.field=tag&facet.missing=true&facet.mincount=2&wt=json"
+capd facet_missing_with_mincount_three "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.field=tag&facet.missing=true&facet.mincount=3&wt=json"
+# facet.range span not divisible by gap, hardend unset: views are 5..45, so
+# the last bucket [20,30) counts 25 while [20,22) counts nothing — the counts
+# and the echoed `end` both discriminate gap-aligned vs verbatim.
+capd facet_range_end_not_gap_aligned "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.range=views&facet.range.start=0&facet.range.end=22&facet.range.gap=10&wt=json"
+# json.nl variants beyond flat/map, currently accepted and rendered flat.
+capd facet_json_nl_arrarr "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.field=tag&json.nl=arrarr&wt=json"
+capd facet_json_nl_arrmap "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.field=tag&json.nl=arrmap&wt=json"
+# json.nl=map + facet.missing: a JSON object cannot key on null; what does
+# Solr use? (Wayfinder currently renders the empty string.)
+capd facet_json_nl_map_missing "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.field=tag&facet.missing=true&json.nl=map&wt=json"
+
+echo "facet-debt core '$DEBT_CORE' left in place on '$DEBT_CONTAINER' (port 8988)"
+echo "  (docker rm -f $DEBT_CONTAINER to stop)"

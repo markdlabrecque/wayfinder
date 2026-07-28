@@ -1,0 +1,24 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":3,
+    "params":{
+      "facet.query":"views:[bad",
+      "q":"*:*",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.parser.ParseException"],
+    "msg":"org.apache.solr.search.SyntaxError: Cannot parse 'views:[bad': Encountered \"<EOF>\" at line 1, column 10.\nWas expecting:\n    \"TO\" ...\n    ",
+    "code":400
+  }
+}

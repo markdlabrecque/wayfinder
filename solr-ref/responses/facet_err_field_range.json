@@ -1,0 +1,22 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0,
+    "params":{
+      "facet.range":"tag",
+      "q":"*:*",
+      "facet.field":"nosuchfield",
+      "facet.range.gap":"5",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json",
+      "facet.range.start":"0",
+      "facet.range.end":"10"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"Unable to range facet on field:tag{type=string,properties=indexed,stored,omitNorms,omitTermFreqAndPositions,sortMissingLast,docValues,useDocValuesAsStored}",
+    "code":400
+  }
+}

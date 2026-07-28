@@ -1,0 +1,30 @@
+{
+  "responseHeader":{
+    "warnings":["Raising facet.mincount from 0 to 1, because field price is Points-based."],
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"*:*",
+      "facet.field":"price",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json",
+      "facet.sort":"index"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{
+      "price":["0.25",1,"5.0",2,"7.5",1,"12.0",1]
+    },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  }
+}

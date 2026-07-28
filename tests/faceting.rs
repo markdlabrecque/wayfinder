@@ -40,7 +40,7 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use common::{assert_matches_fixture, corpus, get, indexed_app, post_docs};
+use common::{assert_matches_fixture, corpus, fixture, get, indexed_app, post_docs};
 
 // --- local helpers ----------------------------------------------------------
 
@@ -174,6 +174,9 @@ enum Refusal {
     NotFast,
     /// The field is not declared at all.
     Undefined,
+    /// The field is `fast` (so `check_facetable` passes) but is `Text`-kinded,
+    /// and `facet.range` needs a numeric or date value (issue #33 item 5).
+    TextRange,
 }
 
 impl Refusal {
@@ -181,6 +184,7 @@ impl Refusal {
         match self {
             Refusal::NotFast => "fast values (docValues)",
             Refusal::Undefined => "undefined field",
+            Refusal::TextRange => "can not range facet on the text field",
         }
     }
 }
@@ -1412,4 +1416,651 @@ async fn date_facet_field_key_is_rendered_as_solr_rfc3339_not_a_raw_i64() {
          and not an offset form like `+00:00` — got {flat:?}"
     );
     assert_eq!(flat[1], json!(1));
+}
+
+// --- 17. issue #33 facet-debt schema + corpus (error precedence, float/date
+//     rendering, unpinned semantics) -------------------------------------
+//
+// A third local schema, separate from `common::SCHEMA_TOML` and
+// `RANGE_SCHEMA_TOML`: the debt items need field types neither of those
+// carries (`pdouble`, `pfloat`, a millisecond-precision `pdate`, plus a
+// stored-only field to combine with a broken `facet.query`). Mirrors the
+// `facets33` core / 5-doc corpus in `solr-ref/capture.sh`'s issue-33 block
+// exactly (see the task spec's "Ground truth" section): `views` (Solr
+// `pint`) -> `int`, `price` (`pdouble`) -> `double`, `rating` (`pfloat`) ->
+// `float`, `stamp` (`pdate`, millisecond values) -> `date`, `tag` (`string`,
+// docValues, absent from r4/r5) -> `string` with `fast = true`, `note`
+// (`string`, stored-only) -> `string` with no `fast`. `id`/`body` are not in
+// the captured corpus but are needed for `unique_key`/`default_field`.
+const DEBT_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "views"
+type = "int"
+stored = true
+fast = true
+
+[[fields]]
+name = "price"
+type = "double"
+stored = true
+fast = true
+
+[[fields]]
+name = "rating"
+type = "float"
+stored = true
+fast = true
+
+[[fields]]
+name = "stamp"
+type = "date"
+stored = true
+fast = true
+
+[[fields]]
+name = "tag"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "note"
+type = "string"
+stored = true
+"#;
+
+/// The 5-doc corpus `capture.sh`'s issue-33 block indexes into `facets33`.
+fn debt_corpus() -> Value {
+    json!([
+        {"id":"r1","views":5, "price":5.0, "rating":5.0,
+         "stamp":"2020-01-02T00:00:00.123Z","tag":"apple","note":"alpha"},
+        {"id":"r2","views":15,"price":7.5, "rating":7.5,
+         "stamp":"2020-01-02T00:00:00.456Z","tag":"apple"},
+        {"id":"r3","views":25,"price":5.0, "rating":5.0,
+         "stamp":"2020-01-03T12:34:56.789Z","tag":"banana"},
+        {"id":"r4","views":35,"price":12.0,"stamp":"2020-01-05T00:00:00Z"},
+        {"id":"r5","views":45,"price":0.25}
+    ])
+}
+
+/// Builds an app on `DEBT_SCHEMA_TOML` and indexes `debt_corpus()`.
+async fn debt_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), DEBT_SCHEMA_TOML).expect("app must build");
+    let (status, body) = post_docs(&app, &debt_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the facet-debt corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
+/// The class of a facet error, read out of its `error.msg` — independent of
+/// exact wording on either side (Solr's or Wayfinder's own), so a fixture
+/// decides *which family's error* won a precedence contest without freezing
+/// either engine's phrasing. Mirrors `tests/sort.rs::sort_error_class`
+/// (read-only reference, not modified here).
+///
+/// `Other` is not one of the three named families — it exists so an
+/// unrelated error (e.g. Wayfinder's own "not fast" refusal for an
+/// unfacetable field, which is not any of Solr's three broken-param
+/// families) still compares *unequal* to whichever family the fixture
+/// expects, carrying the real message so a failing assertion shows exactly
+/// what Wayfinder said instead of panicking blind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FacetErrorClass {
+    /// Solr: "Unable to range facet on field:...". Wayfinder: "can not range
+    /// facet on the text field ...".
+    RangeUnfacetable,
+    /// Solr: "org.apache.solr.search.SyntaxError: ...". Wayfinder: "could not
+    /// parse query ...".
+    QuerySyntax,
+    /// Solr: 'undefined field: "...."'. Wayfinder: "can not facet on
+    /// undefined field: ...".
+    UndefinedField,
+    /// Anything else, carrying the message verbatim.
+    Other(String),
+}
+
+fn facet_error_class(msg: &str) -> FacetErrorClass {
+    if msg.contains("SyntaxError") || msg.contains("could not parse query") {
+        FacetErrorClass::QuerySyntax
+    } else if msg.contains("Unable to range facet") || msg.contains("can not range facet") {
+        FacetErrorClass::RangeUnfacetable
+    } else if msg.contains("undefined field") {
+        FacetErrorClass::UndefinedField
+    } else {
+        FacetErrorClass::Other(msg.to_string())
+    }
+}
+
+/// Asserts a facet error is a 400 with `error.code: 400` (finding 10), and
+/// that its error class (per `facet_error_class`) equals the *fixture's*
+/// error class — i.e. the same family of broken param answered the request
+/// on both engines, without pinning either engine's exact wording.
+fn assert_facet_error_class(status: StatusCode, body: &Value, fixture_name: &str) {
+    let expected = fixture(fixture_name);
+    let want_msg = expected
+        .pointer("/error/msg")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("fixture {fixture_name} has no error.msg"));
+    let want_class = facet_error_class(want_msg);
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a broken facet param must be a 400 ({fixture_name}), got {status} / {body}"
+    );
+    assert_eq!(
+        body.pointer("/error/code").and_then(Value::as_i64),
+        Some(400),
+        "error.code must be 400 ({fixture_name}), got {body}"
+    );
+    let got_msg = body
+        .pointer("/error/msg")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("response has no error.msg, got {body}"));
+    let got_class = facet_error_class(got_msg);
+    assert_eq!(
+        got_class, want_class,
+        "error class must match the fixture `{fixture_name}` \
+         (Solr said: `{want_msg}`; Wayfinder said: `{got_msg}`)"
+    );
+}
+
+// --- 18. error precedence among broken facet params (#30, finding 38) -----
+//
+// Solr reports exactly one error when multiple facet params are broken at
+// once, in the precedence order facet.range > facet.query > facet.field.
+// Wayfinder's `facet_counts` currently computes `facet_fields` first
+// (`src/facet.rs` line ~83), then `facet_queries`, then `facet_ranges` inside
+// the `json!` macro — fields -> queries -> ranges, exactly backwards. The
+// combo tests below are red today for that reason and must turn green once
+// evaluation is reordered to ranges -> queries -> fields (the *emitted key
+// order* of `facet_counts` — queries, fields, ranges, intervals, heatmaps —
+// must not change; that is a separate, already-tested contract in
+// `tests/json_key_order.rs`, read-only here).
+
+#[tokio::test]
+async fn facet_query_single_error_is_query_syntax_class() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.query=views:[bad&wt=json",
+    )
+    .await;
+    assert_facet_error_class(status, &body, "facet_err_query_single");
+}
+
+#[tokio::test]
+async fn facet_field_single_error_is_undefined_field_class() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=nosuchfield&wt=json",
+    )
+    .await;
+    assert_facet_error_class(status, &body, "facet_err_field_single");
+}
+
+#[tokio::test]
+async fn facet_range_single_error_is_range_unfacetable_class() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.range=tag\
+         &facet.range.start=0&facet.range.end=10&facet.range.gap=5&wt=json",
+    )
+    .await;
+    assert_facet_error_class(status, &body, "facet_err_range_single");
+}
+
+#[tokio::test]
+async fn query_and_field_broken_together_the_query_error_wins() {
+    // Today: fields are evaluated before queries, so Wayfinder answers the
+    // *field* (undefined-field) error here — the fixture says the query's
+    // SyntaxError wins. Red until the reorder.
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true\
+         &facet.query=views:[bad&facet.field=nosuchfield&wt=json",
+    )
+    .await;
+    assert_facet_error_class(status, &body, "facet_err_query_field");
+}
+
+#[tokio::test]
+async fn query_and_range_broken_together_the_range_error_wins() {
+    // Today: queries are evaluated before ranges, so Wayfinder answers the
+    // query's SyntaxError — the fixture says the range error wins. Red until
+    // the reorder.
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true\
+         &facet.query=views:[bad&facet.range=tag\
+         &facet.range.start=0&facet.range.end=10&facet.range.gap=5&wt=json",
+    )
+    .await;
+    assert_facet_error_class(status, &body, "facet_err_query_range");
+}
+
+#[tokio::test]
+async fn field_and_range_broken_together_the_range_error_wins() {
+    // Today: fields are evaluated before ranges, so Wayfinder answers the
+    // undefined-field error — the fixture says the range error wins. Red
+    // until the reorder.
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true\
+         &facet.field=nosuchfield&facet.range=tag\
+         &facet.range.start=0&facet.range.end=10&facet.range.gap=5&wt=json",
+    )
+    .await;
+    assert_facet_error_class(status, &body, "facet_err_field_range");
+}
+
+#[tokio::test]
+async fn all_three_broken_together_the_range_error_wins() {
+    // Today: fields are evaluated first, so Wayfinder answers the
+    // undefined-field error — the fixture says the range error wins even
+    // with all three broken at once. Red until the reorder.
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true\
+         &facet.query=views:[bad&facet.field=nosuchfield&facet.range=tag\
+         &facet.range.start=0&facet.range.end=10&facet.range.gap=5&wt=json",
+    )
+    .await;
+    assert_facet_error_class(status, &body, "facet_err_all_three");
+}
+
+#[tokio::test]
+async fn invalid_query_beats_an_unfacetable_field_the_hash_30_shape() {
+    // The #30 shape verbatim: an invalid facet.query plus a stored-only
+    // (unfacetable-in-Wayfinder, by ratified divergence 2) facet.field=note.
+    // In Solr the field half is not an error at all — it is Wayfinder that
+    // makes the field half a 400 too — but with `range > query > field`
+    // precedence Wayfinder must still answer with the *query* error, because
+    // the query is evaluated before the field.
+    //
+    // Today fields are evaluated before queries, so Wayfinder answers its own
+    // "not fast" refusal for `note` — a `FacetErrorClass::Other`, which
+    // cannot equal `QuerySyntax` — making this red for the same underlying
+    // reason as the other combos, verified via the class comparison rather
+    // than assumed.
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.query=views:[bad&facet.field=note&wt=json",
+    )
+    .await;
+    assert_facet_error_class(status, &body, "facet_err_query_vs_unfacetable");
+}
+
+// --- 19. pdouble/pfloat facet keys render as Java Double.toString (finding
+//     39): an integral double is "5.0", never "5" -----------------------
+//
+// `CoreIndex::term_facet` renders an `F64` aggregation key via
+// `v.to_string()` (`src/core_index.rs`, the `(None, Key::F64(v))` arm),
+// which is Rust's formatting, not Java's — and Tantivy normalises an
+// exactly-integral double to a `U64`/`I64` *key variant* besides, so the fix
+// has to come from the schema's declared `ValueKind::F64`, not from the
+// aggregation key's variant or value. Every test below is red today because
+// of that `"5"` vs `"5.0"` rendering, not because of ordering — the ordering
+// itself is already correct (`FacetOrderKey::cmp`'s mismatched-variant
+// fallback in `src/core_index.rs` already normalises U64/I64/F64 keys to the
+// same `f64` for comparison).
+
+#[tokio::test]
+async fn facet_field_double_all_matches_fixture() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=price&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_field_double_all");
+}
+
+#[tokio::test]
+async fn facet_field_double_subset_matches_fixture() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=id:r1&rows=0&facet=true&facet.field=price&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_field_double_subset");
+}
+
+#[tokio::test]
+async fn facet_field_double_sort_index_all_matches_fixture() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=price&facet.sort=index&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    // Value order throughout: 0.25 < 5.0 < 7.5 < 12.0 (finding 39) — already
+    // correct; only the rendered keys are wrong today.
+    assert_eq!(
+        flat_facet(&body, "price"),
+        expect_flat(&[
+            (Some("0.25"), 1),
+            (Some("5.0"), 2),
+            (Some("7.5"), 1),
+            (Some("12.0"), 1),
+        ]),
+        "facet.sort=index on a pdouble field orders by value, rendered as Double.toString"
+    );
+    assert_matches_fixture(body, "facet_field_double_sort_index_all");
+}
+
+#[tokio::test]
+async fn facet_field_float_all_matches_fixture() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=rating&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_field_float_all");
+}
+
+#[tokio::test]
+async fn integral_double_renders_with_a_trailing_zero_but_the_same_int_value_does_not() {
+    // The regression a value-sniffing fix would reintroduce: r1's `views` is
+    // the int `5` and its `price` is the double `5.0` — the *same* number,
+    // two different schema kinds. `views` must keep rendering `"5"` (already
+    // correct, pinned by `facet_field_numeric_all.json` via `range_app`'s
+    // `views`, and re-checked here on the debt schema's own `views`); `price`
+    // must render `"5.0"` (`facet_field_double_subset.json`) — the fix must
+    // be driven by `ValueKind::F64`, not by whether the value happens to be
+    // integral.
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=id:r1&rows=0&facet=true&facet.field=views&facet.field=price&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        flat_facet(&body, "views"),
+        expect_flat(&[(Some("5"), 1)]),
+        "an int field renders an integral value with no trailing `.0`"
+    );
+    assert_eq!(
+        flat_facet(&body, "price"),
+        expect_flat(&[(Some("5.0"), 1)]),
+        "a double field renders the SAME value `5` as `5.0` — schema-driven, not value-driven"
+    );
+}
+
+// --- 20. millisecond-precision pdate facet (finding 40) --------------------
+//
+// Wayfinder's fast date column is `DateOptions::default()` = seconds
+// precision (`src/schema.rs` ~line 494). `stamp` carries two values inside
+// the same second (`r1` at `.123`, `r2` at `.456`) so seconds precision
+// collapses them into one bucket of count 2 at the truncated
+// `"2020-01-02T00:00:00Z"`, and even the *subset* case (a single doc) still
+// renders wrong because the fraction is truncated away entirely — every test
+// below is red for that reason, not for ordering (which the fixtures show is
+// already chronological once the values are distinct).
+//
+// The companion "sort key becomes exact nanoseconds" half of finding 40
+// (`FacetOrderKey`, `src/core_index.rs`) is not separately unit-tested here:
+// `FacetOrderKey` is `pub` but `core_index` is a private module with no
+// `pub use` re-export in `src/lib.rs`, so it is unreachable from an
+// integration test — the ms-ordering fixture tests below are the coverage
+// for it, per the task spec's own fallback instruction.
+
+#[tokio::test]
+async fn facet_field_date_ms_all_matches_fixture() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=stamp&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_field_date_ms_all");
+}
+
+#[tokio::test]
+async fn facet_field_date_ms_subset_matches_fixture() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=id:r1&rows=0&facet=true&facet.field=stamp&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_field_date_ms_subset");
+}
+
+#[tokio::test]
+async fn facet_field_date_ms_sort_index_all_matches_fixture() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=stamp&facet.sort=index&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_field_date_ms_sort_index_all");
+}
+
+// --- 21. previously-unpinned facet semantics (finding 41) ------------------
+
+// 41(a): facet.missing is exempt from both facet.limit and facet.mincount.
+// Wayfinder already matches (the null bucket is appended after `truncate`
+// and is never subject to the `mincount` `retain`) — green from birth.
+
+#[tokio::test]
+async fn facet_missing_survives_a_limit_that_would_otherwise_drop_it() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=tag\
+         &facet.missing=true&facet.limit=1&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_missing_with_limit");
+}
+
+#[tokio::test]
+async fn facet_missing_survives_a_mincount_at_its_own_count() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=tag\
+         &facet.missing=true&facet.mincount=2&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_missing_with_mincount_two");
+}
+
+#[tokio::test]
+async fn facet_missing_survives_a_mincount_above_its_own_count() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=tag\
+         &facet.missing=true&facet.mincount=3&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "facet_missing_with_mincount_three");
+}
+
+// 41(b): a facet.range span not divisible by the gap extends the last bucket
+// to the gap boundary (Wayfinder already does — `range_buckets`'s I64 walk
+// always steps by a full `gap`), but echoes the *gap-aligned* end (30), not
+// the requested one (22). Wayfinder's `echo_bound` echoes the requested
+// `end` verbatim — red.
+
+#[tokio::test]
+async fn facet_range_not_divisible_by_gap_echoes_the_gap_aligned_end() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.range=views\
+         &facet.range.start=0&facet.range.end=22&facet.range.gap=10&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    // The bucket walk itself is already right (`[20,30)` counts r3's 25);
+    // written out explicitly because it is the fixture's least obvious part.
+    assert_eq!(
+        body.pointer("/facet_counts/facet_ranges/views"),
+        Some(&json!({
+            "counts": ["0", 1, "10", 1, "20", 1],
+            "gap": 10,
+            "start": 0,
+            "end": 30,
+        })),
+        "end must echo the gap-aligned boundary (30), not the requested value (22)"
+    );
+    assert_matches_fixture(body, "facet_range_end_not_gap_aligned");
+}
+
+// 41(c): json.nl=arrarr / json.nl=arrmap. `render_buckets` only special-cases
+// `json.nl=map`; any other value (including `arrarr`/`arrmap`) falls through
+// to the flat alternating array today — red.
+
+#[tokio::test]
+async fn json_nl_arrarr_renders_each_bucket_as_a_two_element_array() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=tag&json.nl=arrarr&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/tag"),
+        Some(&json!([["apple", 2], ["banana", 1]]))
+    );
+    assert_matches_fixture(body, "facet_json_nl_arrarr");
+}
+
+#[tokio::test]
+async fn json_nl_arrmap_renders_each_bucket_as_a_one_entry_object() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=tag&json.nl=arrmap&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/tag"),
+        Some(&json!([{"apple": 2}, {"banana": 1}]))
+    );
+    assert_matches_fixture(body, "facet_json_nl_arrmap");
+}
+
+#[tokio::test]
+async fn json_nl_arrarr_applies_to_facet_ranges_counts_too() {
+    // No fixture covers `facet.range` under `json.nl=arrarr` (the capture
+    // only exercised `arrarr`/`arrmap` on `facet.field=tag`) — this test is
+    // Wayfinder-only, asserting the same nested-pair shape `json.nl=map`
+    // already gets for `facet_ranges.<field>.counts`
+    // (`json_nl_map_switches_range_counts_to_an_object`,
+    // `facet_range_json_nl_map.json`), with `gap`/`start`/`end` left as plain
+    // numbers either way. Red today for the same reason as the
+    // `facet.field` case: `render_buckets` does not special-case `arrarr`.
+    let (app, _dir) = range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.range=views\
+         &facet.range.start=0&facet.range.end=40&facet.range.gap=10&json.nl=arrarr&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body.pointer("/facet_counts/facet_ranges/views"),
+        Some(&json!({
+            "counts": [["0", 1], ["10", 1], ["20", 1], ["30", 1]],
+            "gap": 10,
+            "start": 0,
+            "end": 40,
+        })),
+        "json.nl=arrarr must nest facet_ranges counts the same way it nests facet_fields, \
+         leaving gap/start/end untouched"
+    );
+}
+
+// 41(d): json.nl=map + facet.missing keys the null bucket as the empty
+// string. Wayfinder already does this (`render_buckets`'s
+// `term.clone().unwrap_or_default()`) — green from birth.
+
+#[tokio::test]
+async fn json_nl_map_keys_the_missing_bucket_as_the_empty_string() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=tag\
+         &facet.missing=true&json.nl=map&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/tag"),
+        Some(&json!({"apple": 2, "banana": 1, "": 2}))
+    );
+    assert_matches_fixture(body, "facet_json_nl_map_missing");
+}
+
+// --- 22. ValueKind::Text range-facet bail is reachable (issue #33 item 5) --
+//
+// `src/facet.rs`'s `ValueKind::Text` bail in `range_buckets` is unreachable
+// via a non-`fast` text field (`check_facetable` refuses it first, with a
+// different message — `Refusal::NotFast`). `tag` is exactly a `fast` string
+// field, so `facet.range=tag` passes `check_facetable` and reaches the
+// `Text` bail. Already implemented — green from birth. Solr's counterpart
+// (`facet_err_range_single.json`) is also a 400, in the same
+// `RangeUnfacetable` class (finding 38) but with different wording — the
+// wording is not frozen here, only Wayfinder's own fragment is (per the
+// `Refusal` pattern above), and `facet_range_single_error_is_range_unfacetable_class`
+// in section 18 already pins the cross-engine class match.
+
+#[tokio::test]
+async fn facet_range_on_a_fast_text_field_is_a_400_with_wayfinders_own_message() {
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.range=tag\
+         &facet.range.start=0&facet.range.end=10&facet.range.gap=5&wt=json",
+    )
+    .await;
+    assert_facet_400(status, &body, "tag", Refusal::TextRange);
 }
