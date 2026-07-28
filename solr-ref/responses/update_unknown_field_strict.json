@@ -1,0 +1,11 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":14
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"ERROR: [doc=probe_unknown_field] unknown field 'nosuchfield'",
+    "code":400
+  }
+}

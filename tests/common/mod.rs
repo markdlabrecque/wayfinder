@@ -4,6 +4,10 @@
 //! the three-field tracer-bullet schema (PRD §7), indexes the same 5-doc
 //! corpus used to capture `solr-ref/responses/*.json`, and provides thin
 //! request/response helpers plus fixture-comparison normalisation.
+//!
+//! Shared by several integration-test binaries, each of which uses only some of
+//! these helpers — so unused-code warnings here are expected, not a signal.
+#![allow(dead_code)]
 
 use std::path::Path;
 
@@ -87,6 +91,48 @@ pub async fn indexed_app() -> (Router, TempDir) {
     );
 
     (app, dir)
+}
+
+/// Builds an app against an arbitrary schema TOML in a caller-owned directory,
+/// indexing nothing. Returns the router; `dir` must outlive it.
+///
+/// Separate from `indexed_app()` because the schema-layer tests (issue #10) need
+/// their own schemas and their own corpora, and need to reopen the *same* data
+/// dir with a changed schema to exercise the startup compatibility check.
+pub fn app_with_schema(dir: &Path, schema_toml: &str) -> anyhow::Result<Router> {
+    let schema_path = dir.join("schema.toml");
+    std::fs::write(&schema_path, schema_toml).expect("write schema.toml");
+    let data_dir = dir.join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    wayfinder::app(&schema_path, &data_dir)
+}
+
+/// `POST /solr/<core>/update?commit=true` with `docs` as the body.
+pub async fn post_docs(app: &Router, docs: &Value) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/solr/{CORE}/update?commit=true"))
+        .header("content-type", "application/json")
+        .body(Body::from(docs.to_string()))
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(req)
+        .await
+        .expect("update request must not fail at the transport level");
+    let status = resp.status();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("response body must be readable")
+        .to_bytes();
+    let body: Value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("response body must be valid JSON")
+    };
+    (status, body)
 }
 
 /// Issues `GET /solr/<core>/<path_and_query>` against `app` and returns the

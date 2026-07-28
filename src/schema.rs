@@ -1,22 +1,83 @@
-//! TOML schema file -> Tantivy `Schema` (PRD §3 / §7).
+//! TOML schema file -> Tantivy `Schema` (PRD §3).
 //!
-//! Tracer-bullet scope: `string` and `text_en` field types only, with
-//! `stored`, `required`, `fast`, `multi_valued` options. Everything else in
-//! the full PRD schema format (dynamic fields, copy fields, custom analyzer
-//! chains, other field types) is out of scope for this slice.
+//! Covers the full v1 schema format: static fields (`string`, `keyword`,
+//! `text_*` presets, `int`/`long`/`float`/`double`, `date`), `[[dynamic_fields]]`
+//! glob patterns, `[[copy_fields]]`, `[[field_types]]` custom analyzer chains,
+//! and the startup compatibility check against the schema an existing index was
+//! built with.
+//!
+//! Out of scope (PRD §3): runtime schema mutation, `schema.xml`, per-field
+//! similarity.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use tantivy::schema::{Field, IndexRecordOption, STRING, Schema, TextFieldIndexing, TextOptions};
+use tantivy::schema::{
+    DateOptions, Field, IndexRecordOption, JsonObjectOptions, NumericOptions, STRING, Schema,
+    TextFieldIndexing, TextOptions,
+};
+use tantivy::tokenizer::{
+    Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer, StopWordFilter, TextAnalyzer,
+    TokenizerManager,
+};
+
+/// Catch-all Tantivy field holding every document field that resolved through a
+/// `[[dynamic_fields]]` pattern to a non-analyzed type (string/keyword/numeric/
+/// date). Tantivy schemas are fixed at index creation, so dynamic fields cannot
+/// each become their own field the way Solr's do; a JSON field gives per-path
+/// typed indexing instead, and `_dynamic.<name>` is the query path.
+pub const DYNAMIC_FIELD: &str = "_dynamic";
+/// As `DYNAMIC_FIELD`, but for patterns resolving to an analyzed text type.
+/// Split in two because a JSON field carries a single tokenizer for all of its
+/// string values, and a `*_s` string pattern must not be stemmed like a
+/// `*_txt` one.
+pub const DYNAMIC_TEXT_FIELD: &str = "_dynamic_text";
+
+/// The ISO-639-1 code -> Tantivy stemmer language table. PRD open question 5:
+/// ship every language Tantivy's stemmer set gives cheaply, which is all of
+/// them — each preset is a tokenizer + three filters.
+const LANGUAGES: &[(&str, Language)] = &[
+    ("ar", Language::Arabic),
+    ("da", Language::Danish),
+    ("nl", Language::Dutch),
+    ("en", Language::English),
+    ("fi", Language::Finnish),
+    ("fr", Language::French),
+    ("de", Language::German),
+    ("el", Language::Greek),
+    ("hu", Language::Hungarian),
+    ("it", Language::Italian),
+    ("no", Language::Norwegian),
+    ("pt", Language::Portuguese),
+    ("ro", Language::Romanian),
+    ("ru", Language::Russian),
+    ("es", Language::Spanish),
+    ("sv", Language::Swedish),
+    ("ta", Language::Tamil),
+    ("tr", Language::Turkish),
+];
+
+/// Tantivy's own `default` analyzer: simple tokenizer, long tokens dropped,
+/// lowercased, no stemming. Solr calls this shape `text_general`.
+const TEXT_GENERAL_TOKENIZER: &str = "default";
+/// Tantivy's own English analyzer — `text_general` plus an English stemmer.
+/// `text_en` maps onto it rather than a hand-built equivalent so the tracer
+/// bullet's captured relevance behaviour is unchanged.
+const TEXT_EN_TOKENIZER: &str = "en_stem";
 
 #[derive(Debug, Deserialize)]
 struct SchemaFile {
     core: CoreConfig,
     #[serde(rename = "fields", default)]
     fields: Vec<FieldConfig>,
+    #[serde(default)]
+    dynamic_fields: Vec<DynamicFieldConfig>,
+    #[serde(default)]
+    copy_fields: Vec<CopyFieldConfig>,
+    #[serde(default)]
+    field_types: Vec<FieldTypeConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -26,7 +87,7 @@ pub struct CoreConfig {
     pub default_field: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct FieldConfig {
     pub name: String,
     #[serde(rename = "type")]
@@ -41,63 +102,414 @@ pub struct FieldConfig {
     pub multi_valued: bool,
 }
 
-/// A parsed schema: the Tantivy `Schema`, the core config, and a lookup from
-/// field name to both the Tantivy `Field` handle and the original config
-/// (needed to know stored-ness / multi-valuedness when rendering docs).
+#[derive(Debug, Deserialize, Clone)]
+pub struct DynamicFieldConfig {
+    pub pattern: String,
+    #[serde(rename = "type")]
+    pub type_: String,
+    #[serde(default)]
+    pub stored: bool,
+    #[serde(default)]
+    pub fast: bool,
+    #[serde(default)]
+    pub multi_valued: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct CopyFieldConfig {
+    pub source: String,
+    pub dest: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct FieldTypeConfig {
+    pub name: String,
+    pub tokenizer: String,
+    #[serde(default)]
+    pub filters: Vec<FilterConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct FilterConfig {
+    pub kind: String,
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+/// How a field's JSON values are coerced on the way in and rendered on the way
+/// out. Text and string types share `Text` — both take JSON strings; they differ
+/// only in analysis, which the Tantivy schema options already carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueKind {
+    Text,
+    I64,
+    F64,
+    Date,
+}
+
+/// A parsed schema: the Tantivy `Schema`, the core config, the dynamic/copy
+/// rules, the tokenizer manager the index must be opened with, and a lookup from
+/// field name to both the Tantivy `Field` handle and the original config.
 pub struct WayfinderSchema {
     pub tantivy_schema: Schema,
     pub core: CoreConfig,
     pub fields: Vec<FieldConfig>,
-    pub field_handles: HashMap<String, Field>,
+    pub dynamic_fields: Vec<DynamicFieldConfig>,
+    pub copy_fields: Vec<CopyFieldConfig>,
+    pub field_types: Vec<FieldTypeConfig>,
+    pub tokenizers: TokenizerManager,
+    field_handles: HashMap<String, Field>,
+}
+
+// `TokenizerManager` is not `Debug`, so derive is out; tests still need it for
+// `Result::expect_err`.
+impl std::fmt::Debug for WayfinderSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WayfinderSchema")
+            .field("core", &self.core)
+            .field("fields", &self.fields)
+            .field("dynamic_fields", &self.dynamic_fields)
+            .field("copy_fields", &self.copy_fields)
+            .finish_non_exhaustive()
+    }
 }
 
 impl WayfinderSchema {
     pub fn field(&self, name: &str) -> Option<Field> {
         self.field_handles.get(name).copied()
     }
+
+    pub fn field_config(&self, name: &str) -> Option<&FieldConfig> {
+        self.fields.iter().find(|f| f.name == name)
+    }
+
+    /// True if `name` is a field declared in `[[fields]]`. A declared field
+    /// always wins over a `[[dynamic_fields]]` pattern that would also match it,
+    /// as in Solr.
+    pub fn is_static(&self, name: &str) -> bool {
+        self.field_config(name).is_some()
+    }
+
+    /// The `[[dynamic_fields]]` rule matching `name`, longest pattern first
+    /// (Solr's rule). Pattern-only: callers must check `is_static` first.
+    pub fn match_dynamic(&self, name: &str) -> Option<&DynamicFieldConfig> {
+        self.dynamic_fields
+            .iter()
+            .filter(|d| glob_matches(&d.pattern, name))
+            .max_by_key(|d| d.pattern.len())
+    }
+
+    /// Every `[[copy_fields]]` destination for `source`.
+    pub fn copy_dests(&self, source: &str) -> impl Iterator<Item = &str> {
+        self.copy_fields
+            .iter()
+            .filter(move |c| c.source == source)
+            .map(|c| c.dest.as_str())
+    }
+
+    /// The value kind of a declared field.
+    pub fn value_kind(&self, name: &str) -> Option<ValueKind> {
+        self.field_config(name)
+            .and_then(|f| value_kind_of(&f.type_, &self.field_types).ok())
+    }
+
+    /// Which catch-all JSON field a dynamic rule's values live in.
+    pub fn dynamic_target(&self, rule: &DynamicFieldConfig) -> &'static str {
+        match resolve_type(&rule.type_, &self.field_types) {
+            Ok(ResolvedType::Text { .. }) => DYNAMIC_TEXT_FIELD,
+            _ => DYNAMIC_FIELD,
+        }
+    }
+
+    /// Runs `text` through the analyzer registered for field type `type_name`,
+    /// returning the resulting terms. Used by the schema tests to prove each
+    /// preset and custom chain actually does what it claims.
+    pub fn tokenize(&self, type_name: &str, text: &str) -> Option<Vec<String>> {
+        let tokenizer_name = match resolve_type(type_name, &self.field_types).ok()? {
+            ResolvedType::Str => "raw".to_string(),
+            ResolvedType::Text { tokenizer } => tokenizer,
+            _ => return None,
+        };
+        let mut analyzer = self.tokenizers.get(&tokenizer_name)?;
+        let mut stream = analyzer.token_stream(text);
+        let mut out = Vec::new();
+        while stream.advance() {
+            out.push(stream.token().text.clone());
+        }
+        Some(out)
+    }
+}
+
+/// What a schema `type = "..."` resolves to.
+enum ResolvedType {
+    Str,
+    Text { tokenizer: String },
+    I64,
+    F64,
+    Date,
+}
+
+fn resolve_type(type_: &str, custom: &[FieldTypeConfig]) -> Result<ResolvedType> {
+    if let Some(ft) = custom.iter().find(|ft| ft.name == type_) {
+        return Ok(ResolvedType::Text {
+            tokenizer: ft.name.clone(),
+        });
+    }
+    Ok(match type_ {
+        "string" | "keyword" => ResolvedType::Str,
+        "text_general" => ResolvedType::Text {
+            tokenizer: TEXT_GENERAL_TOKENIZER.to_string(),
+        },
+        "text_en" => ResolvedType::Text {
+            tokenizer: TEXT_EN_TOKENIZER.to_string(),
+        },
+        "int" | "long" => ResolvedType::I64,
+        "float" | "double" => ResolvedType::F64,
+        "date" => ResolvedType::Date,
+        other => {
+            let code = other.strip_prefix("text_").filter(|code| {
+                LANGUAGES
+                    .iter()
+                    .any(|(lang_code, _)| lang_code == code && *code != "en")
+            });
+            match code {
+                Some(code) => ResolvedType::Text {
+                    tokenizer: format!("text_{code}"),
+                },
+                None => bail!("unsupported field type `{other}`"),
+            }
+        }
+    })
+}
+
+fn value_kind_of(type_: &str, custom: &[FieldTypeConfig]) -> Result<ValueKind> {
+    Ok(match resolve_type(type_, custom)? {
+        ResolvedType::Str | ResolvedType::Text { .. } => ValueKind::Text,
+        ResolvedType::I64 => ValueKind::I64,
+        ResolvedType::F64 => ValueKind::F64,
+        ResolvedType::Date => ValueKind::Date,
+    })
+}
+
+/// The value kind of a dynamic rule's declared type, for coercing incoming
+/// values before they go into the catch-all JSON field.
+pub fn dynamic_value_kind(
+    rule: &DynamicFieldConfig,
+    custom: &[FieldTypeConfig],
+) -> Result<ValueKind> {
+    value_kind_of(&rule.type_, custom)
+}
+
+/// Solr-style glob: a single leading and/or trailing `*`. Anything else is
+/// matched literally.
+///
+/// ponytail: prefix/suffix match rather than a glob crate — Solr's dynamic-field
+/// patterns are only ever `*_suffix`, `prefix_*`, or `*`.
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    match (pattern.strip_prefix('*'), pattern.strip_suffix('*')) {
+        (Some("*"), _) | (_, Some("")) if pattern == "*" => true,
+        (Some(suffix), None) => name.len() > suffix.len() && name.ends_with(suffix),
+        (None, Some(prefix)) => name.len() > prefix.len() && name.starts_with(prefix),
+        (Some(inner), Some(_)) => name.contains(inner.trim_end_matches('*')),
+        (None, None) => pattern == name,
+    }
+}
+
+/// Builds the `TextAnalyzer` for a `[[field_types]]` chain.
+fn build_analyzer(ft: &FieldTypeConfig) -> Result<TextAnalyzer> {
+    let mut builder = match ft.tokenizer.as_str() {
+        "simple" => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
+        other => bail!(
+            "unsupported tokenizer `{other}` on field type `{}` (supported: `simple`)",
+            ft.name
+        ),
+    };
+    builder = builder.filter_dynamic(RemoveLongFilter::limit(40));
+
+    for filter in &ft.filters {
+        let language = |kind: &str| -> Result<Language> {
+            let name = filter.language.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "filter `{kind}` on field type `{}` requires a `language`",
+                    ft.name
+                )
+            })?;
+            language_by_name(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unsupported language `{name}` on filter `{kind}` of field type `{}`",
+                    ft.name
+                )
+            })
+        };
+        builder = match filter.kind.as_str() {
+            "lowercase" => builder.filter_dynamic(LowerCaser),
+            "stopwords" => {
+                let lang = language("stopwords")?;
+                let stop = StopWordFilter::new(lang).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Tantivy ships no stopword list for `{:?}` (field type `{}`)",
+                        lang,
+                        ft.name
+                    )
+                })?;
+                builder.filter_dynamic(stop)
+            }
+            "stemmer" => builder.filter_dynamic(Stemmer::new(language("stemmer")?)),
+            other => bail!(
+                "unsupported filter kind `{other}` on field type `{}`",
+                ft.name
+            ),
+        };
+    }
+    Ok(builder.build())
+}
+
+/// Accepts both an English language name (`english`) and an ISO-639-1 code
+/// (`en`), because the PRD's example chain writes `language = "english"`.
+fn language_by_name(name: &str) -> Option<Language> {
+    let lower = name.to_lowercase();
+    LANGUAGES
+        .iter()
+        .find(|(code, lang)| *code == lower || format!("{lang:?}").to_lowercase() == lower)
+        .map(|(_, lang)| *lang)
+}
+
+/// Registers the language presets and every custom chain into a tokenizer
+/// manager seeded with Tantivy's defaults (`raw`, `default`, `en_stem`).
+fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager> {
+    let manager = TokenizerManager::default();
+    for (code, lang) in LANGUAGES {
+        if *code == "en" {
+            continue; // `text_en` uses Tantivy's own `en_stem`.
+        }
+        manager.register(
+            &format!("text_{code}"),
+            TextAnalyzer::builder(SimpleTokenizer::default())
+                .filter(RemoveLongFilter::limit(40))
+                .filter(LowerCaser)
+                .filter(Stemmer::new(*lang))
+                .build(),
+        );
+    }
+    for ft in field_types {
+        manager.register(&ft.name, build_analyzer(ft)?);
+    }
+    Ok(manager)
+}
+
+fn text_options(tokenizer: &str, stored: bool, fast: bool) -> TextOptions {
+    let indexing = TextFieldIndexing::default()
+        .set_tokenizer(tokenizer)
+        .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+    let mut opts = TextOptions::default().set_indexing_options(indexing);
+    if stored {
+        opts = opts.set_stored();
+    }
+    if fast {
+        opts = opts.set_fast(Some(tokenizer));
+    }
+    opts
+}
+
+fn numeric_options(stored: bool, fast: bool) -> NumericOptions {
+    let mut opts = NumericOptions::default().set_indexed();
+    if stored {
+        opts = opts.set_stored();
+    }
+    if fast {
+        opts = opts.set_fast();
+    }
+    opts
 }
 
 /// Loads and builds a Tantivy schema from a TOML schema file at `path`.
 pub fn load(path: &Path) -> Result<WayfinderSchema> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading schema file {}", path.display()))?;
-    let parsed: SchemaFile =
-        toml::from_str(&raw).with_context(|| format!("parsing schema file {}", path.display()))?;
+    parse(&raw).with_context(|| format!("parsing schema file {}", path.display()))
+}
+
+/// As `load`, but from the TOML text directly.
+pub fn parse(raw: &str) -> Result<WayfinderSchema> {
+    let parsed: SchemaFile = toml::from_str(raw)?;
+    let tokenizers = build_tokenizers(&parsed.field_types)?;
 
     let mut builder = Schema::builder();
     let mut field_handles = HashMap::new();
 
-    for field_config in &parsed.fields {
-        let field = match field_config.type_.as_str() {
-            "string" => {
+    for fc in &parsed.fields {
+        let resolved = resolve_type(&fc.type_, &parsed.field_types)
+            .with_context(|| format!("on field `{}`", fc.name))?;
+        let field = match resolved {
+            ResolvedType::Str => {
                 let mut opts = STRING;
-                if field_config.stored {
+                if fc.stored {
                     opts = opts.set_stored();
                 }
-                if field_config.fast {
+                if fc.fast {
                     opts = opts.set_fast(None);
                 }
-                builder.add_text_field(&field_config.name, opts)
+                builder.add_text_field(&fc.name, opts)
             }
-            "text_en" => {
-                let indexing = TextFieldIndexing::default()
-                    .set_tokenizer("en_stem")
-                    .set_index_option(IndexRecordOption::WithFreqsAndPositions);
-                let mut opts = TextOptions::default().set_indexing_options(indexing);
-                if field_config.stored {
+            ResolvedType::Text { tokenizer } => {
+                builder.add_text_field(&fc.name, text_options(&tokenizer, fc.stored, fc.fast))
+            }
+            ResolvedType::I64 => {
+                builder.add_i64_field(&fc.name, numeric_options(fc.stored, fc.fast))
+            }
+            ResolvedType::F64 => {
+                builder.add_f64_field(&fc.name, numeric_options(fc.stored, fc.fast))
+            }
+            ResolvedType::Date => {
+                let mut opts = DateOptions::default().set_indexed();
+                if fc.stored {
                     opts = opts.set_stored();
                 }
-                if field_config.fast {
-                    opts = opts.set_fast(Some("en_stem"));
+                if fc.fast {
+                    opts = opts.set_fast();
                 }
-                builder.add_text_field(&field_config.name, opts)
+                builder.add_date_field(&fc.name, opts)
             }
-            other => bail!(
-                "unsupported field type `{other}` on field `{}`",
-                field_config.name
-            ),
         };
-        field_handles.insert(field_config.name.clone(), field);
+        field_handles.insert(fc.name.clone(), field);
+    }
+
+    // Validate the dynamic rules' types up front, so a typo is a startup error
+    // rather than a surprise on the first matching document.
+    for rule in &parsed.dynamic_fields {
+        resolve_type(&rule.type_, &parsed.field_types)
+            .with_context(|| format!("on dynamic field pattern `{}`", rule.pattern))?;
+    }
+
+    // The two catch-all JSON fields backing `[[dynamic_fields]]`. Always present
+    // so that adding a dynamic rule never changes the Tantivy schema.
+    if !parsed.dynamic_fields.is_empty() {
+        let json_opts = |tokenizer: &str| {
+            JsonObjectOptions::default()
+                .set_stored()
+                .set_fast(Some(tokenizer))
+                .set_indexing_options(
+                    TextFieldIndexing::default()
+                        .set_tokenizer(tokenizer)
+                        .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+                )
+        };
+        field_handles.insert(
+            DYNAMIC_FIELD.to_string(),
+            builder.add_json_field(DYNAMIC_FIELD, json_opts("raw")),
+        );
+        field_handles.insert(
+            DYNAMIC_TEXT_FIELD.to_string(),
+            builder.add_json_field(DYNAMIC_TEXT_FIELD, json_opts(TEXT_EN_TOKENIZER)),
+        );
+    }
+
+    for copy in &parsed.copy_fields {
+        for (role, name) in [("source", &copy.source), ("dest", &copy.dest)] {
+            if !field_handles.contains_key(name) {
+                bail!("copy_fields {role} `{name}` is not a declared field");
+            }
+        }
     }
 
     let tantivy_schema = builder.build();
@@ -119,6 +531,73 @@ pub fn load(path: &Path) -> Result<WayfinderSchema> {
         tantivy_schema,
         core: parsed.core,
         fields: parsed.fields,
+        dynamic_fields: parsed.dynamic_fields,
+        copy_fields: parsed.copy_fields,
+        field_types: parsed.field_types,
+        tokenizers,
         field_handles,
     })
+}
+
+/// Where the schema an index was built with is kept, next to the index itself.
+pub fn snapshot_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("wayfinder-schema.toml")
+}
+
+/// Compares the schema an existing index was built with against the configured
+/// one, and refuses any change that would make the index and the schema
+/// disagree (PRD open question 4 — refuse and require a reindex).
+///
+/// Only `[[fields]]` are checked: `[[dynamic_fields]]`, `[[copy_fields]]` and
+/// `[[field_types]]` do not alter the Tantivy schema, so changing them affects
+/// only documents indexed from then on.
+pub fn check_compatible(previous: &str, current: &str) -> Result<()> {
+    let prev: SchemaFile = toml::from_str(previous).context("parsing the index's stored schema")?;
+    let cur: SchemaFile = toml::from_str(current).context("parsing the configured schema")?;
+
+    for old in &prev.fields {
+        match cur.fields.iter().find(|f| f.name == old.name) {
+            None => bail!(
+                "field `{}` was removed from the schema; the existing index still contains it — \
+                 reindex into a fresh data directory",
+                old.name
+            ),
+            Some(new) if new.type_ != old.type_ => bail!(
+                "field `{}` changed type from `{}` to `{}`; the existing index was built with the \
+                 old type — reindex into a fresh data directory",
+                old.name,
+                old.type_,
+                new.type_
+            ),
+            // `required` is a validation rule, not part of the Tantivy schema,
+            // so toggling it does not invalidate the index.
+            Some(new)
+                if (new.stored, new.fast, new.multi_valued)
+                    != (old.stored, old.fast, old.multi_valued) =>
+            {
+                bail!(
+                    "field `{}` changed options (stored/fast/multi_valued); the existing index \
+                     was built with the old options — reindex into a fresh data directory",
+                    old.name
+                )
+            }
+            Some(_) => {}
+        }
+    }
+
+    // PRD open question 4 calls an added field "compatible". Tantivy disagrees:
+    // a schema is fixed when the index is created and cannot be extended in
+    // place, so a new field still needs a reindex. Say that plainly instead of
+    // letting Tantivy fail later with "schema does not match".
+    for new in &cur.fields {
+        if !prev.fields.iter().any(|f| f.name == new.name) {
+            bail!(
+                "field `{}` was added to the schema; Tantivy cannot add a field to an existing \
+                 index — reindex into a fresh data directory",
+                new.name
+            );
+        }
+    }
+
+    Ok(())
 }
