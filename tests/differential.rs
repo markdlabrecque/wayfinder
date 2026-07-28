@@ -158,6 +158,212 @@ async fn keyorder_app() -> (Router, TempDir) {
     (app, dir)
 }
 
+// --- duplicated schema/corpus for manifest-errors.tsv's `sortdebt` rows
+// (issue #32, post-rebase). Mirrors `tests/sort.rs::SORTDEBT_SCHEMA_TOML` /
+// `sortdebt_doc` exactly, same duplication precedent as `FACETS_SCHEMA_TOML`
+// above — `tests/common/` cannot be shared across integration-test binaries.
+// Unlike `facets`/`keyorder`, this schema names its core `sortdebt` (not
+// `content`) to match the manifest-errors row's own request path verbatim —
+// `tests/sort.rs`'s own comment explains why: the captured fixtures and the
+// task spec want a schema literally named `sortdebt` at `/solr/sortdebt/...`.
+// So `sortdebt/...` rows are NOT rewritten in `app_and_request_url` below,
+// unlike `facets/...`/`keyorder/...`.
+
+const SORTDEBT_SCHEMA_TOML: &str = r#"
+[core]
+name = "sortdebt"
+unique_key = "id"
+default_field = "id"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "category"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "views"
+type = "int"
+stored = true
+fast = true
+
+[[fields]]
+name = "weight"
+type = "float"
+stored = true
+fast = true
+
+[[fields]]
+name = "created"
+type = "date"
+stored = true
+fast = true
+
+[[fields]]
+name = "nums"
+type = "int"
+stored = true
+fast = true
+multi_valued = true
+"#;
+
+/// One doc of the `s1..s6` corpus — identical to `tests/sort.rs::sortdebt_doc`.
+fn sortdebt_doc(id: &str) -> Value {
+    match id {
+        "s1" => json!({
+            "id": "s1", "category": "alpha", "views": 30, "weight": 1.5,
+            "created": "2021-03-01T00:00:00Z", "nums": [10, 90]
+        }),
+        "s2" => json!({
+            "id": "s2", "category": "beta", "views": 10, "weight": 3.5,
+            "created": "2021-01-01T00:00:00Z", "nums": [50, 60]
+        }),
+        "s3" => json!({
+            "id": "s3", "category": "gamma", "views": 20, "weight": 2.5,
+            "created": "2021-05-01T00:00:00Z", "nums": [20, 80]
+        }),
+        "s4" => json!({
+            "id": "s4", "category": "delta", "weight": 0.5,
+            "created": "2021-02-01T00:00:00Z", "nums": [70]
+        }),
+        "s5" => json!({"id": "s5", "category": "epsilon", "views": 40}),
+        "s6" => json!({
+            "id": "s6", "category": "zeta", "views": -5, "weight": -1.5,
+            "created": "1969-06-01T00:00:00Z", "nums": [-10, 5]
+        }),
+        other => panic!("no such sortdebt corpus doc: {other}"),
+    }
+}
+
+/// `POST /solr/sortdebt/update?commit=true` — cannot be `common::post_docs`,
+/// which is hardcoded to `common::CORE` (`"content"`). Mirrors
+/// `tests/sort.rs::sortdebt_post_docs`.
+async fn sortdebt_post_docs(app: &Router, docs: &Value) -> (StatusCode, Value) {
+    common::request_full(
+        app,
+        "POST",
+        "sortdebt/update?commit=true",
+        Some(&docs.to_string()),
+    )
+    .await
+}
+
+/// Builds a fresh `sortdebt`-schema app and indexes all six `s1..s6` docs in
+/// one commit — the single-segment case every manifest-errors row here needs
+/// (the multi-segment tests in `tests/sort.rs` reuse these same fixtures
+/// against a differently-segmented index, not a different expected result).
+async fn sortdebt_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), SORTDEBT_SCHEMA_TOML).expect("app must build");
+    let docs: Value = Value::Array(
+        ["s1", "s2", "s3", "s4", "s5", "s6"]
+            .iter()
+            .map(|id| sortdebt_doc(id))
+            .collect(),
+    );
+    let (status, body) = sortdebt_post_docs(&app, &docs).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the sortdebt corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
+// --- duplicated schema/corpus for manifest-errors.tsv's `facets33` rows
+// (issue #33, post-rebase). Mirrors `tests/faceting.rs::DEBT_SCHEMA_TOML` /
+// `debt_corpus` exactly. Unlike `sortdebt`, this schema names its core
+// `content` (same as `facets`/`keyorder` above), so `facets33/...` rows ARE
+// rewritten in `app_and_request_url` below.
+
+const FACETS33_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "views"
+type = "int"
+stored = true
+fast = true
+
+[[fields]]
+name = "price"
+type = "double"
+stored = true
+fast = true
+
+[[fields]]
+name = "rating"
+type = "float"
+stored = true
+fast = true
+
+[[fields]]
+name = "stamp"
+type = "date"
+stored = true
+fast = true
+
+[[fields]]
+name = "tag"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "note"
+type = "string"
+stored = true
+"#;
+
+/// The 5-doc corpus `capture.sh`'s issue-33 block indexes into `facets33` —
+/// identical to `tests/faceting.rs::debt_corpus`.
+fn facets33_corpus() -> Value {
+    json!([
+        {"id":"r1","views":5, "price":5.0, "rating":5.0,
+         "stamp":"2020-01-02T00:00:00.123Z","tag":"apple","note":"alpha"},
+        {"id":"r2","views":15,"price":7.5, "rating":7.5,
+         "stamp":"2020-01-02T00:00:00.456Z","tag":"apple"},
+        {"id":"r3","views":25,"price":5.0, "rating":5.0,
+         "stamp":"2020-01-03T12:34:56.789Z","tag":"banana"},
+        {"id":"r4","views":35,"price":12.0,"stamp":"2020-01-05T00:00:00Z"},
+        {"id":"r5","views":45,"price":0.25}
+    ])
+}
+
+async fn facets33_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), FACETS33_SCHEMA_TOML).expect("app must build");
+    let (status, body) = post_docs(&app, &facets33_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the facets33 corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
 /// Ratified, **permanent** divergences from captured Solr behaviour — the
 /// opposite of `EXPECTED_DIVERGENCES` below, which is a self-expiring to-do
 /// list for unbuilt features. Every entry here cites the PRD/findings
@@ -212,11 +418,49 @@ fn accepted_divergence_reason(name: &str) -> Option<&'static str> {
 /// permanent divergence like `ACCEPTED_DIVERGENCES` above. Filed as issue #35;
 /// this entry expires (and the guard below fails, naming it for deletion) the
 /// moment that lands.
-const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[(
-    "facet_unknown_field",
-    "Wayfinder's facet-field error propagates before the response block is built, so the \
-     `response` key Solr's fixture carries alongside `error` is absent here — see issue #35",
-)];
+///
+/// Issue #33's post-rebase `facets33` rows surfaced four more instances of
+/// the exact same root cause, not new bugs: `facet_counts` returns one
+/// `Result` regardless of which sub-check (query/field/range) fails, so
+/// Wayfinder omits `response` on *every* facet error identically. Solr does
+/// not: a `facet.range` error is detected before the base query ever runs
+/// (its own fixtures, `facet_err_range_single`/`_query_range`/`_field_range`/
+/// `_all_three`, genuinely lack `response` too — confirmed by inspecting the
+/// committed fixtures, `grep -L '"response"' solr-ref/responses/facet_err_*.json`),
+/// but a `facet.query`/`facet.field` error is detected only after it, so
+/// Solr's fixture *does* carry `response` there. `facet_err_query_single`,
+/// `facet_err_field_single`, `facet_err_query_field`, and
+/// `facet_err_query_vs_unfacetable` are exactly the query/field-triggered
+/// cases, so they diverge the same way `facet_unknown_field` does, and
+/// expire together with it under issue #35.
+const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[
+    (
+        "facet_unknown_field",
+        "Wayfinder's facet-field error propagates before the response block is built, so the \
+         `response` key Solr's fixture carries alongside `error` is absent here — see issue #35",
+    ),
+    (
+        "facet_err_query_single",
+        "Same root cause as facet_unknown_field (issue #35): a facet.query-triggered error omits \
+         `response`, which Solr's fixture carries since it detects this error post-query",
+    ),
+    (
+        "facet_err_field_single",
+        "Same root cause as facet_unknown_field (issue #35): a facet.field-triggered error omits \
+         `response`, which Solr's fixture carries since it detects this error post-query",
+    ),
+    (
+        "facet_err_query_field",
+        "Same root cause as facet_unknown_field (issue #35): the query error wins precedence \
+         (finding 38) but still omits `response`, which Solr's fixture carries",
+    ),
+    (
+        "facet_err_query_vs_unfacetable",
+        "Same root cause as facet_unknown_field (issue #35): the query error wins over the \
+         unfacetable-field non-error (finding 38) but still omits `response`, which Solr's \
+         fixture carries",
+    ),
+];
 
 fn expected_divergence_manifest_errors_reason(name: &str) -> Option<&'static str> {
     EXPECTED_DIVERGENCES_MANIFEST_ERRORS
@@ -1054,10 +1298,16 @@ fn live_solr_matches_committed_query_set() {
 // until now. This runs EVERY row against an in-process Wayfinder, per-row
 // app selection by the URL's leading core segment: `content/...` ->
 // `common::indexed_app()`; `facets/...` -> `facets_app()`; `keyorder/...` ->
-// `keyorder_app()`. All three name their core `content`, so the leading
-// segment is rewritten to `content` before the request is issued.
+// `keyorder_app()`; `facets33/...` -> `facets33_app()` (issue #33, post-
+// rebase). All four name their core `content`, so the leading segment is
+// rewritten to `content` before the request is issued.
 //
-// A row whose leading segment names none of the three (`nosuchcore/...`,
+// `sortdebt/...` (issue #32, post-rebase) is different: `sortdebt_app()`'s
+// schema names its core `sortdebt` literally (see the comment on
+// `SORTDEBT_SCHEMA_TOML` above), matching the manifest-errors row's own
+// path — so it is issued unrewritten against `sortdebt_app`.
+//
+// A row whose leading segment names none of the above (`nosuchcore/...`,
 // `schemaless_probe/...`) is not rewritten at all — that mismatch (a core
 // Wayfinder genuinely does not have) is exactly the shape of the
 // `err_missing_core`/`update_unknown_field_schemaless` `ACCEPTED_DIVERGENCES`
@@ -1067,19 +1317,23 @@ fn live_solr_matches_committed_query_set() {
 
 /// Selects the app for `entry` by its URL's leading core segment and
 /// returns `(app, request_url)`, where `request_url` has that segment
-/// rewritten to `content` for the three known cores. An unrecognised
-/// segment is returned unrewritten against `content_app` — see the module
-/// comment above.
+/// rewritten to `content` for every core except `sortdebt` (which keeps its
+/// own name — see the module comment above). An unrecognised segment is
+/// returned unrewritten against `content_app`.
 fn app_and_request_url<'a>(
     entry: &ManifestErrorEntry,
     content_app: &'a Router,
     facets_app: &'a Router,
     keyorder_app: &'a Router,
+    sortdebt_app: &'a Router,
+    facets33_app: &'a Router,
 ) -> (&'a Router, String) {
     match entry.url.split_once('/') {
         Some(("content", rest)) => (content_app, format!("content/{rest}")),
         Some(("facets", rest)) => (facets_app, format!("content/{rest}")),
         Some(("keyorder", rest)) => (keyorder_app, format!("content/{rest}")),
+        Some(("facets33", rest)) => (facets33_app, format!("content/{rest}")),
+        Some(("sortdebt", _)) => (sortdebt_app, entry.url.clone()),
         _ => (content_app, entry.url.clone()),
     }
 }
@@ -1111,6 +1365,8 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let (content_app, _content_dir) = indexed_app().await;
     let (facets_app, _facets_dir) = facets_app().await;
     let (keyorder_app, _keyorder_dir) = keyorder_app().await;
+    let (sortdebt_app, _sortdebt_dir) = sortdebt_app().await;
+    let (facets33_app, _facets33_dir) = facets33_app().await;
 
     let mut ran = 0usize;
     let mut diffed = 0usize;
@@ -1122,7 +1378,14 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     }
 
     for entry in &entries {
-        let (app, url) = app_and_request_url(entry, &content_app, &facets_app, &keyorder_app);
+        let (app, url) = app_and_request_url(
+            entry,
+            &content_app,
+            &facets_app,
+            &keyorder_app,
+            &sortdebt_app,
+            &facets33_app,
+        );
         let (status, actual) = request_full(app, &entry.method, &url, entry.body.as_deref()).await;
 
         if let Some(reason) = accepted_divergence_reason(&entry.name) {
