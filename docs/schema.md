@@ -92,7 +92,9 @@ Use the type by name: `type = "text_en_custom"`.
 
 ## Dynamic fields
 
-`pattern` is a Solr-style glob with a leading and/or trailing `*` (`*_i`, `title_*`, `*`).
+`pattern` is a Solr-style glob with a `*` at exactly one end, or a bare `*` (`*_i`, `title_*`,
+`*`). Anything else — `*_i*`, `a*b` — is rejected at load time rather than given semantics Solr
+does not have.
 The **longest matching pattern wins**, and a field declared in `[[fields]]` always beats a
 pattern that would also match it.
 
@@ -128,5 +130,16 @@ change to `[[fields]]`, naming the field and saying a reindex into a fresh data 
 needed (PRD open question 4). This includes *adding* a field: the PRD calls that compatible, but
 Tantivy cannot extend an existing index's schema in place, so v1 still requires a reindex.
 
-`[[dynamic_fields]]`, `[[copy_fields]]` and `[[field_types]]` do not change the Tantivy schema,
-so they may be edited freely — the change applies to documents indexed from then on.
+`[[copy_fields]]` and `[[field_types]]` never change the Tantivy schema — they govern index-time
+content and analysis — so they may be edited freely, and the change applies to documents indexed
+from then on.
+
+`[[dynamic_fields]]` is *almost* in that category. Editing, adding or removing rules while at
+least one rule remains changes nothing structural. But the catch-all JSON fields exist only when
+there is at least one rule, so **adding the first rule or removing the last one changes the
+Tantivy schema** and is refused like a field change:
+
+```
+[[dynamic_fields]] went from 0 rule(s) to 1; the existing index has no catch-all field to hold
+their values — reindex into a fresh data directory
+```

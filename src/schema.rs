@@ -300,19 +300,49 @@ pub fn dynamic_value_kind(
     value_kind_of(&rule.type_, custom)
 }
 
-/// Solr-style glob: a single leading and/or trailing `*`. Anything else is
-/// matched literally.
+/// Solr-style glob: `*suffix`, `prefix*`, or bare `*`. Anything else is matched
+/// literally. Patterns are validated by `validate_pattern` at load time, so
+/// nothing else can reach here.
 ///
 /// ponytail: prefix/suffix match rather than a glob crate — Solr's dynamic-field
 /// patterns are only ever `*_suffix`, `prefix_*`, or `*`.
 fn glob_matches(pattern: &str, name: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
     match (pattern.strip_prefix('*'), pattern.strip_suffix('*')) {
-        (Some("*"), _) | (_, Some("")) if pattern == "*" => true,
         (Some(suffix), None) => name.len() > suffix.len() && name.ends_with(suffix),
         (None, Some(prefix)) => name.len() > prefix.len() && name.starts_with(prefix),
-        (Some(inner), Some(_)) => name.contains(inner.trim_end_matches('*')),
-        (None, None) => pattern == name,
+        _ => pattern == name,
     }
+}
+
+/// The catch-all JSON fields that `rules` causes to exist in the Tantivy schema.
+/// The single source of truth for that decision, shared by `parse` (which adds
+/// them) and `check_compatible` (which refuses a change to the set).
+fn catch_all_fields(rules: &[DynamicFieldConfig]) -> &'static [&'static str] {
+    if rules.is_empty() {
+        &[]
+    } else {
+        &[DYNAMIC_FIELD, DYNAMIC_TEXT_FIELD]
+    }
+}
+
+/// Solr allows a `*` at exactly one end of a dynamic-field pattern (or a bare
+/// `*`). Reject anything else at load time rather than inventing semantics Solr
+/// does not have.
+fn validate_pattern(pattern: &str) -> Result<()> {
+    let ok = match pattern.matches('*').count() {
+        0 => true,
+        1 => pattern.starts_with('*') || pattern.ends_with('*'),
+        _ => false,
+    };
+    if !ok {
+        bail!(
+            "dynamic field pattern `{pattern}` is not supported: use `*suffix`, `prefix*`, or `*`"
+        );
+    }
+    Ok(())
 }
 
 /// Builds the `TextAnalyzer` for a `[[field_types]]` chain.
@@ -477,31 +507,30 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     // Validate the dynamic rules' types up front, so a typo is a startup error
     // rather than a surprise on the first matching document.
     for rule in &parsed.dynamic_fields {
+        validate_pattern(&rule.pattern)?;
         resolve_type(&rule.type_, &parsed.field_types)
             .with_context(|| format!("on dynamic field pattern `{}`", rule.pattern))?;
     }
 
-    // The two catch-all JSON fields backing `[[dynamic_fields]]`. Always present
-    // so that adding a dynamic rule never changes the Tantivy schema.
-    if !parsed.dynamic_fields.is_empty() {
-        let json_opts = |tokenizer: &str| {
-            JsonObjectOptions::default()
-                .set_stored()
-                .set_fast(Some(tokenizer))
-                .set_indexing_options(
-                    TextFieldIndexing::default()
-                        .set_tokenizer(tokenizer)
-                        .set_index_option(IndexRecordOption::WithFreqsAndPositions),
-                )
+    // The catch-all JSON fields backing `[[dynamic_fields]]`. Present only when
+    // there is at least one rule, which is why toggling a schema between "no
+    // dynamic rules" and "some dynamic rules" changes the Tantivy schema and so
+    // needs a reindex — see `check_compatible`.
+    for name in catch_all_fields(&parsed.dynamic_fields) {
+        let tokenizer = if *name == DYNAMIC_TEXT_FIELD {
+            TEXT_EN_TOKENIZER
+        } else {
+            "raw"
         };
-        field_handles.insert(
-            DYNAMIC_FIELD.to_string(),
-            builder.add_json_field(DYNAMIC_FIELD, json_opts("raw")),
-        );
-        field_handles.insert(
-            DYNAMIC_TEXT_FIELD.to_string(),
-            builder.add_json_field(DYNAMIC_TEXT_FIELD, json_opts(TEXT_EN_TOKENIZER)),
-        );
+        let opts = JsonObjectOptions::default()
+            .set_stored()
+            .set_fast(Some(tokenizer))
+            .set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer(tokenizer)
+                    .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+            );
+        field_handles.insert((*name).to_string(), builder.add_json_field(name, opts));
     }
 
     for copy in &parsed.copy_fields {
@@ -548,9 +577,15 @@ pub fn snapshot_path(data_dir: &Path) -> PathBuf {
 /// one, and refuses any change that would make the index and the schema
 /// disagree (PRD open question 4 — refuse and require a reindex).
 ///
-/// Only `[[fields]]` are checked: `[[dynamic_fields]]`, `[[copy_fields]]` and
-/// `[[field_types]]` do not alter the Tantivy schema, so changing them affects
-/// only documents indexed from then on.
+/// Two things alter the Tantivy schema and are therefore checked: `[[fields]]`,
+/// and whether `[[dynamic_fields]]` is empty — the catch-all JSON fields exist
+/// only when there is at least one rule, so adding the first rule or removing
+/// the last one changes the schema even though editing rules in between does
+/// not.
+///
+/// `[[copy_fields]]` and `[[field_types]]` never alter the Tantivy schema (they
+/// govern index-time content and analysis), so changing them affects only
+/// documents indexed from then on.
 pub fn check_compatible(previous: &str, current: &str) -> Result<()> {
     let prev: SchemaFile = toml::from_str(previous).context("parsing the index's stored schema")?;
     let cur: SchemaFile = toml::from_str(current).context("parsing the configured schema")?;
@@ -597,6 +632,29 @@ pub fn check_compatible(previous: &str, current: &str) -> Result<()> {
                 new.name
             );
         }
+    }
+
+    // The catch-all JSON fields exist only when at least one dynamic rule does,
+    // so crossing that boundary changes the Tantivy schema. Without this check
+    // the index would be reopened with its old schema — missing `_dynamic`, or
+    // carrying a stray one — which is exactly the silent-stale-schema failure
+    // this whole check exists to prevent.
+    let (before, after) = (
+        catch_all_fields(&prev.dynamic_fields),
+        catch_all_fields(&cur.dynamic_fields),
+    );
+    if before != after {
+        let detail = if before.is_empty() {
+            "the existing index has no catch-all field to hold their values"
+        } else {
+            "the existing index still carries the catch-all fields they created"
+        };
+        bail!(
+            "[[dynamic_fields]] went from {} rule(s) to {}; {detail} — reindex into a fresh data \
+             directory",
+            prev.dynamic_fields.len(),
+            cur.dynamic_fields.len()
+        );
     }
 
     Ok(())

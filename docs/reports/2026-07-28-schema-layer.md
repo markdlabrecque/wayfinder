@@ -86,11 +86,17 @@ old segments lack the field — deliberately not attempted).
 
 ## Test evidence
 
-21 new tests in `tests/schema_layer.rs`; two helpers appended to `tests/common/mod.rs`
+25 new tests in `tests/schema_layer.rs` (21 in the first pass, 4 more from review round 1); two
+helpers appended to `tests/common/mod.rs`
 (`app_with_schema`, `post_docs`). Confirmed red before implementation (compile error on the
 then-private `wayfinder::schema` module and the missing API).
 
-`command cargo test` — 33 passed, 0 failed:
+`command cargo test` — **37 passed, 0 failed** after review round 1 (25 schema-layer + 12
+tracer-bullet). The listing below is the first-pass run; round 1 added
+`schema_compatibility_check_refuses_adding_the_first_or_removing_the_last_dynamic_rule`,
+`schema_compatibility_check_allows_editing_dynamic_rules_without_emptying_them`,
+`reopening_a_data_dir_after_toggling_dynamic_fields_refuses_both_ways` and
+`a_pattern_with_stars_at_both_ends_is_rejected_at_load_time`.
 
 ```
 running 21 tests   (tests/schema_layer.rs)
@@ -133,10 +139,64 @@ longest-pattern-wins to shortest failed two tests. Both mutations reverted.
 
 ## Review outcome
 
-Self-review (see deviation above), one round. One must-fix found and fixed: `check_compatible`
-treated a `required` toggle as needing a reindex, but `required` is input validation and not part
-of the Tantivy schema — it now compares only `type`/`stored`/`fast`/`multi_valued`, with a test
-each way (`..._allows_toggling_required`, `..._refuses_a_changed_field_option_naming_it`).
+**Two rounds: a self-review, then an independent review that bounced the work.**
+
+### Round 0 — self-review (see pipeline deviation above)
+
+One must-fix found and fixed: `check_compatible` treated a `required` toggle as needing a
+reindex, but `required` is input validation and not part of the Tantivy schema — it now compares
+only `type`/`stored`/`fast`/`multi_valued`, with a test each way
+(`..._allows_toggling_required`, `..._refuses_a_changed_field_option_naming_it`).
+
+### Round 1 — independent review: BOUNCE, one must-fix
+
+The reviewer verified both premise-challenging findings above against the Tantivy 0.26.1 source
+and confirmed them, along with the 18-entry `Language` table and the absent `StopWordFilter`
+arms for Arabic/Greek/Romanian/Tamil/Turkish. Approved: copy-fields don't recurse, the `required`
+narrowing, numeric/date mapping for #3/#5, no over-engineering.
+
+**Must-fix: `check_compatible` had a hole in exactly the case it exists to catch.** The check
+compared only `[[fields]]`, on the documented reasoning that `[[dynamic_fields]]` never alters
+the Tantivy schema. That was false at the empty↔non-empty boundary: `parse()` adds the
+`_dynamic`/`_dynamic_text` JSON fields only when at least one rule exists, so adding the *first*
+rule or removing the *last* one on an existing data dir changed the Tantivy schema while the
+check reported "compatible" — and `CoreIndex::open`'s
+`create_in_dir(...).or_else(|_| open_in_dir(...))` then silently opened the index with its old
+schema. The exact silent-stale-schema failure this feature was built to prevent, through a door
+the check wasn't watching. No test toggled dynamic fields on reopen, so nothing caught it.
+
+Fixed by giving the decision one owner: `catch_all_fields(rules)` returns the catch-all field
+names a rule set causes to exist, and both `parse()` (which adds them) and `check_compatible()`
+(which refuses a change to the set) now call it, so the two cannot drift again. Message:
+
+```
+[[dynamic_fields]] went from 0 rule(s) to 1; the existing index has no catch-all field to hold
+their values — reindex into a fresh data directory
+```
+
+and, the other way, `... went from 1 rule(s) to 0; the existing index still carries the catch-all
+fields they created — ...`.
+
+Three new tests, and the false premise corrected in the `check_compatible` doc comment, in the
+`parse()` comment that asserted the catch-all fields are "always present", and in
+`docs/schema.md`:
+
+- `schema_compatibility_check_refuses_adding_the_first_or_removing_the_last_dynamic_rule`
+- `reopening_a_data_dir_after_toggling_dynamic_fields_refuses_both_ways` — the end-to-end case,
+  both directions
+- `schema_compatibility_check_allows_editing_dynamic_rules_without_emptying_them` — the boundary
+  is emptiness, not any rule edit
+
+Mutation-verified: disabling the new check fails both
+`reopening_a_data_dir_after_toggling_dynamic_fields_refuses_both_ways` and
+`schema_compatibility_check_refuses_adding_the_first_or_removing_the_last_dynamic_rule`, the
+former by returning `Ok(Router)` — i.e. reproducing the silent open the reviewer described.
+
+**Cosmetic items, both fixed.** The two-star glob arm implemented substring matching, a form Solr
+never produces and whose semantics aren't Solr's anyway; patterns are now validated at load time
+(`validate_pattern`) so only `*suffix`, `prefix*` and bare `*` are accepted, and the arm is gone
+along with the dead `(Some("*"), _)` half of the first arm. Covered by
+`a_pattern_with_stars_at_both_ends_is_rejected_at_load_time`.
 
 ## Follow-ups
 

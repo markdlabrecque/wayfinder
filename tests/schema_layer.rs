@@ -562,6 +562,109 @@ stored = true
     );
 }
 
+/// `FULL_SCHEMA_TOML` with the whole `[[dynamic_fields]]` block removed.
+fn schema_without_dynamic_fields() -> String {
+    let start = FULL_SCHEMA_TOML
+        .find("[[dynamic_fields]]")
+        .expect("test setup: the fixture schema must declare dynamic fields");
+    let end = FULL_SCHEMA_TOML
+        .find("[[copy_fields]]")
+        .expect("test setup: the fixture schema must declare copy fields");
+    let stripped = format!("{}{}", &FULL_SCHEMA_TOML[..start], &FULL_SCHEMA_TOML[end..]);
+    assert!(
+        !stripped.contains("[[dynamic_fields]]") && stripped.contains("[[copy_fields]]"),
+        "test setup: only the dynamic_fields block must be removed"
+    );
+    stripped
+}
+
+#[test]
+fn schema_compatibility_check_refuses_adding_the_first_or_removing_the_last_dynamic_rule() {
+    // The catch-all JSON fields backing dynamic fields exist only when at least
+    // one rule does, so crossing that boundary changes the Tantivy schema even
+    // though editing rules in between does not.
+    let none = schema_without_dynamic_fields();
+
+    let err = schema::check_compatible(&none, FULL_SCHEMA_TOML)
+        .expect_err("adding the first dynamic rule changes the Tantivy schema");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("dynamic_fields") && msg.to_lowercase().contains("reindex"),
+        "refusal must name dynamic_fields and say a reindex is needed, got: {msg}"
+    );
+
+    let err = schema::check_compatible(FULL_SCHEMA_TOML, &none)
+        .expect_err("removing the last dynamic rule changes the Tantivy schema");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("dynamic_fields") && msg.to_lowercase().contains("reindex"),
+        "refusal must name dynamic_fields and say a reindex is needed, got: {msg}"
+    );
+}
+
+#[test]
+fn schema_compatibility_check_allows_editing_dynamic_rules_without_emptying_them() {
+    // Rule set stays non-empty: no catch-all field appears or disappears, so no
+    // reindex is needed.
+    let extra_rule = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[dynamic_fields]]
+pattern = "*_s"
+type = "string"
+stored = true
+"#
+    );
+    schema::check_compatible(FULL_SCHEMA_TOML, &extra_rule)
+        .expect("adding a further dynamic rule must not require a reindex");
+}
+
+#[tokio::test]
+async fn reopening_a_data_dir_after_toggling_dynamic_fields_refuses_both_ways() {
+    // empty -> one rule
+    let none = schema_without_dynamic_fields();
+    let dir = TempDir::new().expect("temp dir");
+    {
+        let app = common::app_with_schema(dir.path(), &none).expect("app builds");
+        let (status, _) = common::post_docs(&app, &json!([{"id":"t1","body":"x"}])).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let err = common::app_with_schema(dir.path(), FULL_SCHEMA_TOML)
+        .expect_err("adding the first dynamic rule must refuse on reopen");
+    assert!(
+        format!("{err:#}").contains("dynamic_fields"),
+        "refusal must name dynamic_fields, got: {err:#}"
+    );
+
+    // one rule -> empty
+    let dir = TempDir::new().expect("temp dir");
+    {
+        let app = common::app_with_schema(dir.path(), FULL_SCHEMA_TOML).expect("app builds");
+        let (status, _) = common::post_docs(&app, &json!([{"id":"t2","body":"x"}])).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let err = common::app_with_schema(dir.path(), &none)
+        .expect_err("removing the last dynamic rule must refuse on reopen");
+    assert!(
+        format!("{err:#}").contains("dynamic_fields"),
+        "refusal must name dynamic_fields, got: {err:#}"
+    );
+}
+
+#[test]
+fn a_pattern_with_stars_at_both_ends_is_rejected_at_load_time() {
+    // Solr has no substring dynamic-field form; refuse rather than invent one.
+    let toml = FULL_SCHEMA_TOML.replace(r#"pattern = "*_i""#, r#"pattern = "*_i*""#);
+    let err = {
+        let (_dir, path) = write_schema(&toml);
+        schema::load(&path).expect_err("a two-star pattern must be rejected")
+    };
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("*_i*"),
+        "error must name the offending pattern, got: {msg}"
+    );
+}
+
 #[tokio::test]
 async fn reopening_a_data_dir_with_a_changed_schema_refuses_with_a_clear_error() {
     let dir = TempDir::new().expect("temp dir");
