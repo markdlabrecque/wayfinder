@@ -10,9 +10,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use tantivy::schema::{
-    Field, IndexRecordOption, STRING, Schema, TextFieldIndexing, TextOptions,
-};
+use tantivy::schema::{Field, IndexRecordOption, STRING, Schema, TextFieldIndexing, TextOptions};
 
 #[derive(Debug, Deserialize)]
 struct SchemaFile {
@@ -57,7 +55,6 @@ impl WayfinderSchema {
     pub fn field(&self, name: &str) -> Option<Field> {
         self.field_handles.get(name).copied()
     }
-
 }
 
 /// Loads and builds a Tantivy schema from a TOML schema file at `path`.
@@ -95,7 +92,10 @@ pub fn load(path: &Path) -> Result<WayfinderSchema> {
                 }
                 builder.add_text_field(&field_config.name, opts)
             }
-            other => bail!("unsupported field type `{other}` on field `{}`", field_config.name),
+            other => bail!(
+                "unsupported field type `{other}` on field `{}`",
+                field_config.name
+            ),
         };
         field_handles.insert(field_config.name.clone(), field);
     }

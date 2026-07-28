@@ -95,9 +95,9 @@ impl CoreIndex {
                 Value::String(s) => doc.add_text(field, s),
                 Value::Array(values) => {
                     for v in values {
-                        let s = v
-                            .as_str()
-                            .ok_or_else(|| anyhow!("field `{}` array values must be strings", field_config.name))?;
+                        let s = v.as_str().ok_or_else(|| {
+                            anyhow!("field `{}` array values must be strings", field_config.name)
+                        })?;
                         doc.add_text(field, s);
                     }
                 }

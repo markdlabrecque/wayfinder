@@ -54,7 +54,8 @@ impl SegmentCollector for AllScoredHitsSegmentCollector {
     type Fruit = Vec<(Score, DocAddress)>;
 
     fn collect(&mut self, doc: DocId, score: Score) {
-        self.hits.push((score, DocAddress::new(self.segment_ord, doc)));
+        self.hits
+            .push((score, DocAddress::new(self.segment_ord, doc)));
     }
 
     fn harvest(self) -> Self::Fruit {

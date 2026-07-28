@@ -65,15 +65,15 @@ fn error_response(status: StatusCode, msg: impl Into<String>, params: &Params) -
 /// Verifies the request's `{core}` path segment matches the core this app
 /// serves. Not part of the tracer-bullet scope (single core per process,
 /// PRD open question 1) beyond this sanity check.
-fn check_core(state: &AppState, core: &str, params: &Params) -> Result<(), Response> {
+fn check_core(state: &AppState, core: &str, params: &Params) -> Option<Response> {
     if core != state.core_name {
-        return Err(error_response(
+        return Some(error_response(
             StatusCode::NOT_FOUND,
             format!("unknown core `{core}`"),
             params,
         ));
     }
-    Ok(())
+    None
 }
 
 async fn ping(
@@ -82,7 +82,7 @@ async fn ping(
     RawQuery(query): RawQuery,
 ) -> Response {
     let params = Params::parse(query.as_deref().unwrap_or(""));
-    if let Err(resp) = check_core(&state, &core, &params) {
+    if let Some(resp) = check_core(&state, &core, &params) {
         return resp;
     }
     let body = json!({
@@ -103,14 +103,18 @@ async fn update(
     body: axum::body::Bytes,
 ) -> Response {
     let params = Params::parse(query.as_deref().unwrap_or(""));
-    if let Err(resp) = check_core(&state, &core, &params) {
+    if let Some(resp) = check_core(&state, &core, &params) {
         return resp;
     }
 
     let docs: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
-            return error_response(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}"), &params);
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("invalid JSON body: {e}"),
+                &params,
+            );
         }
     };
     let docs = match docs.as_array() {
@@ -128,10 +132,10 @@ async fn update(
         return error_response(StatusCode::BAD_REQUEST, e.to_string(), &params);
     }
 
-    if params.get("commit") == Some("true") {
-        if let Err(e) = state.index.commit() {
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), &params);
-        }
+    if params.get("commit") == Some("true")
+        && let Err(e) = state.index.commit()
+    {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), &params);
     }
 
     axum::Json(json!({
@@ -149,7 +153,7 @@ async fn select(
     RawQuery(query): RawQuery,
 ) -> Response {
     let params = Params::parse(query.as_deref().unwrap_or(""));
-    if let Err(resp) = check_core(&state, &core, &params) {
+    if let Some(resp) = check_core(&state, &core, &params) {
         return resp;
     }
 
@@ -178,8 +182,14 @@ async fn select(
     };
 
     let num_found = hits.len();
-    let start: usize = params.get("start").and_then(|s| s.parse().ok()).unwrap_or(0);
-    let rows: usize = params.get("rows").and_then(|s| s.parse().ok()).unwrap_or(10);
+    let start: usize = params
+        .get("start")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let rows: usize = params
+        .get("rows")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
 
     let fl: Option<Vec<String>> = params
         .get("fl")
@@ -196,7 +206,9 @@ async fn select(
     for (_, addr) in page {
         match state.index.render_doc(addr, fl.as_deref()) {
             Ok(doc) => docs.push(doc),
-            Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), &params),
+            Err(e) => {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), &params);
+            }
         }
     }
 
