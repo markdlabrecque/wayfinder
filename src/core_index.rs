@@ -18,6 +18,7 @@ use tantivy::{
 };
 
 use crate::collector::AllScoredHits;
+use crate::config::ServerConfig;
 use crate::schema::{self, ValueKind, WayfinderSchema};
 
 /// Renders one stored Tantivy value as the JSON Solr would return for it.
@@ -98,7 +99,7 @@ pub struct CoreIndex {
 }
 
 impl CoreIndex {
-    pub fn open(schema_path: &Path, data_dir: &Path) -> Result<CoreIndex> {
+    pub fn open(schema_path: &Path, data_dir: &Path, config: &ServerConfig) -> Result<CoreIndex> {
         let schema_toml = std::fs::read_to_string(schema_path)
             .with_context(|| format!("reading schema file {}", schema_path.display()))?;
         let wf_schema = schema::load(schema_path)?;
@@ -121,20 +122,27 @@ impl CoreIndex {
             })?;
         }
 
-        let mut index = Index::create_in_dir(data_dir, wf_schema.tantivy_schema.clone())
+        // `settings` only apply to a newly created index; re-opening an
+        // existing one keeps the doc-store settings it was built with, which
+        // is Tantivy's own rule and worth knowing before tuning them.
+        let mut index = Index::builder()
+            .schema(wf_schema.tantivy_schema.clone())
+            .settings(config.index_settings()?)
+            .create_in_dir(data_dir)
             .or_else(|_| Index::open_in_dir(data_dir))
             .context("opening/creating Tantivy index")?;
         index.set_tokenizers(wf_schema.tokenizers.clone());
         std::fs::write(&snapshot, &schema_toml)
             .with_context(|| format!("writing stored schema {}", snapshot.display()))?;
 
-        // Single-threaded writer: with a small, single-commit corpus this
-        // gives deterministic ascending doc-id allocation, which is what the
-        // tie-break in `AllScoredHits` relies on to match Solr's observed
-        // (insertion) order on equally-scored matches.
+        // `writer_threads` defaults to 1: a single writer thread allocates doc
+        // ids in insertion order, which is what the tie-break in
+        // `AllScoredHits` relies on to match Solr's observed (insertion) order
+        // on equally-scored matches.
         let writer: IndexWriter = index
-            .writer_with_num_threads(1, 32_000_000)
+            .writer_with_num_threads(config.indexing.writer_threads, config.indexing.writer_heap)
             .context("creating index writer")?;
+        writer.set_merge_policy(config.merge_policy()?);
 
         let reader = index
             .reader_builder()
