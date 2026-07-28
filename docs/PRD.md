@@ -100,6 +100,40 @@ gitignored — regenerate rather than trust this list if it ages):
 - `wt=json` only. No XML, no javabin, no `wt=phps`.
 - No core admin API in v1; cores are directories.
 
+#### Ratified divergences from captured Solr behaviour
+
+The rule elsewhere is that any difference from a captured fixture is a bug. These are the
+exceptions — knowing mismatches, each with the fixture that documents it and the reason it was
+chosen. Nothing may be added here without the same two things.
+
+1. **An unknown core returns a JSON error envelope, not Solr's 404 HTML page.**
+   `err_missing_core.json` shows real Solr answering with its "Searching for Solr? You must type
+   the correct path." easter egg. Wayfinder matches the 404 status and returns its normal JSON
+   error. Clients parse JSON; none depends on that HTML, and serving it would mean carrying a
+   second response format solely to reproduce a joke. (findings 15, issue #11)
+
+2. **A facet Wayfinder cannot build is a 400, where Solr returns 200 with empty counts.**
+   `facet_non_docvalues_text.json`, `facet_stored_only_field.json` and `facet_unknown_field.json`
+   show Solr answering `status: 0` with `"<field>":[]` for a non-docValues field, a stored-only
+   field, and a field that does not exist at all — no warning anywhere in the response. That is
+   the one captured behaviour this project rejects on the merits: the client cannot distinguish
+   "this field has no values" from "you asked for something impossible", which is exactly the
+   silent-empty-counts failure the tracer-bullet review flagged. Tantivy cannot aggregate a
+   non-`fast` column at all, so the honest answer is a hard 400 in the Solr error envelope,
+   worded to mirror the `sort` equivalent in finding 11. (issue #3's finding 16)
+
+3. **An unknown field in an incoming document is rejected, where Solr's `_default` configset
+   auto-adds it.** That configset is *schemaless* (`update.autoCreateFields` defaults to true), so
+   Solr silently adds the field as `text_general` and returns 200
+   (`update_unknown_field_schemaless.json`). Wayfinder matches non-schemaless Solr instead
+   (`update_unknown_field_strict.json`, 400), because auto-adding is runtime schema mutation,
+   which §3 rules out and Tantivy cannot do in place regardless. `[[dynamic_fields]]` is the
+   supported way to accept fields not named individually. (issue #10)
+
+Note that divergence 3 is a difference from the *configset* the reference fixtures were captured
+against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1 and 2 are
+differences from Solr proper.
+
 ### How this is verified
 
 Differential testing against a real Solr, which needs no client and no trace — just a corpus
@@ -283,7 +317,7 @@ deliberate exception, called out below.
 | `q` — boolean / term / phrase / prefix / range / fuzzy / regex | `QueryParser`, `BooleanQuery`, `PhraseQuery`, `RangeQuery`, `FuzzyTermQuery`, `RegexQuery` |
 | `fq` filter queries (repeatable) | `BooleanQuery` with a non-scoring `Occur::Must` clause |
 | `fl`, `start`, `rows` | stored-field retrieval, `TopDocs::with_limit(..).and_offset(..)` |
-| `sort` | `TopDocs::order_by_fast_field` (field must be `fast`) |
+| `sort` | custom collector over fast-field column readers (field must be `fast`) — **not** `TopDocs::order_by_fast_field`, see below |
 | `numFound` | `Count` collector |
 | **Faceting** — `facet.field`, `facet.query`, `facet.range` + `.start`/`.end`/`.gap`, `facet.limit`, `facet.mincount`, `facet.sort`, `facet.missing` | aggregation API: `terms`, `range`, `histogram`, `date_histogram` |
 | **Stats** — `stats`, `stats.field` | metric aggregations: `min`/`max`/`sum`/`avg`/`count`/`stats`/`extended_stats`/`percentiles`/`cardinality` |
@@ -297,6 +331,14 @@ deliberate exception, called out below.
 Tantivy's aggregation API is Elasticsearch-shaped, which is a good sign for this project: the
 bucket/metric model is a superset of what Solr's facet component needs, so the work is
 parameter translation rather than building an aggregation engine.
+
+**Correction from issue #2 (`sort`).** This table originally paired `sort` with
+`TopDocs::order_by_fast_field`. That primitive cannot implement the feature: it orders by exactly
+one fast field, so it cannot express multi-clause sort, cannot mix `score` into a clause list, and
+gives no control over where missing values land. `sort` is implemented instead as ordering inside
+Wayfinder's own collector (`src/collector.rs`), with per-segment fast-field column readers, the
+Lucene min/max selector for multi-valued fields, and missing values last in both directions. The
+`fast = true` requirement is unchanged — that part was right.
 
 ### v1 exception — edismax
 
@@ -402,6 +444,20 @@ composition on a pipeline the slice already proves.
 Normalise `QTime`, timestamps, and float tolerance on scores — and log every field the
 normaliser touched, because an over-eager normaliser turns a green suite into a lie.
 
+**Known limit, learned the hard way (issues #2, #11).** The harness proves *envelope*
+equivalence, not *semantic* equivalence. `error.msg` is deliberately normalised away — it is free
+text and outside the compatibility contract (findings 10) — so two genuinely different errors that
+share an HTTP status and `error.code` diff to **zero**. Issue #2 shipped a wrong error
+classification twice under a fully green harness for exactly this reason: reverting a real bug in
+sort-clause validation produced no diffs at all. A green run is therefore necessary but not
+sufficient for anything error-shaped, and every issue that produces errors (#4–#9) inherits this.
+The mitigation is per-feature: reduce a message to its *class* and compare that class against the
+fixture, so the fixture decides which error is correct without freezing either side's wording —
+see `sort_error_class()` in `tests/sort.rs`. There is a matching trap in the other direction:
+because `serde_json` is built without `preserve_order`, every emitted object is alphabetised, so
+comparing parsed values cannot detect key-order divergence at all (relevant to `json.nl=map`,
+where Solr's order is meaningful).
+
 Without a captured client trace, the query set is written deliberately rather than observed,
 so weight it toward the edges: zero results, empty facets, pagination past the end,
 multi-valued facets, facet with `mincount` filtering everything out, sort on each field type,
@@ -459,7 +515,19 @@ operational simplicity are where this project wins, and those are the primary go
    which breaks the compatibility claim — and Solr clients do routinely send extra params.
    **Ignore by default, log at debug, offer `strict_params = true`** for development, so gaps
    are still discoverable during the Search API phase.
-4. **Schema evolution.** What happens when a field is added, removed, or retyped against an
-   existing index? v1 answer is refuse to start and require a reindex. Good enough, and honest.
-5. **Analyzer preset coverage.** Which languages ship in v1? Probably English plus whatever
-   Tantivy's stemmer set gives cheaply.
+4. ~~**Schema evolution.**~~ **Resolved as written, and implemented in issue #10:** refuse to
+   start and require a reindex. Worth recording *why* there was never a softer option — Tantivy
+   fixes a schema at index creation and `IndexBuilder::open_or_create` does a strict equality
+   check, so **adding** a field is no more compatible than removing or retyping one; all three
+   need a reindex. Wayfinder persists the schema an index was built with and refuses on any
+   change, naming the field, rather than letting Tantivy fail later with "An index exists but the
+   schema does not match". The comparison covers `type`/`stored`/`fast`/`multi_valued` plus
+   whether `[[dynamic_fields]]` is empty (an empty-to-non-empty transition adds the catch-all
+   JSON fields, so it changes the real schema); `required` is input validation and not part of
+   the Tantivy schema, so toggling it is compatible.
+5. ~~**Analyzer preset coverage.**~~ **Resolved by issue #10:** every language in
+   `tantivy::tokenizer::Language` ships, 18 in total, as `text_<code>` presets alongside
+   `string`/`keyword`/`text_general`/`text_en`. Presets stem but do not strip stopwords, matching
+   `en_stem`'s shape; stopword removal is available through a custom `[[field_types]]` chain.
+   Tantivy ships no stopword list for Arabic, Greek, Romanian, Tamil or Turkish, so a `stopwords`
+   filter in those languages is a load-time error rather than a silent no-op.
