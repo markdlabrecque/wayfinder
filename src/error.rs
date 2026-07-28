@@ -30,6 +30,35 @@ pub enum Envelope {
     Bare,
 }
 
+/// The parts of a `WfError` that are set on only some error paths (the
+/// `WithParams` envelope's echoed request, and finding 45's one
+/// trace-carrying 500). Grouped and boxed as a single field on `WfError`
+/// rather than inlined, so every `WfError` — and every function returning
+/// `Result<_, WfError>`, which is most of `src/lib.rs`'s request-handling
+/// path — carries one pointer's worth of overhead for this instead of a
+/// `serde_json::Value` plus an `Option<String>`'s worth
+/// (`clippy::result_large_err`).
+#[derive(Default)]
+struct ErrorExtra {
+    params: Value,
+    /// Issue #35: some errors are detected only after the base query has
+    /// already run, so Solr's own fixture for them carries the base query's
+    /// `response` block alongside `error` (e.g. `facet_unknown_field.json`).
+    /// `None` when never set, which must render with no `response` key at
+    /// all — not a regression for errors detected before any query runs
+    /// (`facet_err_range_single.json`).
+    response: Option<Value>,
+    /// Set only for the one captured 500 whose error object carries `msg,
+    /// trace, code` with **no** `metadata` key at all (finding 45's
+    /// `err_regex_bad_class.json`: a regex that parses as a query but fails
+    /// automaton compilation) — every other error here, 400 or 500, keeps
+    /// the `metadata` array. `trace` itself is free text (a Java stack
+    /// trace on Solr's side) the differential normaliser drops the same way
+    /// it drops `error.msg` (finding 10), so its content never has to
+    /// match; only its *shape* — present, and `metadata` absent — does.
+    trace: Option<String>,
+}
+
 pub struct WfError {
     status: StatusCode,
     /// Wayfinder-honest analogue of Solr's `root-error-class`. Solr puts a Java
@@ -38,20 +67,10 @@ pub struct WfError {
     class: &'static str,
     msg: String,
     envelope: Envelope,
-    /// Boxed alongside `response` below to keep `WfError` — and therefore
-    /// every `Result<_, WfError>` in the crate — small
-    /// (`clippy::result_large_err`); `serde_json::Value` alone is large
-    /// enough to push the unboxed struct past clippy's threshold.
-    params: Box<Value>,
-    /// Issue #35: some errors are detected only after the base query has
-    /// already run, so Solr's own fixture for them carries the base query's
-    /// `response` block alongside `error` (e.g. `facet_unknown_field.json`).
-    /// `None` when never set, which must render with no `response` key at
-    /// all — not a regression for errors detected before any query runs
-    /// (`facet_err_range_single.json`). Boxed so this rarely-used field does
-    /// not inflate the size of every `Result<_, WfError>` in the crate
-    /// (`clippy::result_large_err`).
-    response: Option<Box<Value>>,
+    /// Boxed to keep `WfError` — and therefore every `Result<_, WfError>` in
+    /// the crate — small (`clippy::result_large_err`); the fields inside are
+    /// set on only some error paths.
+    extra: Box<ErrorExtra>,
 }
 
 impl WfError {
@@ -61,8 +80,7 @@ impl WfError {
             class,
             msg: msg.into(),
             envelope: Envelope::WithParams,
-            params: Box::new(Value::Object(serde_json::Map::new())),
-            response: None,
+            extra: Box::default(),
         }
     }
 
@@ -76,7 +94,7 @@ impl WfError {
 
     /// Attaches the request params for the `WithParams` envelope.
     pub fn with_params(mut self, params: &Params) -> Self {
-        self.params = Box::new(params.echo());
+        self.extra.params = params.echo();
         self
     }
 
@@ -89,7 +107,14 @@ impl WfError {
     /// `error` (`WithParams` envelope only — see the module docs on issue
     /// #35).
     pub fn with_response(mut self, response: Value) -> Self {
-        self.response = Some(Box::new(response));
+        self.extra.response = Some(response);
+        self
+    }
+
+    /// Marks this error as the one shape whose `error` object has no
+    /// `metadata` key at all — see `ErrorExtra::trace`'s doc comment.
+    pub fn with_trace(mut self, trace: impl Into<String>) -> Self {
+        self.extra.trace = Some(trace.into());
         self
     }
 }
@@ -97,26 +122,35 @@ impl WfError {
 impl IntoResponse for WfError {
     fn into_response(self) -> Response {
         let code = self.status.as_u16() as i64;
-        // Flat alternating array, like Solr's (finding 10).
-        let error = json!({
-            "metadata": ["error-class", "wayfinder::Error", "root-error-class", self.class],
-            "msg": self.msg,
-            "code": code,
-        });
+        // Flat alternating array, like Solr's (finding 10) — except the one
+        // `trace`-carrying shape, which never had a `metadata` key to begin
+        // with (`err_regex_bad_class.json`, finding 45).
+        let error = match &self.extra.trace {
+            Some(trace) => json!({
+                "msg": self.msg,
+                "trace": trace,
+                "code": code,
+            }),
+            None => json!({
+                "metadata": ["error-class", "wayfinder::Error", "root-error-class", self.class],
+                "msg": self.msg,
+                "code": code,
+            }),
+        };
         let body = match self.envelope {
             Envelope::Bare => json!({ "error": error }),
             Envelope::NoParams => json!({
                 "responseHeader": { "status": code, "QTime": 0 },
                 "error": error,
             }),
-            Envelope::WithParams => match self.response.map(|b| *b) {
+            Envelope::WithParams => match self.extra.response {
                 Some(response) => json!({
-                    "responseHeader": { "status": code, "QTime": 0, "params": self.params },
+                    "responseHeader": { "status": code, "QTime": 0, "params": self.extra.params },
                     "response": response,
                     "error": error,
                 }),
                 None => json!({
-                    "responseHeader": { "status": code, "QTime": 0, "params": self.params },
+                    "responseHeader": { "status": code, "QTime": 0, "params": self.extra.params },
                     "error": error,
                 }),
             },
