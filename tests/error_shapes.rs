@@ -16,9 +16,9 @@
 //! in `err_bad_syntax.json`, `err_update_bad_json.json`, `err_update_put.json`.
 
 // `tests/common` is shared with the tracer-bullet suite; this file uses only
-// part of it. The allow keeps that from reading as dead code here, and leaves
-// `tests/common/mod.rs` untouched for the concurrent #1 harness branch.
-#[allow(dead_code)]
+// part of it. The allow that covers that now lives inside `tests/common/mod.rs`
+// as an inner attribute (added by #10/#1), so it is not repeated here — clippy
+// rejects the duplicate under `-D warnings`.
 mod common;
 
 use axum::Router;
