@@ -29,11 +29,17 @@
 //!   strings for a date field, the gap verbatim as the date-math expression
 //!   (`facet_range_numeric.json`, `facet_range_date.json`).
 //!
-//! **Documented divergence** (findings 16): real Solr answers a facet it cannot
-//! build — a non-docValues field, a stored-only field, a field that does not
-//! exist — with HTTP 200 and an empty array. Wayfinder refuses with a 400,
-//! because Tantivy has no column to aggregate and a silently empty count block
-//! is a wrong answer a client cannot detect.
+//! **Documented divergence** (findings 16, narrowed by issue #26): real Solr
+//! answers a facet on an *existing but unfacetable* field — a non-docValues
+//! field, or a stored-only field — with HTTP 200 and an empty array. Wayfinder
+//! refuses with a 400, because Tantivy has no column to aggregate and a silently
+//! empty count block is a wrong answer a client cannot detect.
+//!
+//! A field that does **not exist** is *not* part of that divergence: real Solr
+//! 400s on it too (`facet_unknown_field.json`), so Wayfinder matches. The
+//! original fixture said 200 because it was captured against a container whose
+//! schema had been polluted by `capture.sh`'s own schemaless probe, which
+//! auto-created `nosuchfield` — see issue #26.
 
 use std::ops::Bound;
 

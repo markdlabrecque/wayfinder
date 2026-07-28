@@ -126,9 +126,17 @@ container. Anything not a main-core GET is a `manifest-errors.tsv` row.
 16. **The issue-#3 premise was wrong: Solr never errors on a facet it cannot build.**
     `facet.field` on `body` (text_en, indexed, stored, **no** docValues) returns HTTP 200 with
     `"body":[]` (`facet_non_docvalues_text.json`). So does a stored-only field that is neither
-    indexed nor docValues (`facet_stored_only_field.json`, `note` on the `facets` core), and so
-    does a field that **does not exist at all** (`facet_unknown_field.json`, `"nosuchfield":[]`).
-    All three are `status: 0`, present-and-empty, no warning anywhere in the response.
+    indexed nor docValues (`facet_stored_only_field.json`, `note` on the `facets` core). Both are
+    `status: 0`, present-and-empty, no warning anywhere in the response.
+
+    **Corrected by issue #26.** This finding originally claimed a third case — that a field which
+    does not exist at all also returns 200 with `"nosuchfield":[]`. That was wrong, and wrong for
+    an instructive reason: the fixture was captured against a container whose `content` schema had
+    already been polluted by this same script's schemaless probe, which auto-adds `nosuchfield`
+    and cannot remove it. So `nosuchfield` *did* exist when the fixture was taken. On a clean
+    container Solr answers `facet.field=nosuchfield` with a **400**, which is what Wayfinder does,
+    so unknown facet fields are **not** a divergence at all. `capture.sh` now runs the probe on its
+    own throwaway core, and the fixture is re-captured at 400.
 
     That is precisely the silent-empty-counts behaviour tracer-bullet review follow-up 1 names as
     a bug: the client cannot tell "this field has no values" from "I asked for something
