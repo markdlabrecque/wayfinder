@@ -1,5 +1,6 @@
-# Solr reference capture — regenerable via solr-ref/capture.sh
-/solr-ref/
+# Solr reference fixtures — regenerable via solr-ref/capture.sh
+/solr-ref/responses/
+/solr-ref/manifest.tsv
 
 # Rust
 /target/
