@@ -183,7 +183,68 @@ above (PRD §8). Two modes, one differ:
   but the expected side comes from a live Solr over HTTP (`WAYFINDER_DIFF_SOLR_URL`, default
   `http://localhost:8983/solr/content`). Run `solr-ref/capture.sh` first — it leaves the
   container up with the schema and corpus already loaded; this test does not orchestrate
-  Docker itself.
+  Docker itself. **This mode never queries Wayfinder** — it re-fetches from Solr itself and
+  diffs that against the committed fixture, i.e. a fixture-staleness check against the live
+  container, not a Wayfinder compatibility check (that is the hermetic mode's job). This matters
+  for the self-expiring list below: a divergence that only exists because Wayfinder lacks a
+  feature (e.g. `fl=score`, issue #34) trivially "matches" in live mode on every run, since real
+  Solr is internally consistent with its own past capture — so those entries' self-expiry is
+  decided by the hermetic run only, and live mode just logs them.
+
+### `manifest-errors.tsv` wiring (issue #31)
+
+`manifest-errors.tsv` (added by issue #11 for the non-core-relative-GET error fixtures — other
+cores, POST/PUT/DELETE, request bodies) is now run by the same two-mode harness, in
+`tests/differential.rs::manifest_errors_every_row_runs_against_the_matching_hermetic_app` /
+`live_solr_matches_committed_manifest_errors`. `tests/common/diff.rs::load_manifest_errors`
+parses its 6-column format (`name, status, method, url-after-/solr/, body, [base-url]`);
+`common::request_full`/`request` (moved from `tests/error_shapes.rs`, issue #31 item 3) issue the
+requests so POST/PUT/DELETE and bodies work. Per-row app selection is by the URL's leading core
+segment (`content/...`, `facets/...`, `keyorder/...`), rewritten to `content` before the request
+is issued, since every Wayfinder test app names its core `content` (`KEYORDER_SCHEMA_TOML`'s
+comment documents the same rewrite for `tests/json_key_order.rs`'s own copy of that core). A
+segment naming neither — `nosuchcore/...`, `schemaless_probe/...` — is issued unrewritten against
+the default content app, since that mismatch (a core Wayfinder genuinely does not have) is exactly
+the shape of the `ACCEPTED_DIVERGENCES` rows below.
+
+### `ACCEPTED_DIVERGENCES` vs `EXPECTED_DIVERGENCES`
+
+Two distinct lists, both self-documenting, printed during their runs, never silent:
+
+- **`ACCEPTED_DIVERGENCES`** (`tests/differential.rs`, manifest-errors runner only) — *ratified,
+  permanent* divergences from captured Solr behaviour, each citing the PRD/findings section that
+  ratifies it: `err_missing_core` (finding 15, HTML vs JSON 404 body — checked as a raw-text
+  non-JSON assertion, since `common::fixture` would panic parsing it), `update_unknown_field_schemaless`
+  (PRD ratified-divergence 3, no schemaless mode), and the three unfacetable-field rows
+  (finding 16, `facet_non_docvalues_text[/_enum]`, `facet_stored_only_field`). These never
+  expire — there is nothing to build, the PRD says this is Wayfinder's intended shape — so they
+  are checked by a narrower, row-specific assertion instead of the generic differ, and are not
+  expected to ever leave the list.
+- **`EXPECTED_DIVERGENCES`** (`manifest.tsv` loop) / **`EXPECTED_DIVERGENCES_MANIFEST_ERRORS`**
+  (`manifest-errors.tsv` loop) — a *self-expiring to-do list* for an unbuilt feature or an
+  as-yet-unfixed bug, not a harness bug and not ratified. Every entry's diff is still computed;
+  the moment it comes back empty the suite goes red, naming the entry to delete. See "Expected-
+  divergence list" below for the `manifest.tsv` history; `EXPECTED_DIVERGENCES_MANIFEST_ERRORS`
+  currently carries one entry, `facet_unknown_field` (issue #35: Wayfinder's facet-field error
+  omits the `response` block Solr's fixture carries alongside `error` — a real gap in
+  `src/lib.rs::select`'s error path found by running this wiring for the first time, confirmed
+  against the live canonical container, not a listed accepted divergence since nothing ratifies
+  it as intended).
+
+### Running the live error mode
+
+`WAYFINDER_DIFF_SOLR=1 cargo test --test differential` runs `live_solr_matches_committed_manifest_errors`
+alongside the others. Each row uses its own effective base URL (column 6 of `manifest-errors.tsv`,
+defaulting to the canonical `http://localhost:8983/solr`) and its own method/body via
+`common::diff::fetch_live_full`/`fetch_live_status` (the latter is a status-only fetch, used for
+`ACCEPTED_DIVERGENCES` rows, since `err_missing_core`'s HTML body would fail `fetch_live_full`'s
+JSON parse). A row whose base URL fails a quick reachability probe
+(`common::diff::live_reachable`) is a printed, named skip — the per-issue containers on
+8984/8985/8986 are not guaranteed to be up — except the canonical 8983 base, which must always
+answer. Running this mode **writes** to the reference container: `update_unknown_field_schemaless`
+re-POSTs `probe_unknown_field` with `commit=true` against the canonical 8983 container, exactly
+as `manifest-errors.tsv`'s own row does — idempotent in practice (same doc `id`, so a re-POST
+just re-indexes it), but not a read-only probe.
 
 ### Adding a query
 
@@ -196,10 +257,12 @@ hand-edit the manifest or fixtures.
 
 `tests/differential.rs::EXPECTED_DIVERGENCES` names manifest entries with a *known, currently
 real* Wayfinder-vs-Solr divergence caused by an unbuilt feature (not a harness bug) — currently
-`sort` *ordering* (issue #2), plus `ping` for the reason below. The seven faceting entries it
+`ping` (reason below) plus `select_term_scored`/`select_quick_scored` (issue #31/#34, finding
+31: no `fl=score` support). `sort` *ordering* (issue #2) and the seven faceting entries this list
 used to carry (`facet.mincount`/`limit`/`missing`/`query`, `json.nl=map`, term-dictionary
-enumeration for the zero/all-filtered facets) were deleted when issue #3 landed and they stopped
-diverging. Each entry carries a mandatory reason naming the owning issue.
+enumeration for the zero/all-filtered facets) were deleted when issues #2/#3 landed and they
+stopped diverging — the mechanism working exactly as designed. Each entry carries a mandatory
+reason naming the owning issue.
 
 Note what does **not** belong here: an *accepted, permanent* divergence (finding 15's unknown
 core, finding 16's unfacetable-field 400). Those get their fixtures in `manifest-errors.tsv` and
@@ -392,9 +455,13 @@ cannot see any of them unless the `preserve_order` feature is on, which is why t
     It is *not* the managed-schema declaration order (where `_version_` and `_root_` are declared
     up front, before the dynamically-added `body`/`category`), so the fixtures rule schema order
     out directly. That `fl` order does not drive it was established by a live probe during the
-    issue-#25 investigation and is **not** pinned by any committed fixture — the only multi-field
-    `fl` capture, `select_term` (`fl=id,body`), lists its fields in input order anyway, so it
-    cannot discriminate. Treat the `fl` half as inferred, per finding 20's lesson.
+    issue-#25 investigation; the only multi-field `fl` capture at the time, `select_term`
+    (`fl=id,body`), listed its fields in input order anyway, so it could not discriminate.
+    **Update (issue #31):** the `fl` half is no longer inferred-only — `select_fl_reversed`
+    (`fl=body,id`, deliberately reversed) is a committed fixture whose docs come back `id, body`
+    (input order), not `body, id` (`fl` order), pinning this half the same way `select_all` pins
+    the other. See `tests/json_key_order.rs::select_fl_reversed_doc_key_order_matches_solr` and
+    its vacuity guard.
 
 25. **Wayfinder's doc field order is *schema* order (`render_doc` in `src/core_index.rs`) and
     coincides with Solr's for every committed corpus**, because each corpus was indexed with its
@@ -410,7 +477,8 @@ cannot see any of them unless the `preserve_order` feature is on, which is why t
     entirely. This is the ordering half of finding 6, and it is why the differential normaliser is
     order-insensitive on that object and why `params` is the one permanently exempt path in
     `key_order::EXEMPT_PATHS`. Every *other* object in the envelope is ordered on purpose and is
-    compared.
+    compared. Issue #25's own change moved Wayfinder's echo of this object from alphabetical to
+    request order — neither matches Solr's `HashMap` order, so the exemption stands regardless.
 
 ## Findings from the issue #24 `facet.field` numeric/date capture
 
@@ -588,3 +656,26 @@ schemaless probe ever touched it; `facet_err_field_single.json`'s clean
     `json.nl=map` + `facet.missing`, the null bucket's object key is the empty string
     (`facet_json_nl_map_missing.json`: `{"apple":2,"banana":1,"":2}`) — exactly what Wayfinder
     already emitted; the `ponytail:` guess in `render_buckets` is now a captured fact.
+
+## Findings from the issue #31 harness follow-up capture
+
+Claiming finding 31 (32/33 not needed — no further new Solr facts surfaced).
+
+Three new `content`-core captures against the canonical container, added to `manifest.tsv`:
+`select_term_scored`/`select_quick_scored` (`fl=id,score` on the two existing free-text
+relevance queries) and `select_fl_reversed` (`fl=body,id`, see finding 24's update above).
+
+31. **`fl=score` puts a per-doc `score` float on each doc and a `response.maxScore` key
+    alongside `numFound`/`start`, not just a bare per-query relevance number.**
+    `select_term_scored.json`: `response.maxScore` equals the top doc's own `score`
+    (`0.45748958`), and every doc in `response.docs` carries its own `score` — the docs are still
+    ordered by descending score exactly as they are without `fl=score`, `fl` only adds which
+    fields render, never reorders anything (finding 24's `fl`-order lesson generalises: `fl`
+    governs field selection, not document order or field order for the fields it does select
+    when unreversed — see the reversed case above). Wayfinder does not implement `fl=score` at
+    all today (it is silently dropped, the same as any other unknown-but-harmless `fl` entry —
+    finding from `select_fl_missing`), so `response.maxScore` never appears and no doc ever
+    carries `score` — tracked as issue #34, and `tests/differential.rs::EXPECTED_DIVERGENCES`
+    carries `select_term_scored`/`select_quick_scored` as self-expiring entries naming it. The
+    ranked-ID-list differ's score-tolerance path (`diff_ranked_ids` in `tests/common/diff.rs`)
+    is now exercised against these real fixtures, not just synthetic id/score pairs.
