@@ -17,7 +17,7 @@ use tantivy::{
     DateTime, DocAddress, Index, IndexReader, IndexWriter, ReloadPolicy, Score, TantivyDocument,
 };
 
-use crate::collector::AllScoredHits;
+use crate::collector::{AllScoredHits, SortClause};
 use crate::config::ServerConfig;
 use crate::schema::{self, ValueKind, WayfinderSchema};
 
@@ -342,15 +342,18 @@ impl CoreIndex {
     }
 
     /// Runs `query`, intersects with every `filter_queries` match set, and
-    /// returns the full match list (all docs, unpaginated) sorted per
-    /// `AllScoredHits` — score descending, then ascending doc order.
+    /// returns the full match list (all docs, unpaginated) ordered per
+    /// `AllScoredHits`: by `sort`'s clauses, then always by ascending doc order.
+    /// An empty `sort` is the no-`sort` default — score descending, then
+    /// ascending doc order.
     pub fn search(
         &self,
         query: &dyn Query,
         filter_queries: &[Box<dyn Query>],
+        sort: &[SortClause],
     ) -> Result<Vec<(Score, DocAddress)>> {
         let searcher = self.reader.searcher();
-        let mut hits = searcher.search(query, &AllScoredHits)?;
+        let mut hits = searcher.search(query, &AllScoredHits::new(sort.to_vec()))?;
 
         for fq in filter_queries {
             let allowed = searcher.search(fq.as_ref(), &DocSetCollector)?;

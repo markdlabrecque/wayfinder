@@ -28,8 +28,16 @@ use tower::ServiceExt;
 
 pub const CORE: &str = "content";
 
-/// The tracer-bullet schema per PRD §7: `id` (string, stored, unique key),
+/// The tracer-bullet schema per PRD §7: `id` (string, fast, stored, unique key),
 /// `body` (text_en, stored), `category` (string, fast, multi_valued, stored).
+///
+/// `id` is `fast = true` to mirror the reference Solr, not as a convenience:
+/// Solr's `_default` configset gives its `string` type `docValues="true"`, so
+/// real Solr sorts on `id` happily — `select_sort.json` is exactly that. A
+/// mirror schema without `fast` on `id` would make `sort=id desc` a 400 here
+/// while the fixture is a 200, which is a divergence in the *test* schema, not
+/// in Wayfinder. Added by issue #2 (sort); `body` stays non-fast so
+/// `err_bad_sort.json`'s 400 still reproduces.
 pub const SCHEMA_TOML: &str = r#"
 [core]
 name = "content"
@@ -41,6 +49,7 @@ name = "id"
 type = "string"
 stored = true
 required = true
+fast = true
 
 [[fields]]
 name = "body"

@@ -172,6 +172,65 @@ curl -s "$STRICT_SOLR/$CORE/schema" -H 'Content-Type: application/json' -d '{
 cap_post update_unknown_field_strict 'update?commit=true' \
   '[{"id":"probe_unknown_field","body":"probe","nosuchfield":"x"}]' "$STRICT_SOLR"
 
+# --- sort parameter (issue #2) ----------------------------------------------
+# Appended block; nothing above is edited, and the shared schema / 5-doc corpus
+# are deliberately untouched so every pre-existing fixture stays byte-identical.
+#
+# The corpus only offers three sortable-ish fields: `id` (string, single-valued,
+# docValues via the _default `string` type), `body` (text_en, no docValues) and
+# `category` (string, docValues, *multiValued*). That is enough for every case in
+# the issue without adding a field:
+#   - direction:      sort=id asc / id desc
+#   - multi-clause:   score <dir>,id <dir> — with q=*:* every doc scores the same,
+#                     so the second clause alone decides the order, which is what
+#                     proves multi-clause parsing is honoured end to end
+#   - score:          q=lazy scores doc1/doc2 differently, so asc vs desc is visible
+#   - pagination:     sort + start/rows
+#   - multiValued:    sorting on `category` is NOT an error in Solr 9 — it is a
+#                     200 that uses Lucene's SortedSetSortField selector (min
+#                     value for asc, max for desc), missing values last. Captured
+#                     both directions because that is the only way to see it.
+#   - error paths:    a non-fast field buried among valid clauses, a junk
+#                     direction token, and a missing direction token (the last two
+#                     were captured to find out what Solr does; both are 400s)
+cap select_sort_asc            'select?q=*:*&sort=id+asc&rows=3&wt=json'
+cap select_sort_score_all      'select?q=*:*&sort=score+desc&rows=10&wt=json'
+cap select_sort_score_desc     'select?q=lazy&df=body&sort=score+desc&rows=5&wt=json'
+cap select_sort_score_asc      'select?q=lazy&df=body&sort=score+asc&rows=5&wt=json'
+cap select_sort_multi_asc      'select?q=*:*&sort=score+desc,id+asc&rows=5&wt=json'
+cap select_sort_multi_desc     'select?q=*:*&sort=score+desc,id+desc&rows=5&wt=json'
+cap select_sort_paged          'select?q=*:*&sort=id+desc&rows=2&start=2&wt=json'
+cap select_sort_paged_past_end 'select?q=*:*&sort=id+desc&rows=2&start=99&wt=json'
+cap select_sort_mv_asc         'select?q=*:*&sort=category+asc&wt=json'
+cap select_sort_mv_desc        'select?q=*:*&sort=category+desc&wt=json'
+cap err_sort_bad_clause_among_good 'select?q=*:*&sort=id+asc,body+desc&wt=json'
+cap err_sort_bad_direction     'select?q=*:*&sort=id+sideways&wt=json'
+cap err_sort_no_direction      'select?q=*:*&sort=id&wt=json'
+
+# Which error wins when a sort spec has more than one problem. Captured over two
+# review rounds, because issue #2 twice asserted a check order on inference and
+# was twice wrong. Each fixture below establishes exactly one thing -- read the
+# scope carefully, it is narrower than it looks:
+#   - score+sideways:        the direction check fails. pos=5 (past the field name).
+#                            Establishes: score is NOT exempt from the direction
+#                            check. It says nothing about field resolution -
+#                            under direction-first a bad direction errors either
+#                            way. The special-casing is established by
+#                            select_sort_score_* returning 200 and ranking.
+#   - body+desc,id+sideways: an EARLIER clause's field error beats a LATER clause's
+#                            direction error. Establishes: clause-by-clause, left to
+#                            right, stopping at the first bad clause. It says
+#                            NOTHING about the order of checks *within* a clause --
+#                            clause ordering alone explains it.
+#   - body+sideways:         one clause, bad in BOTH ways (non-docValues field AND a
+#                            junk direction). The only spec that separates the two
+#                            within-clause orders, and Solr answers the DIRECTION
+#                            error. Establishes: within a clause the direction is
+#                            checked BEFORE the field is resolved.
+cap err_sort_score_bad_direction   'select?q=*:*&sort=score+sideways&wt=json'
+cap err_sort_field_before_direction 'select?q=*:*&sort=body+desc,id+sideways&wt=json'
+cap err_sort_direction_before_field 'select?q=*:*&sort=body+sideways&wt=json'
+
 echo
 column -t -s $'\t' "$HERE/manifest.tsv"
 echo

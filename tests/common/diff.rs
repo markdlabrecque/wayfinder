@@ -290,8 +290,14 @@ pub fn load_manifest(path: &Path) -> Vec<ManifestEntry> {
 /// default suite.
 pub fn fetch_live(base_url: &str, path_and_query: &str) -> (u16, Value) {
     let url = format!("{base_url}/{path_and_query}");
+    // `-g` disables curl's URL globbing, or the `[` in `err_bad_syntax`'s
+    // `fq=category:[unclosed` is read as a glob range and curl exits non-zero
+    // before issuing a request. `capture.sh`'s `cap()` has always passed `-sg`
+    // for the same reason; this side was missing it, which broke live mode for
+    // the whole manifest (issue #1 follow-up: "live mode never exercised
+    // end-to-end").
     let output = std::process::Command::new("curl")
-        .args(["-s", "-w", "\n%{http_code}", &url])
+        .args(["-sg", "-w", "\n%{http_code}", &url])
         .output()
         .unwrap_or_else(|e| panic!("failed to run curl against {url}: {e}"));
     assert!(

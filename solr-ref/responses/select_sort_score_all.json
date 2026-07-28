@@ -1,0 +1,47 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"*:*",
+      "sort":"score desc",
+      "rows":"10",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"doc1",
+      "body":"the quick brown fox jumps over the lazy dog",
+      "category":["animals","classic"],
+      "_version_":1871975046978732032,
+      "_root_":"doc1"
+    },{
+      "id":"doc2",
+      "body":"a lazy afternoon in the garden",
+      "category":["garden"],
+      "_version_":1871975046982926336,
+      "_root_":"doc2"
+    },{
+      "id":"doc3",
+      "body":"quick thinking saves the day",
+      "category":["misc","classic"],
+      "_version_":1871975046983974912,
+      "_root_":"doc3"
+    },{
+      "id":"doc4",
+      "body":"dogs and cats living together",
+      "category":["animals"],
+      "_version_":1871975046985023488,
+      "_root_":"doc4"
+    },{
+      "id":"doc5",
+      "body":"nothing much here at all",
+      "_version_":1871975046986072064,
+      "_root_":"doc5"
+    }]
+  }
+}

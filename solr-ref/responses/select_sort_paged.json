@@ -1,0 +1,31 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"*:*",
+      "start":"2",
+      "sort":"id desc",
+      "rows":"2",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":2,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"doc3",
+      "body":"quick thinking saves the day",
+      "category":["misc","classic"],
+      "_version_":1871975046983974912,
+      "_root_":"doc3"
+    },{
+      "id":"doc2",
+      "body":"a lazy afternoon in the garden",
+      "category":["garden"],
+      "_version_":1871975046982926336,
+      "_root_":"doc2"
+    }]
+  }
+}
