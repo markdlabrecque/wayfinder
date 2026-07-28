@@ -1,0 +1,35 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "q":"*:*",
+      "fl":"id,created",
+      "sort":"created desc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":6,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "created":"2021-05-01T00:00:00Z",
+      "id":"s3"
+    },{
+      "created":"2021-03-01T00:00:00Z",
+      "id":"s1"
+    },{
+      "created":"2021-02-01T00:00:00Z",
+      "id":"s4"
+    },{
+      "created":"2021-01-01T00:00:00Z",
+      "id":"s2"
+    },{
+      "id":"s5"
+    },{
+      "created":"1969-06-01T00:00:00Z",
+      "id":"s6"
+    }]
+  }
+}

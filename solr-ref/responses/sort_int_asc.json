@@ -1,0 +1,35 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "q":"*:*",
+      "fl":"id,views",
+      "sort":"views asc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":6,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"s6",
+      "views":-5
+    },{
+      "id":"s4"
+    },{
+      "id":"s2",
+      "views":10
+    },{
+      "id":"s3",
+      "views":20
+    },{
+      "id":"s1",
+      "views":30
+    },{
+      "id":"s5",
+      "views":40
+    }]
+  }
+}

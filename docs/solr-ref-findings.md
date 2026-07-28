@@ -459,3 +459,67 @@ Eleven new `manifest-errors.tsv` rows against the `facets` core (a `facets`-core
     does not by itself distinguish value order from lexical order (RFC3339 lexical order and
     chronological order coincide for these dates), so it is asserted but not load-bearing for the
     fix the way the numeric fixtures are.
+
+## Findings from the issue #32 sort-debt capture
+
+Claiming findings 34-37 (issue #31 reserved 31-33). Twenty-two new `manifest-errors.tsv` rows
+against a new `sortdebt` core (own container `wayfinder-solr-32`, port 8987 — not the
+`content` core, so none of these are `manifest.tsv` rows). Corpus `s1..s6`: `category`
+string, `views` pint, `weight` pfloat, `created` pdate, `nums` multiValued pint, with
+per-field gaps (`s4` has no `views`; `s5` has only `id`/`category`/`views`) and **negative
+values plus a pre-epoch date on `s6`** — the negatives are what make finding 36
+discriminable at all.
+
+34. **The comma between sort clauses is mandatory, and extra tokens after a direction are a
+    400, not ignored.** Within one comma-delimited clause, the field is the first
+    whitespace-delimited token and *everything from there to the next comma or end of spec*,
+    trimmed, must be exactly `asc` or `desc`; otherwise Solr answers the direction error with
+    `pos` just past the field token. `sort=id asc category desc`, `sort=id asc garbage`, and
+    `sort=id asc category` all 400 with
+    `Can't determine a Sort Order (asc or desc) in sort spec '<spec>', pos=2`
+    (`sort_clause_space_separated.json`, `sort_clause_trailing_garbage.json`,
+    `sort_clause_trailing_valid_field.json`). This kills Wayfinder's previous
+    split-on-whitespace-and-drop-the-rest reading: `sort=id asc garbage` was a silent 200
+    here and is a 400 in Solr — exactly the "never a silent fallback" property. Comma
+    handling is asymmetric: a trailing comma is fine (`sort=id asc,` → 200,
+    `sort_clause_trailing_comma.json`), as is whitespace around the separating comma
+    (`sort_clause_space_before_comma.json`, `sort_clause_space_after_comma.json`) and an
+    empty `sort=` (`sort_clause_empty.json`, default order) — but a comma *starting* a
+    clause glues onto the following token and fails **field resolution**: `sort=,id asc` and
+    `sort=id asc,,category desc` 400 with
+    `sort param could not be parsed as a query, and is not a field that exists in the
+    index: ,id` (resp. `,category`) — a third field-error wording, still classified as a
+    field error by `tests/sort.rs::sort_error_class` (`sort_clause_leading_comma.json`,
+    `sort_clause_double_comma.json`). So "skip empty clauses" is right only for the
+    *trailing* position; Wayfinder previously 200'd the leading-comma case.
+
+35. **The direction error's `pos` is absolute within the whole sort spec, not
+    clause-relative — the inference flagged in `src/lib.rs` was right.**
+    `sort=id asc,id sideways` → `pos=9` (`err_sort_second_clause_bad_direction.json`),
+    exactly what Wayfinder's arithmetic predicted; `sort=id asc,category` → `pos=15`
+    (`err_sort_second_clause_no_direction.json`), i.e. past the *second* clause's
+    whole field token; and leading whitespace counts — `sort='  id sideways'` → `pos=4`
+    (`err_sort_leading_whitespace.json`).
+
+36. **A document missing a numeric, float, or date sort value sorts as the value 0 — not
+    first, not last.** Lucene's default `missingValue` for numeric sorts is 0, and the
+    fixtures pin it: under `views asc` the missing doc lands *between* `-5` and `10`
+    (`s6, s4, s2, s3, s1, s5` — `sort_int_asc.json`), under `weight asc` between `-1.5`
+    and `0.5`, and under `created asc` between the pre-epoch `1969-06-01` and `2021-01-01`
+    (missing date = epoch). Descending is the exact mirror. Without `s6`'s negatives this
+    is indistinguishable from "missing sorts first under asc" — which is what a corpus of
+    positive values would have wrongly suggested. **This is a per-type divergence from
+    strings**: a missing `SortedSet` (string) value sorts last in *both* directions
+    (finding 16), so missing-value placement is a property of the column type, not of the
+    sort machinery. Wayfinder's previous missing-last-for-everything comparator was wrong
+    for the numeric/float/date arms.
+
+37. **The min/max selector applies to multiValued numerics exactly as to strings, composed
+    with finding 36's missing-as-zero.** `nums asc` orders by per-doc minimum
+    (`s6(-10), s5(missing→0), s1(10), s3(20), s2(50), s4(70)` — `sort_mv_int_asc.json`);
+    `nums desc` by per-doc maximum (`s1(90), s3(80), s4(70), s2(60), s6(5), s5(missing→0)`
+    — `sort_mv_int_desc.json`). The desc order is not the reverse of the asc order (the
+    corpus was arranged so min-order and max-order disagree), which is what proves a
+    selector rather than a direction flip; and `s6` (max `5`) sorting *above* the missing
+    `s5` under desc while `s5` sits between `-10` and `10` under asc is the multiValued
+    confirmation of missing-as-zero.
