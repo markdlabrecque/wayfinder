@@ -198,6 +198,26 @@ never produces and whose semantics aren't Solr's anyway; patterns are now valida
 along with the dead `(Some("*"), _)` half of the first arm. Covered by
 `a_pattern_with_stars_at_both_ends_is_rejected_at_load_time`.
 
+### Round 2 — independent review: APPROVED, mergeable
+
+The same reviewer re-examined `5d58f4b` and re-ran the gates itself (37 passed, `cargo fmt
+--check` clean, `cargo clippy --all-targets -- -D warnings` clean). It confirmed the fix is
+structural rather than a patch: `parse()` no longer has an independent
+`if !dynamic_fields.is_empty()` branch, it iterates `catch_all_fields(...)`, and
+`check_compatible` calls the same function on both sides — so **no path remains in `parse()` that
+can add or omit a catch-all field without going through it**, and the two sites cannot drift
+again. Also confirmed: `validate_pattern` matches Solr's actual dynamic-field grammar (wildcard at
+one end only, so `a*b` is correctly rejected too) with no coverage lost by deleting the
+substring arm; the existing longest-pattern-wins tests pass unchanged; all three false-premise
+sites now state the true boundary; the mutation used to verify the check is not lurking in the
+diff (`if before != after { bail!(...) }` intact); and shared-file discipline still holds
+(`tests/tracer_bullet.rs` empty diff vs `main`, `tests/common/mod.rs` untouched by this commit,
+`solr-ref/responses/` adds only).
+
+**This closes the review at the 2-round cap with no must-fix items outstanding.** Round 2 was a
+verification pass, not a second bounce, so the "could use more review passes" flag does not apply;
+the follow-ups below are the complete set of known deferred work.
+
 ## Follow-ups
 
 1. **Single-valued field given a JSON array** is accepted, indexing every value and returning
@@ -220,6 +240,15 @@ along with the dead `(Some("*"), _)` half of the first arm. Covered by
    verified back at `numFound: 5`, and no captured fixture is affected, but the container should
    be recreated (`docker rm -f wayfinder-solr-ref && solr-ref/capture.sh`) before trusting a
    live differential run from issue #1.
+
+   **Resolved by the orchestrator.** The container was recreated and verified clean:
+   `nosuchfield` is gone, the schema is back to `id`/`body`/`category` plus Solr's own internals,
+   and the corpus reads `numFound: 5`. Worth recording what the recapture incidentally proved —
+   14 fixtures came back byte-different, and **every difference was `QTime`, `_version_`, or
+   `ping`'s `rid`**, nothing else. That is independent corroboration that issue #1's normaliser
+   drop-list is exactly right and no broader. The re-captured fixtures were discarded in favour of
+   the committed ones, since churning ground truth over `_version_` noise would dirty every
+   branch's diff for no gain.
 
 ## Pointers
 
