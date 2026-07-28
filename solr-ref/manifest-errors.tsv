@@ -11,3 +11,6 @@ facet_range_numeric	200	GET	facets/select?q=*:*&rows=0&facet=true&facet.range=vi
 facet_range_date	200	GET	facets/select?q=*:*&rows=0&facet=true&facet.range=created&facet.range.start=2020-01-01T00:00:00Z&facet.range.end=2020-01-06T00:00:00Z&facet.range.gap=%2B1DAY&wt=json	
 facet_range_json_nl_map	200	GET	facets/select?q=*:*&rows=0&facet=true&facet.range=views&facet.range.start=0&facet.range.end=40&facet.range.gap=10&json.nl=map&wt=json	
 facet_stored_only_field	200	GET	facets/select?q=*:*&rows=0&facet=true&facet.field=note&wt=json	
+keyorder_range_wide_map	200	GET	keyorder/select?q=*:*&rows=0&facet=true&facet.range=views&facet.range.start=0&facet.range.end=200&facet.range.gap=10&json.nl=map&wt=json		http://localhost:8986/solr
+keyorder_facet_field_map	200	GET	keyorder/select?q=*:*&rows=0&facet=true&facet.field=tag&json.nl=map&wt=json		http://localhost:8986/solr
+keyorder_facet_field_map_index	200	GET	keyorder/select?q=*:*&rows=0&facet=true&facet.field=tag&facet.sort=index&json.nl=map&wt=json		http://localhost:8986/solr

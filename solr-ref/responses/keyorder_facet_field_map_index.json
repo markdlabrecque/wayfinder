@@ -1,0 +1,35 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"*:*",
+      "facet.field":"tag",
+      "json.nl":"map",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json",
+      "facet.sort":"index"
+    }
+  },
+  "response":{
+    "numFound":8,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{
+      "tag":{
+        "apple":5,
+        "banana":1,
+        "mango":2,
+        "zebra":5
+      }
+    },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  }
+}
