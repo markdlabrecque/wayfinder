@@ -1131,13 +1131,16 @@ async fn string_sort_across_two_segments_matches_the_single_segment_order() {
 #[tokio::test]
 async fn a_numeric_column_absent_from_one_segment_still_reads_as_zero() {
     // Batch 1 = [s1,s2,s3,s4,s6] (every doc that has `nums`), batch 2 = [s5]
-    // (the one doc that never had `nums` at all). Segment 2 therefore has no
-    // `nums` column whatsoever (`SegmentSortColumn::Absent` in
-    // `src/collector.rs`, not a column with an empty value for its one doc).
-    // This pins that an absent column still reads as 0 under `sort=nums asc`,
-    // not as "missing, sorts last" — the same fixture (`sort_mv_int_asc`) as
-    // the single-segment case, so any cross-segment special-casing of an
-    // absent column would show up as a divergence from it.
+    // (the one doc that never had `nums` at all). Segment 2 still *has* a
+    // `nums` column — Tantivy 0.26 materialises a column for every declared
+    // fast field in every segment (`FastFieldsWriter::new` calls
+    // `record_column_type` at writer construction) — it just holds no value
+    // for s5, so the zero default comes from the per-doc missing default in
+    // the `I64` arm of `SegmentSortColumn::value`, not from the (unreachable)
+    // `Absent` arm. This pins that a valueless doc in its own segment still
+    // reads as 0 under `sort=nums asc`, not as "missing, sorts last" — the
+    // same fixture (`sort_mv_int_asc`) as the single-segment case, so any
+    // cross-segment special-casing would show up as a divergence from it.
     let (app, _dir) = sortdebt_app(&[&["s1", "s2", "s3", "s4", "s6"], &["s5"]]).await;
 
     let (status, body) = sortdebt_get(&app, "select?q=*:*&sort=nums+asc&fl=id,nums&wt=json").await;
@@ -1145,12 +1148,13 @@ async fn a_numeric_column_absent_from_one_segment_still_reads_as_zero() {
     assert_eq!(status, 200);
     assert_eq!(ids(&body), fixture_ids("sort_mv_int_asc"));
 
-    // Segment 2 (`[s5]`) also has no `weight` or `created` column at all — s5
-    // is missing both — so this same two-segment app exercises the F64 and
-    // Date arms of `SegmentSortColumn::Absent`'s zero default too (review
-    // round 1: the `nums` assertion above only covers the I64 arm). Same
-    // fixtures as the single-segment tests, so any segment-aware special
-    // casing of an absent column would show up as a divergence from them.
+    // s5 also carries no `weight` or `created` value, so this same
+    // two-segment app exercises the per-doc missing defaults in the F64 and
+    // Date arms of `SegmentSortColumn::value` too (review round 1: the `nums`
+    // assertion above only covers the I64 arm). As above, the columns exist
+    // in segment 2 — they are just empty for s5. Same fixtures as the
+    // single-segment tests, so any segment-aware special casing would show up
+    // as a divergence from them.
     let (status, body) =
         sortdebt_get(&app, "select?q=*:*&sort=weight+asc&fl=id,weight&wt=json").await;
     assert_eq!(status, 200);

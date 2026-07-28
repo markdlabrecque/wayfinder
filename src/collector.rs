@@ -51,13 +51,14 @@ pub struct SortClause {
     pub descending: bool,
     /// The schema-declared value kind of `key`, when it is a `Field` — `None`
     /// for `Score` (never missing, so the kind is never consulted). Only used
-    /// to pick the *type* of a segment-wide missing default when the field's
-    /// column is entirely `Absent` in a segment (finding 36/37): an absent
-    /// column carries no type information of its own, so the clause has to
-    /// carry it in from the schema instead (`check_sort` resolves it via
+    /// to pick the *type* of a segment-wide missing default in the defensive
+    /// `Absent` arm (finding 36/37): an absent column carries no type
+    /// information of its own, so the clause has to carry it in from the
+    /// schema instead (`check_sort` resolves it via
     /// `WayfinderSchema::value_kind`, which already folds in any custom
     /// `[[field_types]]` — those only ever resolve to `Text`, so there is no
-    /// numeric/date custom-type case this can miss).
+    /// numeric/date custom-type case this can miss). Note `Absent` is
+    /// unreachable in practice under Tantivy 0.26 — see its doc comment.
     pub value_kind: Option<ValueKind>,
 }
 
@@ -203,12 +204,20 @@ enum SegmentSortColumn {
     I64(Column<i64>),
     F64(Column<f64>),
     Date(Column<DateTime>),
-    /// The field is fast in the schema but has no column in this segment (no
-    /// document in it carried a value). Every document in this segment reads
-    /// as `missing`: `None` for a string-typed field (missing-last, finding
+    /// Defensive, unreachable in practice: Tantivy 0.26 materialises a column
+    /// for every declared fast field in every segment
+    /// (`FastFieldsWriter::new` calls `record_column_type` for each fast
+    /// field at writer construction), and `check_sort` only lets
+    /// schema-declared fast fields through — so a segment with *no* column
+    /// for a sortable field cannot currently occur, and a doc with no value
+    /// takes the per-doc missing defaults in `value()` instead (verified by
+    /// planting a panic here and running the whole sort suite; issue #32
+    /// review round 2). Kept because it is correct if a future Tantivy stops
+    /// materialising empty columns: every document in the segment would read
+    /// as `missing` — `None` for a string-typed field (missing-last, finding
     /// 16), or the type's zero value for a numeric/float/date-typed field
     /// (missing-as-zero, finding 36/37) — resolved once at `open` time from
-    /// `clause.value_kind`, since the absent column itself carries no type.
+    /// `clause.value_kind`, since an absent column carries no type.
     Absent(Option<SortValue>),
 }
 
