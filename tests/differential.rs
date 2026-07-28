@@ -348,11 +348,11 @@ const RANKED_RELEVANCE_ENTRIES: &[&str] = &["select_term"];
 /// value; encoding that in the normaliser would risk hiding a real
 /// `params` diff on every other entry, so it lives here instead, alongside
 /// the rest.
+// Sort (issue #2) used to be listed here: #11 landed sort validation, which made
+// `err_bad_sort` match, and #2 landed the ordering itself, which made
+// `select_sort` — plus the sixteen `select_sort_*` / `err_sort_*` entries added
+// with it — match too. Both are gone from this list, as designed.
 const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[
-    (
-        "select_sort",
-        "sort *ordering* unbuilt, issue #2 — #11 landed sort validation (so `err_bad_sort` now matches and is no longer listed here), but a valid `sort` is still accepted and ignored",
-    ),
     (
         "facet_mincount",
         "advanced faceting unbuilt (full term-dictionary enumeration, mincount/limit/missing/query/json.nl), issue #3",

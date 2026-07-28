@@ -5,8 +5,9 @@
 //! Tantivy schema, `/update` (JSON add + commit), `/select` (`q`, `fq`,
 //! `fl`, `rows`, `start`, one `facet.field`), and `/admin/ping`.
 //!
+//! `sort` was out of the tracer-bullet scope and has since landed (issue #2).
 //! Deliberately out of scope here (PRD §7): highlighting, edismax, stats,
-//! MLT, sort. Multi-core: out of scope too — `app()` serves exactly one
+//! MLT. Multi-core: out of scope too — `app()` serves exactly one
 //! core, matching PRD open question 1's "single-core-per-process" lean.
 
 mod collector;
@@ -28,6 +29,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use serde_json::{Value, json};
 
+use collector::{SortClause, SortKey};
 use core_index::CoreIndex;
 use error::{Envelope, WfError};
 use params::Params;
@@ -43,9 +45,9 @@ struct AppState {
 /// (findings fact 8).
 ///
 /// **Implementing a new param? Add it here.** Otherwise `strict_params = true`
-/// will 400 on a param Wayfinder actually supports. `sort` is listed because
-/// #11 validates it (a non-`fast` field is a 400); ordering itself lands with
-/// #2. Still missing, waiting on their issues: the rest of the `facet.*` family
+/// will 400 on a param Wayfinder actually supports. `sort` is fully
+/// implemented as of #2 — validated by #11, ordered by #2.
+/// Still missing, waiting on their issues: the rest of the `facet.*` family
 /// (#3), `commitWithin` / `overwrite` / `softCommit` (#9).
 const SELECT_PARAMS: &[&str] = &[
     "q",
@@ -141,50 +143,120 @@ fn check_update_method(method: &Method) -> Result<(), WfError> {
     Ok(())
 }
 
-/// Validates the `sort` parameter's *fields* without implementing ordering.
+/// Parses and validates the `sort` parameter, returning the clauses to order by
+/// (empty means "no sort", i.e. Solr's default `score desc`).
 ///
-/// Sorting on a field that is not `fast` is a hard 400 in Solr (finding 11,
-/// `err_bad_sort.json`), never a silent fallback — that error shape is in scope
-/// here. Actually ordering the results is issue #2; until it lands a valid
-/// `sort` is accepted and ignored.
-fn check_sort(state: &AppState, params: &Params) -> Result<(), WfError> {
+/// Three hard 400s, all captured:
+///
+/// - Sorting on an undefined field.
+/// - Sorting on a field that is not `fast`: a hard 400 in Solr (finding 11,
+///   `err_bad_sort.json`), never a silent fallback.
+/// - A clause whose direction token is missing or is not `asc`/`desc`
+///   (`err_sort_no_direction.json`, `err_sort_bad_direction.json`).
+///
+/// The *order* of those checks is itself captured behaviour (finding 18), and it
+/// has two independent halves, each with its own fixture — they are separate
+/// claims and only one fixture each can establish them:
+///
+/// - **Across clauses:** left to right, stopping at the first bad clause, so one
+///   bad clause rejects the whole spec rather than sorting on the valid prefix
+///   (`err_sort_bad_clause_among_good.json`, and
+///   `err_sort_field_before_direction.json` where an earlier clause's field error
+///   beats a later clause's direction error).
+/// - **Within a clause:** the direction is checked **before** the field is
+///   resolved. Only `err_sort_direction_before_field.json` shows this —
+///   `sort=body sideways` is bad in both ways at once, and Solr answers the
+///   direction error. Every other captured spec is identical under either
+///   within-clause order, so nothing else can be cited for it.
+///
+/// `score` is special-cased out of field resolution entirely. Note what
+/// establishes what: `err_sort_score_bad_direction.json` shows only that `score`
+/// is **not exempt from the direction check** — under direction-first, a bad
+/// direction errors whether or not `score` is special-cased, so that fixture
+/// says nothing about resolution. The special-casing itself is established by
+/// `select_sort_score_{all,asc,desc}` returning 200 and ranking by score, which
+/// an unresolvable field could not do.
+fn check_sort(state: &AppState, params: &Params) -> Result<Vec<SortClause>, WfError> {
     let Some(sort) = params.get("sort") else {
-        return Ok(());
+        return Ok(Vec::new());
     };
-    for clause in sort.split(',') {
-        let clause = clause.trim();
+
+    let mut clauses = Vec::new();
+    let mut offset = 0usize;
+    for raw in sort.split(',') {
+        let clause_start = offset;
+        offset += raw.len() + 1; // +1 for the comma that `split` consumed
+        let clause = raw.trim();
         if clause.is_empty() {
             continue;
         }
-        let field_name = clause.split_whitespace().next().unwrap_or(clause);
-        if field_name == "score" {
-            continue;
-        }
-        let field = state
-            .index
-            .wf_schema
-            .fields
-            .iter()
-            .find(|f| f.name == field_name);
-        match field {
-            None => {
+        let mut tokens = clause.split_whitespace();
+        let field_name = tokens.next().unwrap_or(clause);
+
+        // Direction first, field second. `err_sort_direction_before_field.json`
+        // (`sort=body sideways` -> the direction error, not the field error) is
+        // the only captured spec that separates the two within-clause orders.
+        let descending = match tokens.next() {
+            Some("asc") => false,
+            Some("desc") => true,
+            // `pos` mirrors Solr's parser position — the offset just past this
+            // clause's field name: `pos=2` for `'id sideways'`
+            // (`err_sort_bad_direction.json`), `pos=5` for `'score sideways'`
+            // (`err_sort_score_bad_direction.json`), `pos=4` for
+            // `'body sideways'` (`err_sort_direction_before_field.json`). Three
+            // different field-name lengths, so a constant offset is ruled out.
+            //
+            // INFERRED, not captured: that the offset is absolute within the
+            // whole spec rather than relative to the clause. Every captured
+            // fixture has `clause_start == 0`, so the two are indistinguishable.
+            // Reaching the difference needs a spec whose earlier clauses are
+            // fully valid (`sort=id asc,id sideways` — Wayfinder emits `pos=9`);
+            // uncaptured. Contained risk: `error.msg` is outside the
+            // compatibility contract (finding 10).
+            _ => {
+                let pos = clause_start + (raw.len() - raw.trim_start().len()) + field_name.len();
                 return Err(WfError::bad_request(
                     "wayfinder::BadSort",
-                    format!("can not sort on undefined field: {field_name}"),
+                    format!(
+                        "Can't determine a Sort Order (asc or desc) in sort spec '{sort}', pos={pos}"
+                    ),
                 )
                 .with_params(params));
             }
-            Some(f) if !f.fast => {
-                return Err(WfError::bad_request(
-                    "wayfinder::BadSort",
-                    format!("can not sort on a field w/o fast values (docValues): {field_name}"),
-                )
-                .with_params(params));
+        };
+
+        let key = if field_name == "score" {
+            SortKey::Score
+        } else {
+            let field = state
+                .index
+                .wf_schema
+                .fields
+                .iter()
+                .find(|f| f.name == field_name);
+            match field {
+                None => {
+                    return Err(WfError::bad_request(
+                        "wayfinder::BadSort",
+                        format!("can not sort on undefined field: {field_name}"),
+                    )
+                    .with_params(params));
+                }
+                Some(f) if !f.fast => {
+                    return Err(WfError::bad_request(
+                        "wayfinder::BadSort",
+                        format!(
+                            "can not sort on a field w/o fast values (docValues): {field_name}"
+                        ),
+                    )
+                    .with_params(params));
+                }
+                Some(f) => SortKey::Field(f.name.clone()),
             }
-            Some(_) => {}
-        }
+        };
+        clauses.push(SortClause::new(key, descending));
     }
-    Ok(())
+    Ok(clauses)
 }
 
 /// Under `strict_params`, rejects the first request param Wayfinder does not
@@ -281,7 +353,7 @@ async fn select(
     let params = Params::parse(query.as_deref().unwrap_or(""));
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, SELECT_PARAMS, &params)?;
-    check_sort(&state, &params)?;
+    let sort = check_sort(&state, &params)?;
 
     let default_field = params
         .get("df")
@@ -308,7 +380,7 @@ async fn select(
 
             state
                 .index
-                .search(query.as_ref(), &filter_queries)
+                .search(query.as_ref(), &filter_queries, &sort)
                 .map_err(|e| {
                     WfError::internal("wayfinder::SearchError", e.to_string()).with_params(&params)
                 })?

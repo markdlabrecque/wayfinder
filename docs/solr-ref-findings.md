@@ -142,3 +142,118 @@ entry, so it is handled as a named, reasoned exclusion instead.
 When you fix the owning feature: remove the corresponding entry (or entries) from
 `EXPECTED_DIVERGENCES` in `tests/differential.rs`. If you forget, the test fails with a message
 telling you exactly which entry to remove.
+
+---
+
+## Findings from the issue #2 `sort` capture
+
+Sixteen new fixtures, captured against the same `solr:9` container and 5-doc corpus, all
+core-relative GETs and so all in `solr-ref/manifest.tsv`. Thirteen came with the feature; the
+last three were added over two review rounds to settle the check-order claims in finding 18,
+each because the claim had been inferred rather than captured (see finding 20).
+
+16. **Sorting on a `multiValued` docValues field is a 200, not an error** — the issue's "Out"
+    scope premise ("error like Solr") was wrong. `select_sort_mv_asc.json` /
+    `select_sort_mv_desc.json` show Solr 9 applying Lucene's `SortedSetSortField` selector
+    semantics:
+    - `asc` orders by each document's **minimum** value (doc1 `[animals, classic]` -> `animals`),
+    - `desc` orders by each document's **maximum** (doc3 `[misc, classic]` -> `misc`),
+    - a document with **no value sorts last in both directions** (doc5 has no `category` and is
+      last under `asc` *and* under `desc`, so "missing last" is not a consequence of direction).
+
+    Wayfinder implements the selector rather than rejecting, in `src/collector.rs`.
+
+17. **A sort clause with a missing or unrecognised direction token is a 400.** `sort=id`
+    (`err_sort_no_direction.json`) and `sort=id sideways` (`err_sort_bad_direction.json`) both
+    fail with `Can't determine a Sort Order (asc or desc) in sort spec '<spec>', pos=2` — Solr
+    does **not** default the direction. `pos` is the parser offset just past the clause's field
+    name: `pos=2` past `id`, and `pos=5` past `score`
+    (`err_sort_score_bad_direction.json`), which is what confirms the offset's meaning rather
+    than it being a coincidence of two same-length field names.
+
+18. **Solr validates a sort spec clause by clause, left to right, stopping at the first bad
+    clause; within a clause it checks the direction *before* resolving the field.** These are
+    two independent claims and each needs its own fixture — issue #2 got the order wrong twice
+    by inferring one from evidence for the other, so the scope of each fixture is spelled out:
+
+    *Across clauses (left to right, first bad clause wins):*
+    - `sort=id asc,body desc` is a 400 (`err_sort_bad_clause_among_good.json`) — one bad clause
+      rejects the whole spec, rather than sorting on the valid prefix.
+    - `sort=body desc,id sideways` is a 400 (`err_sort_field_before_direction.json`) reporting
+      the *field* error for the earlier clause, not the direction error for the later one. This
+      rules out validating every direction in a global first pass. It says **nothing** about
+      within-clause order: clause 1's direction (`desc`) is valid, so clause ordering alone
+      explains the result.
+
+    *Within one clause (direction before field):*
+    - `sort=body sideways` is a 400 (`err_sort_direction_before_field.json`) reporting the
+      *direction* error, even though `body` is also a non-docValues field. One clause, bad in
+      both ways at once — the **only** captured spec that separates the two within-clause
+      orders, because every other one answers identically under either. `pos=4`.
+
+    *And `score`:*
+    - `sort=score sideways` is a 400 (`err_sort_score_bad_direction.json`) reporting the
+      direction error. This establishes only that `score` is **not exempt from the direction
+      check** — under direction-first, a bad direction errors whether or not `score` is
+      special-cased, so this fixture cannot speak to field resolution. That `score` is never
+      resolved as a field is established instead by `select_sort_score_{all,asc,desc}`
+      returning 200 and ranking by score, which an unresolvable field could not do.
+
+    Only `error.code`/HTTP status is part of the compatibility contract (finding 10), so every
+    one of these is a 400 whichever order an implementation picks; the discriminating evidence
+    is `error.msg` alone. That is why the order needs fixtures rather than reasoning, and why
+    `tests/sort.rs` asserts the error *class* against the fixture and pins the direction
+    message verbatim (`pos` included) — see finding 20.
+
+    `check_sort` in `src/lib.rs` implements exactly this: one pass over the clauses, per clause
+    checking the direction and then resolving the field, returning on the first bad clause.
+
+19. **`sort=score desc` is exactly the default order.** `select_sort_score_all.json` has the
+    same document order as the no-`sort` `select_all.json`, which is why Wayfinder expresses the
+    unsorted path as the single implicit clause `score desc` plus the ascending-doc-order
+    tie-break, rather than as a separate code path.
+
+20. **A divergence the compatibility contract cannot see — kept as a worked example.** Issue #2
+    first shipped `check_sort` as two passes (validate every clause's direction, then resolve
+    fields), built to a task-spec premise that Solr "parses the whole spec before resolving any
+    field". For `sort=body desc,id sideways` that answered
+
+    ```
+    Can't determine a Sort Order (asc or desc) in sort spec 'body desc,id sideways', pos=12
+    ```
+
+    where Solr answers the earlier clause's field error (finding 18). Both are HTTP 400 with
+    `error.code: 400`, and the differential harness drops `error.msg` (finding 10), so
+    **`err_sort_field_before_direction` showed 0 diffs while the behaviour was wrong.** The
+    normaliser output says so out loud:
+
+    ```
+    err_sort_field_before_direction: normaliser touched ["responseHeader.QTime", "error.msg", "error.metadata"]
+    err_sort_field_before_direction: 0 diffs
+    ```
+
+    It then happened a **second** time, one level down. The replacement was one pass, per clause
+    resolving the field and *then* checking the direction — and that within-clause half was
+    itself never captured, only inferred from `err_sort_field_before_direction`, which cannot
+    establish it. Review swapped the two checks and the whole suite passed. Capturing
+    `sort=body sideways` settled it: Solr checks the **direction first**, so that inference was
+    backwards too, and the code was corrected again.
+
+    Three lessons, all earned the hard way in one issue:
+
+    - **The premise, not the code, was the bug** — both times. Each wrong design was consistent
+      with every fixture that existed when it was written. When a design rests on an inferred
+      mechanism rather than a captured one, capture the discriminating case *before* writing the
+      prose that claims it.
+    - **Evidence for one claim is not evidence for a neighbouring claim.** "Clause by clause,
+      left to right" and "direction before field within a clause" look like one fact and are
+      two. `err_sort_field_before_direction` proves only the first; the second needed a spec bad
+      in both ways at once, in a single clause.
+    - **0 diffs is not proof for anything the normaliser drops.** Where the class of an error
+      matters, assert the class against the fixture — `tests/sort.rs::sort_error_class` compares
+      "direction error" vs "field error" between response and fixture, pinning the ordering
+      without freezing either side's wording. Where Wayfinder claims *verbatim* equality, as it
+      does for the direction message, freeze the whole string:
+      `direction_error_messages_match_solr_verbatim_including_pos` covers four fixtures with
+      four different field-name lengths, because `pos` is arithmetic and a deliberately wrong
+      `pos` otherwise passed the entire suite.
