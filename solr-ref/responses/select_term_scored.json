@@ -1,0 +1,26 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"lazy",
+      "df":"body",
+      "fl":"id,score",
+      "rows":"5",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "maxScore":0.45748958,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"doc2",
+      "score":0.45748958
+    },{
+      "id":"doc1",
+      "score":0.3204711
+    }]
+  }
+}

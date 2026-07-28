@@ -1,0 +1,26 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":4,
+    "params":{
+      "q":"quick",
+      "df":"body",
+      "fl":"id,score",
+      "rows":"5",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "maxScore":0.41331142,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"doc3",
+      "score":0.41331142
+    },{
+      "id":"doc1",
+      "score":0.3204711
+    }]
+  }
+}

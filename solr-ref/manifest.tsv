@@ -52,3 +52,6 @@ facet_mincount_one	200	select?q=id:doc2&rows=0&facet=true&facet.field=category&f
 facet_query_multi	200	select?q=*:*&rows=0&facet=true&facet.query=category:animals&facet.query=category:garden&wt=json
 facet_query_zero	200	select?q=*:*&rows=0&facet=true&facet.query=category:nosuchvalue&wt=json
 facet_query_with_fq	200	select?q=*:*&fq=category:classic&rows=0&facet=true&facet.query=category:animals&wt=json
+select_term_scored	200	select?q=lazy&df=body&fl=id,score&rows=5&wt=json
+select_quick_scored	200	select?q=quick&df=body&fl=id,score&rows=5&wt=json
+select_fl_reversed	200	select?q=*:*&rows=2&fl=body,id&wt=json

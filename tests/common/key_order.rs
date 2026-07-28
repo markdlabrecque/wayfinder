@@ -257,13 +257,26 @@ const EXEMPT_PATHS: [&str; 1] = ["responseHeader.params"];
 /// elements are compared pairwise over the common prefix, and objects present on
 /// only one side are skipped rather than failed, for the same reason.
 pub fn assert_same_key_order(actual_text: &str, fixture_name: &str) {
+    assert_same_key_order_texts(actual_text, &fixture_text(fixture_name), fixture_name);
+}
+
+/// Test-support variant of `assert_same_key_order` that compares two raw
+/// JSON texts directly, rather than looking the "expected" side up as a
+/// named fixture under `solr-ref/responses/`. `assert_same_key_order` is
+/// exactly this with `fixture_text(fixture_name)` as the expected side; this
+/// exists so regression tests that need a synthetic "expected" text (e.g. the
+/// `IGNORED_KEYS` path-scoping regression, which needs a `_version_` outside
+/// `response.docs[*]`) do not need a committed fixture to exercise the
+/// comparison logic. No behaviour change from the pre-existing
+/// `assert_same_key_order` body.
+pub fn assert_same_key_order_texts(actual_text: &str, expected_text: &str, label: &str) {
     let actual = KeyOrder::parse(actual_text);
-    let expected = fixture_key_order(fixture_name);
+    let expected = KeyOrder::parse(expected_text);
     let mut checked = 0usize;
-    compare(&actual, &expected, "", fixture_name, &mut checked);
+    compare(&actual, &expected, "", label, &mut checked);
     assert!(
         checked > 0,
-        "assert_same_key_order({fixture_name}) compared no objects at all - \
+        "assert_same_key_order_texts({label}) compared no objects at all - \
          the comparison is vacuous, which is a bug in the test, not the code"
     );
 }
@@ -274,8 +287,15 @@ fn compare(actual: &KeyOrder, expected: &KeyOrder, path: &str, fixture: &str, ch
     }
     match (actual, expected) {
         (KeyOrder::Object(a), KeyOrder::Object(e)) => {
-            let got = filtered_keys(a);
-            let want = filtered_keys(e);
+            // `IGNORED_KEYS` (`_version_`/`_root_`) is only ever a legitimate
+            // Wayfinder omission *inside* `response.docs[<i>]` (findings fact
+            // 9) — elsewhere, e.g. at the top level, a `_version_` key
+            // present on only one side is a real key-order mismatch and must
+            // not be silently filtered away from both sides before the
+            // comparison (issue #31 follow-up 1).
+            let scope_ignored = is_response_docs_entry(path);
+            let got = filtered_keys(a, scope_ignored);
+            let want = filtered_keys(e, scope_ignored);
             *checked += 1;
             assert_eq!(
                 got,
@@ -284,7 +304,7 @@ fn compare(actual: &KeyOrder, expected: &KeyOrder, path: &str, fixture: &str, ch
                 display_path(path)
             );
             for (key, e_child) in e {
-                if IGNORED_KEYS.contains(&key.as_str()) {
+                if scope_ignored && IGNORED_KEYS.contains(&key.as_str()) {
                     continue;
                 }
                 if let Some((_, a_child)) = a.iter().find(|(k, _)| k == key) {
@@ -306,11 +326,24 @@ fn compare(actual: &KeyOrder, expected: &KeyOrder, path: &str, fixture: &str, ch
     }
 }
 
-fn filtered_keys(entries: &[(String, KeyOrder)]) -> Vec<&str> {
+/// True if `path` is exactly `response.docs[<i>]` for some array index `i` —
+/// the one place `IGNORED_KEYS` applies (see `compare` above), not any depth
+/// under it or anywhere else in the envelope.
+fn is_response_docs_entry(path: &str) -> bool {
+    match path.strip_prefix("response.docs[") {
+        Some(rest) => match rest.strip_suffix(']') {
+            Some(idx) => !idx.is_empty() && idx.bytes().all(|b| b.is_ascii_digit()),
+            None => false,
+        },
+        None => false,
+    }
+}
+
+fn filtered_keys(entries: &[(String, KeyOrder)], scope_ignored: bool) -> Vec<&str> {
     entries
         .iter()
         .map(|(k, _)| k.as_str())
-        .filter(|k| !IGNORED_KEYS.contains(k))
+        .filter(|k| !(scope_ignored && IGNORED_KEYS.contains(k)))
         .collect()
 }
 

@@ -22,14 +22,45 @@
 
 mod common;
 
+use std::path::{Path, PathBuf};
+
 use axum::Router;
 use axum::http::StatusCode;
+use common::diff::load_manifest_errors;
 use common::key_order::{
-    KeyOrder, assert_same_key_order, fixture_key_order, get_text, is_alphabetical,
+    KeyOrder, assert_same_key_order, assert_same_key_order_texts, fixture_key_order, get_text,
+    is_alphabetical,
 };
 use common::{CORE, indexed_app, post_docs};
 use serde_json::{Value, json};
 use tempfile::TempDir;
+
+fn manifest_errors_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("solr-ref/manifest-errors.tsv")
+}
+
+/// Looks up `name`'s row in `solr-ref/manifest-errors.tsv` and returns its
+/// URL with the `keyorder/` core prefix stripped, so the three query
+/// constants below are read out of the manifest at runtime instead of
+/// hand-copied (issue #31 follow-up: "editing the manifest must not silently
+/// desynchronise them").
+fn keyorder_query_from_manifest(name: &str) -> String {
+    let entries = load_manifest_errors(&manifest_errors_path());
+    let entry = entries
+        .iter()
+        .find(|e| e.name == name)
+        .unwrap_or_else(|| panic!("manifest-errors.tsv has no row named `{name}`"));
+    entry
+        .url
+        .strip_prefix("keyorder/")
+        .unwrap_or_else(|| {
+            panic!(
+                "row `{name}`'s url `{}` must start with `keyorder/`",
+                entry.url
+            )
+        })
+        .to_string()
+}
 
 // --- 0. helper self-tests -------------------------------------------------
 //
@@ -177,16 +208,22 @@ async fn keyorder_app() -> (Router, TempDir) {
 }
 
 /// The query from `keyorder_range_wide_map`'s row in
-/// `solr-ref/manifest-errors.tsv`, minus the core prefix.
-const WIDE_RANGE_QUERY: &str = "select?q=*:*&rows=0&facet=true&facet.range=views\
-     &facet.range.start=0&facet.range.end=200&facet.range.gap=10&json.nl=map&wt=json";
+/// `solr-ref/manifest-errors.tsv`, minus the core prefix — derived at
+/// runtime via `keyorder_query_from_manifest`, not hand-copied, so editing
+/// the manifest row cannot silently desynchronise this from ground truth.
+fn wide_range_query() -> String {
+    keyorder_query_from_manifest("keyorder_range_wide_map")
+}
 
 /// The query from `keyorder_facet_field_map`'s manifest-errors row.
-const FIELD_MAP_QUERY: &str = "select?q=*:*&rows=0&facet=true&facet.field=tag&json.nl=map&wt=json";
+fn field_map_query() -> String {
+    keyorder_query_from_manifest("keyorder_facet_field_map")
+}
 
 /// The query from `keyorder_facet_field_map_index`'s manifest-errors row.
-const FIELD_MAP_INDEX_QUERY: &str =
-    "select?q=*:*&rows=0&facet=true&facet.field=tag&facet.sort=index&json.nl=map&wt=json";
+fn field_map_index_query() -> String {
+    keyorder_query_from_manifest("keyorder_facet_field_map_index")
+}
 
 /// Asserts the keys at `path` in `text` match the same path in `fixture`, and
 /// (when `must_differ_from_alphabetical`) that the fixture's own order is *not*
@@ -221,7 +258,7 @@ fn assert_keys_match_fixture(
 #[tokio::test]
 async fn wide_range_json_nl_map_bucket_order_matches_solr() {
     let (app, _dir) = keyorder_app().await;
-    let (status, text) = get_text(&app, CORE, WIDE_RANGE_QUERY).await;
+    let (status, text) = get_text(&app, CORE, &wide_range_query()).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -240,7 +277,7 @@ async fn wide_range_json_nl_map_bucket_order_matches_solr() {
 #[tokio::test]
 async fn facet_range_sub_key_order_matches_solr() {
     let (app, _dir) = keyorder_app().await;
-    let (status, text) = get_text(&app, CORE, WIDE_RANGE_QUERY).await;
+    let (status, text) = get_text(&app, CORE, &wide_range_query()).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -260,7 +297,7 @@ async fn facet_range_sub_key_order_matches_solr() {
 #[tokio::test]
 async fn facet_field_json_nl_map_count_order_matches_solr() {
     let (app, _dir) = keyorder_app().await;
-    let (status, text) = get_text(&app, CORE, FIELD_MAP_QUERY).await;
+    let (status, text) = get_text(&app, CORE, &field_map_query()).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -281,7 +318,7 @@ async fn facet_field_json_nl_map_count_order_matches_solr() {
 #[tokio::test]
 async fn facet_field_json_nl_map_index_order_matches_solr() {
     let (app, _dir) = keyorder_app().await;
-    let (status, text) = get_text(&app, CORE, FIELD_MAP_INDEX_QUERY).await;
+    let (status, text) = get_text(&app, CORE, &field_map_index_query()).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -318,11 +355,24 @@ async fn facet_counts_sub_object_order_matches_solr() {
 /// `response` (`numFound, start, numFoundExact, docs`), plus each doc.
 /// `responseHeader.params` is exempt (Java `HashMap` order — see the module
 /// docs); `_version_`/`_root_` are ignored because Wayfinder has no such fields.
+///
+/// `rows=10` against the 5-doc corpus, so `response.docs` is genuinely
+/// non-empty here — asserted explicitly (issue #31 follow-up 5) because
+/// `assert_same_key_order` skips short/one-sided arrays by design, so an
+/// empty-`docs` response would pass this whole-envelope check *vacuously*,
+/// never having compared a single doc's key order.
 #[tokio::test]
 async fn plain_select_envelope_key_order_matches_solr() {
     let (app, _dir) = indexed_app().await;
     let (status, text) = get_text(&app, CORE, "select?q=*:*&rows=10&wt=json").await;
     assert_eq!(status, StatusCode::OK, "plain select must be a 200: {text}");
+    let body: Value = serde_json::from_str(&text).expect("valid JSON");
+    assert!(
+        body["response"]["docs"]
+            .as_array()
+            .is_some_and(|d| !d.is_empty()),
+        "response.docs must be non-empty, or the doc key-order comparison below is vacuous: {text}"
+    );
     assert_same_key_order(&text, "select_all");
 }
 
@@ -434,6 +484,12 @@ async fn facets_app() -> (Router, TempDir) {
 /// alphabetical `QTime, params, status, warnings` and not
 /// `status, QTime, params, warnings` either (the order a naive
 /// `body["responseHeader"]["warnings"] = ...` append would produce).
+///
+/// No `response.docs` non-empty guard here (contrast
+/// `plain_select_envelope_key_order_matches_solr`, issue #31 follow-up 5):
+/// this query is `rows=0`, so an empty `docs` is legitimate, not a vacuity
+/// bug — the whole point of the query is the facet counts, and
+/// `facet_field_numeric_all`'s own capture (`capture.sh`) is `rows=0` too.
 #[tokio::test]
 async fn response_header_warnings_leads_not_trails() {
     let (app, _dir) = facets_app().await;
@@ -450,4 +506,105 @@ async fn response_header_warnings_leads_not_trails() {
     );
     assert_keys_match_fixture(&text, "facet_field_numeric_all", "responseHeader", true);
     assert_same_key_order(&text, "facet_field_numeric_all");
+}
+
+// --- 6. `IGNORED_KEYS` scoping (issue #31 follow-up 1) ---------------------
+//
+// `_version_`/`_root_` are keys Wayfinder deliberately never emits at all
+// (findings fact 9), so they only ever appear on the *fixture* side. Today
+// `key_order::compare` strips them from both sides' key lists at *any*
+// depth before comparing, via `filtered_keys`. That is broader than the
+// intent stated in the module docs ("Keys only real Solr emits... Ignored
+// on both sides so a whole-envelope order comparison is about order, not
+// about doc field membership") — the whole point only applies inside
+// `response.docs[<i>]`, where Wayfinder's own omission is the documented
+// divergence. This regression proves a `_version_` key *outside* that path
+// is not silently ignored: an object with `_version_` at the top level,
+// diffed against one missing it, must fail the key-order comparison, not
+// pass because both sides get the key filtered away first.
+
+/// Fails today: `_version_` at the top level (not inside
+/// `response.docs[<i>]`) is filtered out of both sides by `IGNORED_KEYS`
+/// before the key lists are compared, so this mismatch is invisible. Once
+/// `IGNORED_KEYS` is scoped to `response.docs[<i>]` only, the comparison
+/// sees `_version_` as a real key present on one side and not the other,
+/// and fails as it should.
+#[test]
+fn version_key_outside_response_docs_is_not_ignored() {
+    let expected_text = r#"{"top":1,"_version_":2}"#;
+    let actual_text = r#"{"top":1}"#;
+
+    let result = std::panic::catch_unwind(|| {
+        assert_same_key_order_texts(
+            actual_text,
+            expected_text,
+            "version_key_outside_response_docs_is_not_ignored",
+        )
+    });
+
+    assert!(
+        result.is_err(),
+        "a top-level `_version_` present on only one side must be a real key-order \
+         mismatch, not silently ignored by IGNORED_KEYS — IGNORED_KEYS must be scoped \
+         to `response.docs[<i>]` only"
+    );
+}
+
+/// Companion regression: a `_version_`/`_root_` mismatch genuinely *inside*
+/// `response.docs[<i>]` must stay ignored — that is the one path where
+/// Wayfinder's deliberate omission is the documented divergence, and this
+/// must not regress into a false failure once the scoping lands.
+#[test]
+fn version_key_inside_response_docs_is_still_ignored() {
+    let expected_text = r#"{"response":{"docs":[{"id":"a","_version_":2}]}}"#;
+    let actual_text = r#"{"response":{"docs":[{"id":"a"}]}}"#;
+
+    assert_same_key_order_texts(
+        actual_text,
+        expected_text,
+        "version_key_inside_response_docs_is_still_ignored",
+    );
+}
+
+// --- 7. finding 24's `fl`-order half, pinned by a committed fixture --------
+//
+// `select_fl_reversed` (`fl=body,id`, reversed from every other multi-field
+// `fl` capture) discriminates input order from `fl` order: `select_term`'s
+// `fl=id,body` cannot, because those two happen to coincide there. Doc key
+// order must be `id, body` (input order), not `body, id` (`fl` order) — the
+// vacuity guard below asserts the fixture itself actually discriminates,
+// i.e. its doc keys are *not* in `fl` order.
+
+/// The fixture's own doc keys must not equal `fl`'s order (`["body","id"]`)
+/// — otherwise this fixture cannot tell input order apart from `fl` order,
+/// and the pin below would be vacuous.
+#[test]
+fn select_fl_reversed_fixture_discriminates_input_order_from_fl_order() {
+    let doc_keys = fixture_key_order("select_fl_reversed").keys_at(
+        "response.docs[0]",
+        "select_fl_reversed fixture vacuity guard",
+    );
+    assert_ne!(
+        doc_keys,
+        vec!["body".to_string(), "id".to_string()],
+        "select_fl_reversed's fixture doc keys must not be in fl order (fl=body,id) — \
+         if they are, capture.sh's premise for this fixture is wrong and it cannot pin \
+         finding 24's fl-order half"
+    );
+}
+
+/// Wayfinder's doc key order for `fl=body,id` matches the fixture — pinning
+/// finding 24's "doc field order is input order, not `fl` order" half on a
+/// committed fixture instead of a live probe only.
+#[tokio::test]
+async fn select_fl_reversed_doc_key_order_matches_solr() {
+    let (app, _dir) = indexed_app().await;
+    let (status, text) = get_text(&app, CORE, "select?q=*:*&rows=2&fl=body,id&wt=json").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "select with fl=body,id must be a 200: {text}"
+    );
+    assert_keys_match_fixture(&text, "select_fl_reversed", "response.docs[0]", false);
+    assert_same_key_order(&text, "select_fl_reversed");
 }
