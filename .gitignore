@@ -9,3 +9,6 @@
 # Added by cargo
 
 /target
+
+# Claude Code local state (worktrees, local settings)
+/.claude/
