@@ -9,8 +9,28 @@
 The pipeline ran as a single agent doing the stages in order (red tests → implementation → review →
 report) rather than four delegated agents: the executing agent was a fork, and forks are barred from
 spawning subagents. TDD order was preserved and the red-before-green evidence is below, but the
-independent-reviewer property was not — **this work has had no second pair of eyes and should get a
-review pass before merge.**
+independent-reviewer property was not.
+
+**Resolved:** the orchestrator subsequently dispatched a fresh independent `reviewer` agent against
+commit `69f2627`. Outcome: **approved, mergeable as-is**, round 1 of 1 (the 2-round cap was not hit,
+so this work has had the full permitted review depth). The reviewer independently re-ran
+`cargo test` (24/24), `cargo fmt --check`, and `cargo clippy --all-targets -- -D warnings` (all
+clean), and specifically verified:
+
+- `git diff main --name-status -- solr-ref/responses/` shows adds only — the 25 pre-existing fixtures
+  were **not** silently re-captured, which was the highest-severity risk on this branch.
+- Scope discipline held: the diff against `main` for `src/schema.rs`, `src/main.rs`,
+  `tests/common/mod.rs`, `src/params.rs`, `src/core_index.rs` is empty (siblings own those files).
+- No pre-existing test was edited or weakened; `tests/error_shapes.rs` is the only test file touched.
+- The `any()` route change does not make `/update` permissive: `check_update_method` still 400s a
+  non-POST *before* body parsing, so `GET /update` errors rather than tripping over an empty body.
+- Every error path routes through `WfError`; no hand-rolled error responses remain.
+- The three-variant `Envelope` maps 1:1 to three fixture-backed shapes — not speculative machinery.
+
+Non-blocking follow-ups the reviewer confirmed are safe to defer are listed in the follow-ups section
+below; it added that `manifest-errors.tsv` is not yet wired into #1's differential harness, and that
+`tests/error_shapes.rs`'s local `request()` helper (kept local deliberately to avoid colliding with
+the concurrent #1 branch) should be consolidated into `tests/common/mod.rs` post-merge.
 
 ## What was built
 
