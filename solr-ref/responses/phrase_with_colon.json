@@ -1,0 +1,17 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"\"category:animals\"",
+      "df":"body",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":0,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  }
+}

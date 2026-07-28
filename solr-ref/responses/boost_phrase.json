@@ -1,0 +1,23 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":5,
+    "params":{
+      "q":"\"lazy dog\"^2",
+      "df":"body",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"doc1",
+      "body":"the quick brown fox jumps over the lazy dog",
+      "category":["animals","classic"],
+      "_version_":1871993756992929792,
+      "_root_":"doc1"
+    }]
+  }
+}

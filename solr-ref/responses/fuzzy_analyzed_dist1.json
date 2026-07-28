@@ -1,0 +1,28 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"body:lazy~1",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"doc2",
+      "body":"a lazy afternoon in the garden",
+      "category":["garden"],
+      "_version_":1871993756995026944,
+      "_root_":"doc2"
+    },{
+      "id":"doc1",
+      "body":"the quick brown fox jumps over the lazy dog",
+      "category":["animals","classic"],
+      "_version_":1871993756992929792,
+      "_root_":"doc1"
+    }]
+  }
+}

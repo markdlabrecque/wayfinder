@@ -1,0 +1,15 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0,
+    "params":{
+      "q":"category:[animals TO",
+      "wt":"json"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.parser.ParseException"],
+    "msg":"org.apache.solr.search.SyntaxError: Cannot parse 'category:[animals TO': Encountered \"<EOF>\" at line 1, column 20.\nWas expecting one of:\n    \"TO\" ...\n    <RANGE_QUOTED> ...\n    <RANGE_GOOP> ...\n    ",
+    "code":400
+  }
+}

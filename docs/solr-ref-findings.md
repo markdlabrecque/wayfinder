@@ -705,7 +705,7 @@ relevance queries) and `select_fl_reversed` (`fl=body,id`, see finding 24's upda
 
 ## Findings from the issue #9 update-pipeline capture
 
-Claiming findings 46-49 (31-41 are #31/#32/#33's; #8 has 42-45 — supersedes the earlier
+Claiming findings 46-49 (31-41 are #31/#32/#33's; #8 has 56-59 — supersedes the earlier
 "claim from 42 up" note on issue #9).
 
 Thirty-four new `manifest-errors.tsv` rows against a new self-contained `update9` core
@@ -923,3 +923,76 @@ Also not captured: an `hl.fl` naming an undefined or non-text field. Wayfinder r
 `facet.field`'s own unknown-field precedent (`facet_unknown_field.json`, issue #35) rather than
 from a captured `hl_*` fixture — flag for correction if a real capture ever shows a different
 shape.
+
+## Findings from the issue #8 query-types capture
+
+Claiming findings 56-59 (issue #4's highlighting capture has 52-55, above). Forty-six new
+`manifest.tsv` rows (content-core GETs, replayed by the differential harness) plus twelve
+`manifest-errors.tsv` rows (read-only GETs against the existing `facets` core on the SAME
+canonical container — its schema and corpus untouched, so no pre-existing fixture moved).
+Capture block appended to `capture.sh`; `animols`/`animblz` are edit distance 1/2 from the
+indexed `animals`, and the `content` corpus's stemmed `text_en` field (`lazy` indexed as `lazi`)
+is what makes the multi-term-analysis questions answerable at all.
+
+56. **Fuzzy: default distance 2; explicit `~0`/`~1`/`~2` are exact edit distances; out-of-range
+    distances are NOT syntax errors; the fuzzy term is lowercased but never stemmed.**
+    `category:animblz~` (distance 2) hits with a bare `~` (`fuzzy_default_dist2.json`), `~1`
+    misses it and hits the distance-1 `animols` (`fuzzy_dist1_{hit,miss}.json`), `~2` hits, `~0`
+    is exact (`fuzzy_dist2.json`, `fuzzy_dist0_exact.json`). `animals~3` and `animals~0.8` are
+    both **200s**, not 400s (`err_fuzzy_dist3.json`, `err_fuzzy_fractional.json` — named `err_`
+    for the intent of the probe, both came back 200 with the exact-term match set). Against the
+    stemmed `body`: `lazy~0` misses (the index holds `lazi`, so the query term was not stemmed)
+    while `lazy~1` and `LAZY~1` both hit (`fuzzy_analyzed_{dist0,dist1,case}.json`) — multi-term
+    analysis lowercases but does not stem. **Fuzzy matches are scored, not constant-score**:
+    `fuzzy_analyzed_dist1.json` returns `doc2, doc1` — NOT insertion order — so a
+    constant-score fuzzy (Tantivy's `FuzzyTermQuery` default) diverges on ordering even when the
+    match set is right. On a Points-based field, `views:15~1` is a 200 with 0 hits, not an error
+    (`qfuzzy_int.json`).
+
+57. **Wildcard and regex are anchored whole-term automata over the indexed terms, lowercased
+    (wildcard) / verbatim (regex), never stemmed, constant-score (doc-order results).**
+    Trailing `anim*`, single-char `anima?s`, leading `*mals` and infix `an*ls` all work
+    (`wildcard_{prefix,qmark,leading,infix}.json` — leading wildcards need no opt-in in Solr 9).
+    `body:laz*` hits the stemmed `lazi` and `body:lazy*` misses it
+    (`wildcard_analyzed_{hit,stem}.json`) — same not-stemmed rule as fuzzy; `LAZ*` hits, so
+    wildcards are lowercased (`wildcard_analyzed_case.json`). `category:*` is the field-exists
+    idiom, 4 docs (`wildcard_field_exists.json`); on a pint field `views:1*` is a **400**
+    `Can't run prefix queries on numeric fields` (`qwild_int.json`). Regex: `/animals/` hits,
+    `/anim/` misses — **anchored full-term match, not substring** (`regex_{full,substring}.json`);
+    `/anim.*/` and `/anim[a-z]ls/` hit; `/ANIMALS/` misses — **case-sensitive, no analysis at
+    all** (`regex_{dotstar,charclass,uppercase}.json`); `body:/laz./` hits the stemmed `lazi`
+    (`regex_analyzed.json`). Every wildcard/regex/range fixture returns docs in insertion order —
+    Lucene's constant-score multi-term rewrite — unlike fuzzy (finding 56).
+
+58. **Ranges: `[..]`/`{..}`/mixed `[..}` endpoints behave classically on string, numeric and
+    date fields; `*` is the open endpoint; a reversed range is a 200 with 0 hits; `TO` is
+    case-sensitive; numeric endpoints must parse as the field's type.**
+    String: `category:[animals TO garden]` = 4 docs, `{animals TO garden}` = the strictly-between
+    `classic` docs, `[animals TO garden}` = 3 (`range_str_{incl,excl,half_open}.json`), `*` at
+    either or both ends works (`range_str_star_{upper,lower,both}.json`), `[garden TO animals]`
+    is 200/0 (`range_str_reversed.json`). Lowercase `to` is a 400 SyntaxError
+    (`err_range_lowercase_to.json`), as is an unclosed range (`err_range_unclosed_q.json`).
+    pint: inclusive/exclusive/half-open/star all value-typed (`qrange_int_*.json`); a float
+    endpoint on a pint (`[10.5 TO 30]`) and an alphabetic endpoint are both 400
+    `Invalid Number: <token> for field views` (`qrange_int_{float,alpha}_endpoint.json`) — no
+    truncation, no lexical fallback; `views:015` matches 15, so bare numeric terms parse
+    numerically too (`qterm_int_leading_zero.json`). pdate: RFC3339 endpoints, inclusive and
+    exclusive, behave as values (`qrange_date_{incl,excl}.json`).
+
+59. **Boosts reorder scoring exactly as expected and a non-numeric boost is a 400; a bad regex
+    is Solr's one captured 500.** Baseline `q=quick garden&df=body` ranks the rarer `garden`
+    doc first (`doc2, doc3, doc1`, `boost_baseline.json`); `quick^10 garden` flips it to
+    `doc3, doc1, doc2`, and the fielded (`body:quick^10 body:garden`) and float (`^2.5`) forms
+    agree (`boost_{term,fielded_term,float}.json`). Boost composes with phrases
+    (`boost_phrase.json`) and fuzzy (`boost_fuzzy_combo.json`). `body:quick^bad` is a 400
+    SyntaxError (`err_boost_bad.json`). `category:/anim[/` — a regex that parses as a query but
+    fails automaton compilation — is a **500** whose error object is `msg, trace, code` with a
+    Java stack trace and **no `metadata`** (`err_regex_bad_class.json`); an unclosed `/regex` is
+    an ordinary 400 SyntaxError (`err_regex_unclosed.json`). The `trace` key is free text no
+    other engine can reproduce, so the differential normaliser drops `error.trace` the way it
+    already drops `error.msg` (finding 10). Also pinned while here: a colon inside a quoted
+    phrase is NOT a field query — `q="category:animals"&df=body` is a phrase on `body` (0 hits)
+    where the unquoted control matches 2 (`phrase_with_colon.json`, `select_q_field_term.json`)
+    — which retires schema-layer follow-up 5's open question about what the dynamic-field
+    rewrite scan must not rewrite.
+

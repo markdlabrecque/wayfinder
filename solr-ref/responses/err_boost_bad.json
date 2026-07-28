@@ -1,0 +1,15 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0,
+    "params":{
+      "q":"body:quick^bad",
+      "wt":"json"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.parser.TokenMgrError"],
+    "msg":"org.apache.solr.search.SyntaxError: Cannot parse 'body:quick^bad': Lexical error at line 1, column 12.  Encountered: '98' (98),",
+    "code":400
+  }
+}
