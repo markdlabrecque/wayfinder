@@ -1,0 +1,7 @@
+{
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"Unsupported method: PUT for request org.apache.solr.servlet.ServletUtils$1@4a25cd81",
+    "code":400
+  }
+}

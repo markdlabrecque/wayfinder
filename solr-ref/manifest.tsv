@@ -23,3 +23,4 @@ err_unknown_field	400	select?q=nosuchfield:x&wt=json
 err_bad_syntax	400	select?q=*:*&fq=category:[unclosed&wt=json
 err_bad_sort	400	select?q=*:*&sort=body+desc&wt=json
 err_unknown_param	200	select?q=*:*&notaparam=1&wt=json
+err_missing_q	200	select?wt=json

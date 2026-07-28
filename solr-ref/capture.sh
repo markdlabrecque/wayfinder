@@ -88,8 +88,39 @@ cap err_bad_syntax      'select?q=*:*&fq=category:[unclosed&wt=json'
 cap err_bad_sort        'select?q=*:*&sort=body+desc&wt=json'
 cap err_unknown_param   'select?q=*:*&notaparam=1&wt=json'
 
+# --- error shapes, issue #11 -----------------------------------------------
+# Plain core-relative GET: goes in manifest.tsv like every other query, so the
+# differential harness picks it up for free.
+cap err_missing_q       'select?wt=json'
+
+# The rest are not core-relative GETs (other core, POST body, non-GET method),
+# so they cannot live in manifest.tsv without breaking its "core-relative GET"
+# contract. Separate index: name, status, method, url-after-/solr/, body.
+capx() {  # capx <name> <method> <url-after-/solr/> [body]
+  local name=$1 method=$2 suffix=$3 body=${4-}
+  if [ -n "$body" ]; then
+    curl -sg -X "$method" "$SOLR/$suffix" -H 'Content-Type: application/json' -d "$body" \
+      -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  else
+    curl -sg -X "$method" "$SOLR/$suffix" \
+      -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" "$method" "$suffix" "$body" \
+    >> "$HERE/manifest-errors.tsv"
+  rm -f "$OUT/$name.status"
+}
+: > "$HERE/manifest-errors.tsv"
+
+capx err_missing_core    GET    "nosuchcore/select?q=*:*&wt=json"
+capx err_update_bad_json POST   "$CORE/update?commit=true&wt=json" '{not json'
+capx err_select_delete   DELETE "$CORE/select?q=*:*&wt=json"
+capx err_update_put      PUT    "$CORE/update?wt=json" '[]'
+
 echo
 column -t -s $'\t' "$HERE/manifest.tsv"
+echo
+column -t -s $'\t' "$HERE/manifest-errors.tsv"
 echo
 echo "captured $(wc -l < "$HERE/manifest.tsv" | tr -d ' ') responses -> $OUT"
 echo "solr still running as '$CONTAINER' (docker rm -f $CONTAINER to stop)"
