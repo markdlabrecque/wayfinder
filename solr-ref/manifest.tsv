@@ -40,3 +40,15 @@ err_sort_no_direction	400	select?q=*:*&sort=id&wt=json
 err_sort_score_bad_direction	400	select?q=*:*&sort=score+sideways&wt=json
 err_sort_field_before_direction	400	select?q=*:*&sort=body+desc,id+sideways&wt=json
 err_sort_direction_before_field	400	select?q=*:*&sort=body+sideways&wt=json
+facet_multi_field	200	select?q=*:*&rows=0&facet=true&facet.field=category&facet.field=id&wt=json
+facet_json_nl_map_multi	200	select?q=*:*&rows=0&facet=true&facet.field=category&facet.field=id&json.nl=map&wt=json
+facet_subset	200	select?q=id:doc2&rows=0&facet=true&facet.field=category&wt=json
+facet_sort_count_tiebreak	200	select?q=quick&df=body&rows=0&facet=true&facet.field=category&facet.sort=count&wt=json
+facet_sort_index_subset	200	select?q=quick&df=body&rows=0&facet=true&facet.field=category&facet.sort=index&wt=json
+facet_missing_no_hit	200	select?q=id:doc2&rows=0&facet=true&facet.field=category&facet.missing=true&wt=json
+facet_limit_zero	200	select?q=*:*&rows=0&facet=true&facet.field=category&facet.limit=0&wt=json
+facet_limit_unlimited	200	select?q=*:*&rows=0&facet=true&facet.field=category&facet.limit=-1&wt=json
+facet_mincount_one	200	select?q=id:doc2&rows=0&facet=true&facet.field=category&facet.mincount=1&wt=json
+facet_query_multi	200	select?q=*:*&rows=0&facet=true&facet.query=category:animals&facet.query=category:garden&wt=json
+facet_query_zero	200	select?q=*:*&rows=0&facet=true&facet.query=category:nosuchvalue&wt=json
+facet_query_with_fq	200	select?q=*:*&fq=category:classic&rows=0&facet=true&facet.query=category:animals&wt=json

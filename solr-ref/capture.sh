@@ -239,3 +239,102 @@ echo
 echo "captured $(wc -l < "$HERE/manifest.tsv" | tr -d ' ') responses -> $OUT"
 echo "solr still running as '$CONTAINER' (docker rm -f $CONTAINER to stop)"
 echo "strict solr still running as '$STRICT_CONTAINER' (docker rm -f $STRICT_CONTAINER to stop)"
+
+# --- Faceting completion (issue #3) ----------------------------------------
+# Everything below is appended at the end per CLAUDE.md, so re-running the
+# script leaves every pre-existing manifest row byte-identical and only adds
+# rows at the tail.
+#
+# Main-core captures: plain core-relative GETs against the untouched 5-doc
+# corpus, so they belong in manifest.tsv and the differential harness picks
+# them up for free.
+
+# Multiple facet.field: `id` is a string field with docValues=true in the
+# _default configset, so it facets alongside `category`.
+cap facet_multi_field       'select?q=*:*&rows=0&facet=true&facet.field=category&facet.field=id&wt=json'
+cap facet_json_nl_map_multi 'select?q=*:*&rows=0&facet=true&facet.field=category&facet.field=id&json.nl=map&wt=json'
+
+# The dictionary-enumeration property at two different hit-set sizes: terms
+# reachable only by non-matching docs must still appear, at 0.
+cap facet_subset            'select?q=id:doc2&rows=0&facet=true&facet.field=category&wt=json'
+
+# facet.sort tie-break, on a hit set where count order and term order differ
+# (`quick` matches doc1+doc3 -> classic 2, animals 1, misc 1, garden 0).
+cap facet_sort_count_tiebreak 'select?q=quick&df=body&rows=0&facet=true&facet.field=category&facet.sort=count&wt=json'
+cap facet_sort_index_subset   'select?q=quick&df=body&rows=0&facet=true&facet.field=category&facet.sort=index&wt=json'
+
+# facet.missing is hit-set-based: doc5 (the value-less doc) is outside this
+# hit set, so the null bucket must be 0, not 1.
+cap facet_missing_no_hit    'select?q=id:doc2&rows=0&facet=true&facet.field=category&facet.missing=true&wt=json'
+
+# facet.limit boundaries.
+cap facet_limit_zero        'select?q=*:*&rows=0&facet=true&facet.field=category&facet.limit=0&wt=json'
+cap facet_limit_unlimited   'select?q=*:*&rows=0&facet=true&facet.field=category&facet.limit=-1&wt=json'
+
+# facet.mincount=1 drops the zero-count dictionary terms.
+cap facet_mincount_one      'select?q=id:doc2&rows=0&facet=true&facet.field=category&facet.mincount=1&wt=json'
+
+# Repeatable facet.query, a facet query matching nothing (key present at 0),
+# and a facet query intersected with q + fq.
+cap facet_query_multi       'select?q=*:*&rows=0&facet=true&facet.query=category:animals&facet.query=category:garden&wt=json'
+cap facet_query_zero        'select?q=*:*&rows=0&facet=true&facet.query=category:nosuchvalue&wt=json'
+cap facet_query_with_fq     'select?q=*:*&fq=category:classic&rows=0&facet=true&facet.query=category:animals&wt=json'
+
+# --- Premise check: what does Solr do for a facet it cannot build? ---------
+# These go in manifest-errors.tsv, not manifest.tsv, even though they are
+# core-relative GETs: Wayfinder deliberately diverges here (a hard 400 rather
+# than a silent empty array), so putting them in manifest.tsv would demand a
+# permanent EXPECTED_DIVERGENCES entry in the differential harness. They are
+# captured as ground truth for the documented divergence, not as a target.
+#   facet_non_docvalues_text      `body`: text_en, indexed, stored, no docValues
+#   facet_non_docvalues_text_enum the same field with facet.method=enum
+#   facet_unknown_field           a field that does not exist at all
+capx facet_non_docvalues_text      GET "$CORE/select?q=*:*&rows=0&facet=true&facet.field=body&wt=json"
+capx facet_non_docvalues_text_enum GET "$CORE/select?q=*:*&rows=0&facet=true&facet.field=body&facet.method=enum&wt=json"
+capx facet_unknown_field           GET "$CORE/select?q=*:*&rows=0&facet=true&facet.field=nosuchfield&wt=json"
+
+# --- facet.range: a second core, same container ----------------------------
+# facet.range needs a numeric or date field. Adding one to the `content` core
+# would rewrite ground truth for every doc-returning fixture, so the range
+# corpus lives in its own core with its own 4 docs. Captured with capx (not a
+# main-core GET, so not a manifest.tsv row).
+#   views   pint,   indexed+stored+docValues  -> numeric range facet
+#   created pdate,  indexed+stored+docValues  -> date range facet
+#   note    string, stored only (no indexed, no docValues) -> unfacetable
+RANGE_CORE=facets
+if ! curl -sf "$SOLR/admin/cores?action=STATUS&core=$RANGE_CORE&wt=json" \
+     | grep -q "\"name\":\"$RANGE_CORE\""; then
+  docker exec "$CONTAINER" solr create -c "$RANGE_CORE" >/dev/null
+fi
+curl -s "$SOLR/$RANGE_CORE/schema" -H 'Content-Type: application/json' -d '{
+  "add-field": [
+    {"name":"views",   "type":"pint",   "indexed":true, "stored":true, "docValues":true},
+    {"name":"created", "type":"pdate",  "indexed":true, "stored":true, "docValues":true},
+    {"name":"note",    "type":"string", "indexed":false,"stored":true, "docValues":false}
+  ]
+}' >/dev/null
+curl -sf "$SOLR/$RANGE_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+  {"id":"r1","views":5, "created":"2020-01-02T00:00:00Z","note":"alpha"},
+  {"id":"r2","views":15,"created":"2020-01-03T00:00:00Z","note":"beta"},
+  {"id":"r3","views":25,"created":"2020-01-03T00:00:00Z","note":"alpha"},
+  {"id":"r4","views":35,"created":"2020-01-05T00:00:00Z"}
+]' >/dev/null
+
+capx facet_range_numeric GET \
+  "$RANGE_CORE/select?q=*:*&rows=0&facet=true&facet.range=views&facet.range.start=0&facet.range.end=40&facet.range.gap=10&wt=json"
+capx facet_range_date GET \
+  "$RANGE_CORE/select?q=*:*&rows=0&facet=true&facet.range=created&facet.range.start=2020-01-01T00:00:00Z&facet.range.end=2020-01-06T00:00:00Z&facet.range.gap=%2B1DAY&wt=json"
+capx facet_range_json_nl_map GET \
+  "$RANGE_CORE/select?q=*:*&rows=0&facet=true&facet.range=views&facet.range.start=0&facet.range.end=40&facet.range.gap=10&json.nl=map&wt=json"
+# A stored-only field: neither indexed nor docValues, the case where Solr has
+# nothing at all to read.
+capx facet_stored_only_field GET \
+  "$RANGE_CORE/select?q=*:*&rows=0&facet=true&facet.field=note&wt=json"
+
+echo
+column -t -s $'\t' "$HERE/manifest.tsv"
+echo
+column -t -s $'\t' "$HERE/manifest-errors.tsv"
+echo
+echo "captured $(wc -l < "$HERE/manifest.tsv" | tr -d ' ') manifest.tsv rows -> $OUT"
+echo "range-facet core '$RANGE_CORE' left in place on '$CONTAINER'"

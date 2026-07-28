@@ -7,10 +7,15 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Map, Value, json};
-use tantivy::collector::DocSetCollector;
+use tantivy::aggregation::agg_req::{Aggregation, AggregationVariants, Aggregations};
+use tantivy::aggregation::agg_result::{AggregationResult, BucketResult};
+use tantivy::aggregation::bucket::TermsAggregation;
+use tantivy::aggregation::{
+    AggContextParams, AggregationCollector, AggregationLimitsGuard, DEFAULT_BUCKET_LIMIT, Key,
+};
+use tantivy::collector::{Count, DocSetCollector};
 use tantivy::query::{AllQuery, Query, QueryParser};
 use tantivy::schema::OwnedValue;
-use tantivy::schema::Value as _;
 use tantivy::time::OffsetDateTime;
 use tantivy::time::format_description::well_known::Rfc3339;
 use tantivy::{
@@ -20,6 +25,11 @@ use tantivy::{
 use crate::collector::{AllScoredHits, SortClause};
 use crate::config::ServerConfig;
 use crate::schema::{self, ValueKind, WayfinderSchema};
+
+/// Ceiling on how many distinct terms one `facet.field` enumerates. Tantivy's
+/// own aggregation bucket limit is the binding constraint, so the request asks
+/// for exactly that many and no more.
+const MAX_FACET_TERMS: u32 = DEFAULT_BUCKET_LIMIT;
 
 /// Renders one stored Tantivy value as the JSON Solr would return for it.
 fn render_value<'a>(v: impl tantivy::schema::Value<'a>) -> Value {
@@ -422,32 +432,97 @@ impl CoreIndex {
         Ok(Value::Object(out))
     }
 
-    /// Counts occurrences of each value of `field_name` across `hits`
-    /// (Solr's `facet.field`, default sort — count descending, term
-    /// ascending on ties). `field_name` must be a stored field; the tracer
-    /// bullet reads facet counts from stored values rather than the fast
-    /// field, which is an implementation simplification (see handoff notes).
-    pub fn facet_counts(
-        &self,
-        field_name: &str,
-        hits: &[(Score, DocAddress)],
-    ) -> Result<Vec<(String, i64)>> {
-        let field = self
-            .wf_schema
-            .field(field_name)
-            .ok_or_else(|| anyhow!("unknown facet field `{field_name}`"))?;
-        let searcher = self.reader.searcher();
+    /// Number of documents matching `query`. The counting primitive behind
+    /// `facet.query`, `facet.missing` and each `facet.range` bucket, all of
+    /// which are "how many docs also match this extra constraint?".
+    pub fn count(&self, query: &dyn Query) -> Result<usize> {
+        Ok(self.reader.searcher().search(query, &Count)?)
+    }
 
-        let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-        for (_, addr) in hits {
-            let doc: TantivyDocument = searcher.doc(*addr)?;
-            for value in doc.get_all(field).filter_map(|v| v.as_str()) {
-                *counts.entry(value.to_string()).or_insert(0) += 1;
-            }
-        }
+    /// Every term in a **string** field's term dictionary, with how many of
+    /// `query`'s matches carry it — Solr's `facet.field`.
+    ///
+    /// For a string field the counts do not come from the hit set: Solr
+    /// enumerates the whole term dictionary, so a query matching one document
+    /// still reports every other term at 0 (`facet_zero.json`,
+    /// `facet_subset.json`). Tantivy does that with `min_doc_count: 0`,
+    /// documented in tantivy 0.26.1's `aggregation/bucket/term_agg.rs:229` as
+    /// *"When set to 0, this will return all terms in the field"* — which is
+    /// also why this needs a `fast` (docValues) field and why a non-`fast` one is
+    /// refused by the caller rather than silently answered with an empty array.
+    ///
+    /// ponytail: that dictionary enumeration is **string-only**. In tantivy
+    /// 0.26.1 the `min_doc_count == 0` term-dictionary stream that inserts the
+    /// zero-count buckets sits inside the `ColumnType::Str` branch
+    /// (`term_agg.rs:1024-1053`); the numeric/date/bool branches
+    /// (`:1054-1112`) only map the entries the hit set actually produced. So a
+    /// `facet.field` on an `int`/`date` field reports only values present in the
+    /// hit set, and a value reachable only through a non-matching document is
+    /// silently dropped — a real divergence from Solr, with no fixture covering
+    /// it yet. Fixing it needs either a Tantivy change or a per-value count
+    /// pass; string faceting is what this issue targets.
+    ///
+    /// Returned unsorted and unfiltered: `facet.mincount` / `facet.sort` /
+    /// `facet.limit` are response-shaping concerns and live in `crate::facet`.
+    pub fn term_facet(&self, field_name: &str, query: &dyn Query) -> Result<Vec<(String, u64)>> {
+        const AGG_NAME: &str = "wf_terms";
 
-        let mut counted: Vec<(String, i64)> = counts.into_iter().collect();
-        counted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        Ok(counted)
+        let mut aggs = Aggregations::default();
+        aggs.insert(
+            AGG_NAME.to_string(),
+            Aggregation {
+                agg: AggregationVariants::Terms(TermsAggregation {
+                    field: field_name.to_string(),
+                    // `size` trims the final bucket list and `segment_size`
+                    // caps the dictionary walk that fills in the zero-count
+                    // terms, so both have to be at least the dictionary size
+                    // for the enumeration to be complete.
+                    //
+                    // ponytail: a field with more distinct values than
+                    // `MAX_FACET_TERMS` truncates (and trips Tantivy's own
+                    // bucket limit). Solr has no such ceiling. Revisit with
+                    // streaming/`facet.prefix` paging if a real corpus needs it.
+                    size: Some(MAX_FACET_TERMS),
+                    segment_size: Some(MAX_FACET_TERMS),
+                    min_doc_count: Some(0),
+                    ..TermsAggregation::default()
+                }),
+                sub_aggregation: Aggregations::default(),
+            },
+        );
+
+        let collector = AggregationCollector::from_aggs(
+            aggs,
+            AggContextParams::new(
+                AggregationLimitsGuard::default(),
+                self.index.tokenizers().clone(),
+            ),
+        );
+        let results = self.reader.searcher().search(query, &collector)?;
+
+        let Some(AggregationResult::BucketResult(BucketResult::Terms { buckets, .. })) =
+            results.0.get(AGG_NAME)
+        else {
+            return Err(anyhow!(
+                "could not facet on field `{field_name}`: unexpected aggregation result"
+            ));
+        };
+
+        Ok(buckets
+            .iter()
+            .map(|bucket| {
+                let term = match (&bucket.key_as_string, &bucket.key) {
+                    (Some(s), _) => s.clone(),
+                    (None, Key::Str(s)) => s.clone(),
+                    (None, Key::I64(v)) => v.to_string(),
+                    (None, Key::U64(v)) => v.to_string(),
+                    // ponytail: numeric `facet.field` keys are rendered
+                    // straight from the aggregation key. Only `string` fields
+                    // are pinned by a fixture so far.
+                    (None, Key::F64(v)) => v.to_string(),
+                };
+                (term, bucket.doc_count)
+            })
+            .collect())
     }
 }

@@ -1,0 +1,29 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":4,
+    "params":{
+      "q":"*:*",
+      "facet.field":"body",
+      "facet.method":"enum",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{
+      "body":["dog",2,"lazi",2,"quick",2,"afternoon",1,"all",1,"brown",1,"cat",1,"dai",1,"fox",1,"garden",1,"here",1,"jump",1,"live",1,"much",1,"noth",1,"over",1,"save",1,"think",1,"togeth",1]
+    },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  }
+}

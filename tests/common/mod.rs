@@ -38,6 +38,10 @@ pub const CORE: &str = "content";
 /// while the fixture is a 200, which is a divergence in the *test* schema, not
 /// in Wayfinder. Added by issue #2 (sort); `body` stays non-fast so
 /// `err_bad_sort.json`'s 400 still reproduces.
+/// Issue #3 relies on the same property for the other reason: `facet.field=id`
+/// works on real Solr for exactly that configset reason
+/// (`facet_multi_field.json`). `fast` changes no stored output, so no existing
+/// fixture moves.
 pub const SCHEMA_TOML: &str = r#"
 [core]
 name = "content"
