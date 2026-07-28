@@ -1,0 +1,5 @@
+# Solr reference capture — regenerable via solr-ref/capture.sh
+/solr-ref/
+
+# Rust
+/target/
