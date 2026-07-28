@@ -45,7 +45,10 @@ async fn select_all_returns_all_docs_with_default_fl_and_no_internal_fields() {
     // fact 9): no internal fields leak into an unrestricted result, even
     // though the fixture (real Solr) has them.
     for doc in body["response"]["docs"].as_array().unwrap() {
-        assert!(doc.get("_version_").is_none(), "doc must not include _version_");
+        assert!(
+            doc.get("_version_").is_none(),
+            "doc must not include _version_"
+        );
         assert!(doc.get("_root_").is_none(), "doc must not include _root_");
     }
 }
@@ -125,7 +128,10 @@ async fn facet_on_multi_valued_field_matches_flat_alternating_array_shape() {
     // ...] array (not an object) by default, and facet_counts always carries
     // all five sub-objects, empty when unused.
     let facet_counts = &body["facet_counts"];
-    assert!(facet_counts.is_object(), "facet_counts must be present when facet=true");
+    assert!(
+        facet_counts.is_object(),
+        "facet_counts must be present when facet=true"
+    );
     for key in [
         "facet_queries",
         "facet_fields",
@@ -139,7 +145,10 @@ async fn facet_on_multi_valued_field_matches_flat_alternating_array_shape() {
         );
     }
     let category = &facet_counts["facet_fields"]["category"];
-    assert!(category.is_array(), "facet_fields.category must be a flat array, not an object");
+    assert!(
+        category.is_array(),
+        "facet_fields.category must be a flat array, not an object"
+    );
     let flat: Vec<Value> = category.as_array().unwrap().clone();
     assert_eq!(
         flat,
@@ -182,8 +191,14 @@ async fn select_unknown_fl_field_is_silently_dropped() {
 
     let doc = &body["response"]["docs"][0];
     assert_eq!(doc["id"], "doc1");
-    assert!(doc.get("nosuchfield").is_none(), "unknown fl field must be silently dropped, not erroring");
-    assert!(doc.get("body").is_none(), "fl restricts to the requested fields only");
+    assert!(
+        doc.get("nosuchfield").is_none(),
+        "unknown fl field must be silently dropped, not erroring"
+    );
+    assert!(
+        doc.get("body").is_none(),
+        "fl restricts to the requested fields only"
+    );
 }
 
 #[tokio::test]

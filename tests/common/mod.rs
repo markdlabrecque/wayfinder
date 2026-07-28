@@ -141,7 +141,10 @@ pub fn normalize_envelope(mut v: Value) -> Value {
     if let Some(header) = v.get_mut("responseHeader").and_then(|h| h.as_object_mut()) {
         header.remove("QTime");
     }
-    if let Some(docs) = v.pointer_mut("/response/docs").and_then(|d| d.as_array_mut()) {
+    if let Some(docs) = v
+        .pointer_mut("/response/docs")
+        .and_then(|d| d.as_array_mut())
+    {
         for doc in docs.iter_mut() {
             if let Some(obj) = doc.as_object_mut() {
                 obj.remove("_version_");
