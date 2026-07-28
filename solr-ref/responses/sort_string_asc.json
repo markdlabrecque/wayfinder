@@ -1,0 +1,36 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2,
+    "params":{
+      "q":"*:*",
+      "fl":"id,category",
+      "sort":"category asc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":6,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"s1",
+      "category":"alpha"
+    },{
+      "id":"s2",
+      "category":"beta"
+    },{
+      "id":"s4",
+      "category":"delta"
+    },{
+      "id":"s5",
+      "category":"epsilon"
+    },{
+      "id":"s3",
+      "category":"gamma"
+    },{
+      "id":"s6",
+      "category":"zeta"
+    }]
+  }
+}

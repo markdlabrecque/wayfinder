@@ -530,8 +530,111 @@ capf facet_field_numeric_json_nl_map "$FACET_CORE/select?q=id:r1&rows=0&facet=tr
 # zero-count terms" is indistinguishable from a broken capture setup.
 capf facet_field_string_control_subset "$FACET_CORE/select?q=id:r1&rows=0&facet=true&facet.field=id&wt=json"
 
+# --- sort clause grammar + numeric/date sort corpus (issue #32) --------------
+# Appended block; nothing above is edited. Same self-contained-container
+# precedent as `wayfinder-solr-24` above (own container, own port, own core),
+# and for the same reason: this was captured while issues #31 (8983) and #33
+# (8988) ran concurrently, so it must not perturb the reference core or any
+# other block's container. Like the #24 block it is not runnable standalone
+# (`$OUT`/`$HERE`, and `caps` appends to manifest-errors.tsv unconditionally);
+# run the whole script.
+#
+# Two questions this corpus is built to discriminate:
+#   1. Clause grammar — is the comma optional (`sort=id asc category desc`
+#      two clauses or an error?), where do dropped/extra tokens go, and is the
+#      direction-error `pos` absolute in the spec or clause-relative
+#      (`sort=id asc,id sideways`)? Findings 34-35.
+#   2. Numeric/float/date missing-value placement — `s6` carries *negative*
+#      values (and a pre-epoch date) precisely so "missing sorts as 0" is
+#      distinguishable from "missing sorts first/last": the missing doc landing
+#      *between* the negative value and the smallest positive one is what rules
+#      both extremes out. Findings 36-37.
+SORTDEBT_CONTAINER=wayfinder-solr-32
+SORTDEBT_SOLR=http://localhost:8987/solr
+SORTDEBT_CORE=sortdebt
+if ! docker ps --format '{{.Names}}' | grep -qx "$SORTDEBT_CONTAINER"; then
+  docker rm -f "$SORTDEBT_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$SORTDEBT_CONTAINER" -p 8987:8983 \
+    solr:9 solr-precreate "$SORTDEBT_CORE" >/dev/null
+fi
+echo -n "waiting for sortdebt solr"
+for _ in $(seq 60); do
+  if curl -sf "$SORTDEBT_SOLR/$SORTDEBT_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+  echo -n "."; sleep 1
+done
+curl -s "$SORTDEBT_SOLR/$SORTDEBT_CORE/schema" -H 'Content-Type: application/json' -d '{
+  "add-field": [
+    {"name":"category","type":"string","indexed":true,"stored":true,"docValues":true},
+    {"name":"views",   "type":"pint",  "indexed":true,"stored":true,"docValues":true},
+    {"name":"weight",  "type":"pfloat","indexed":true,"stored":true,"docValues":true},
+    {"name":"created", "type":"pdate", "indexed":true,"stored":true,"docValues":true},
+    {"name":"nums",    "type":"pint",  "indexed":true,"stored":true,"docValues":true,"multiValued":true}
+  ]
+}' >/dev/null
+curl -sf "$SORTDEBT_SOLR/$SORTDEBT_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+  {"id":"s1","category":"alpha",  "views":30,"weight":1.5,"created":"2021-03-01T00:00:00Z","nums":[10,90]},
+  {"id":"s2","category":"beta",   "views":10,"weight":3.5,"created":"2021-01-01T00:00:00Z","nums":[50,60]},
+  {"id":"s3","category":"gamma",  "views":20,"weight":2.5,"created":"2021-05-01T00:00:00Z","nums":[20,80]},
+  {"id":"s4","category":"delta",              "weight":0.5,"created":"2021-02-01T00:00:00Z","nums":[70]},
+  {"id":"s5","category":"epsilon","views":40},
+  {"id":"s6","category":"zeta",   "views":-5,"weight":-1.5,"created":"1969-06-01T00:00:00Z","nums":[-10,5]}
+]' >/dev/null
+
+# Same 6-column manifest-errors.tsv contract as `capf` above: not the `content`
+# core, so never manifest.tsv — the differential harness must not GET these
+# against the reference core.
+caps() {  # caps <name> <path-after-core>
+  local name=$1 suffix=$2
+  curl -sg "$SORTDEBT_SOLR/$SORTDEBT_CORE/$suffix" \
+    -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$SORTDEBT_CORE/$suffix" "" "$SORTDEBT_SOLR" \
+    >> "$HERE/manifest-errors.tsv"
+  rm -f "$OUT/$name.status"
+}
+
+# Clause grammar: is the comma optional, and what happens to extra tokens?
+caps sort_clause_space_separated 'select?q=*:*&sort=id+asc+category+desc&wt=json'
+caps sort_clause_trailing_garbage 'select?q=*:*&sort=id+asc+garbage&wt=json'
+caps sort_clause_trailing_valid_field 'select?q=*:*&sort=id+asc+category&wt=json'
+caps sort_clause_trailing_comma 'select?q=*:*&sort=id+asc,&wt=json'
+caps sort_clause_leading_comma 'select?q=*:*&sort=,id+asc&wt=json'
+caps sort_clause_double_comma 'select?q=*:*&sort=id+asc,,category+desc&wt=json'
+caps sort_clause_empty 'select?q=*:*&sort=&wt=json'
+caps sort_clause_space_before_comma 'select?q=*:*&sort=id+asc+,+category+desc&wt=json'
+caps sort_clause_space_after_comma 'select?q=*:*&sort=id+asc,+category+desc&wt=json'
+
+# Multi-clause pos: absolute within the spec, or clause-relative?
+caps err_sort_second_clause_bad_direction 'select?q=*:*&sort=id+asc,id+sideways&wt=json'
+caps err_sort_second_clause_no_direction 'select?q=*:*&sort=id+asc,category&wt=json'
+# And pos under leading whitespace.
+caps err_sort_leading_whitespace 'select?q=*:*&sort=%20%20id+sideways&wt=json'
+
+# String (SortedSet) sort on this corpus, for the multi-segment test in
+# tests/sort.rs: category values are arranged so the correct asc order
+# interleaves the two commit batches the test uses, which is what makes a
+# raw-cross-segment-ordinal comparison visibly wrong.
+caps sort_string_asc 'select?q=*:*&sort=category+asc&fl=id,category&wt=json'
+caps sort_string_desc 'select?q=*:*&sort=category+desc&fl=id,category&wt=json'
+
+# Numeric / float / date sort, missing values in both directions.
+caps sort_int_asc 'select?q=*:*&sort=views+asc&fl=id,views&wt=json'
+caps sort_int_desc 'select?q=*:*&sort=views+desc&fl=id,views&wt=json'
+caps sort_float_asc 'select?q=*:*&sort=weight+asc&fl=id,weight&wt=json'
+caps sort_float_desc 'select?q=*:*&sort=weight+desc&fl=id,weight&wt=json'
+caps sort_date_asc 'select?q=*:*&sort=created+asc&fl=id,created&wt=json'
+caps sort_date_desc 'select?q=*:*&sort=created+desc&fl=id,created&wt=json'
+
+# Min/max selector on a multiValued numeric field (`nums` values are arranged
+# so the desc order is *not* the reverse of the asc order — that asymmetry is
+# what proves the selector, not just a direction flip).
+caps sort_mv_int_asc 'select?q=*:*&sort=nums+asc&fl=id,nums&wt=json'
+caps sort_mv_int_desc 'select?q=*:*&sort=nums+desc&fl=id,nums&wt=json'
+
 echo
 column -t -s $'\t' "$HERE/manifest-errors.tsv"
 echo
 echo "numeric/date facet.field core '$FACET_CORE' left in place on '$FACET_CONTAINER'"
 echo "  (docker rm -f $FACET_CONTAINER to stop)"
+echo "sort-debt core '$SORTDEBT_CORE' left in place on '$SORTDEBT_CONTAINER' (port 8987)"
+echo "  (docker rm -f $SORTDEBT_CONTAINER to stop)"

@@ -1,0 +1,35 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"*:*",
+      "fl":"id,nums",
+      "sort":"nums desc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":6,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"s1",
+      "nums":[10,90]
+    },{
+      "id":"s3",
+      "nums":[20,80]
+    },{
+      "id":"s4",
+      "nums":[70]
+    },{
+      "id":"s2",
+      "nums":[50,60]
+    },{
+      "id":"s6",
+      "nums":[-10,5]
+    },{
+      "id":"s5"
+    }]
+  }
+}
