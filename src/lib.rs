@@ -13,7 +13,7 @@ mod collector;
 mod core_index;
 mod error;
 mod params;
-mod schema;
+pub mod schema;
 
 use std::path::Path;
 use std::sync::Arc;

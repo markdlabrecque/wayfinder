@@ -116,6 +116,61 @@ capx err_missing_core    GET    "nosuchcore/select?q=*:*&wt=json"
 capx err_update_bad_json POST   "$CORE/update?commit=true&wt=json" '{not json'
 capx err_select_delete   DELETE "$CORE/select?q=*:*&wt=json"
 capx err_update_put      PUT    "$CORE/update?wt=json" '[]'
+# --- Doc-level field handling (issue #10) ----------------------------------
+# The _default configset is *schemaless*: `update.autoCreateFields` defaults to
+# true, so an unknown document field is silently added to the schema (as
+# text_general) instead of being rejected. That is a configset behaviour, not a
+# Solr-core one, and it is explicitly out of scope for Wayfinder (PRD §3: no
+# runtime schema mutation). So capture both sides:
+#   update_unknown_field_schemaless -> what the _default configset does (200)
+#   update_unknown_field_strict     -> what a non-schemaless Solr does (400),
+#                                      which is the behaviour Wayfinder matches
+# The strict side needs -Dupdate.autoCreateFields=false, a JVM-wide property, so
+# it runs in its own container on another port.
+# Indexed in manifest-errors.tsv, not manifest.tsv: these are POSTs with a body,
+# and manifest.tsv's contract is "core-relative GET" — the differential harness
+# (issue #1) GETs every row in it verbatim. Same 5-column format as capx above,
+# plus a 6th column for the base URL, since the strict side runs on another port.
+cap_post() {  # cap_post <name> <path-with-query> <json-body> [base-url] [core]
+  local name=$1 path=$2 body=$3 base=${4:-$SOLR} core=${5:-$CORE}
+  curl -sg "$base/$core/$path" -H 'Content-Type: application/json' -d "$body" \
+    -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" POST "$core/$path" "$body" "$base" \
+    >> "$HERE/manifest-errors.tsv"
+  rm -f "$OUT/$name.status"
+}
+
+# Schemaless side, on the main container. `commit=false` and a delete-by-id
+# afterwards keep the 5-doc reference corpus intact for every other fixture.
+cap_post update_unknown_field_schemaless 'update?commit=true' \
+  '[{"id":"probe_unknown_field","body":"probe","nosuchfield":"x"}]'
+curl -s "$SOLR/$CORE/update?commit=true" -H 'Content-Type: application/json' \
+  -d '{"delete":{"id":"probe_unknown_field"}}' >/dev/null
+
+# Strict side, its own container/port.
+STRICT_CONTAINER=wayfinder-solr-ref-strict
+STRICT_SOLR=http://localhost:8984/solr
+if ! docker ps --format '{{.Names}}' | grep -qx "$STRICT_CONTAINER"; then
+  docker rm -f "$STRICT_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$STRICT_CONTAINER" -p 8984:8983 \
+    -e SOLR_OPTS=-Dupdate.autoCreateFields=false \
+    solr:9 solr-precreate "$CORE" >/dev/null
+fi
+echo -n "waiting for strict solr"
+for _ in $(seq 60); do
+  if curl -sf "$STRICT_SOLR/$CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+  echo -n "."; sleep 1
+done
+curl -s "$STRICT_SOLR/$CORE/schema" -H 'Content-Type: application/json' -d '{
+  "add-field": [
+    {"name":"body",     "type":"text_en", "indexed":true, "stored":true},
+    {"name":"category", "type":"string",  "indexed":true, "stored":true,
+     "docValues":true, "multiValued":true}
+  ]
+}' >/dev/null
+cap_post update_unknown_field_strict 'update?commit=true' \
+  '[{"id":"probe_unknown_field","body":"probe","nosuchfield":"x"}]' "$STRICT_SOLR"
 
 echo
 column -t -s $'\t' "$HERE/manifest.tsv"
@@ -124,3 +179,4 @@ column -t -s $'\t' "$HERE/manifest-errors.tsv"
 echo
 echo "captured $(wc -l < "$HERE/manifest.tsv" | tr -d ' ') responses -> $OUT"
 echo "solr still running as '$CONTAINER' (docker rm -f $CONTAINER to stop)"
+echo "strict solr still running as '$STRICT_CONTAINER' (docker rm -f $STRICT_CONTAINER to stop)"
