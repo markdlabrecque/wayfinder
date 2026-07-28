@@ -1,0 +1,30 @@
+{
+  "responseHeader":{
+    "warnings":["Raising facet.mincount from 0 to 1, because field created is Points-based."],
+    "status":0,
+    "QTime":1,
+    "params":{
+      "q":"*:*",
+      "facet.field":"created",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json",
+      "facet.sort":"index"
+    }
+  },
+  "response":{
+    "numFound":4,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{
+      "created":["2020-01-02T00:00:00Z",1,"2020-01-03T00:00:00Z",2,"2020-01-05T00:00:00Z",1]
+    },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  }
+}

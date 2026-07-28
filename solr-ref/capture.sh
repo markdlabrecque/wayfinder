@@ -420,6 +420,65 @@ capk() {  # capk <name> <path-after-core>
   rm -f "$OUT/$name.status"
 }
 
+# --- facet.field on numeric / date columns (issue #24) ----------------------
+# Appended block; nothing above is edited.
+#
+# Why its own container and port, rather than reusing `$CONTAINER`'s `facets`
+# core: this block was written while issue #25 was capturing concurrently
+# against `wayfinder-solr-ref` on 8983, and the top of this script *rebuilds*
+# that container destructively. Two concurrent runs against one container is how
+# fixtures got churned earlier in this project. Same precedent as
+# `wayfinder-solr-ref-strict` on 8984 -- a self-contained container, core,
+# schema and corpus, so this block cannot perturb the reference core or the
+# fixtures already captured from it (issue #26's lesson: never leave the
+# reference core unable to reproduce its own captures). It is *not* runnable
+# standalone, though: it uses `$OUT`/`$HERE` set at the top of the script, and
+# `capf` appends to `manifest-errors.tsv` unconditionally, so re-running just
+# this block would duplicate its eleven rows there. Run the whole script.
+#
+# The core, schema and corpus are identical to the `facets` core the issue #3
+# block builds above, so these fixtures are ground truth for the same 4-doc
+# corpus `tests/faceting.rs::range_app` mirrors.
+FACET_CONTAINER=wayfinder-solr-24
+FACET_SOLR=http://localhost:8985/solr
+FACET_CORE=facets
+if ! docker ps --format '{{.Names}}' | grep -qx "$FACET_CONTAINER"; then
+  docker rm -f "$FACET_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$FACET_CONTAINER" -p 8985:8983 \
+    solr:9 solr-precreate "$FACET_CORE" >/dev/null
+fi
+echo -n "waiting for facet solr"
+for _ in $(seq 60); do
+  if curl -sf "$FACET_SOLR/$FACET_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+  echo -n "."; sleep 1
+done
+curl -s "$FACET_SOLR/$FACET_CORE/schema" -H 'Content-Type: application/json' -d '{
+  "add-field": [
+    {"name":"views",   "type":"pint",   "indexed":true, "stored":true, "docValues":true},
+    {"name":"created", "type":"pdate",  "indexed":true, "stored":true, "docValues":true},
+    {"name":"note",    "type":"string", "indexed":false,"stored":true, "docValues":false}
+  ]
+}' >/dev/null
+curl -sf "$FACET_SOLR/$FACET_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+  {"id":"r1","views":5, "created":"2020-01-02T00:00:00Z","note":"alpha"},
+  {"id":"r2","views":15,"created":"2020-01-03T00:00:00Z","note":"beta"},
+  {"id":"r3","views":25,"created":"2020-01-03T00:00:00Z","note":"alpha"},
+  {"id":"r4","views":35,"created":"2020-01-05T00:00:00Z"}
+]' >/dev/null
+
+# Same 5-column manifest-errors.tsv contract as `capx`, plus the base URL as a
+# 6th column (the `update_unknown_field_*` precedent) so it is recorded which
+# Solr answered. Not manifest.tsv: these are not `content`-relative GETs, so the
+# differential harness must not GET them against the reference core.
+capf() {  # capf <name> <url-after-/solr/>
+  local name=$1 suffix=$2
+  curl -sg "$FACET_SOLR/$suffix" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$suffix" "" "$FACET_SOLR" \
+    >> "$HERE/manifest-errors.tsv"
+  rm -f "$OUT/$name.status"
+}
+
 capk keyorder_range_wide_map \
   'select?q=*:*&rows=0&facet=true&facet.range=views&facet.range.start=0&facet.range.end=200&facet.range.gap=10&json.nl=map&wt=json'
 capk keyorder_facet_field_map \
@@ -428,3 +487,51 @@ capk keyorder_facet_field_map_index \
   'select?q=*:*&rows=0&facet=true&facet.field=tag&facet.sort=index&json.nl=map&wt=json'
 
 echo "key-order core '$KEYORDER_CORE' left in place on '$KEYORDER_CONTAINER' (port 8986)"
+
+# The whole point of the issue: `views` has four distinct values but `q=id:r1`
+# matches one document. If Solr enumerates the numeric term dictionary the way
+# it does a string one, 15/25/35 come back at 0. `q=*:*` is the control -- it
+# cannot distinguish enumeration from hit-set mapping, which is exactly why the
+# subset capture is the one that decides.
+capf facet_field_numeric_all    "$FACET_CORE/select?q=*:*&rows=0&facet=true&facet.field=views&wt=json"
+capf facet_field_numeric_subset "$FACET_CORE/select?q=id:r1&rows=0&facet=true&facet.field=views&wt=json"
+
+# The same question for a date column, and the rendering of a date facet term
+# (Tantivy's date column is i64 nanos; Solr's key is an ISO-8601 string).
+# `created` has three distinct values over four docs, so `q=*:*` also pins that
+# a shared value counts 2.
+capf facet_field_date_all       "$FACET_CORE/select?q=*:*&rows=0&facet=true&facet.field=created&wt=json"
+capf facet_field_date_subset    "$FACET_CORE/select?q=id:r1&rows=0&facet=true&facet.field=created&wt=json"
+
+# facet.sort on a numeric dictionary: `index` order separates numeric ordering
+# (5,15,25,35) from the lexical ordering of the rendered keys (15,25,35,5), and
+# `count` order over a hit set of one says where the zero-count terms land.
+capf facet_field_numeric_sort_index "$FACET_CORE/select?q=id:r1&rows=0&facet=true&facet.field=views&facet.sort=index&wt=json"
+capf facet_field_numeric_sort_count "$FACET_CORE/select?q=id:r1&rows=0&facet=true&facet.field=views&facet.sort=count&wt=json"
+
+# The ordering question the one-hit captures above cannot answer: over the full
+# corpus, is a numeric/date facet ordered by the *value* or by the lexical form
+# of the rendered key? 5,15,25,35 vs "15","25","35","5" separates them, and
+# `facet.sort=count` with four counts of 1 makes the tie-break visible too.
+capf facet_field_numeric_sort_index_all "$FACET_CORE/select?q=*:*&rows=0&facet=true&facet.field=views&facet.sort=index&wt=json"
+capf facet_field_date_sort_index_all    "$FACET_CORE/select?q=*:*&rows=0&facet=true&facet.field=created&facet.sort=index&wt=json"
+
+# facet.mincount=1 must drop the zero-count numeric terms -- the control that
+# says a zero-fill is a real enumeration being filtered, not a fabrication.
+capf facet_field_numeric_mincount_one "$FACET_CORE/select?q=id:r1&rows=0&facet=true&facet.field=views&facet.mincount=1&wt=json"
+
+# Numeric keys as object keys under json.nl=map.
+capf facet_field_numeric_json_nl_map "$FACET_CORE/select?q=id:r1&rows=0&facet=true&facet.field=views&json.nl=map&wt=json"
+
+# The control, and the reason the captures above can be trusted: `id` is a
+# string field with docValues in the _default configset, so the SAME container,
+# core, corpus and hit set (`q=id:r1`) must still enumerate for a *string*
+# column -- r2/r3/r4 at 0. Without this, "the numeric facet reported no
+# zero-count terms" is indistinguishable from a broken capture setup.
+capf facet_field_string_control_subset "$FACET_CORE/select?q=id:r1&rows=0&facet=true&facet.field=id&wt=json"
+
+echo
+column -t -s $'\t' "$HERE/manifest-errors.tsv"
+echo
+echo "numeric/date facet.field core '$FACET_CORE' left in place on '$FACET_CONTAINER'"
+echo "  (docker rm -f $FACET_CONTAINER to stop)"

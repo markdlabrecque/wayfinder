@@ -14,3 +14,14 @@ facet_stored_only_field	200	GET	facets/select?q=*:*&rows=0&facet=true&facet.fiel
 keyorder_range_wide_map	200	GET	keyorder/select?q=*:*&rows=0&facet=true&facet.range=views&facet.range.start=0&facet.range.end=200&facet.range.gap=10&json.nl=map&wt=json		http://localhost:8986/solr
 keyorder_facet_field_map	200	GET	keyorder/select?q=*:*&rows=0&facet=true&facet.field=tag&json.nl=map&wt=json		http://localhost:8986/solr
 keyorder_facet_field_map_index	200	GET	keyorder/select?q=*:*&rows=0&facet=true&facet.field=tag&facet.sort=index&json.nl=map&wt=json		http://localhost:8986/solr
+facet_field_numeric_all	200	GET	facets/select?q=*:*&rows=0&facet=true&facet.field=views&wt=json		http://localhost:8985/solr
+facet_field_numeric_subset	200	GET	facets/select?q=id:r1&rows=0&facet=true&facet.field=views&wt=json		http://localhost:8985/solr
+facet_field_date_all	200	GET	facets/select?q=*:*&rows=0&facet=true&facet.field=created&wt=json		http://localhost:8985/solr
+facet_field_date_subset	200	GET	facets/select?q=id:r1&rows=0&facet=true&facet.field=created&wt=json		http://localhost:8985/solr
+facet_field_numeric_sort_index	200	GET	facets/select?q=id:r1&rows=0&facet=true&facet.field=views&facet.sort=index&wt=json		http://localhost:8985/solr
+facet_field_numeric_sort_count	200	GET	facets/select?q=id:r1&rows=0&facet=true&facet.field=views&facet.sort=count&wt=json		http://localhost:8985/solr
+facet_field_numeric_sort_index_all	200	GET	facets/select?q=*:*&rows=0&facet=true&facet.field=views&facet.sort=index&wt=json		http://localhost:8985/solr
+facet_field_date_sort_index_all	200	GET	facets/select?q=*:*&rows=0&facet=true&facet.field=created&facet.sort=index&wt=json		http://localhost:8985/solr
+facet_field_numeric_mincount_one	200	GET	facets/select?q=id:r1&rows=0&facet=true&facet.field=views&facet.mincount=1&wt=json		http://localhost:8985/solr
+facet_field_numeric_json_nl_map	200	GET	facets/select?q=id:r1&rows=0&facet=true&facet.field=views&json.nl=map&wt=json		http://localhost:8985/solr
+facet_field_string_control_subset	200	GET	facets/select?q=id:r1&rows=0&facet=true&facet.field=id&wt=json		http://localhost:8985/solr
