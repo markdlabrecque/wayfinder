@@ -1,6 +1,6 @@
-# Solr reference fixtures — regenerable via solr-ref/capture.sh
-/solr-ref/responses/
-/solr-ref/manifest.tsv
+# Solr reference fixtures (solr-ref/responses/, manifest.tsv) are committed:
+# the test suite asserts against them, so they must be present without Docker.
+# Regenerate with solr-ref/capture.sh.
 
 # Rust
 /target/

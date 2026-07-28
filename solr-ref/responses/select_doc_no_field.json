@@ -1,0 +1,21 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"id:doc5",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"doc5",
+      "body":"nothing much here at all",
+      "_version_":1871926628510072832,
+      "_root_":"doc5"
+    }]
+  }
+}

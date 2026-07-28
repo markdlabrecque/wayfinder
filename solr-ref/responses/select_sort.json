@@ -1,0 +1,35 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"*:*",
+      "sort":"id desc",
+      "rows":"3",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"doc5",
+      "body":"nothing much here at all",
+      "_version_":1871926628510072832,
+      "_root_":"doc5"
+    },{
+      "id":"doc4",
+      "body":"dogs and cats living together",
+      "category":["animals"],
+      "_version_":1871926628509024256,
+      "_root_":"doc4"
+    },{
+      "id":"doc3",
+      "body":"quick thinking saves the day",
+      "category":["misc","classic"],
+      "_version_":1871926628507975680,
+      "_root_":"doc3"
+    }]
+  }
+}

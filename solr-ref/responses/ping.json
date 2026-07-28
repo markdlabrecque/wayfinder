@@ -1,0 +1,17 @@
+{
+  "responseHeader":{
+    "zkConnected":null,
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"{!lucene}*:*",
+      "distrib":"false",
+      "df":"_text_",
+      "echoParams":"all",
+      "rows":"10",
+      "wt":"json",
+      "rid":"null-31"
+    }
+  },
+  "status":"OK"
+}

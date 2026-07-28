@@ -1,0 +1,16 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0,
+    "params":{
+      "q":"*:*",
+      "sort":"body desc",
+      "wt":"json"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"can not sort on a field w/o docValues unless it is indexed=true uninvertible=true and the type supports Uninversion: body",
+    "code":400
+  }
+}
