@@ -25,7 +25,7 @@ use tantivy::query::{BooleanQuery, ExistsQuery, Occur};
 use crate::core_index::CoreIndex;
 use crate::facet::{self, BaseClauses};
 use crate::params::Params;
-use crate::schema::WayfinderSchema;
+use crate::schema::{ValueKind, WayfinderSchema};
 
 /// Builds the whole `stats` block: `{"stats_fields": {...}}`, one entry per
 /// `stats.field`. Returns `None` when `stats.field` was not given at all —
@@ -85,11 +85,34 @@ pub fn stats(index: &CoreIndex, params: &Params, base: &BaseClauses) -> Result<V
 /// exercises this error path (issue #5's fixtures only cover `views`/`price`,
 /// both fast numeric fields), so the message is not fixture-pinned, but a
 /// clear 400 beats a panic or a silently empty result.
+///
+/// A **text** field has to be refused explicitly, not just an absent-`fast`
+/// one: a fast (docValues) string field — e.g. `id` in both this issue's own
+/// schema and `tests/stats.rs::STATS_SCHEMA_TOML` — passes the `fast` check
+/// but is not a numeric/date column, so Tantivy's `ExtendedStats` aggregation
+/// silently substitutes an empty column for it
+/// (`fastfield/readers.rs`/`accessor_helpers.rs` in tantivy 0.26.1) rather
+/// than erroring, which would otherwise come back as an honest-looking but
+/// wrong `count: 0, missing: 0, min: null, max: null, mean: "NaN"` 200 for a
+/// field that actually has a value on every doc — exactly the "silently
+/// empty result" this whole check exists to prevent.
+///
+/// ponytail: same uniform-400-message simplification `facet::check_facetable`
+/// already makes (undefined field / non-fast field / non-numeric field all
+/// answer with Wayfinder's own error message rather than replicating Solr's
+/// exact wording) — none of these three paths is fixture-pinned, unlike
+/// `facet_non_docvalues_text`'s ratified divergence, so revisit if a stats
+/// error fixture ever gets captured.
 fn check_statable(schema: &WayfinderSchema, field_name: &str) -> Result<()> {
     match schema.field_config(field_name) {
         None => bail!("can not compute stats on undefined field: {field_name}"),
         Some(field) if !field.fast => {
             bail!("can not compute stats on a field w/o fast values (docValues): {field_name}")
+        }
+        Some(_) if schema.value_kind(field_name) == Some(ValueKind::Text) => {
+            bail!(
+                "can not compute stats on the text field `{field_name}`: stats needs a numeric or date field"
+            )
         }
         Some(_) => Ok(()),
     }

@@ -282,3 +282,113 @@ async fn stats_field_is_repeatable() {
         "stats.stats_fields.price must be present, got {body}"
     );
 }
+
+/// `stats=true` with no `stats.field` at all is not a fixture case (every
+/// captured request supplies at least one `stats.field`), but matches Solr's
+/// own shape: the component runs, finds nothing to compute stats on, and
+/// reports an empty `stats_fields` object rather than omitting the whole
+/// `stats` key (that omission is reserved for `stats` not being `true` at
+/// all -- `stats_key_absent_without_stats_true` above).
+#[tokio::test]
+async fn stats_true_with_no_stats_field_is_an_empty_stats_fields_object() {
+    let (app, _dir) = stats_app().await;
+    let (status, body) = get(&app, "select?q=*:*&rows=0&stats=true&wt=json").await;
+    assert_eq!(status, 200, "stats=true alone must not 400, got {body}");
+    assert_eq!(
+        body.pointer("/stats/stats_fields"),
+        Some(&serde_json::json!({})),
+        "stats.stats_fields must be present and empty with no stats.field, got {body}"
+    );
+}
+
+// --- 5. stats.field validation (no fixture: mutation-tested per project convention) ---
+
+/// A `stats.field` naming a field that is not declared in the schema at all
+/// must 400, not silently answer with an all-zero/all-null stats block --
+/// mirrors `facet::check_facetable`'s "undefined field" branch. Mutation-test
+/// this by commenting out the `None =>` arm in `check_statable`: without it
+/// this request would panic or misbehave inside `CoreIndex::field_stats`
+/// instead of cleanly 400ing.
+#[tokio::test]
+async fn stats_field_on_an_undefined_field_is_400() {
+    let (app, _dir) = stats_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&stats=true&stats.field=nosuchfield&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status, 400,
+        "stats.field on an undefined field must 400, got {body}"
+    );
+}
+
+/// A `stats.field` naming a `fast` **string** field (`id`, in
+/// `STATS_SCHEMA_TOML`) must also 400: `fast` alone does not mean
+/// aggregatable for `stats` any more than it does for `facet.range`
+/// (`facet::range_buckets`'s `ValueKind::Text` arm makes the same call).
+/// Tantivy's `ExtendedStats` aggregation silently substitutes an empty column
+/// for a non-numeric/date field rather than erroring, so without this check
+/// `stats.field=id` would come back 200 with a dishonest
+/// `count: 0, missing: 0, min: null, max: null, mean: "NaN"` even though every
+/// doc in the corpus has an `id`. Mutation-test this by deleting the
+/// `ValueKind::Text` arm in `check_statable`: this assertion is the one thing
+/// that would catch that silent regression.
+#[tokio::test]
+async fn stats_field_on_a_fast_string_field_is_400_not_a_silent_empty_result() {
+    let (app, _dir) = stats_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&stats=true&stats.field=id&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status, 400,
+        "stats.field on a fast string field must 400, not silently return an empty result, got {body}"
+    );
+}
+
+// --- 6. SELECT_PARAMS guard ------------------------------------------------
+
+/// The `strict_params` guard for every `stats.*` param this issue adds: a
+/// request using both `stats` and `stats.field` under `strict_params = true`
+/// must never 400 on "unknown request parameter" -- that would mean one of
+/// them was implemented but forgotten in `SELECT_PARAMS`, the same class of
+/// bug `tests/faceting.rs::strict_params_accepts_every_implemented_facet_param`
+/// guards against for the `facet.*` family.
+#[tokio::test]
+async fn strict_params_accepts_stats_and_stats_field() {
+    let dir = TempDir::new().expect("temp dir");
+    let schema_path = dir.path().join("schema.toml");
+    std::fs::write(&schema_path, STATS_SCHEMA_TOML).expect("write schema.toml");
+    let config_path = dir.path().join("wayfinder.toml");
+    std::fs::write(&config_path, "strict_params = true\n").expect("write wayfinder.toml");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    let app =
+        wayfinder::app_with_config(&schema_path, &data_dir, &config_path).expect("app must build");
+    let (status, body) = post_docs(&app, &stats_corpus()).await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "seeding must succeed, got {body}"
+    );
+
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&stats=true&stats.field=views&stats.field=price&wt=json",
+    )
+    .await;
+    let msg = body
+        .pointer("/error/msg")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        !msg.contains("unknown request parameter"),
+        "stats/stats.field must be in SELECT_PARAMS, got: {msg}"
+    );
+    assert_eq!(
+        status, 200,
+        "strict_params must accept stats/stats.field, got {body}"
+    );
+}

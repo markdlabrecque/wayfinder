@@ -842,7 +842,7 @@ Claiming finding 50 (46-49 are issue #9's, landed first).
     floating-point NaN, and its JSON writer renders that as a quoted string since bare `NaN` is
     not valid JSON. A naive Rust implementation using `f64::NAN` would serialize via `serde_json`
     as `null` instead and silently diverge — `tests/stats.rs` asserts this field literally rather
-    than only diffing against the fixture, for exactly that reason. Not yet implemented
-    (tracked by issue #5; the four fixtures above are wired into
-    `EXPECTED_DIVERGENCES_MANIFEST_ERRORS` in `tests/differential.rs` until `stats`/`stats.field`
-    land).
+    than only diffing against the fixture, for exactly that reason. Implemented under issue #5
+    (`src/stats.rs`, wired into `src/lib.rs::select`); closes the four
+    `EXPECTED_DIVERGENCES_MANIFEST_ERRORS` entries the four fixtures above tracked
+    (`stats_views`, `stats_multi_fields`, `stats_zero`, `stats_zero_fq`).
