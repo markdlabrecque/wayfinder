@@ -15,6 +15,7 @@
 mod collector;
 mod config;
 mod core_index;
+pub mod edismax;
 mod error;
 mod facet;
 mod highlight;
@@ -64,6 +65,15 @@ const SELECT_PARAMS: &[&str] = &[
     "q",
     "df",
     "fq",
+    // edismax (issue #7, PRD §5 v1 exception): `defType=edismax` switches the
+    // query parser; `qf`/`pf`/`mm`/`tie`/`boost`/`bq` are its own params.
+    "defType",
+    "qf",
+    "pf",
+    "mm",
+    "tie",
+    "boost",
+    "bq",
     "fl",
     "rows",
     "start",
@@ -668,10 +678,35 @@ async fn select(
     let parsed = match params.get("q") {
         None => None,
         Some(q) => {
-            let query = state
-                .index
-                .parse_query(q, &default_field)
-                .map_err(|e| query_parse_error(e, &params))?;
+            // `defType=edismax` (issue #7, PRD §5 v1 exception) switches only
+            // `q`'s own parser to the dismax-style qf/pf/mm/tie/boost/bq
+            // composition (`CoreIndex::parse_edismax_query`) — `fq` below is
+            // untouched, always the plain Solr query grammar, matching real
+            // Solr (`defType` only ever governs `q`).
+            let query = if params.get("defType") == Some("edismax") {
+                let qf = params.get("qf").unwrap_or("");
+                let pf = params.get("pf");
+                let mm = params.get("mm");
+                let tie: f32 = params
+                    .get("tie")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
+                let bq: Vec<String> = params
+                    .get_all("bq")
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
+                let boost: Option<f32> = params.get("boost").and_then(|s| s.parse().ok());
+                state
+                    .index
+                    .parse_edismax_query(q, &default_field, qf, pf, mm, tie, &bq, boost)
+                    .map_err(|e| query_parse_error(anyhow::Error::from(e), &params))?
+            } else {
+                state
+                    .index
+                    .parse_query(q, &default_field)
+                    .map_err(|e| query_parse_error(e, &params))?
+            };
 
             let mut filter_queries = Vec::new();
             for fq in params.get_all("fq") {

@@ -1292,6 +1292,15 @@ async fn hermetic_whole_query_set_matches_committed_fixtures() {
         if entry.name.starts_with("mlt_") {
             continue;
         }
+        // `edismax_*` rows need the dedicated 10-doc edismax corpus
+        // (`title`+`body` text_en fields, `eA`-`eD`/`pA`/`pB`/`mmA`-`mmD`),
+        // not this loop's 5-doc tracer-bullet corpus — same rationale as
+        // `mlt_*` above. `tests/edismax.rs`'s own
+        // `hermetic_edismax_manifest_entries_match_committed_fixtures` runs
+        // these rows against that corpus instead (issue #7).
+        if entry.name.starts_with("edismax_") {
+            continue;
+        }
         let (status, actual) = get(&app, &entry.path).await;
         let divergence_reason = expected_divergence_reason(&entry.name);
 

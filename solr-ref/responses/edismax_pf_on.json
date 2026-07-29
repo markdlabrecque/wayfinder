@@ -1,0 +1,28 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":4,
+    "params":{
+      "q":"quick fox",
+      "defType":"edismax",
+      "qf":"body",
+      "pf":"body",
+      "fl":"id,score",
+      "fq":"id:(pA OR pB)",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "maxScore":2.5450876,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"pA",
+      "score":2.5450876
+    },{
+      "id":"pB",
+      "score":1.2725438
+    }]
+  }
+}

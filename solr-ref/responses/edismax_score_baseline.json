@@ -1,0 +1,33 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "q":"rocket",
+      "defType":"edismax",
+      "qf":"title body",
+      "fl":"id,score",
+      "fq":"id:(eA OR eB OR eC OR eD)",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":4,
+    "start":0,
+    "maxScore":0.871532,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"eC",
+      "score":0.871532
+    },{
+      "id":"eD",
+      "score":0.72299594
+    },{
+      "id":"eB",
+      "score":0.71525735
+    },{
+      "id":"eA",
+      "score":0.5274755
+    }]
+  }
+}

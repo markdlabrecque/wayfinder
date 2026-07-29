@@ -20,8 +20,8 @@ use tantivy::aggregation::{
 };
 use tantivy::collector::{Count, DocSetCollector};
 use tantivy::query::{
-    AllQuery, BooleanQuery, BoostQuery, EmptyQuery, ExistsQuery, Occur, Query, QueryParser,
-    RegexQuery, TermQuery,
+    AllQuery, BooleanQuery, BoostQuery, DisjunctionMaxQuery, EmptyQuery, ExistsQuery, Occur,
+    PhraseQuery, Query, QueryParser, RegexQuery, TermQuery,
 };
 use tantivy::schema::document::Value as _;
 use tantivy::schema::{Field, IndexRecordOption, OwnedValue};
@@ -36,6 +36,7 @@ use tantivy::{
 
 use crate::collector::{AllScoredHits, SortClause};
 use crate::config::ServerConfig;
+use crate::edismax;
 use crate::query::{self, QueryError};
 use crate::schema::{self, ValueKind, WayfinderSchema};
 
@@ -346,6 +347,50 @@ fn terms_to_should_query(field: Field, terms: Vec<String>) -> Box<dyn Query> {
         })
         .collect();
     Box::new(BooleanQuery::new(clauses))
+}
+
+/// Flattens a `tantivy::query_grammar::UserInputAst` (the same grammar
+/// entry point `CoreIndex::parse_query` walks — finding 74) into a flat list
+/// of `(Occur, leaf)` pairs for edismax's `q`, whose scope is exactly the
+/// flat "words, quoted phrases, `+`/`-`" grammar this produces for every
+/// query this issue's fixtures exercise. Nested clauses (parens, `AND`/`OR`)
+/// are supported by recursing rather than assumed away, combining an outer
+/// clause's `Occur` with each descendant leaf's own via `combine_occur` —
+/// once any ancestor is `MustNot` the leaf is excluded, once any ancestor
+/// (with no `MustNot` ancestor) is `Must` the leaf is required, and only a
+/// leaf with every ancestor `Should` stays optional and counts toward `mm`.
+fn flatten_edismax_clauses(
+    ast: tantivy::query_grammar::UserInputAst,
+) -> Vec<(Occur, tantivy::query_grammar::UserInputLeaf)> {
+    use tantivy::query_grammar::UserInputAst;
+    match ast {
+        UserInputAst::Leaf(leaf) => vec![(Occur::Should, *leaf)],
+        UserInputAst::Boost(inner, _) => flatten_edismax_clauses(*inner),
+        UserInputAst::Clause(subqueries) => {
+            let mut out = Vec::with_capacity(subqueries.len());
+            for (occur_opt, sub) in subqueries {
+                let occur = occur_opt.unwrap_or(Occur::Should);
+                for (sub_occur, leaf) in flatten_edismax_clauses(sub) {
+                    out.push((combine_occur(occur, sub_occur), leaf));
+                }
+            }
+            out
+        }
+    }
+}
+
+/// Combines an outer clause's `Occur` with a nested leaf's own: `MustNot`
+/// wins over everything (excluding always excludes), `Must` wins over
+/// `Should` (a required clause nested inside another required clause is
+/// still required), and only `Should`-under-`Should` stays optional.
+fn combine_occur(outer: Occur, inner: Occur) -> Occur {
+    if outer == Occur::MustNot || inner == Occur::MustNot {
+        Occur::MustNot
+    } else if outer == Occur::Must || inner == Occur::Must {
+        Occur::Must
+    } else {
+        Occur::Should
+    }
 }
 
 /// The field name a `UserInputLeaf` targets, if any (`All` never does — a
@@ -772,6 +817,284 @@ impl CoreIndex {
         let parser = QueryParser::for_index(&self.index, vec![default_field]);
         self.build_ast(user_ast, &parser, default_field_name)
             .map_err(anyhow::Error::from)
+    }
+
+    /// Builds a `defType=edismax` query (issue #7, PRD §5 v1 exception):
+    /// `q` walked into one `Should`/`Must`/`MustNot`-tagged clause per
+    /// top-level term/phrase (finding 74 — the same `+`/`-`/quote grammar as
+    /// the plain parser, `tantivy::query_grammar::parse_query` again), each
+    /// clause a `DisjunctionMaxQuery` (with `tie`) over every `qf` field's
+    /// own per-field query, `mm` applied as `BooleanQuery`'s own
+    /// `minimum_number_should_match` over just the `Should` clauses (finding
+    /// 68 — a `None` `mm` leaves Tantivy's own built-in "at least one
+    /// optional clause must match when there's no `Must`" default alone,
+    /// which already reproduces Solr's own no-`mm`-param default of
+    /// effectively `0%`/OR without this needing to special-case it), then
+    /// wrapped as the sole `Must` clause of an outer `BooleanQuery` whose
+    /// other clauses are `pf`'s phrase-boost (finding 70) and each `bq`
+    /// (finding 73) — both score-only `Should` clauses that can never block
+    /// a match once a `Must` clause is present (Tantivy's own
+    /// `RequiredOptionalScorer` path). `boost` (finding 72) is a final
+    /// `BoostQuery` multiplying the whole thing.
+    ///
+    /// `qf`/`pf` field lists (and their `^boost` suffixes) come from
+    /// `edismax::parse_field_weights`; an unknown field name in either is
+    /// silently dropped rather than erroring, matching Wayfinder's general
+    /// unknown-param leniency (finding 8) applied to a sub-grammar with no
+    /// fixture pinning stricter behaviour. A leaf this function does not
+    /// specially handle (a fielded literal, a range, a set, `bf`'s function-
+    /// query syntax) falls through to `build_ast`/`build_leaf` against just
+    /// the default field, the same machinery `parse_query` itself uses —
+    /// out of `qf`'s per-field weighting, but never a hard error, which is
+    /// what finding 75 requires for `bf`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn parse_edismax_query(
+        &self,
+        q: &str,
+        default_field_name: &str,
+        qf: &str,
+        pf: Option<&str>,
+        mm: Option<&str>,
+        tie: f32,
+        bq: &[String],
+        boost: Option<f32>,
+    ) -> Result<Box<dyn Query>, QueryError> {
+        // `*:*` is special-cased exactly like the plain parser (`parse_query`
+        // above): Tantivy 0.26's own grammar parses it as
+        // `UserInputLeaf::Exists { field: "*" }`, which without this
+        // short-circuit falls into this function's per-leaf `_` arm and 400s
+        // as an undefined field (`*` is not a real field). Real Solr returns
+        // every doc for `q=*:*&defType=edismax`, same as under the lucene
+        // parser.
+        if q.trim() == "*:*" {
+            return Ok(Box::new(AllQuery));
+        }
+
+        let default_field = self.wf_schema.field(default_field_name).ok_or_else(|| {
+            QueryError::Internal(format!("unknown default field `{default_field_name}`"))
+        })?;
+
+        let qf_fields = self.resolve_field_weights(qf, default_field_name);
+        if qf_fields.is_empty() {
+            return Err(QueryError::Syntax(format!(
+                "edismax `qf` names no field this core has: `{qf}`"
+            )));
+        }
+
+        // Same rewrite prologue `parse_query` runs before handing off to the
+        // grammar (wildcard subclause + dynamic-field rewriting) — omitting
+        // this was a real bug: a dynamic-field name in an edismax `q` would
+        // otherwise reach the grammar unrewritten and 400 the same way a
+        // missing `*:*` short-circuit did above.
+        let rewritten = self.rewrite_dynamic_fields(&self.rewrite_wildcard_subclause(q));
+        let user_ast = tantivy::query_grammar::parse_query(&rewritten)
+            .map_err(|_| QueryError::Syntax(format!("could not parse query `{q}`")))?;
+        let flat = flatten_edismax_clauses(user_ast);
+
+        let parser = QueryParser::for_index(&self.index, vec![default_field]);
+        let mut literal_texts: Vec<String> = Vec::new();
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::with_capacity(flat.len());
+        for (occur, leaf) in flat {
+            match &leaf {
+                tantivy::query_grammar::UserInputLeaf::Literal(lit) if lit.field_name.is_none() => {
+                    literal_texts.push(lit.phrase.clone());
+                    let built = self.build_field_disjunction(&lit.phrase, &qf_fields, tie);
+                    clauses.push((occur, built));
+                }
+                _ => {
+                    let built = self.build_ast(
+                        tantivy::query_grammar::UserInputAst::Leaf(Box::new(leaf)),
+                        &parser,
+                        default_field_name,
+                    )?;
+                    clauses.push((occur, built));
+                }
+            }
+        }
+
+        if clauses.is_empty() {
+            return Ok(Box::new(EmptyQuery));
+        }
+        // Same all-`MustNot` guard as `build_ast`: an edismax `q=-mission`
+        // alone must mean "every doc except one with mission", not zero
+        // results from an ill-defined all-exclusion `BooleanQuery`.
+        if clauses.iter().all(|(occur, _)| *occur == Occur::MustNot) {
+            clauses.push((Occur::Should, Box::new(AllQuery)));
+        }
+
+        let should_count = clauses
+            .iter()
+            .filter(|(occur, _)| *occur == Occur::Should)
+            .count();
+        let mut main_query = BooleanQuery::new(clauses);
+        if let Some(mm_spec) = mm {
+            main_query
+                .set_minimum_number_should_match(edismax::min_should_match(mm_spec, should_count));
+        }
+
+        let mut outer_clauses: Vec<(Occur, Box<dyn Query>)> =
+            vec![(Occur::Must, Box::new(main_query))];
+
+        if let Some(pf_spec) = pf
+            && let Some(pf_query) =
+                self.build_pf_query(pf_spec, default_field_name, &literal_texts, tie)
+        {
+            outer_clauses.push((Occur::Should, pf_query));
+        }
+
+        for bq_str in bq {
+            let bq_query = self
+                .parse_query(bq_str, default_field_name)
+                .map_err(|e| QueryError::Syntax(e.to_string()))?;
+            outer_clauses.push((Occur::Should, bq_query));
+        }
+
+        let mut composed: Box<dyn Query> = if outer_clauses.len() == 1 {
+            outer_clauses
+                .into_iter()
+                .next()
+                .expect("checked len == 1")
+                .1
+        } else {
+            Box::new(BooleanQuery::new(outer_clauses))
+        };
+
+        if let Some(boost_factor) = boost {
+            composed = Box::new(BoostQuery::new(composed, boost_factor));
+        }
+
+        Ok(composed)
+    }
+
+    /// `qf`/`pf`'s `field^boost` list, resolved to real schema `Field`
+    /// handles (dropping any name this core does not declare) — an empty
+    /// `spec` falls back to `default_field_name` at weight 1.0, matching
+    /// Solr's own behaviour when `qf` is absent (`df` alone drives the
+    /// query, just as it does for the plain parser).
+    fn resolve_field_weights(&self, spec: &str, default_field_name: &str) -> Vec<(Field, f32)> {
+        let weights = if spec.trim().is_empty() {
+            vec![(default_field_name.to_string(), 1.0)]
+        } else {
+            edismax::parse_field_weights(spec)
+        };
+        weights
+            .into_iter()
+            .filter_map(|(name, boost)| self.wf_schema.field(&name).map(|field| (field, boost)))
+            .collect()
+    }
+
+    /// One edismax clause's `qf`-wide query: `phrase_text` tokenized with
+    /// each `qf` field's own indexing analyzer (a bare word normally
+    /// tokenizes to exactly one term; a quoted multi-word phrase to more
+    /// than one, becoming a `PhraseQuery` rather than a `TermQuery` — see
+    /// finding 74), each wrapped in that field's `BoostQuery`, combined via
+    /// `DisjunctionMaxQuery::with_tie_breaker` (finding 69's reordering,
+    /// finding 71's tie behaviour). A field whose analyzer drops every token
+    /// (an all-stopword phrase, though `text_en` here does not strip any)
+    /// is simply absent from the disjunction rather than contributing an
+    /// ill-defined empty clause.
+    fn build_field_disjunction(
+        &self,
+        phrase_text: &str,
+        qf_fields: &[(Field, f32)],
+        tie: f32,
+    ) -> Box<dyn Query> {
+        let mut disjuncts: Vec<Box<dyn Query>> = Vec::with_capacity(qf_fields.len());
+        for (field, field_boost) in qf_fields {
+            let tokens = self.tokenize_for_field(*field, phrase_text);
+            let base: Box<dyn Query> = match tokens.as_slice() {
+                [] => continue,
+                [only] => Box::new(TermQuery::new(
+                    Term::from_field_text(*field, only),
+                    IndexRecordOption::WithFreqsAndPositions,
+                )),
+                _ => {
+                    let terms: Vec<Term> = tokens
+                        .iter()
+                        .map(|t| Term::from_field_text(*field, t))
+                        .collect();
+                    Box::new(PhraseQuery::new(terms))
+                }
+            };
+            disjuncts.push(Box::new(BoostQuery::new(base, *field_boost)));
+        }
+        if disjuncts.is_empty() {
+            Box::new(EmptyQuery)
+        } else {
+            Box::new(DisjunctionMaxQuery::with_tie_breaker(disjuncts, tie))
+        }
+    }
+
+    /// `pf`'s phrase-boost query (finding 70): every literal clause's text
+    /// from `q` (in original order, `+`/`-`/quoting stripped away — exactly
+    /// the free-text terms) joined with a space and re-tokenized per `pf`
+    /// field, then built into a `PhraseQuery` if that field's analyzer
+    /// produces more than one token (a single-token "phrase" is just the
+    /// `qf` clause again, so it is skipped rather than duplicated — also
+    /// what keeps a one-word `q` from producing a `pf` clause at all, since
+    /// `PhraseQuery::new` itself requires more than one term). `None` when
+    /// no `pf` field survives that filter, so callers never need to inspect
+    /// an empty `DisjunctionMaxQuery`.
+    fn build_pf_query(
+        &self,
+        pf_spec: &str,
+        default_field_name: &str,
+        literal_texts: &[String],
+        tie: f32,
+    ) -> Option<Box<dyn Query>> {
+        let pf_fields = self.resolve_field_weights(pf_spec, default_field_name);
+        let joined = literal_texts.join(" ");
+        if pf_fields.is_empty() || joined.trim().is_empty() {
+            return None;
+        }
+        let mut disjuncts: Vec<Box<dyn Query>> = Vec::new();
+        for (field, field_boost) in &pf_fields {
+            let tokens = self.tokenize_for_field(*field, &joined);
+            if tokens.len() < 2 {
+                continue;
+            }
+            let terms: Vec<Term> = tokens
+                .iter()
+                .map(|t| Term::from_field_text(*field, t))
+                .collect();
+            let phrase: Box<dyn Query> = Box::new(PhraseQuery::new(terms));
+            disjuncts.push(Box::new(BoostQuery::new(phrase, *field_boost)));
+        }
+        if disjuncts.is_empty() {
+            None
+        } else {
+            Some(Box::new(DisjunctionMaxQuery::with_tie_breaker(
+                disjuncts, tie,
+            )))
+        }
+    }
+
+    /// Tokenizes free-standing `text` (not a stored doc value — a `q`/`pf`
+    /// clause's own literal text) with `field`'s own indexing analyzer, the
+    /// same tokenizer chain `mlt_query` mines stored values with. A
+    /// non-text field (or one with no configured tokenizer) falls back to
+    /// the raw text as a single "token" — edismax's `qf`/`pf` are only ever
+    /// pointed at text fields per this issue's scope, so this is a
+    /// defensive fallback, not a path any fixture exercises.
+    fn tokenize_for_field(&self, field: Field, text: &str) -> Vec<String> {
+        let schema = self.index.schema();
+        let field_entry = schema.get_field_entry(field);
+        let tantivy::schema::FieldType::Str(text_options) = field_entry.field_type() else {
+            return vec![text.to_string()];
+        };
+        let Some(mut tokenizer) = text_options
+            .get_indexing_options()
+            .map(|o| o.tokenizer())
+            .and_then(|name| self.index.tokenizers().get(name))
+        else {
+            return vec![text.to_string()];
+        };
+        let mut tokens = Vec::new();
+        let mut token_stream = tokenizer.token_stream(text);
+        token_stream.process(&mut |token: &tantivy::tokenizer::Token| {
+            tokens.push(token.text.clone());
+        });
+        tokens
     }
 
     /// Rewrites an embedded `*:*` sub-clause (e.g. `*:* AND lazy`) to a bare

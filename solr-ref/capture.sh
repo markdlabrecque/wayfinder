@@ -1492,3 +1492,98 @@ capm mlt_no_interesting_terms  'mlt?q=id:mlt20&mlt.fl=body&wt=json'
 capm mlt_nonexistent_doc       'mlt?q=id:nosuchdoc&mlt.fl=body&wt=json'
 echo "mlt core '$MLT_CORE' left in place on '$MLT_CONTAINER' (port 8993)"
 echo "  (docker rm -f $MLT_CONTAINER to stop)"
+
+# --- edismax query parser (issue #7) ----------------------------------------
+# `defType=edismax` needs `qf`/`pf` to reward two *different analyzed fields*
+# differently, and `tie`/`bq`/`boost` to have a visible, per-doc-distinct
+# scoring effect. The 5-doc tracer-bullet corpus has only one text field
+# (`body`) and an unanalyzed `category`, so it cannot exercise any of that —
+# same rationale as the MLT block above (own container, own corpus). Own
+# container on its own port (`wayfinder-solr-7`, 8994, continuing the
+# per-issue port precedent), own 10-doc corpus over two text_en fields
+# (`title`, `body`), built purpose-first for each edismax knob:
+#   - eA/eB: "rocket launch success" split across title-only vs body-only,
+#     so `qf=title^N body` and `qf=title body^N` visibly swap which of the
+#     two ranks first (finding, see docs/solr-ref-findings.md).
+#   - eC/eD: "rocket" present in *both* fields for eC (so `tie` has
+#     something to blend) but only in eD's title (so `tie` cannot move eD at
+#     all) — isolates tie's effect to exactly one side of the pair.
+#   - eA-eD together: `bq=title:mission^5` matches only eC/eD (both have
+#     "mission" in the title) and `boost=2` is a pure multiplier — both
+#     visible against the same four-doc, `q=rocket` baseline.
+#   - pA/pB: same two words ("quick", "fox"), adjacent in pA's body,
+#     separated in pB's — `pf=body` rewards pA only; without it the two tie
+#     exactly (they carry identical term frequencies otherwise).
+#   - mmA-D: "alpha beta gamma" split 3/2/1/0 words per doc, so a given `mm`
+#     spec's required-match count reads directly off which doc drops out.
+# Core named `content`, per the same convention the MLT block documents:
+# Wayfinder's own test core name is independent of the Solr core the
+# fixtures were captured from.
+EDISMAX_CONTAINER=wayfinder-solr-7
+EDISMAX_SOLR=http://localhost:8994/solr
+EDISMAX_CORE=content
+if ! docker ps --format '{{.Names}}' | grep -qx "$EDISMAX_CONTAINER"; then
+  docker rm -f "$EDISMAX_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$EDISMAX_CONTAINER" -p 8994:8983 \
+    solr:9 solr-precreate "$EDISMAX_CORE" >/dev/null
+fi
+echo -n "waiting for edismax solr"
+for _ in $(seq 60); do
+  if curl -sf "$EDISMAX_SOLR/$EDISMAX_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+  echo -n "."; sleep 1
+done
+curl -s "$EDISMAX_SOLR/$EDISMAX_CORE/schema" -H 'Content-Type: application/json' -d '{
+  "add-field": [
+    {"name":"title", "type":"text_en", "indexed":true, "stored":true},
+    {"name":"body",  "type":"text_en", "indexed":true, "stored":true}
+  ]
+}' >/dev/null
+curl -sf "$EDISMAX_SOLR/$EDISMAX_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"eA",  "title":"rocket launch success",              "body":"filler unrelated text about weather"},
+    {"id":"eB",  "title":"filler unrelated text about weather", "body":"rocket launch success"},
+    {"id":"eC",  "title":"rocket mission",                      "body":"the rocket soared past the rocket pad toward the rocket"},
+    {"id":"eD",  "title":"rocket rocket rocket mission control", "body":"launch complete"},
+    {"id":"pA",  "title":"phrase doc a",                         "body":"a quick fox ran away"},
+    {"id":"pB",  "title":"phrase doc b",                         "body":"a fox that is quick ran away"},
+    {"id":"mmA", "title":"mm doc a",                             "body":"alpha beta gamma"},
+    {"id":"mmB", "title":"mm doc b",                             "body":"alpha beta"},
+    {"id":"mmC", "title":"mm doc c",                             "body":"alpha"},
+    {"id":"mmD", "title":"mm doc d",                             "body":"nothing relevant here at all"}
+]' >/dev/null
+cape() {  # cape <name> <path-with-query>, against $EDISMAX_SOLR/$EDISMAX_CORE
+  local name=$1 path=$2
+  curl -sg "$EDISMAX_SOLR/$EDISMAX_CORE/$path" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\n' "$name" "$(cat "$OUT/$name.status")" "$path" >> "$HERE/manifest.tsv"
+  rm -f "$OUT/$name.status"
+}
+# happy path / envelope shape
+cape edismax_basic              'select?q=rocket&defType=edismax&qf=title+body&fl=id&wt=json'
+# qf per-field boost changing which of eA/eB (title-only vs body-only match)
+# ranks first — three captures over the same query, boost moved each way
+cape edismax_qf_equal           'select?q=rocket+launch+success&defType=edismax&qf=title+body&fl=id&wt=json'
+cape edismax_qf_boost_title     'select?q=rocket+launch+success&defType=edismax&qf=title^10+body&fl=id&wt=json'
+cape edismax_qf_boost_body      'select?q=rocket+launch+success&defType=edismax&qf=title+body^10&fl=id&wt=json'
+# pf phrase boost: pA (adjacent "quick fox") vs pB (same two words, not
+# adjacent) tie exactly without pf, pA pulls ahead with it
+cape edismax_pf_off             'select?q=quick+fox&defType=edismax&qf=body&fl=id,score&fq=id:(pA+OR+pB)&wt=json'
+cape edismax_pf_on              'select?q=quick+fox&defType=edismax&qf=body&pf=body&fl=id,score&fq=id:(pA+OR+pB)&wt=json'
+# tie dis-max tie-break: eC matches "rocket" in both fields (tie has
+# something to blend), eD only in its title (tie cannot move it)
+cape edismax_tie_0              'select?q=rocket&defType=edismax&qf=title+body&tie=0&fl=id,score&fq=id:(eC+OR+eD)&wt=json'
+cape edismax_tie_1              'select?q=rocket&defType=edismax&qf=title+body&tie=1&fl=id,score&fq=id:(eC+OR+eD)&wt=json'
+# boost (multiplicative) / bq (additive) against the same four-doc baseline
+cape edismax_score_baseline     'select?q=rocket&defType=edismax&qf=title+body&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json'
+cape edismax_boost_multiplicative 'select?q=rocket&defType=edismax&qf=title+body&boost=2&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json'
+cape edismax_bq_additive        'select?q=rocket&defType=edismax&qf=title+body&bq=title:mission^5&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json'
+# q grammar: quoted phrase, `+`/`-` operators
+cape edismax_quoted_phrase      'select?q=%22quick+fox%22&defType=edismax&qf=body&fl=id&fq=id:(pA+OR+pB)&wt=json'
+cape edismax_operators_exclude  'select?q=rocket+-mission&defType=edismax&qf=title+body&fl=id&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json'
+cape edismax_operators_required 'select?q=%2Brocket+%2Blaunch&defType=edismax&qf=title+body&fl=id&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json'
+# mm applied to a real query: "alpha beta gamma" (3 optional clauses) against
+# mmA/mmB/mmC/mmD, which contain exactly 3/2/1/0 of those words
+cape edismax_mm_1               'select?q=alpha+beta+gamma&defType=edismax&qf=body&mm=1&fl=id&fq=id:(mmA+OR+mmB+OR+mmC+OR+mmD)&wt=json'
+cape edismax_mm_2               'select?q=alpha+beta+gamma&defType=edismax&qf=body&mm=2&fl=id&fq=id:(mmA+OR+mmB+OR+mmC+OR+mmD)&wt=json'
+cape edismax_mm_3               'select?q=alpha+beta+gamma&defType=edismax&qf=body&mm=3&fl=id&fq=id:(mmA+OR+mmB+OR+mmC+OR+mmD)&wt=json'
+cape edismax_mm_conditional     'select?q=alpha+beta+gamma&defType=edismax&qf=body&mm=2%3C-1+3%3C80%25&fl=id&fq=id:(mmA+OR+mmB+OR+mmC+OR+mmD)&wt=json'
+echo "edismax core '$EDISMAX_CORE' left in place on '$EDISMAX_CONTAINER' (port 8994)"
+echo "  (docker rm -f $EDISMAX_CONTAINER to stop)"
