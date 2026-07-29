@@ -6,10 +6,11 @@
 //! `fl`, `rows`, `start`, and the `facet.*` family — see `crate::facet`),
 //! and `/admin/ping`.
 //!
-//! `sort` was out of the tracer-bullet scope and has since landed (issue #2).
-//! Deliberately out of scope here (PRD §7): highlighting, edismax, stats,
-//! MLT. Multi-core: out of scope too — `app()` serves exactly one
-//! core, matching PRD open question 1's "single-core-per-process" lean.
+//! `sort` was out of the tracer-bullet scope and has since landed (issue #2),
+//! as has `stats` (issue #5). Deliberately out of scope here (PRD §7):
+//! highlighting, edismax, MLT. Multi-core: out of scope too — `app()`
+//! serves exactly one core, matching PRD open question 1's
+//! "single-core-per-process" lean.
 
 mod collector;
 mod config;
@@ -18,6 +19,7 @@ mod error;
 mod facet;
 mod params;
 pub mod schema;
+mod stats;
 
 pub use config::ServerConfig;
 
@@ -75,6 +77,8 @@ const SELECT_PARAMS: &[&str] = &[
     "facet.range.end",
     "facet.range.gap",
     "json.nl",
+    "stats",
+    "stats.field",
     "sort",
     "wt",
 ];
@@ -715,6 +719,27 @@ async fn select(
     response.insert("numFoundExact".to_string(), json!(true));
     response.insert("docs".to_string(), json!(docs));
 
+    // Facet and stats counts are both aggregated over a *real* query (`q` AND
+    // every `fq`), not over `hits`: Solr enumerates the field's whole term
+    // dictionary / metric aggregation over the matching set, which the hit
+    // list cannot see (`search` filters post-hoc with `retain`, so the
+    // Boolean query is rebuilt here rather than reused). Shared between both
+    // features rather than built twice.
+    let base: facet::BaseClauses = match &parsed {
+        // No `q` matches nothing, so neither does any facet/stats block — but
+        // the term dictionary is still enumerated, at 0, exactly as
+        // `facet_zero` shows for a `q` that matches nothing, and `stats_zero`
+        // shows for stats.
+        None => vec![(Occur::Must, Box::new(EmptyQuery) as Box<dyn Query>)],
+        Some((query, filter_queries)) => std::iter::once((Occur::Must, query.box_clone()))
+            .chain(
+                filter_queries
+                    .iter()
+                    .map(|fq| (Occur::Must, fq.box_clone())),
+            )
+            .collect(),
+    };
+
     // `facet=true` gates the whole block; `facet.field` alone does not turn
     // faceting on and the key stays absent (findings fact 4). Computed *before*
     // `responseHeader` is built, not after: Solr's own `responseHeader` key
@@ -724,23 +749,6 @@ async fn select(
     // they are emitted in, so `warnings` has to be known before the object
     // literal is written.
     let facet_result = if params.get("facet") == Some("true") {
-        // Facet counts are aggregated over a *real* query (`q` AND every `fq`),
-        // not over `hits`: Solr enumerates the field's whole term dictionary,
-        // which the hit list cannot see. `search` filters post-hoc with
-        // `retain`, so the Boolean query is rebuilt here rather than reused.
-        let base: facet::BaseClauses = match &parsed {
-            // No `q` matches nothing, so neither does any facet — but the term
-            // dictionary is still enumerated, at 0, exactly as `facet_zero`
-            // shows for a `q` that matches nothing.
-            None => vec![(Occur::Must, Box::new(EmptyQuery) as Box<dyn Query>)],
-            Some((query, filter_queries)) => std::iter::once((Occur::Must, query.box_clone()))
-                .chain(
-                    filter_queries
-                        .iter()
-                        .map(|fq| (Occur::Must, fq.box_clone())),
-                )
-                .collect(),
-        };
         Some(
             facet::facet_counts(&state.index, &state.config, &params, &default_field, &base)
                 .map_err(|e| {
@@ -769,6 +777,19 @@ async fn select(
         .map(|(_, warnings)| warnings.as_slice())
         .unwrap_or_default();
 
+    // `stats=true` gates the whole `stats` block the same way `facet=true`
+    // gates `facet_counts` — `stats.field` alone does not turn it on (mirrors
+    // `facet.field`'s own convention, and matches `stats_key_absent_without_stats_true`).
+    let stats_result = if params.get("stats") == Some("true") {
+        Some(stats::stats(&state.index, &params, &base).map_err(|e| {
+            WfError::bad_request("wayfinder::StatsError", e.to_string())
+                .with_params(&params)
+                .with_response(Value::Object(response.clone()))
+        })?)
+    } else {
+        None
+    };
+
     // `responseHeader.warnings` is absent unless there is something to warn
     // about (every fixture that isn't a Points-based `facet.field` at
     // mincount 0 lacks the key) — never an empty array — and, when present,
@@ -788,6 +809,9 @@ async fn select(
 
     if let Some((facet_counts, _)) = facet_result {
         body["facet_counts"] = facet_counts;
+    }
+    if let Some(stats) = stats_result {
+        body["stats"] = stats;
     }
 
     Ok(axum::Json(body).into_response())

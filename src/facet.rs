@@ -154,7 +154,7 @@ pub fn facet_counts(
 }
 
 /// Clones `base` and adds `extra` as another `Must` clause.
-fn narrowed(base: &BaseClauses, occur: Occur, extra: Box<dyn Query>) -> BooleanQuery {
+pub(crate) fn narrowed(base: &BaseClauses, occur: Occur, extra: Box<dyn Query>) -> BooleanQuery {
     let mut clauses: BaseClauses = base
         .iter()
         .map(|(occur, query)| (*occur, query.box_clone()))

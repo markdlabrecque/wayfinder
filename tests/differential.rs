@@ -653,29 +653,12 @@ fn ranked_score_value_ratified_reason(name: &str) -> Option<&'static str> {
 /// `PreQueryFacetError` marker rather than attaching `response` to every
 /// facet error uniformly.
 ///
-/// Issue #5 (stats component) adds four entries: `stats=true`/`stats.field`
-/// are not implemented yet, so the `stats` key is entirely absent from
-/// Wayfinder's response where the fixture carries a real `stats_fields`
-/// block — remove these four the moment `stats` lands (`tests/stats.rs` is
-/// the fixture-derived suite that will go green at the same time).
-const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[
-    (
-        "stats_views",
-        "issue #5: stats=true/stats.field unimplemented, `stats` key absent from the response",
-    ),
-    (
-        "stats_multi_fields",
-        "issue #5: stats=true/stats.field unimplemented, `stats` key absent from the response",
-    ),
-    (
-        "stats_zero",
-        "issue #5: stats=true/stats.field unimplemented, `stats` key absent from the response",
-    ),
-    (
-        "stats_zero_fq",
-        "issue #5: stats=true/stats.field unimplemented, `stats` key absent from the response",
-    ),
-];
+/// Issue #5 (stats component) is fixed: `stats=true`/`stats.field` land in
+/// `src/stats.rs`, wired into `src/lib.rs::select`, so `stats_views`,
+/// `stats_multi_fields`, `stats_zero`, and `stats_zero_fq` all now match the
+/// captured fixtures for real and their entries are removed rather than left
+/// here — this list is empty until the next unbuilt-feature entry needs it.
+const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[];
 
 fn expected_divergence_manifest_errors_reason(name: &str) -> Option<&'static str> {
     EXPECTED_DIVERGENCES_MANIFEST_ERRORS
