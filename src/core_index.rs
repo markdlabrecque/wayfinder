@@ -859,6 +859,17 @@ impl CoreIndex {
         bq: &[String],
         boost: Option<f32>,
     ) -> Result<Box<dyn Query>, QueryError> {
+        // `*:*` is special-cased exactly like the plain parser (`parse_query`
+        // above): Tantivy 0.26's own grammar parses it as
+        // `UserInputLeaf::Exists { field: "*" }`, which without this
+        // short-circuit falls into this function's per-leaf `_` arm and 400s
+        // as an undefined field (`*` is not a real field). Real Solr returns
+        // every doc for `q=*:*&defType=edismax`, same as under the lucene
+        // parser.
+        if q.trim() == "*:*" {
+            return Ok(Box::new(AllQuery));
+        }
+
         let default_field = self.wf_schema.field(default_field_name).ok_or_else(|| {
             QueryError::Internal(format!("unknown default field `{default_field_name}`"))
         })?;
@@ -870,7 +881,13 @@ impl CoreIndex {
             )));
         }
 
-        let user_ast = tantivy::query_grammar::parse_query(q)
+        // Same rewrite prologue `parse_query` runs before handing off to the
+        // grammar (wildcard subclause + dynamic-field rewriting) — omitting
+        // this was a real bug: a dynamic-field name in an edismax `q` would
+        // otherwise reach the grammar unrewritten and 400 the same way a
+        // missing `*:*` short-circuit did above.
+        let rewritten = self.rewrite_dynamic_fields(&self.rewrite_wildcard_subclause(q));
+        let user_ast = tantivy::query_grammar::parse_query(&rewritten)
             .map_err(|_| QueryError::Syntax(format!("could not parse query `{q}`")))?;
         let flat = flatten_edismax_clauses(user_ast);
 

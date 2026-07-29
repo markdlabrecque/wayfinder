@@ -178,19 +178,110 @@ async fn edismax_route_returns_200() {
     );
 }
 
+/// Reviewer round-1 must-fix item 2: `parse_edismax_query` used to call
+/// `tantivy::query_grammar::parse_query` directly, skipping the same
+/// `*:*` → `AllQuery` short-circuit the plain parser applies before ever
+/// reaching the grammar. Tantivy 0.26 parses `*:*` as
+/// `UserInputLeaf::Exists { field: "*" }`, which fell into this function's
+/// per-leaf fallback arm and 400'd as an undefined field (`*` is not a real
+/// field) — real Solr returns every doc for `q=*:*` under edismax, same as
+/// the lucene parser.
+#[tokio::test]
+async fn star_colon_star_matches_everything_under_edismax() {
+    let (app, _dir) = edismax_app().await;
+    let (status, body) = get(&app, "select?q=*:*&defType=edismax&qf=title+body&wt=json").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "q=*:* must not 400 under defType=edismax: {body}"
+    );
+    assert_eq!(
+        body["response"]["numFound"],
+        Value::from(10),
+        "q=*:* must match every doc in the 10-doc edismax corpus: {body}"
+    );
+}
+
+/// Reviewer round-1 must-fix item 2 (continued): `parse_edismax_query` also
+/// used to skip `rewrite_dynamic_fields`/`rewrite_wildcard_subclause`, the
+/// same prologue `parse_query` runs before handing the query string to the
+/// grammar — so a `[[dynamic_fields]]` catch-all name in an edismax `q`
+/// reached the grammar unrewritten and hit the same "undefined field" 400
+/// as `*:*` did above, for the same missing-prologue reason. No Solr fixture
+/// pins this (Wayfinder-only regression, same rationale as
+/// `tests/query_types.rs`'s dynamic-field regression tests), so this pins
+/// only that it must not 400 and must match, not any particular fixture.
+const DYNAMIC_EDISMAX_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[dynamic_fields]]
+pattern = "*_i"
+type = "int"
+stored = true
+fast = true
+"#;
+
+#[tokio::test]
+async fn dynamic_field_in_q_is_rewritten_under_edismax() {
+    let dir = TempDir::new().expect("temp dir");
+    let app = app_with_schema(dir.path(), DYNAMIC_EDISMAX_SCHEMA_TOML).expect("app must build");
+    let (status, body) = common::post_docs(
+        &app,
+        &serde_json::json!([{"id": "d1", "body": "hello world", "count_i": 7}]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "indexing must succeed, got {body}");
+
+    let (status, body) = get(
+        &app,
+        "select?q=count_i:7&defType=edismax&qf=body&fl=id&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a dynamic-field name in `q` must not 400 under defType=edismax: {body}"
+    );
+    assert_eq!(
+        body["response"]["numFound"],
+        Value::from(1),
+        "the dynamic-field rewrite must still apply and match doc d1: {body}"
+    );
+}
+
 #[tokio::test]
 async fn edismax_basic_matches_committed_fixture() {
-    // Self-expiring skip guard, issue #51: `eB`/`eD` land a genuine BM25
-    // near-tie for this query, and Tantivy's own fieldnorm quantization
-    // (a 256-entry `u8` table, `tantivy::fieldnorm::code`) diverges from
-    // Lucene's `SmallFloat` norm-byte quantization by enough to flip their
-    // relative order versus the committed Solr fixture (`eC, eD, eB, eA`),
-    // while leaving the *set* of matching docs unchanged. This intentionally
-    // asserts Wayfinder's current (wrong) order rather than the fixture's
-    // order, so that closing #51 — or any unrelated BM25/fieldnorm change
-    // that happens to fix this — trips this assertion instead of staying
-    // silently green. When it fails, restore `assert_matches_fixture(body,
-    // "edismax_basic")` and close #51.
+    // Self-expiring skip guard, issue #51 (corrected root cause per
+    // reviewer round 1 — this is NOT fieldnorm quantization; both Tantivy's
+    // `FIELD_NORMS_TABLE` and Lucene's `SmallFloat` quantization are exact/
+    // identity for the 2-10-token doc lengths in this corpus, so there is no
+    // quantization error to diverge on). Same root cause as `pf_off`'s guard
+    // below: Wayfinder's `text_en` deliberately does not strip stopwords
+    // (PRD open question 5, documented on `CoreIndex::mlt_query`), unlike
+    // real Solr's `text_en`. That changes `eB`/`eD`'s indexed doc lengths
+    // (and therefore their BM25 length-norm component) relative to what
+    // Solr computed, flipping their relative order versus the committed
+    // fixture (`eC, eD, eB, eA`) while leaving the *set* of matching docs
+    // unchanged. This intentionally asserts Wayfinder's current (wrong)
+    // order rather than the fixture's order, so that closing #51 — or any
+    // unrelated `text_en`/stopword change that happens to fix this — trips
+    // this assertion instead of staying silently green. When it fails,
+    // restore `assert_matches_fixture(body, "edismax_basic")` and close #51.
     let (app, _dir) = edismax_app().await;
     let (status, body) = get(
         &app,
@@ -208,9 +299,10 @@ async fn edismax_basic_matches_committed_fixture() {
     assert_eq!(
         actual_order,
         vec!["eC", "eB", "eD", "eA"],
-        "known BM25 near-tie order flip (issue #51) no longer reproduces — the divergence may \
-         be fixed; if `actual_order` now equals the fixture order `{fixture_order:?}`, restore \
-         `assert_matches_fixture(body, \"edismax_basic\")` and close #51"
+        "known text_en-stopword-driven order flip (issue #51) no longer reproduces — the \
+         divergence may be fixed; if `actual_order` now equals the fixture order \
+         `{fixture_order:?}`, restore `assert_matches_fixture(body, \"edismax_basic\")` and \
+         close #51"
     );
 }
 
@@ -538,14 +630,17 @@ async fn minus_operator_excludes_matches_the_committed_fixture() {
 
 #[tokio::test]
 async fn plus_operator_requires_matches_the_committed_fixture() {
-    // Self-expiring skip guard, issue #51: same root cause as
-    // `edismax_basic_matches_committed_fixture` above — `eA`/`eB` are a
-    // genuine BM25 near-tie here, and Tantivy's fieldnorm quantization vs.
-    // Lucene's `SmallFloat` quantization flips their relative order versus
-    // the committed fixture (`eD, eA, eB`), leaving the matching doc set
-    // unchanged. Asserts the current (wrong) order explicitly; when this
-    // fails, restore `assert_matches_fixture(body,
-    // "edismax_operators_required")` and close #51.
+    // Self-expiring skip guard, issue #51 (corrected root cause per
+    // reviewer round 1): same root cause as
+    // `edismax_basic_matches_committed_fixture` above, NOT fieldnorm
+    // quantization — Wayfinder's `text_en` deliberately does not strip
+    // stopwords (PRD open question 5), which changes `eA`/`eB`'s indexed
+    // doc lengths (and BM25 length norm) relative to what Solr computed,
+    // flipping their relative order versus the committed fixture
+    // (`eD, eA, eB`) while leaving the matching doc set unchanged. Asserts
+    // the current (wrong) order explicitly; when this fails, restore
+    // `assert_matches_fixture(body, "edismax_operators_required")` and
+    // close #51.
     let (app, _dir) = edismax_app().await;
     let (status, body) = get(
         &app,
@@ -563,9 +658,10 @@ async fn plus_operator_requires_matches_the_committed_fixture() {
     assert_eq!(
         actual_order,
         vec!["eD", "eB", "eA"],
-        "known BM25 near-tie order flip (issue #51) no longer reproduces — the divergence may \
-         be fixed; if `actual_order` now equals the fixture order `{fixture_order:?}`, restore \
-         `assert_matches_fixture(body, \"edismax_operators_required\")` and close #51"
+        "known text_en-stopword-driven order flip (issue #51) no longer reproduces — the \
+         divergence may be fixed; if `actual_order` now equals the fixture order \
+         `{fixture_order:?}`, restore `assert_matches_fixture(body, \
+         \"edismax_operators_required\")` and close #51"
     );
 }
 
@@ -740,19 +836,23 @@ fn blank_bm25_score_magnitudes(mut value: Value) -> Value {
 const EDISMAX_KNOWN_DIVERGENCES: &[(&str, &str)] = &[
     (
         "edismax_basic",
-        "issue #51: eB/eD BM25 near-tie order flip (Tantivy vs Lucene fieldnorm quantization)",
+        "issue #51: eB/eD order flip from Wayfinder's text_en not stripping stopwords \
+         (PRD open question 5), same root cause as pf_off — not fieldnorm quantization",
     ),
     (
         "edismax_score_baseline",
-        "issue #51: eB/eD BM25 near-tie order flip (Tantivy vs Lucene fieldnorm quantization)",
+        "issue #51: eB/eD order flip from Wayfinder's text_en not stripping stopwords \
+         (PRD open question 5), same root cause as pf_off — not fieldnorm quantization",
     ),
     (
         "edismax_boost_multiplicative",
-        "issue #51: eB/eD BM25 near-tie order flip (Tantivy vs Lucene fieldnorm quantization)",
+        "issue #51: eB/eD order flip from Wayfinder's text_en not stripping stopwords \
+         (PRD open question 5), same root cause as pf_off — not fieldnorm quantization",
     ),
     (
         "edismax_operators_required",
-        "issue #51: eA/eB BM25 near-tie order flip (Tantivy vs Lucene fieldnorm quantization)",
+        "issue #51: eA/eB order flip from Wayfinder's text_en not stripping stopwords \
+         (PRD open question 5), same root cause as pf_off — not fieldnorm quantization",
     ),
 ];
 
