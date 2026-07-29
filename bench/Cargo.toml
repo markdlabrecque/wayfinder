@@ -1,0 +1,16 @@
+[package]
+name = "wayfinder-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Benchmark tooling (issue #13): corpus generator + results aggregator that
+# produce docs/benchmarks.md. Deliberately a standalone crate, not a
+# workspace member of the root `wayfinder` package -- this tooling is not
+# part of the served product and has no business linking against it.
+
+[lib]
+name = "wayfinder_bench"
+path = "src/lib.rs"
+
+[dependencies]
