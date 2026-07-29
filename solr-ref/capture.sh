@@ -1012,3 +1012,59 @@ capup update_delete_id_missing "$UPDATE9_CORE/update?commit=true&wt=json" \
 
 echo "update-pipeline core '$UPDATE9_CORE' left in place on '$UPDATE9_CONTAINER' (port 8989)"
 echo "  (docker rm -f $UPDATE9_CONTAINER to stop)"
+
+# --- pure-wildcard sub-clause (issue #39) ------------------------------------
+# `*:* AND lazy` / `lazy OR *:* / `*:* -lazy` panic pre-fix: `*:*` compiles to
+# tantivy-query-grammar's `Exists` leaf, which unconditionally requires a field
+# once it isn't the whole query string (`set_field(None)` ->
+# `.expect("Exist query without a field isn't allowed")`,
+# tantivy-query-grammar-0.26.0/src/user_input_ast.rs:51). Wayfinder's
+# `parse_query` already special-cases the whole-string `*:*` as `AllQuery`;
+# these three probe the sub-clause case that reaches the grammar instead.
+#
+# Own container on its own port (`wayfinder-solr-39`, 8990), per the
+# `wayfinder-solr-24`/`-32`/`-33` precedent: issues #8 (8983, canonical) and #9
+# (8989) were running concurrently. Same schema and 5-doc corpus as the
+# canonical `content` core at the top of this script, so these are ordinary
+# `content`-core GETs and belong in `manifest.tsv`, not `manifest-errors.tsv` —
+# NOT run through `cap()` (that targets `$SOLR`/`$CORE`, i.e. the canonical
+# container), so appended to `manifest.tsv` by hand below. Not runnable
+# standalone: rebuild the container first if it isn't already up.
+WILDCARD_CONTAINER=wayfinder-solr-39
+WILDCARD_SOLR=http://localhost:8990/solr
+WILDCARD_CORE=content
+if ! docker ps --format '{{.Names}}' | grep -qx "$WILDCARD_CONTAINER"; then
+  docker rm -f "$WILDCARD_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$WILDCARD_CONTAINER" -p 8990:8983 \
+    solr:9 solr-precreate "$WILDCARD_CORE" >/dev/null
+fi
+echo -n "waiting for wildcard-panic solr"
+for _ in $(seq 60); do
+  if curl -sf "$WILDCARD_SOLR/$WILDCARD_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+  echo -n "."; sleep 1
+done
+curl -s "$WILDCARD_SOLR/$WILDCARD_CORE/schema" -H 'Content-Type: application/json' -d '{
+  "add-field": [
+    {"name":"body",     "type":"text_en", "indexed":true, "stored":true},
+    {"name":"category", "type":"string",  "indexed":true, "stored":true,
+     "docValues":true, "multiValued":true}
+  ]
+}' >/dev/null
+curl -sf "$WILDCARD_SOLR/$WILDCARD_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"doc1","body":"the quick brown fox jumps over the lazy dog","category":["animals","classic"]},
+    {"id":"doc2","body":"a lazy afternoon in the garden","category":["garden"]},
+    {"id":"doc3","body":"quick thinking saves the day","category":["misc","classic"]},
+    {"id":"doc4","body":"dogs and cats living together","category":["animals"]},
+    {"id":"doc5","body":"nothing much here at all"}
+]' >/dev/null
+capw() {  # capw <name> <path-with-query>, against $WILDCARD_SOLR/$WILDCARD_CORE
+  local name=$1 path=$2
+  curl -sg "$WILDCARD_SOLR/$WILDCARD_CORE/$path" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\n' "$name" "$(cat "$OUT/$name.status")" "$path" >> "$HERE/manifest.tsv"
+  rm -f "$OUT/$name.status"
+}
+capw select_wildcard_and_term   'select?q=*:*+AND+lazy&df=body&fl=id,body&wt=json'
+capw select_wildcard_or_term    'select?q=lazy+OR+*:*&df=body&fl=id,body&wt=json'
+capw select_wildcard_minus_term 'select?q=*:*+-lazy&df=body&fl=id,body&wt=json'
+echo "wildcard-panic core '$WILDCARD_CORE' left in place on '$WILDCARD_CONTAINER' (port 8990)"
+echo "  (docker rm -f $WILDCARD_CONTAINER to stop)"

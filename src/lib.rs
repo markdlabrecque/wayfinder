@@ -32,6 +32,7 @@ use axum::routing::any;
 use serde_json::{Map, Value, json};
 use tantivy::Score;
 use tantivy::query::{EmptyQuery, Occur, Query, QueryClone};
+use tower_http::catch_panic::CatchPanicLayer;
 
 use collector::{SortClause, SortKey};
 use core_index::CoreIndex;
@@ -112,11 +113,57 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
     // so a 405 from the router would be a divergence. `/update` does reject
     // some methods (`err_update_put.json`), which it does itself, with Solr's
     // envelope for it.
-    Ok(Router::new()
+    let router = Router::new()
         .route("/solr/{core}/update", any(update))
         .route("/solr/{core}/select", any(select))
-        .route("/solr/{core}/admin/ping", any(ping))
-        .with_state(state))
+        .route("/solr/{core}/admin/ping", any(ping));
+
+    // Test-only, never in a default/release build (#39): a route that always
+    // panics, so `tests/panic_recovery.rs` can exercise the real router's
+    // panic-catching layer via a genuine, unconditional handler panic
+    // instead of relying on a bug (like the `*:*` sub-clause panic this same
+    // change fixes elsewhere) as its trigger. Gated behind the `test-support`
+    // Cargo feature, which only this crate's own `[dev-dependencies]` entry
+    // in `Cargo.toml` enables — a normal `cargo build`/`cargo build --release`
+    // never compiles it in.
+    #[cfg(feature = "test-support")]
+    let router = router.route("/solr/{core}/__test_panic__", any(test_panic));
+
+    // Defence in depth (#39): a handler panic (e.g. an unforeseen
+    // `.unwrap()`/`.expect()` deep in a dependency, reachable from
+    // attacker-controlled input) must surface as a normal HTTP 500 in
+    // Solr's error envelope rather than unwinding the connection. This is a
+    // last-resort net, not a substitute for fixing the panic at its source.
+    Ok(router
+        .with_state(state)
+        .layer(CatchPanicLayer::custom(handle_panic)))
+}
+
+/// Test-only handler behind the `test-support` feature (see `build()`): an
+/// unconditional panic, for `tests/panic_recovery.rs` to exercise the
+/// panic-catching layer against a real, deliberate panic.
+#[cfg(feature = "test-support")]
+async fn test_panic() -> Response {
+    panic!("test-support: deliberate panic for panic-recovery test coverage")
+}
+
+/// Converts a caught router panic into a Solr-shaped 500 error response.
+///
+/// Uses `Envelope::Bare` (no `responseHeader`/`params` echo): a panic can
+/// happen before request params are ever parsed, and this handler runs
+/// outside any single request's handler body, so it has no `Params` value to
+/// echo — unlike `WfError` sites inside `select`/`update`, which do.
+fn handle_panic(err: Box<dyn std::any::Any + Send + 'static>) -> Response {
+    let details = if let Some(s) = err.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = err.downcast_ref::<&str>() {
+        s.to_string()
+    } else {
+        "unknown panic".to_string()
+    };
+    WfError::internal("wayfinder::PanicError", details)
+        .envelope(Envelope::Bare)
+        .into_response()
 }
 
 /// Verifies the request's `{core}` path segment matches the core this app

@@ -3,6 +3,14 @@ name = "wayfinder"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Off by default, so no production/release build ever includes it (#39).
+# Enabled only by this crate's own dev-dependency below, for
+# `tests/panic_recovery.rs` to exercise a real, unconditional handler panic
+# through the real router/middleware stack without relying on a bug (like
+# the `*:*` sub-clause panic this same change fixes) as its trigger.
+test-support = []
+
 [dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["json"] }
@@ -11,8 +19,10 @@ serde_json = { version = "1.0.151", features = ["preserve_order"] }
 tantivy = "0.26.1"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net"] }
 toml = "1.1.3"
+tower-http = { version = "0.6", features = ["catch-panic"] }
 
 [dev-dependencies]
+wayfinder = { path = ".", features = ["test-support"] }
 axum = "0.8.9"
 http = "1.4.2"
 http-body-util = "0.1.4"

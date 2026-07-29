@@ -1,0 +1,24 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":35,
+    "params":{
+      "q":"*:* AND lazy",
+      "df":"body",
+      "fl":"id,body",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"doc2",
+      "body":"a lazy afternoon in the garden"
+    },{
+      "id":"doc1",
+      "body":"the quick brown fox jumps over the lazy dog"
+    }]
+  }
+}
