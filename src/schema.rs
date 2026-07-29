@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use tantivy::schema::{
     DateOptions, DateTimePrecision, Field, IndexRecordOption, JsonObjectOptions, NumericOptions,
-    STRING, Schema, TextFieldIndexing, TextOptions,
+    Schema, TextFieldIndexing, TextOptions,
 };
 use tantivy::tokenizer::{
     Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer, StopWordFilter, TextAnalyzer,
@@ -211,6 +211,18 @@ impl WayfinderSchema {
     pub fn value_kind(&self, name: &str) -> Option<ValueKind> {
         self.field_config(name)
             .and_then(|f| value_kind_of(&f.type_, &self.field_types).ok())
+    }
+
+    /// True if `name` is an unanalyzed `string`/`keyword` field, as opposed to
+    /// a tokenized `text_*`/custom-chain one — both resolve to `ValueKind::
+    /// Text`, so this is the distinction issue #8's fuzzy/wildcard multi-term
+    /// analysis needs (lowercase-but-do-not-stem an analyzed field's search
+    /// term; leave a raw string's alone, matching Solr's `StrField` not
+    /// analyzing at all). A field that is not declared (unknown, or a
+    /// catch-all dynamic container) is not a raw string by this definition.
+    pub fn is_raw_string(&self, name: &str) -> bool {
+        self.field_config(name)
+            .is_some_and(|f| matches!(f.type_.as_str(), "string" | "keyword"))
     }
 
     /// Which catch-all JSON field a dynamic rule's values live in.
@@ -472,12 +484,23 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
             .with_context(|| format!("on field `{}`", fc.name))?;
         let field = match resolved {
             ResolvedType::Str => {
-                let mut opts = STRING;
+                // Not Tantivy's own `STRING` const: that leaves fieldnorms
+                // on, which BM25-length-norms a multivalued string field by
+                // its value count — Solr's `StrField` sets `omitNorms=true`
+                // and never does that (finding 45's `select_q_field_term`:
+                // `doc1`, with 2 `category` values, must rank no worse than
+                // `doc4`'s 1, tied on an equal score and insertion-order
+                // tie-broken, not favouring the fewer-valued doc).
+                let indexing = TextFieldIndexing::default()
+                    .set_tokenizer("raw")
+                    .set_index_option(IndexRecordOption::Basic)
+                    .set_fieldnorms(false);
+                let mut opts = TextOptions::default().set_indexing_options(indexing);
                 if fc.stored {
                     opts = opts.set_stored();
                 }
                 if fc.fast {
-                    opts = opts.set_fast(None);
+                    opts = opts.set_fast(Some("raw"));
                 }
                 builder.add_text_field(&fc.name, opts)
             }

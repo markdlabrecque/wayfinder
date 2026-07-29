@@ -1233,3 +1233,155 @@ caph hl_default_fl        'select?q=lazy&df=body&hl=true&wt=json'
 
 echo "highlighting core '$HL_CORE' left in place on '$HL_CONTAINER' (port 8991)"
 echo "  (docker rm -f $HL_CONTAINER to stop)"
+# --- query types beyond the stock parser (issue #8) ---------------------------
+# Appended block; nothing above is edited. Findings 56-59 (docs/solr-ref-findings.md).
+#
+# Two halves:
+#   1. Content-core captures: plain core-relative GETs against the untouched
+#      5-doc corpus -> manifest.tsv, so the differential harness replays them
+#      for free. Covers fuzzy / wildcard / regex / string ranges / boosts and
+#      one syntax-error case per type (issue #11's error shapes).
+#   2. Numeric/date ranges need numeric/date fields the content corpus lacks.
+#      Read-only GETs against the existing `facets` core (built by the issue #3
+#      block above, SAME container/port 8983) -> manifest-errors.tsv, per the
+#      "core-relative GET only" manifest.tsv contract. The facets schema and
+#      corpus are NOT touched: every row here is a GET, so no pre-existing
+#      facet fixture can move.
+# Not runnable standalone ($OUT/$HERE, unconditional manifest appends): run the
+# whole script.
+
+# -- fuzzy: default edit distance, explicit distances, analysis of the fuzzy --
+# -- term. `animols` is distance 1 from the indexed `animals`, `animblz` is ---
+# -- distance 2 -- the pair discriminates `~` (default), `~1`, `~2`. ----------
+cap fuzzy_default_dist1   'select?q=category:animols~&wt=json'
+cap fuzzy_default_dist2   'select?q=category:animblz~&wt=json'
+cap fuzzy_dist1_hit       'select?q=category:animols~1&wt=json'
+cap fuzzy_dist1_miss      'select?q=category:animblz~1&wt=json'
+cap fuzzy_dist2           'select?q=category:animblz~2&wt=json'
+cap fuzzy_dist0_exact     'select?q=category:animals~0&wt=json'
+# text_en indexes `lazy` stemmed to `lazi`. If the fuzzy term were stemmed too,
+# `lazy~0` would hit (lazi==lazi); if not, `~0` misses and `~1` hits on the
+# 1-edit lazy->lazi distance. This pair pins whether fuzzy terms are analyzed.
+cap fuzzy_analyzed_dist0  'select?q=body:lazy~0&wt=json'
+cap fuzzy_analyzed_dist1  'select?q=body:lazy~1&wt=json'
+# Is the fuzzy term lowercased (multiterm analysis)?
+cap fuzzy_analyzed_case   'select?q=body:LAZY~1&wt=json'
+# Error shapes: distance above Lucene's max (2), and a fractional distance.
+cap err_fuzzy_dist3       'select?q=category:animals~3&wt=json'
+cap err_fuzzy_fractional  'select?q=category:animals~0.8&wt=json'
+
+# -- wildcard / prefix: trailing *, ?, leading *, infix *, case, and analysis -
+cap wildcard_prefix       'select?q=category:anim*&wt=json'
+cap wildcard_qmark        'select?q=category:anima?s&wt=json'
+cap wildcard_leading      'select?q=category:*mals&wt=json'
+cap wildcard_infix        'select?q=category:an*ls&wt=json'
+# Stemming discriminator: index term is `lazi`. `laz*` matches it; `lazy*`
+# only matches if the wildcard term were stemmed (lazy->lazi) -- expect miss.
+cap wildcard_analyzed_hit  'select?q=body:laz*&wt=json'
+cap wildcard_analyzed_stem 'select?q=body:lazy*&wt=json'
+cap wildcard_analyzed_case 'select?q=body:LAZ*&wt=json'
+# Bare wildcard term against df, and the field-exists idiom `field:*`.
+cap wildcard_bare_df      'select?q=laz*&df=body&wt=json'
+cap wildcard_field_exists 'select?q=category:*&wt=json'
+
+# -- regex: anchoring (substring vs whole-term), metachars, case, analysis ----
+cap regex_full            'select?q=category:/animals/&wt=json'
+cap regex_substring       'select?q=category:/anim/&wt=json'
+cap regex_dotstar         'select?q=category:/anim.*/&wt=json'
+cap regex_charclass       'select?q=category:/anim[a-z]ls/&wt=json'
+cap regex_uppercase       'select?q=category:/ANIMALS/&wt=json'
+# Against the stemmed text field: /laz./ matches the indexed `lazi`.
+cap regex_analyzed        'select?q=body:/laz./&wt=json'
+cap err_regex_bad_class   'select?q=category:/anim[/&wt=json'
+cap err_regex_unclosed    'select?q=category:/animals&wt=json'
+
+# -- ranges on a string field (numeric/date below, facets core) ---------------
+# category terms: animals, classic, garden, misc.
+cap range_str_incl        'select?q=category:[animals+TO+garden]&wt=json'
+cap range_str_excl        'select?q=category:{animals+TO+garden}&wt=json'
+cap range_str_half_open   'select?q=category:[animals+TO+garden}&wt=json'
+cap range_str_star_upper  'select?q=category:[garden+TO+*]&wt=json'
+cap range_str_star_lower  'select?q=category:[*+TO+classic]&wt=json'
+cap range_str_star_both   'select?q=category:[*+TO+*]&wt=json'
+cap range_str_reversed    'select?q=category:[garden+TO+animals]&wt=json'
+cap err_range_unclosed_q  'select?q=category:[animals+TO&wt=json'
+cap err_range_lowercase_to 'select?q=category:[animals+to+garden]&wt=json'
+
+# -- boosts in the query string ------------------------------------------------
+# Baseline vs boosted pair: with q=quick garden on body, `garden` (1 doc) has
+# the higher idf, so doc2 leads the baseline; boosting quick^10 must pull the
+# two quick docs (doc1, doc3) above it. Ordering, not scores, is the contract
+# -- BM25 float values are engine-specific.
+cap boost_baseline        'select?q=quick+garden&df=body&wt=json'
+cap boost_term            'select?q=quick^10+garden&df=body&wt=json'
+cap boost_fielded_term    'select?q=body:quick^10+body:garden&wt=json'
+cap boost_float           'select?q=body:quick^2.5+body:garden&wt=json'
+cap boost_phrase          'select?q=%22lazy+dog%22^2&df=body&wt=json'
+cap boost_fuzzy_combo     'select?q=category:animols~1^3&wt=json'
+cap err_boost_bad         'select?q=body:quick^bad&wt=json'
+
+# -- quoted phrases are not field queries --------------------------------------
+# The discriminator for Wayfinder's dynamic-field rewrite scan (schema-layer
+# follow-up 5): a colon inside a quoted phrase must NOT be parsed as
+# field:value. Control first: the same text unquoted IS a field query (2 docs).
+cap select_q_field_term   'select?q=category:animals&wt=json'
+cap phrase_with_colon     'select?q=%22category:animals%22&df=body&wt=json'
+
+# -- numeric/date ranges: facets core (same container), manifest-errors.tsv ----
+# views: r1=5 r2=15 r3=25 r4=35; created: r1=2020-01-02 r2=r3=2020-01-03,
+# r4=2020-01-05. Same 6-column contract as capf/capk/caps above.
+capq8() {  # capq8 <name> <path-after-core>
+  local name=$1 suffix=$2
+  curl -sg "$SOLR/facets/$suffix" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "facets/$suffix" "" "$SOLR" \
+    >> "$HERE/manifest-errors.tsv"
+  rm -f "$OUT/$name.status"
+}
+
+capq8 qrange_int_incl            'select?q=views:[10+TO+30]&wt=json'
+capq8 qrange_int_incl_endpoints  'select?q=views:[5+TO+35]&wt=json'
+capq8 qrange_int_excl            'select?q=views:{5+TO+35}&wt=json'
+capq8 qrange_int_half_open       'select?q=views:[5+TO+35}&wt=json'
+capq8 qrange_int_star_upper      'select?q=views:[25+TO+*]&wt=json'
+# Endpoint typing on a pint field: a float endpoint, an alphabetic endpoint,
+# a leading-zero literal -- do they coerce, truncate, or 400?
+capq8 qrange_int_float_endpoint  'select?q=views:[10.5+TO+30]&wt=json'
+capq8 qrange_int_alpha_endpoint  'select?q=views:[a+TO+b]&wt=json'
+capq8 qterm_int_leading_zero     'select?q=views:015&wt=json'
+# Wildcard / fuzzy against a Points-based field: is there anything to match?
+capq8 qwild_int                  'select?q=views:1*&wt=json'
+capq8 qfuzzy_int                 'select?q=views:15~1&wt=json'
+# Date ranges, inclusive and exclusive.
+capq8 qrange_date_incl 'select?q=created:[2020-01-02T00:00:00Z+TO+2020-01-03T00:00:00Z]&wt=json'
+capq8 qrange_date_excl 'select?q=created:{2020-01-02T00:00:00Z+TO+2020-01-05T00:00:00Z}&wt=json'
+
+echo "issue #8 query-type captures done (content core -> manifest.tsv, facets core -> manifest-errors.tsv)"
+
+# -- issue #8, review round 1: discriminating cases the first pass left unpinned
+# (same block ownership; appended so re-runs stay mechanical).
+#
+# Transposition: `animasl` swaps the last two chars of `animals` — Damerau
+# distance 1, plain-Levenshtein distance 2. `~1` hitting is what pins Lucene's
+# transpositions=true default; `~2` is the both-algorithms control.
+cap fuzzy_transposition_dist1   'select?q=category:animasl~1&wt=json'
+cap fuzzy_transposition_control 'select?q=category:animasl~2&wt=json'
+# Compound queries containing a wildcard/fuzzy clause: these must behave as
+# boolean composition (Solr), never collapse into one glob or silently drop
+# the suffix.
+cap compound_wildcard_or   'select?q=category:animals+OR+body:laz*&wt=json'
+cap compound_wildcard_and  'select?q=body:laz*+AND+category:animals&wt=json'
+cap compound_fuzzy_or      'select?q=category:animols~1+OR+body:garden&wt=json'
+cap grouped_wildcard       'select?q=(body:laz*)&wt=json'
+# field-exists on a text field with no docValues (`body`): Solr answers from
+# the postings, so this must be a 200 with every doc that has a body.
+cap exists_non_docvalues   'select?q=body:*&wt=json'
+
+# -- issue #8, review round 2: all-negative / mixed-negative queries ----------
+# Solr answers a purely negative query as the complement of its matches (the
+# implicit *:* MUST clause); Lucene alone matches nothing. These pin which.
+cap negative_only          'select?q=-lazy&df=body&wt=json'
+cap negative_not_keyword   'select?q=NOT+lazy&df=body&wt=json'
+cap negative_two_clauses   'select?q=-lazy+-dog&df=body&wt=json'
+cap negative_and_not       'select?q=lazy+AND+NOT+dog&df=body&wt=json'
+cap negative_fielded_and_not 'select?q=category:animals+AND+NOT+body:garden&wt=json'

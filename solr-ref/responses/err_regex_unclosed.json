@@ -1,0 +1,15 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":1,
+    "params":{
+      "q":"category:/animals",
+      "wt":"json"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.parser.TokenMgrError"],
+    "msg":"org.apache.solr.search.SyntaxError: Cannot parse 'category:/animals': Lexical error at line 1, column 18.  Encountered: <EOF> after prefix \"/animals\" (in lexical state 3)",
+    "code":400
+  }
+}

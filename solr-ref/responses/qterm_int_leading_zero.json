@@ -1,0 +1,23 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"views:015",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"r2",
+      "views":15,
+      "created":"2020-01-03T00:00:00Z",
+      "note":"beta",
+      "_version_":1871993758865686528,
+      "_root_":"r2"
+    }]
+  }
+}
