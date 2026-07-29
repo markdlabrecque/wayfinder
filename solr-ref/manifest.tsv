@@ -58,3 +58,12 @@ select_fl_reversed	200	select?q=*:*&rows=2&fl=body,id&wt=json
 select_wildcard_and_term	200	select?q=*:*+AND+lazy&df=body&fl=id,body&wt=json
 select_wildcard_or_term	200	select?q=lazy+OR+*:*&df=body&fl=id,body&wt=json
 select_wildcard_minus_term	200	select?q=*:*+-lazy&df=body&fl=id,body&wt=json
+hl_basic	200	select?q=lazy&df=body&hl=true&hl.fl=body&wt=json
+hl_snippets_two	200	select?q=quick&df=body&hl=true&hl.fl=body&hl.snippets=2&wt=json
+hl_custom_markers	200	select?q=lazy&df=body&hl=true&hl.fl=body&hl.simple.pre=%3Cb%3E&hl.simple.post=%3C%2Fb%3E&wt=json
+hl_fragsize_small	200	select?q=quick&df=body&hl=true&hl.fl=body&hl.fragsize=18&wt=json
+hl_fragsize_truncated	200	select?q=quick&df=body&hl=true&hl.fl=body&hl.method=original&hl.fragsize=10&wt=json
+hl_no_field_match	200	select?q=*:*&fq=category:animals&hl=true&hl.fl=body&wt=json
+hl_multi_field_comma	200	select?q=lazy&df=body&hl=true&hl.fl=body,category&wt=json
+hl_multi_field_space	200	select?q=lazy&df=body&hl=true&hl.fl=body%20category&wt=json
+hl_default_fl	200	select?q=lazy&df=body&hl=true&wt=json

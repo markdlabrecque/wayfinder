@@ -21,6 +21,7 @@ use tantivy::aggregation::{
 use tantivy::collector::{Count, DocSetCollector};
 use tantivy::query::{AllQuery, Query, QueryParser};
 use tantivy::schema::OwnedValue;
+use tantivy::snippet::SnippetGenerator;
 use tantivy::time::OffsetDateTime;
 use tantivy::time::format_description::well_known::Rfc3339;
 use tantivy::{
@@ -817,6 +818,49 @@ impl CoreIndex {
             }
         }
         Ok(Value::Object(out))
+    }
+
+    /// Generates up to one highlighted HTML snippet for `field_name` in the
+    /// doc at `addr`, against `query`'s terms in that field (Solr's
+    /// `hl`/`hl.fl`). Returns an empty `Vec` -- never a single empty-string
+    /// entry -- when the field carries no term overlap for this doc (finding
+    /// 51, `docs/solr-ref-findings.md`), or when the field is not stored
+    /// (silently, mirroring `render_doc`'s own omit-rather-than-null
+    /// treatment of a missing stored value -- unfixture-backed, the
+    /// conservative choice for a case no captured response exercises).
+    ///
+    /// ponytail: Tantivy's public `SnippetGenerator` only exposes the single
+    /// best-scoring fragment (`select_best_fragment_combination` is a private
+    /// fn, `tantivy-0.26.1/src/snippet/mod.rs`), so `hl.snippets > 1` is a cap
+    /// this can never actually fill past 1 -- at most one snippet comes back
+    /// regardless of how many times a term repeats in the field. No captured
+    /// fixture needs a second real snippet (`hl_snippets_two.json`'s query
+    /// has exactly one hit per doc per field), so this is left as the
+    /// ceiling rather than hand-rolling multi-fragment selection against a
+    /// private algorithm.
+    pub fn highlight_field(
+        &self,
+        query: &dyn Query,
+        addr: DocAddress,
+        field_name: &str,
+        max_num_chars: usize,
+        pre: &str,
+        post: &str,
+    ) -> Result<Vec<String>> {
+        let field = self
+            .wf_schema
+            .field(field_name)
+            .ok_or_else(|| anyhow!("can not highlight undefined field: {field_name}"))?;
+        let searcher = self.reader.searcher();
+        let mut generator = SnippetGenerator::create(&searcher, query, field)?;
+        generator.set_max_num_chars(max_num_chars);
+        let doc: TantivyDocument = searcher.doc(addr)?;
+        let mut snippet = generator.snippet_from_doc(&doc);
+        if snippet.is_empty() {
+            return Ok(Vec::new());
+        }
+        snippet.set_snippet_prefix_postfix(pre, post);
+        Ok(vec![snippet.to_html()])
     }
 
     /// Number of documents matching `query`. The counting primitive behind

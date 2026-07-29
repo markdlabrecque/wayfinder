@@ -7,16 +7,17 @@
 //! and `/admin/ping`.
 //!
 //! `sort` was out of the tracer-bullet scope and has since landed (issue #2),
-//! as has `stats` (issue #5). Deliberately out of scope here (PRD §7):
-//! highlighting, edismax, MLT. Multi-core: out of scope too — `app()`
-//! serves exactly one core, matching PRD open question 1's
-//! "single-core-per-process" lean.
+//! as has `stats` (issue #5) and highlighting (`hl`/`hl.fl` — see
+//! `crate::highlight`, issue #4). Deliberately out of scope here (PRD §7):
+//! edismax, MLT. Multi-core: out of scope too — `app()` serves exactly one
+//! core, matching PRD open question 1's "single-core-per-process" lean.
 
 mod collector;
 mod config;
 mod core_index;
 mod error;
 mod facet;
+mod highlight;
 mod params;
 pub mod schema;
 mod stats;
@@ -80,6 +81,13 @@ const SELECT_PARAMS: &[&str] = &[
     "stats",
     "stats.field",
     "sort",
+    "hl",
+    "hl.fl",
+    "hl.snippets",
+    "hl.fragsize",
+    "hl.simple.pre",
+    "hl.simple.post",
+    "hl.method",
     "wt",
 ];
 /// `commitWithin` / `overwrite` / `softCommit` landed with #9.
@@ -669,7 +677,7 @@ async fn select(
         .is_some_and(|fl| fl.iter().any(|f| f == "score"));
 
     let mut docs = Vec::with_capacity(page.len());
-    for (score, addr) in page {
+    for (score, addr) in page.iter().copied() {
         docs.push(
             state
                 .index
@@ -790,6 +798,47 @@ async fn select(
         None
     };
 
+    // `hl=true` gates the whole `highlighting` block (finding 52); it is
+    // keyed by unique-key value over the docs actually returned on this
+    // page, matching `response.docs`'s own pagination.
+    let highlighting_result = if params.get("hl") == Some("true") {
+        let result = match &parsed {
+            Some((query, _)) => highlight::highlighting(
+                &state.index,
+                &params,
+                &default_field,
+                query.as_ref(),
+                &page,
+                &state.index.wf_schema.core.unique_key,
+            ),
+            // No `q` matches nothing, so `page` is always empty here too —
+            // an empty `highlighting` object, not an absent key.
+            None => Ok(Value::Object(Map::new())),
+        }
+        .map_err(|e| {
+            // An undefined/non-text `hl.fl` field is a request-input
+            // problem (`highlight::InvalidHlField`), rendered as Solr's own
+            // 400 -- mirroring `facet.field`'s own unknown-field handling
+            // just above, including carrying the base query's already-built
+            // `response` block alongside `error` (issue #35's precedent;
+            // unfixtured for `hl.fl` specifically, since no captured
+            // `hl_*` fixture exercises an invalid field, but the shape
+            // should be consistent with `facet_unknown_field.json`'s). A
+            // failure that isn't request-input (a genuine Tantivy/searcher
+            // error) stays a 500.
+            if e.downcast_ref::<highlight::InvalidHlField>().is_some() {
+                WfError::bad_request("wayfinder::HighlightError", e.to_string())
+                    .with_params(&params)
+                    .with_response(Value::Object(response.clone()))
+            } else {
+                WfError::internal("wayfinder::HighlightError", e.to_string()).with_params(&params)
+            }
+        })?;
+        Some(result)
+    } else {
+        None
+    };
+
     // `responseHeader.warnings` is absent unless there is something to warn
     // about (every fixture that isn't a Points-based `facet.field` at
     // mincount 0 lacks the key) — never an empty array — and, when present,
@@ -812,6 +861,10 @@ async fn select(
     }
     if let Some(stats) = stats_result {
         body["stats"] = stats;
+    }
+
+    if let Some(highlighting) = highlighting_result {
+        body["highlighting"] = highlighting;
     }
 
     Ok(axum::Json(body).into_response())

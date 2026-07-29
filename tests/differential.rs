@@ -1245,6 +1245,9 @@ const RANKED_RELEVANCE_ENTRIES: &[&str] =
 // ratified permanently as PRD ratified-divergence 4 and handled by
 // `RANKED_SCORE_VALUE_RATIFIED` above, so both entries are gone from this
 // list.
+// the canonical `content` core, findings 52+). `hl`/`hl.fl` and friends are
+// now implemented (`src/highlight.rs`) and every `hl_*` row matches, so all
+// eight entries that were parked here are gone.
 const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[(
     "ping",
     "`responseHeader.params` carries Solr ping-handler artifacts incl. a per-run `rid` counter no implementation can reproduce; see the same carve-out in `tracer_bullet.rs::ping_reports_ok`",

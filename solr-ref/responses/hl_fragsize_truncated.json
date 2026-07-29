@@ -1,0 +1,41 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":5,
+    "params":{
+      "q":"quick",
+      "df":"body",
+      "hl":"true",
+      "hl.fragsize":"10",
+      "hl.fl":"body",
+      "hl.method":"original",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"doc3",
+      "body":"quick thinking saves the day",
+      "category":["misc","classic"],
+      "_version_":1872055469222133761,
+      "_root_":"doc3"
+    },{
+      "id":"doc1",
+      "body":"the quick brown fox jumps over the lazy dog",
+      "category":["animals","classic"],
+      "_version_":1872055469200113664,
+      "_root_":"doc1"
+    }]
+  },
+  "highlighting":{
+    "doc3":{
+      "body":["<em>quick</em>"]
+    },
+    "doc1":{
+      "body":["the <em>quick</em>"]
+    }
+  }
+}
