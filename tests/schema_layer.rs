@@ -297,6 +297,92 @@ type = "int""#,
     );
 }
 
+// --- unique_key contract: single-valued, non-analyzed (issue #40) ----------
+
+/// The update pipeline resolves `core.unique_key` as a single Tantivy text
+/// term. A multi-valued uniqueKey field has no single term to resolve against
+/// (`Term::from_field_text` takes one value), so overwrite/delete-by-id
+/// semantics would be undefined. Schema load time must reject it loudly
+/// instead of silently picking one value (or panicking) at request time.
+#[test]
+fn multi_valued_unique_key_is_rejected_at_load_time() {
+    let toml = FULL_SCHEMA_TOML.replace(
+        r#"name = "id"
+type = "string"
+stored = true
+required = true"#,
+        r#"name = "id"
+type = "string"
+stored = true
+required = true
+multi_valued = true"#,
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path).expect_err("a multi-valued uniqueKey must be rejected");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("unique_key") && msg.contains("id"),
+        "error must name core.unique_key and the field, got: {msg}"
+    );
+}
+
+/// `value_kind_of` maps both `ResolvedType::Str` (`string`/`keyword`, raw and
+/// unanalyzed) and `ResolvedType::Text { .. }` (analyzed presets like
+/// `text_en`, and custom `[[field_types]]` chains) to the same `ValueKind::Text`.
+/// Only the former is safe as a uniqueKey: an analyzed field tokenizes a value
+/// like `"Hello World"` into `["hello", "world"]`, so the document would no
+/// longer match itself as a single exact term via `Term::from_field_text`.
+/// Load time must reject an analyzed uniqueKey, not just a non-text one.
+#[test]
+fn analyzed_unique_key_is_rejected_at_load_time() {
+    let toml = FULL_SCHEMA_TOML.replace(
+        r#"name = "id"
+type = "string""#,
+        r#"name = "id"
+type = "text_en""#,
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path).expect_err("an analyzed (text_en) uniqueKey must be rejected");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("unique_key") && msg.contains("id"),
+        "error must name core.unique_key and the field, got: {msg}"
+    );
+}
+
+/// A document missing its uniqueKey has no term to overwrite/delete by, so
+/// the field must be guaranteed present on every document. Schema load time
+/// must reject a uniqueKey that is not `required = true`.
+#[test]
+fn non_required_unique_key_is_rejected_at_load_time() {
+    let toml = FULL_SCHEMA_TOML.replace(
+        r#"name = "id"
+type = "string"
+stored = true
+required = true"#,
+        r#"name = "id"
+type = "string"
+stored = true
+required = false"#,
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path).expect_err("a non-required uniqueKey must be rejected");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("unique_key") && msg.contains("id") && msg.contains("required"),
+        "error must name core.unique_key, the field, and the `required` requirement, got: {msg}"
+    );
+}
+
+/// Boundary control: a plain, single-valued `string` uniqueKey is exactly the
+/// shape the two tests above are carving out as forbidden, so it must still
+/// load cleanly.
+#[test]
+fn single_valued_string_unique_key_still_loads() {
+    let (_dir, path) = write_schema(FULL_SCHEMA_TOML);
+    schema::load(&path).expect("a single-valued, non-analyzed string uniqueKey must load");
+}
+
 // --- copy fields ------------------------------------------------------------
 
 #[test]
