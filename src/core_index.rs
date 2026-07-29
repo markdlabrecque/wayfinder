@@ -749,6 +749,25 @@ impl CoreIndex {
     /// Recursively converts a `tantivy::query_grammar::UserInputAst` into a
     /// real `Query`, handling `Clause`/`Boost` composition itself and
     /// deferring each `Leaf` to `build_leaf`.
+    ///
+    /// Round-2 review's regression: an all-`MustNot` `Clause` (`-lazy`,
+    /// `NOT lazy`, `-lazy -dog`) must answer Solr's implicit complement —
+    /// every doc except the excluded ones — not a silent 200/0. A plain
+    /// `BooleanQuery` of only exclusions has nothing to exclude *from*, so
+    /// once every clause at *this* level is confirmed `MustNot`, an extra
+    /// `(Should, AllQuery)` clause is pushed to supply that "everything"
+    /// (mirroring tantivy's own `QueryParser::make_non_negative`, which does
+    /// the same for its `LogicalAst`). This check is per-`Clause`-node, not
+    /// global: `lazy AND NOT dog` parses as `(+lazy +(-dog))` — an *inner*
+    /// single-clause `(-dog)` that is all-negative on its own, nested inside
+    /// an *outer* clause that also carries the positive `+lazy` and so is
+    /// never all-negative itself. Recursion alone gets this right: the
+    /// inner `(-dog)` clause earns the `AllQuery` companion when *it* is
+    /// built (becoming "every doc except dog"), and that combines with
+    /// `+lazy` at the outer `Must`/`Must` level exactly as a normal AND
+    /// would — no special-casing needed at the outer level, and nothing here
+    /// ever injects `AllQuery` into a clause that already carries a
+    /// non-`MustNot` sibling.
     fn build_ast(
         &self,
         ast: tantivy::query_grammar::UserInputAst,
@@ -765,6 +784,9 @@ impl CoreIndex {
                 }
                 if clauses.is_empty() {
                     return Ok(Box::new(EmptyQuery));
+                }
+                if clauses.iter().all(|(occur, _)| *occur == Occur::MustNot) {
+                    clauses.push((Occur::Should, Box::new(AllQuery)));
                 }
                 Ok(Box::new(BooleanQuery::new(clauses)))
             }
@@ -882,6 +904,13 @@ impl CoreIndex {
             return Ok(Box::new(ExistsQuery::new(field_name.to_string(), false)));
         }
         if self.wf_schema.value_kind(field_name) == Some(ValueKind::Text) {
+            // ponytail: `.*` walks and matches every entry in the field's
+            // term dictionary via the automaton machinery `RegexQuery`
+            // already has (`AutomatonWeight`) — correct, but with no upper
+            // bound on dictionary size the way a real "does this doc have a
+            // fast column value" check would have. Fine for the corpora
+            // this issue's fixtures cover; revisit if a non-fast text field
+            // with a very large distinct-term count ever needs this path.
             return RegexQuery::from_pattern(".*", field)
                 .map(|q| Box::new(q) as Box<dyn Query>)
                 .map_err(|e| QueryError::RegexCompile(e.to_string()));
