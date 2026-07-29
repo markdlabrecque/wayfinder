@@ -996,3 +996,16 @@ is what makes the multi-term-analysis questions answerable at all.
     — which retires schema-layer follow-up 5's open question about what the dynamic-field
     rewrite scan must not rewrite.
 
+    **Round-1 review addendum (seven more `manifest.tsv` rows, same block).** The reviewer named
+    three inference gaps and each got its discriminating capture rather than an argument:
+    (a) **Fuzzy distance is Damerau — a transposition counts as ONE edit.** `animasl` (last two
+    chars of `animals` swapped) is plain-Levenshtein distance 2 but `category:animasl~1` hits
+    both `animals` docs (`fuzzy_transposition_dist1.json`; `~2` control captured too), pinning
+    Lucene's `transpositions=true` FuzzyQuery default. (b) **Wildcard/fuzzy clauses compose as
+    ordinary boolean clauses.** `category:animals OR body:laz*` = 3 docs,
+    `body:laz* AND category:animals` = doc1, `(body:laz*)` = 2, and
+    `category:animols~1 OR body:garden` = `doc2, doc1, doc4` — scored composition, not a
+    whole-query glob and not a silently dropped suffix (`compound_*.json`,
+    `grouped_wildcard.json`). (c) **`field:*` works on a plain indexed field with no docValues**:
+    `body:*` is a 200 with all five docs (`exists_non_docvalues.json`) — Solr answers exists
+    from the postings, so an implementation must not require a fast/docValues column for it.

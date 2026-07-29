@@ -1357,3 +1357,22 @@ capq8 qrange_date_incl 'select?q=created:[2020-01-02T00:00:00Z+TO+2020-01-03T00:
 capq8 qrange_date_excl 'select?q=created:{2020-01-02T00:00:00Z+TO+2020-01-05T00:00:00Z}&wt=json'
 
 echo "issue #8 query-type captures done (content core -> manifest.tsv, facets core -> manifest-errors.tsv)"
+
+# -- issue #8, review round 1: discriminating cases the first pass left unpinned
+# (same block ownership; appended so re-runs stay mechanical).
+#
+# Transposition: `animasl` swaps the last two chars of `animals` — Damerau
+# distance 1, plain-Levenshtein distance 2. `~1` hitting is what pins Lucene's
+# transpositions=true default; `~2` is the both-algorithms control.
+cap fuzzy_transposition_dist1   'select?q=category:animasl~1&wt=json'
+cap fuzzy_transposition_control 'select?q=category:animasl~2&wt=json'
+# Compound queries containing a wildcard/fuzzy clause: these must behave as
+# boolean composition (Solr), never collapse into one glob or silently drop
+# the suffix.
+cap compound_wildcard_or   'select?q=category:animals+OR+body:laz*&wt=json'
+cap compound_wildcard_and  'select?q=body:laz*+AND+category:animals&wt=json'
+cap compound_fuzzy_or      'select?q=category:animols~1+OR+body:garden&wt=json'
+cap grouped_wildcard       'select?q=(body:laz*)&wt=json'
+# field-exists on a text field with no docValues (`body`): Solr answers from
+# the postings, so this must be a 200 with every doc that has a body.
+cap exists_non_docvalues   'select?q=body:*&wt=json'

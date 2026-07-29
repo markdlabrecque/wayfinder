@@ -113,3 +113,10 @@ boost_fuzzy_combo	200	select?q=category:animols~1^3&wt=json
 err_boost_bad	400	select?q=body:quick^bad&wt=json
 select_q_field_term	200	select?q=category:animals&wt=json
 phrase_with_colon	200	select?q=%22category:animals%22&df=body&wt=json
+fuzzy_transposition_dist1	200	select?q=category:animasl~1&wt=json
+fuzzy_transposition_control	200	select?q=category:animasl~2&wt=json
+compound_wildcard_or	200	select?q=category:animals+OR+body:laz*&wt=json
+compound_wildcard_and	200	select?q=body:laz*+AND+category:animals&wt=json
+compound_fuzzy_or	200	select?q=category:animols~1+OR+body:garden&wt=json
+grouped_wildcard	200	select?q=(body:laz*)&wt=json
+exists_non_docvalues	200	select?q=body:*&wt=json
