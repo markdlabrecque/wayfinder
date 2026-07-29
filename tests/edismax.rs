@@ -273,10 +273,12 @@ async fn edismax_basic_matches_committed_fixture() {
     // quantization error to diverge on). Same root cause as `pf_off`'s guard
     // below: Wayfinder's `text_en` deliberately does not strip stopwords
     // (PRD open question 5, documented on `CoreIndex::mlt_query`), unlike
-    // real Solr's `text_en`. That changes `eB`/`eD`'s indexed doc lengths
-    // (and therefore their BM25 length-norm component) relative to what
-    // Solr computed, flipping their relative order versus the committed
-    // fixture (`eC, eD, eB, eA`) while leaving the *set* of matching docs
+    // real Solr's `text_en`. Stopwords retained in *other* docs (eC, pA, pB,
+    // the mm*/p* titles) shift the per-field average doc length that feeds
+    // the BM25 length norm (avgdl_title 3.1->3.3, avgdl_body 3.5->4.3),
+    // which changes `eB`/`eD`'s length-norm component relative to what Solr
+    // computed, flipping their relative order versus the committed fixture
+    // (`eC, eD, eB, eA`) while leaving the *set* of matching docs
     // unchanged. This intentionally asserts Wayfinder's current (wrong)
     // order rather than the fixture's order, so that closing #51 — or any
     // unrelated `text_en`/stopword change that happens to fix this — trips
@@ -634,9 +636,11 @@ async fn plus_operator_requires_matches_the_committed_fixture() {
     // reviewer round 1): same root cause as
     // `edismax_basic_matches_committed_fixture` above, NOT fieldnorm
     // quantization — Wayfinder's `text_en` deliberately does not strip
-    // stopwords (PRD open question 5), which changes `eA`/`eB`'s indexed
-    // doc lengths (and BM25 length norm) relative to what Solr computed,
-    // flipping their relative order versus the committed fixture
+    // stopwords (PRD open question 5), which shifts the per-field average
+    // doc length feeding the BM25 length norm (avgdl_title 3.1->3.3,
+    // avgdl_body 3.5->4.3), changing `eA`/`eB`'s length-norm component
+    // relative to what Solr computed and flipping their relative order
+    // versus the committed fixture
     // (`eD, eA, eB`) while leaving the matching doc set unchanged. Asserts
     // the current (wrong) order explicitly; when this fails, restore
     // `assert_matches_fixture(body, "edismax_operators_required")` and
