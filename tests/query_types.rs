@@ -354,6 +354,17 @@ async fn regex_bad_char_class_is_a_500_with_no_metadata_key() {
         "a regex-compile 500 must have no error.metadata key at all, unlike a 400 \
          SyntaxError — got {body}"
     );
+    // The differential harness's normaliser drops `error.trace` on both
+    // sides before comparing (finding 10/45's rationale — free text no
+    // other engine can reproduce), so the hermetic differential suite
+    // cannot by itself prove Wayfinder ever actually emits the key at all;
+    // this test is the one place that shape is pinned directly.
+    assert!(
+        body["error"]["trace"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty()),
+        "a regex-compile 500 must carry a non-empty error.trace — got {body}"
+    );
 }
 
 /// An unclosed `/regex` is an ordinary 400 SyntaxError, not the 500 above and
@@ -786,4 +797,57 @@ async fn dynamic_field_rewrite_must_not_apply_inside_a_quoted_phrase() {
         "the phrase must match doc d1's body (`count i seven`), not be silently swallowed by \
          an incorrect rewrite: {body}"
     );
+}
+
+/// Round-1 review item 3 (Wayfinder-only regression; no Solr fixture, same
+/// rationale as the quoted-phrase test above): `parse_query`'s own
+/// fuzzy/wildcard detection must not run at all on a `[[dynamic_fields]]`
+/// catch-all path — `count_i` is not itself a declared field, so this
+/// module's `field_or_err` used to reject `count_i:1*`/`count_i:7~1` with
+/// "undefined field" before `rewrite_dynamic_fields` (which turns `count_i:`
+/// into `_dynamic.count_i:`) ever got a say. Both must now fall through to
+/// Tantivy's own per-leaf conversion and succeed (200, 0 hits — a wildcard/
+/// fuzzy match against a JSON int sub-path is not expected to hit anything
+/// in this corpus, only to not hard-error).
+#[tokio::test]
+async fn dynamic_field_wildcard_and_fuzzy_do_not_hard_error() {
+    let (app, _dir) = dynamic_quote_app().await;
+
+    let (status, body) = get(&app, "select?q=count_i:1*&wt=json").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a wildcard on a dynamic-field path must not 400 just because `count_i` is not itself \
+         a declared field: {body}"
+    );
+    assert_eq!(body["response"]["numFound"], json!(0));
+
+    let (status, body) = get(&app, "select?q=count_i:7~1&wt=json").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "fuzzy on a dynamic-field path must not 400 for the same reason: {body}"
+    );
+    assert_eq!(body["response"]["numFound"], json!(0));
+}
+
+/// `count_i:*` (the field-exists idiom on a dynamic-field path) is not fixed
+/// by this module at all: it now correctly falls through to Tantivy's own
+/// `Exists`-leaf conversion (see `build_leaf`'s doc comment on why a
+/// `_dynamic.*` path is never special-cased here), which has its own
+/// separate, already-documented gap — `compute_logical_ast_from_leaf_lenient`
+/// discards the field entirely for `UserInputLeaf::Exists`. That gap
+/// predates issue #8 (the plain, pre-#8 `QueryParser::parse_query` path hits
+/// the exact same tantivy arm for a declared field's `field:*` too, which is
+/// finding 43's whole reason `build_field_exists` exists as a Wayfinder-side
+/// workaround for *declared* fields) and is out of this fix's minimal scope
+/// for an *undeclared* dynamic path with no Solr fixture pinning what the
+/// right answer should even be. This test pins today's honest, correctly-
+/// classed 400 — not the wrong-for-the-wrong-reason "undefined field" this
+/// module used to produce before falling through.
+#[tokio::test]
+async fn dynamic_field_exists_falls_through_to_tantivys_own_gap_not_ours() {
+    let (app, _dir) = dynamic_quote_app().await;
+    let (status, body) = get(&app, "select?q=count_i:*&wt=json").await;
+    assert_query_error(status, &body, "err_bad_syntax");
 }

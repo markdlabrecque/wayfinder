@@ -285,6 +285,33 @@ fn terms_to_should_query(field: Field, terms: Vec<String>) -> Box<dyn Query> {
     Box::new(BooleanQuery::new(clauses))
 }
 
+/// The field name a `UserInputLeaf` targets, if any (`All` never does — a
+/// bare `*` alone, distinct from the fielded `Exists` idiom).
+fn leaf_field_name(leaf: &tantivy::query_grammar::UserInputLeaf) -> Option<&str> {
+    use tantivy::query_grammar::UserInputLeaf;
+    match leaf {
+        UserInputLeaf::Literal(l) => l.field_name.as_deref(),
+        UserInputLeaf::Exists { field } => Some(field.as_str()),
+        UserInputLeaf::Range { field, .. } => field.as_deref(),
+        UserInputLeaf::Set { field, .. } => field.as_deref(),
+        UserInputLeaf::Regex { field, .. } => field.as_deref(),
+        UserInputLeaf::All => None,
+    }
+}
+
+/// True when `field_name` is a `[[dynamic_fields]]` catch-all JSON path
+/// (`_dynamic.<name>`/`_dynamic_text.<name>`) rather than a declared field —
+/// exactly and only what `rewrite_dynamic_fields` produces, so this is a
+/// reliable signal without needing the pre-rewrite identifier (which the
+/// grammar has already discarded by the time a leaf reaches `build_leaf`).
+fn is_dynamic_container_field(field_name: &str) -> bool {
+    [schema::DYNAMIC_FIELD, schema::DYNAMIC_TEXT_FIELD]
+        .iter()
+        .any(|container| {
+            field_name.starts_with(*container) && field_name[container.len()..].starts_with('.')
+        })
+}
+
 pub struct CoreIndex {
     pub wf_schema: WayfinderSchema,
     index: Index,
@@ -653,37 +680,35 @@ impl CoreIndex {
     /// Parses a Solr `q` (or `fq`) query string into a Tantivy query.
     /// `*:*` is special-cased to `AllQuery`, matching Solr's match-all idiom.
     ///
-    /// Before falling through to Tantivy's own grammar, `query::detect` gets
-    /// first look at the *whole* string: fuzzy (`term~`, `term~N`),
-    /// wildcard/prefix (`te?t`, `test*`, `*mals`, `field:*`) and regex
-    /// (`/pattern/`) are constructs Tantivy's own `QueryParser` does not
-    /// implement at all (see `crate::query`'s module doc for exactly how it
-    /// silently mangles each one instead of erroring), so they are built
-    /// directly here rather than coaxed out of it. Everything else — ranges,
-    /// boosts, phrases, boolean composition — is unchanged: Tantivy's parser
-    /// already gets those right against the fixtures.
+    /// Everything else is parsed by `tantivy::query_grammar::parse_query` —
+    /// the exact same grammar entry point Tantivy's own `QueryParser` uses
+    /// internally — and then walked leaf by leaf via `build_ast`/
+    /// `build_leaf`: fuzzy (`term~`, `term~N`), wildcard/prefix (`te?t`,
+    /// `test*`, `*mals`, `field:*`) and regex (`/pattern/`) are constructs
+    /// Tantivy's own `QueryParser` does not implement at all (see
+    /// `crate::query`'s module doc for exactly how it silently mangles each
+    /// one instead of erroring), so those leaves are built directly; every
+    /// other leaf (plain terms/phrases, ranges, sets) is delegated to
+    /// Tantivy's own per-leaf conversion, and the boolean `Clause`/`Boost`
+    /// structure joining them is walked, not reparsed — round-1 review
+    /// established that a whole-query-string special case cannot tell a
+    /// compound query (`category:animals OR body:laz*`) apart from a bare
+    /// atomic one, so detection now happens per leaf, after the grammar has
+    /// already done the hard part of splitting the query into leaves.
     pub fn parse_query(&self, query_str: &str, default_field_name: &str) -> Result<Box<dyn Query>> {
         if query_str.trim() == "*:*" {
             return Ok(Box::new(AllQuery));
-        }
-        if let Some((atomic, boost)) = query::detect(query_str) {
-            let built = self
-                .build_atomic(atomic, default_field_name)
-                .map_err(anyhow::Error::from)?;
-            return Ok(match boost {
-                Some(b) => Box::new(BoostQuery::new(built, b)),
-                None => built,
-            });
         }
         let default_field = self
             .wf_schema
             .field(default_field_name)
             .ok_or_else(|| anyhow!("unknown default field `{default_field_name}`"))?;
-        let parser = QueryParser::for_index(&self.index, vec![default_field]);
         let rewritten = self.rewrite_dynamic_fields(&self.rewrite_wildcard_subclause(query_str));
-        parser
-            .parse_query(&rewritten)
-            .map_err(|e| anyhow!("could not parse query `{query_str}`: {e}"))
+        let user_ast = tantivy::query_grammar::parse_query(&rewritten)
+            .map_err(|_| anyhow!("could not parse query `{query_str}`"))?;
+        let parser = QueryParser::for_index(&self.index, vec![default_field]);
+        self.build_ast(user_ast, &parser, default_field_name)
+            .map_err(anyhow::Error::from)
     }
 
     /// Rewrites an embedded `*:*` sub-clause (e.g. `*:* AND lazy`) to a bare
@@ -721,35 +746,115 @@ impl CoreIndex {
         query_str.replace("*:*", "*")
     }
 
-    /// Builds the Tantivy `Query` for one `query::Atomic` clause detected by
-    /// `parse_query`. A missing/unfielded fuzzy or wildcard clause resolves
-    /// against `default_field_name` (the bare `laz*&df=body` shape); regex
-    /// and field-exists always carry their own field (`query::detect` never
-    /// emits those two without one).
-    fn build_atomic(
+    /// Recursively converts a `tantivy::query_grammar::UserInputAst` into a
+    /// real `Query`, handling `Clause`/`Boost` composition itself and
+    /// deferring each `Leaf` to `build_leaf`.
+    fn build_ast(
         &self,
-        atomic: query::Atomic,
+        ast: tantivy::query_grammar::UserInputAst,
+        parser: &QueryParser,
         default_field_name: &str,
     ) -> Result<Box<dyn Query>, QueryError> {
-        match atomic {
-            query::Atomic::FieldExists { field } => self.build_field_exists(&field),
-            query::Atomic::Fuzzy {
-                field,
-                term,
-                distance_raw,
-            } => {
-                let field_name = field.as_deref().unwrap_or(default_field_name);
-                self.build_fuzzy(field_name, &term, &distance_raw)
+        use tantivy::query_grammar::UserInputAst;
+        match ast {
+            UserInputAst::Clause(subqueries) => {
+                let mut clauses = Vec::with_capacity(subqueries.len());
+                for (occur_opt, sub) in subqueries {
+                    let occur = occur_opt.unwrap_or(Occur::Should);
+                    clauses.push((occur, self.build_ast(sub, parser, default_field_name)?));
+                }
+                if clauses.is_empty() {
+                    return Ok(Box::new(EmptyQuery));
+                }
+                Ok(Box::new(BooleanQuery::new(clauses)))
             }
-            query::Atomic::Wildcard { field, glob } => {
-                let field_name = field.as_deref().unwrap_or(default_field_name);
-                self.build_wildcard(field_name, &glob)
+            UserInputAst::Boost(inner, boost) => {
+                let built = self.build_ast(*inner, parser, default_field_name)?;
+                Ok(Box::new(BoostQuery::new(built, boost.into_inner() as f32)))
             }
-            query::Atomic::Regex { field, pattern } => self.build_regex(&field, &pattern),
-            query::Atomic::RegexUnclosed => Err(QueryError::Syntax(
-                "unclosed regex literal: expected a matching `/`".to_string(),
-            )),
+            UserInputAst::Leaf(leaf) => self.build_leaf(*leaf, parser, default_field_name),
         }
+    }
+
+    /// Builds one grammar leaf. A bare (`Delimiter::None`, no slop/prefix)
+    /// literal is classified by `query::classify_literal` for fuzzy/wildcard/
+    /// unclosed-regex; `UserInputLeaf::Exists` and an all-`Unbounded`
+    /// `UserInputLeaf::Range` (`[* TO *]`) both become the field-exists idiom
+    /// (finding 43/44); `UserInputLeaf::Regex` (a *closed* `/pattern/`,
+    /// which the grammar itself already parsed out of a literal) becomes a
+    /// `RegexQuery`. A leaf targeting a `[[dynamic_fields]]`-backed catch-all
+    /// path (its field starts with `_dynamic.`/`_dynamic_text.` —
+    /// `rewrite_dynamic_fields` already ran, so that prefix is exactly and
+    /// only how a dynamic-field reference looks by the time the grammar
+    /// sees it) is never special-cased here: this module's field lookups
+    /// only know declared fields, not a JSON sub-path within a catch-all
+    /// container, so those go straight to Tantivy's own per-leaf conversion,
+    /// which already resolves JSON paths correctly (round-1 review item 3 —
+    /// `count_i:*`/`count_i:1*`/`count_i:7~1` on a `*_i` dynamic rule must
+    /// not hard-error just because "count_i" is not itself a declared
+    /// field). Everything else delegates to `parser.
+    /// build_query_from_user_input_ast` on a single-leaf sub-AST, reusing
+    /// Tantivy's own (already-correct-against-the-fixtures) conversion for
+    /// plain terms/phrases/ranges/sets.
+    fn build_leaf(
+        &self,
+        leaf: tantivy::query_grammar::UserInputLeaf,
+        parser: &QueryParser,
+        default_field_name: &str,
+    ) -> Result<Box<dyn Query>, QueryError> {
+        use tantivy::query_grammar::{UserInputAst, UserInputBound, UserInputLeaf};
+
+        if leaf_field_name(&leaf).is_some_and(is_dynamic_container_field) {
+            return parser
+                .build_query_from_user_input_ast(UserInputAst::Leaf(Box::new(leaf)))
+                .map(|q| q as Box<dyn Query>)
+                .map_err(|e| QueryError::Syntax(e.to_string()));
+        }
+
+        if query::leaf_is_special_literal(&leaf) {
+            let UserInputLeaf::Literal(literal) = &leaf else {
+                unreachable!("leaf_is_special_literal only returns true for a Literal")
+            };
+            let field_name = literal.field_name.as_deref().unwrap_or(default_field_name);
+            match query::classify_literal(&literal.phrase) {
+                query::LiteralKind::Fuzzy { term, distance_raw } => {
+                    return self.build_fuzzy(field_name, &term, &distance_raw);
+                }
+                query::LiteralKind::Wildcard { glob } => {
+                    return self.build_wildcard(field_name, &glob);
+                }
+                query::LiteralKind::RegexUnclosed => {
+                    return Err(QueryError::Syntax(
+                        "unclosed regex literal: expected a matching `/`".to_string(),
+                    ));
+                }
+                query::LiteralKind::Plain => {} // fall through to delegate below
+            }
+        }
+
+        match &leaf {
+            UserInputLeaf::Exists { field } => return self.build_field_exists(field),
+            UserInputLeaf::Range {
+                field: Some(field),
+                lower: UserInputBound::Unbounded,
+                upper: UserInputBound::Unbounded,
+            } => return self.build_field_exists(field),
+            UserInputLeaf::Regex {
+                field: Some(field),
+                pattern,
+            } => return self.build_regex(field, pattern),
+            UserInputLeaf::Regex { field: None, .. } => {
+                return Err(QueryError::Syntax(
+                    "regex query needs a specific field".to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        parser
+            .build_query_from_user_input_ast(UserInputAst::Leaf(Box::new(leaf)))
+            .map(|q| q as Box<dyn Query>)
+            .map_err(|e| QueryError::Syntax(e.to_string()))
     }
 
     fn field_or_err(&self, field_name: &str) -> Result<Field, QueryError> {
@@ -760,9 +865,30 @@ impl CoreIndex {
 
     /// `field:*` / `field:[* TO *]` — every doc carrying any value for
     /// `field` (finding 43's field-exists idiom; also the range-syntax
-    /// equivalent, finding 44's `range_str_star_both`).
+    /// equivalent, finding 44's `range_str_star_both`). `ExistsQuery` needs
+    /// a fast (docValues) column, but Solr answers `field:*` from the
+    /// postings on a plain indexed field with none (round-1 review's
+    /// `exists_non_docvalues.json`: `body:*` = all five docs even though
+    /// `body` is not `fast`) — so a non-fast field falls back to a
+    /// constant-score `RegexQuery` matching every term in the field's own
+    /// dictionary, which is exactly "this doc has at least one term here".
     fn build_field_exists(&self, field_name: &str) -> Result<Box<dyn Query>, QueryError> {
-        self.field_or_err(field_name)?;
+        let field = self.field_or_err(field_name)?;
+        let is_fast = self
+            .wf_schema
+            .field_config(field_name)
+            .is_some_and(|f| f.fast);
+        if is_fast {
+            return Ok(Box::new(ExistsQuery::new(field_name.to_string(), false)));
+        }
+        if self.wf_schema.value_kind(field_name) == Some(ValueKind::Text) {
+            return RegexQuery::from_pattern(".*", field)
+                .map(|q| Box::new(q) as Box<dyn Query>)
+                .map_err(|e| QueryError::RegexCompile(e.to_string()));
+        }
+        // A non-fast, non-text (numeric/date) field: no fixture exercises
+        // this combination — `ExistsQuery` at least gives a clear (if
+        // unfortunate) runtime error rather than a silently wrong answer.
         Ok(Box::new(ExistsQuery::new(field_name.to_string(), false)))
     }
 
@@ -824,14 +950,17 @@ impl CoreIndex {
     /// no analysis at all, over the *indexed* (post-analysis, e.g. stemmed)
     /// terms; constant-score. A pattern that fails automaton compilation
     /// (e.g. an unbalanced character class) is finding 45's one 500, not a
-    /// 400 — this is the only place that error can come from, since
-    /// `query::detect` already turned an unclosed `/regex` into
-    /// `Atomic::RegexUnclosed` (a 400) before this is ever reached.
+    /// 400 — this is the only place that error can come from, since a
+    /// `/pattern` with no closing `/` never reaches this: the grammar's own
+    /// `regex()` combinator only ever produces `UserInputLeaf::Regex` for a
+    /// *closed* delimiter pair; an unclosed one is a `Literal` instead,
+    /// caught by `query::classify_literal`'s `RegexUnclosed` (a 400) before
+    /// `build_leaf` gets here.
     fn build_regex(&self, field_name: &str, pattern: &str) -> Result<Box<dyn Query>, QueryError> {
         let field = self.field_or_err(field_name)?;
         RegexQuery::from_pattern(pattern, field)
             .map(|q| Box::new(q) as Box<dyn Query>)
-            .map_err(|e| QueryError::Internal(e.to_string()))
+            .map_err(|e| QueryError::RegexCompile(e.to_string()))
     }
 
     /// Every distinct term in `field`'s term dictionary (across every

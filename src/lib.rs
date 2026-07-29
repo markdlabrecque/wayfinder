@@ -601,18 +601,23 @@ async fn update(
 
 /// Maps a `CoreIndex::parse_query` failure to the right `WfError` shape:
 /// finding 45's one 500 (a regex that parses as a query but fails automaton
-/// compilation — `query::QueryError::Internal`, carried through
+/// compilation — `query::QueryError::RegexCompile`, carried through
 /// `parse_query`'s `anyhow::Error` via `From`) gets the trace-carrying,
-/// no-`metadata` envelope `err_regex_bad_class.json` pins; every other
-/// failure (unknown field, bad syntax, an unclosed regex, a prefix query on
-/// a numeric field) is an ordinary 400 `wayfinder::SyntaxError`, as before
-/// this issue.
+/// no-`metadata` envelope `err_regex_bad_class.json` pins; any other
+/// unexpected failure (`QueryError::Internal` — e.g. a term-dictionary I/O
+/// error) is a plain 500 with the ordinary `metadata` shape, not dressed up
+/// in the regex one; every other failure (unknown field, bad syntax, an
+/// unclosed regex, a prefix query on a numeric field) is an ordinary 400
+/// `wayfinder::SyntaxError`, as before this issue.
 fn query_parse_error(e: anyhow::Error, params: &Params) -> WfError {
     match e.downcast_ref::<query::QueryError>() {
-        Some(query::QueryError::Internal(_)) => {
+        Some(query::QueryError::RegexCompile(_)) => {
             WfError::internal("wayfinder::RegexCompileError", e.to_string())
                 .with_trace(e.to_string())
                 .with_params(params)
+        }
+        Some(query::QueryError::Internal(_)) => {
+            WfError::internal("wayfinder::QueryError", e.to_string()).with_params(params)
         }
         _ => WfError::bad_request("wayfinder::SyntaxError", e.to_string()).with_params(params),
     }
