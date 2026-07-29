@@ -60,7 +60,7 @@ still giving a way to discover gaps during the Search API phase.
 
 ## Not yet captured
 
-Highlighting, stats, MLT, edismax, `/update` responses, `commitWithin`/`softCommit` behaviour.
+Stats, MLT, edismax, `/update` responses, `commitWithin`/`softCommit` behaviour.
 Range facets were captured by issue #3 (findings 16-18) — what is still missing there is
 `facet.range.other` / `.include` / `.hardend`, month/year date-math gaps, `facet.prefix`,
 `facet.method`, `facet.pivot`, interval and heatmap faceting, `f.<field>.facet.*` per-field
@@ -918,3 +918,8 @@ Not yet captured for highlighting: `hl.maxAnalyzedChars`, `hl.requireFieldMatch`
 `hl.highlightMultiTerm`, per-field `f.<field>.hl.*` overrides, and any field type other than
 `text_en` (a highlighted `string`/numeric/date field was not exercised — `category` above is
 requested but never actually matched, so its shape when it *does* highlight remains unseen).
+Also not captured: an `hl.fl` naming an undefined or non-text field. Wayfinder renders that as a
+400 with the base query's `response` block attached (`WfError::with_response`), by inference from
+`facet.field`'s own unknown-field precedent (`facet_unknown_field.json`, issue #35) rather than
+from a captured `hl_*` fixture — flag for correction if a real capture ever shows a different
+shape.

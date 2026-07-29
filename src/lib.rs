@@ -816,7 +816,23 @@ async fn select(
             None => Ok(Value::Object(Map::new())),
         }
         .map_err(|e| {
-            WfError::internal("wayfinder::HighlightError", e.to_string()).with_params(&params)
+            // An undefined/non-text `hl.fl` field is a request-input
+            // problem (`highlight::InvalidHlField`), rendered as Solr's own
+            // 400 -- mirroring `facet.field`'s own unknown-field handling
+            // just above, including carrying the base query's already-built
+            // `response` block alongside `error` (issue #35's precedent;
+            // unfixtured for `hl.fl` specifically, since no captured
+            // `hl_*` fixture exercises an invalid field, but the shape
+            // should be consistent with `facet_unknown_field.json`'s). A
+            // failure that isn't request-input (a genuine Tantivy/searcher
+            // error) stays a 500.
+            if e.downcast_ref::<highlight::InvalidHlField>().is_some() {
+                WfError::bad_request("wayfinder::HighlightError", e.to_string())
+                    .with_params(&params)
+                    .with_response(Value::Object(response.clone()))
+            } else {
+                WfError::internal("wayfinder::HighlightError", e.to_string()).with_params(&params)
+            }
         })?;
         Some(result)
     } else {

@@ -31,13 +31,34 @@
 //!   judgment call standing in for a real `hl.method=unified`
 //!   implementation, which the issue explicitly puts out of scope.
 
-use anyhow::{Result, anyhow};
+use std::fmt;
+
+use anyhow::{Result, anyhow, bail};
 use serde_json::{Map, Value};
 use tantivy::query::Query;
 use tantivy::{DocAddress, Score};
 
 use crate::core_index::CoreIndex;
 use crate::params::Params;
+use crate::schema::{ValueKind, WayfinderSchema};
+
+/// Marks a `highlighting` error as a request-input problem -- an undefined or
+/// non-text `hl.fl` field -- rather than a genuine internal failure, so
+/// `select` in `src/lib.rs` can render it as Solr's own 400 via
+/// `downcast_ref`, matching `check_sort`'s undefined-field error and
+/// `facet::check_facetable`'s undefined/unfacetable field, instead of
+/// treating it as a 500. Wraps the original error rather than replacing it --
+/// `Display` forwards to it verbatim.
+#[derive(Debug)]
+pub struct InvalidHlField(anyhow::Error);
+
+impl fmt::Display for InvalidHlField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for InvalidHlField {}
 
 /// Solr's `hl.snippets` default.
 const DEFAULT_SNIPPETS: usize = 1;
@@ -76,8 +97,14 @@ pub fn highlighting(
         .filter(|&n: &usize| n > 0)
         .unwrap_or(DEFAULT_SNIPPETS);
 
-    // finding 54: only apply `hl.fragsize` truncation under the explicit
-    // `hl.method=original` opt-in -- see module docs.
+    // ponytail: only the `hl.method=original` vs. everything-else split
+    // (finding 54) -- not a real `hl.method=unified` fragmenter. The ceiling
+    // is exactly the module docs' finding-54 paragraph: `hl.fragsize` is
+    // applied verbatim under `hl.method=original`, and ignored entirely
+    // (falling back to Tantivy's own 150-char default) for every other
+    // `hl.method` value, including the unset default. A real `unified`
+    // implementation would need its own fragmenter, which the issue puts out
+    // of scope.
     let max_chars = if params.get("hl.method") == Some("original") {
         params
             .get("hl.fragsize")
@@ -90,6 +117,15 @@ pub fn highlighting(
 
     let pre = params.get("hl.simple.pre").unwrap_or(DEFAULT_PRE);
     let post = params.get("hl.simple.post").unwrap_or(DEFAULT_POST);
+
+    // Validated once per request, before touching Tantivy at all: an
+    // undefined or non-text `hl.fl` field is a request-input problem (Solr's
+    // own `check_sort` / `facet::check_facetable` precedent), not the kind of
+    // internal failure a genuine `SnippetGenerator`/searcher error would be.
+    for field_name in &fields {
+        check_highlightable(&index.wf_schema, field_name)
+            .map_err(|e| anyhow::Error::new(InvalidHlField(e)))?;
+    }
 
     let mut out = Map::new();
     for &(_, addr) in page {
@@ -113,6 +149,24 @@ pub fn highlighting(
         out.insert(key, Value::Object(per_field));
     }
     Ok(Value::Object(out))
+}
+
+/// Refuses an `hl.fl` field Tantivy cannot highlight, rather than surfacing
+/// whatever internal error `SnippetGenerator::create`/`tokenizer_for_field`
+/// would raise for it (an undefined field would panic-free but wrongly
+/// resolve to "no term overlap"; a Points-based field -- int/long/float/
+/// double/date -- has no tokenizer at all and `tokenizer_for_field` errors).
+/// Both are request-input problems, not internal ones -- mirrors
+/// `facet::check_facetable`'s precedent for the same distinction on
+/// `facet.field`.
+fn check_highlightable(schema: &WayfinderSchema, field_name: &str) -> Result<()> {
+    match schema.field_config(field_name) {
+        None => bail!("can not highlight undefined field: {field_name}"),
+        Some(_) => match schema.value_kind(field_name) {
+            Some(ValueKind::Text) => Ok(()),
+            _ => bail!("can not highlight a non-text field: {field_name}"),
+        },
+    }
 }
 
 /// The unique key's stored value for `addr`, rendered the same way
