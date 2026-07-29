@@ -41,6 +41,7 @@
 //! schema had been polluted by `capture.sh`'s own schemaless probe, which
 //! auto-created `nosuchfield` — see issue #26.
 
+use std::fmt;
 use std::ops::Bound;
 
 use anyhow::{Result, anyhow, bail};
@@ -54,6 +55,26 @@ use crate::config::ServerConfig;
 use crate::core_index::CoreIndex;
 use crate::params::Params;
 use crate::schema::{ValueKind, WayfinderSchema};
+
+/// Marks a `facet_counts` error as coming from `facet.range` specifically
+/// (issue #35): Solr detects a broken `facet.range` *before* running the base
+/// query, so its own fixtures for that case (`facet_err_range_single.json`
+/// and friends) carry no `response` block, while a `facet.query`/
+/// `facet.field` error is detected *after* the base query has already run and
+/// does carry one. This wraps the original error rather than replacing it —
+/// `Display` forwards to it verbatim — so `select` in `src/lib.rs` can tell
+/// the two apart via `downcast_ref` without changing the message any
+/// existing test or fixture comparison sees.
+#[derive(Debug)]
+pub struct PreQueryFacetError(anyhow::Error);
+
+impl fmt::Display for PreQueryFacetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for PreQueryFacetError {}
 
 /// Solr's `facet.limit` default.
 const DEFAULT_FACET_LIMIT: i64 = 100;
@@ -114,7 +135,8 @@ pub fn facet_counts(
     // separate, order-sensitive contract (`tests/json_key_order.rs`) — so the
     // results are hoisted into bindings here, evaluated range-first, and only
     // placed into the `json!` object in the unchanged key order.
-    let facet_ranges = facet_ranges(index, params, base, nl)?;
+    let facet_ranges = facet_ranges(index, params, base, nl)
+        .map_err(|e| anyhow::Error::new(PreQueryFacetError(e)))?;
     let facet_queries = facet_queries(index, params, default_field, base)?;
     let (facet_fields, warnings) = facet_fields(index, config, params, base, nl)?;
     Ok((

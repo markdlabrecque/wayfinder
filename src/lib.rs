@@ -629,63 +629,15 @@ async fn select(
         );
     }
 
-    // `facet=true` gates the whole block; `facet.field` alone does not turn
-    // faceting on and the key stays absent (findings fact 4). Computed *before*
-    // `responseHeader` is built, not after: Solr's own `responseHeader` key
-    // order is `warnings, status, QTime, params` — `warnings` leads, it does
-    // not trail (finding 29 / issue #24) — and `serde_json`'s `preserve_order`
-    // feature (issue #25) means the order keys are inserted in is now the order
-    // they are emitted in, so `warnings` has to be known before the object
-    // literal is written.
-    let facet_result = if params.get("facet") == Some("true") {
-        // Facet counts are aggregated over a *real* query (`q` AND every `fq`),
-        // not over `hits`: Solr enumerates the field's whole term dictionary,
-        // which the hit list cannot see. `search` filters post-hoc with
-        // `retain`, so the Boolean query is rebuilt here rather than reused.
-        let base: facet::BaseClauses = match &parsed {
-            // No `q` matches nothing, so neither does any facet — but the term
-            // dictionary is still enumerated, at 0, exactly as `facet_zero`
-            // shows for a `q` that matches nothing.
-            None => vec![(Occur::Must, Box::new(EmptyQuery) as Box<dyn Query>)],
-            Some((query, filter_queries)) => std::iter::once((Occur::Must, query.box_clone()))
-                .chain(
-                    filter_queries
-                        .iter()
-                        .map(|fq| (Occur::Must, fq.box_clone())),
-                )
-                .collect(),
-        };
-        Some(
-            facet::facet_counts(&state.index, &state.config, &params, &default_field, &base)
-                .map_err(|e| {
-                    WfError::bad_request("wayfinder::FacetError", e.to_string())
-                        .with_params(&params)
-                })?,
-        )
-    } else {
-        None
-    };
-    let warnings = facet_result
-        .as_ref()
-        .map(|(_, warnings)| warnings.as_slice())
-        .unwrap_or_default();
-
-    // `responseHeader.warnings` is absent unless there is something to warn
-    // about (every fixture that isn't a Points-based `facet.field` at
-    // mincount 0 lacks the key) — never an empty array — and, when present,
-    // leads the object rather than trailing it.
-    let mut response_header = Map::new();
-    if !warnings.is_empty() {
-        response_header.insert("warnings".to_string(), json!(warnings));
-    }
-    response_header.insert("status".to_string(), json!(0));
-    response_header.insert("QTime".to_string(), json!(0));
-    response_header.insert("params".to_string(), json!(params.echo()));
-
     // Key order in the fixtures is `numFound, start, maxScore, numFoundExact,
     // docs` — `maxScore` sits between `start` and `numFoundExact`, which a
     // `json!` object literal can't express conditionally, so this is built
-    // the same way `response_header` is above.
+    // the same way `response_header` is below. Built *before* `facet_result`
+    // (issue #35): a `facet.query`/`facet.field` error is detected only after
+    // the base query has already run, so Solr's own fixtures for those errors
+    // (`facet_unknown_field.json`, `facet_err_query_single.json`) still carry
+    // this `response` block alongside `error` — it has to exist already so it
+    // can be attached to that error below.
     let mut response = Map::new();
     response.insert("numFound".to_string(), json!(num_found));
     response.insert("start".to_string(), json!(start));
@@ -715,6 +667,72 @@ async fn select(
     }
     response.insert("numFoundExact".to_string(), json!(true));
     response.insert("docs".to_string(), json!(docs));
+
+    // `facet=true` gates the whole block; `facet.field` alone does not turn
+    // faceting on and the key stays absent (findings fact 4). Computed *before*
+    // `responseHeader` is built, not after: Solr's own `responseHeader` key
+    // order is `warnings, status, QTime, params` — `warnings` leads, it does
+    // not trail (finding 29 / issue #24) — and `serde_json`'s `preserve_order`
+    // feature (issue #25) means the order keys are inserted in is now the order
+    // they are emitted in, so `warnings` has to be known before the object
+    // literal is written.
+    let facet_result = if params.get("facet") == Some("true") {
+        // Facet counts are aggregated over a *real* query (`q` AND every `fq`),
+        // not over `hits`: Solr enumerates the field's whole term dictionary,
+        // which the hit list cannot see. `search` filters post-hoc with
+        // `retain`, so the Boolean query is rebuilt here rather than reused.
+        let base: facet::BaseClauses = match &parsed {
+            // No `q` matches nothing, so neither does any facet — but the term
+            // dictionary is still enumerated, at 0, exactly as `facet_zero`
+            // shows for a `q` that matches nothing.
+            None => vec![(Occur::Must, Box::new(EmptyQuery) as Box<dyn Query>)],
+            Some((query, filter_queries)) => std::iter::once((Occur::Must, query.box_clone()))
+                .chain(
+                    filter_queries
+                        .iter()
+                        .map(|fq| (Occur::Must, fq.box_clone())),
+                )
+                .collect(),
+        };
+        Some(
+            facet::facet_counts(&state.index, &state.config, &params, &default_field, &base)
+                .map_err(|e| {
+                    // Issue #35: `facet.range` is detected before the base
+                    // query ever runs (Solr's own `facet_err_range_single.json`
+                    // has no `response` block), while `facet.query`/
+                    // `facet.field` errors are detected after it (Solr's
+                    // `facet_unknown_field.json` / `facet_err_query_single.json`
+                    // do). `facet::facet_counts` marks the former with
+                    // `PreQueryFacetError` so only the latter gets `response`
+                    // attached here.
+                    let err = WfError::bad_request("wayfinder::FacetError", e.to_string())
+                        .with_params(&params);
+                    if e.downcast_ref::<facet::PreQueryFacetError>().is_some() {
+                        err
+                    } else {
+                        err.with_response(Value::Object(response.clone()))
+                    }
+                })?,
+        )
+    } else {
+        None
+    };
+    let warnings = facet_result
+        .as_ref()
+        .map(|(_, warnings)| warnings.as_slice())
+        .unwrap_or_default();
+
+    // `responseHeader.warnings` is absent unless there is something to warn
+    // about (every fixture that isn't a Points-based `facet.field` at
+    // mincount 0 lacks the key) — never an empty array — and, when present,
+    // leads the object rather than trailing it.
+    let mut response_header = Map::new();
+    if !warnings.is_empty() {
+        response_header.insert("warnings".to_string(), json!(warnings));
+    }
+    response_header.insert("status".to_string(), json!(0));
+    response_header.insert("QTime".to_string(), json!(0));
+    response_header.insert("params".to_string(), json!(params.echo()));
 
     let mut body = json!({
         "responseHeader": response_header,

@@ -227,11 +227,13 @@ Two distinct lists, both self-documenting, printed during their runs, never sile
   as-yet-unfixed bug, not a harness bug and not ratified. Every entry's diff is still computed;
   the moment it comes back empty the suite goes red, naming the entry to delete. See "Expected-
   divergence list" below for the `manifest.tsv` history; `EXPECTED_DIVERGENCES_MANIFEST_ERRORS`
-  currently carries one entry, `facet_unknown_field` (issue #35: Wayfinder's facet-field error
-  omits the `response` block Solr's fixture carries alongside `error` — a real gap in
-  `src/lib.rs::select`'s error path found by running this wiring for the first time, confirmed
-  against the live canonical container, not a listed accepted divergence since nothing ratifies
-  it as intended).
+  is now **empty** — issue #35 closed the gap it tracked (`facet_unknown_field` and four more
+  rows surfaced by issue #33: Wayfinder's facet-field/facet-query errors omitted the `response`
+  block Solr's fixture carries alongside `error`). The fix builds `response` before
+  `facet::facet_counts` runs and attaches it to a `facet.query`/`facet.field` error, while a
+  `facet.range` error — detected before the base query ever runs — is marked with
+  `facet::PreQueryFacetError` so it is deliberately excluded and still renders with no
+  `response` key, matching `facet_err_range_single.json` and friends (see finding 43).
 
 ### Running the live error mode
 
@@ -699,7 +701,6 @@ relevance queries) and `select_fl_reversed` (`fl=body,id`, see finding 24's upda
     (rather than a `json!` object literal, which can't express a conditional key mid-object) to
     match this exactly (`src/lib.rs`, around the `response.insert("maxScore", ...)` call).
 
-
 ---
 
 ## Findings from the issue #9 update-pipeline capture
@@ -792,3 +793,28 @@ identical statuses.
     Jetty-level **405 with an empty body** (`ping_unknown_core_delete.json`), not the 404 page;
     Wayfinder stays method-agnostic and serves its JSON 404 there too — same divergence family,
     noted rather than matched.
+
+## Findings from the issue #35 facet-error-response fix
+
+Claiming finding 50 (46-49 are issue #9's, landed first).
+
+50. **A `facet.query`/`facet.field` error carries the base query's `response` block; a
+    `facet.range` error does not — Solr detects the two at different points in request
+    processing.** `facet_unknown_field.json` (an undefined `facet.field`) and
+    `facet_err_query_single.json` (an unparseable `facet.query`) both 400, and both still carry
+    a real `response` block alongside `error` — `numFound`/`start`/`numFoundExact`/`docs` for
+    the base `q`/`fq`, computed before the facet param is ever validated. `facet_err_range_single.json`
+    (a `facet.range` on an unfacetable field) 400s the same way but has **no** `response` key at
+    all: Solr validates `facet.range` before running the base query, so there is no query result
+    yet to attach. This is the same precedence order finding 38 pins (`facet.range` >
+    `facet.query` > `facet.field`) surfacing a second, independent fact — not just which error
+    wins when several are broken, but that the range check runs at a genuinely earlier point in
+    the pipeline than the query/field checks, before vs. after the base query. Wayfinder's
+    `src/lib.rs::select` now builds `response` before calling `facet::facet_counts`, and
+    `facet::facet_counts` marks a `facet_ranges` failure with the `facet::PreQueryFacetError`
+    wrapper (`Display` forwards to the original error so no message changes) so `select` can
+    tell the two cases apart via `downcast_ref` and only attach `response` to the
+    query/field case, matching both fixtures exactly. Fixed under issue #35; closes the
+    `EXPECTED_DIVERGENCES_MANIFEST_ERRORS` entries it tracked (`facet_unknown_field`,
+    `facet_err_query_single`, `facet_err_field_single`, `facet_err_query_field`,
+    `facet_err_query_vs_unfacetable`).

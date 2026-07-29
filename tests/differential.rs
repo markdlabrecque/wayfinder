@@ -561,60 +561,21 @@ fn ranked_score_value_ratified_reason(name: &str) -> Option<&'static str> {
 /// `manifest-errors.tsv`'s own self-expiring to-do list — the counterpart of
 /// `EXPECTED_DIVERGENCES` below for `manifest.tsv`, but scoped to this file's
 /// runner since the two loops have different app-selection and check logic.
-/// Found while wiring the manifest-errors runner into the real differ for the
-/// first time (issue #31): `facet_unknown_field` is a 400 on both sides (same
-/// `error.code`, same class) but Wayfinder's actual response has no
-/// `response` key at all, while Solr's fixture carries both `response` (the
-/// base query, computed before the facet field is parsed) and `error` — a
-/// genuine gap in `src/lib.rs::select`'s error path (it `?`-propagates the
-/// facet error before the `response` json! literal is built), confirmed
-/// against the live canonical container, not a harness bug and not a ratified
-/// permanent divergence like `ACCEPTED_DIVERGENCES` above. Filed as issue #35;
-/// this entry expires (and the guard below fails, naming it for deletion) the
-/// moment that lands.
 ///
-/// Issue #33's post-rebase `facets33` rows surfaced four more instances of
-/// the exact same root cause, not new bugs: `facet_counts` returns one
-/// `Result` regardless of which sub-check (query/field/range) fails, so
-/// Wayfinder omits `response` on *every* facet error identically. Solr does
-/// not: a `facet.range` error is detected before the base query ever runs
-/// (its own fixtures, `facet_err_range_single`/`_query_range`/`_field_range`/
-/// `_all_three`, genuinely lack `response` too — confirmed by inspecting the
-/// committed fixtures, `grep -L '"response"' solr-ref/responses/facet_err_*.json`),
-/// but a `facet.query`/`facet.field` error is detected only after it, so
-/// Solr's fixture *does* carry `response` there. `facet_err_query_single`,
-/// `facet_err_field_single`, `facet_err_query_field`, and
-/// `facet_err_query_vs_unfacetable` are exactly the query/field-triggered
-/// cases, so they diverge the same way `facet_unknown_field` does, and
-/// expire together with it under issue #35.
-const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[
-    (
-        "facet_unknown_field",
-        "Wayfinder's facet-field error propagates before the response block is built, so the \
-         `response` key Solr's fixture carries alongside `error` is absent here — see issue #35",
-    ),
-    (
-        "facet_err_query_single",
-        "Same root cause as facet_unknown_field (issue #35): a facet.query-triggered error omits \
-         `response`, which Solr's fixture carries since it detects this error post-query",
-    ),
-    (
-        "facet_err_field_single",
-        "Same root cause as facet_unknown_field (issue #35): a facet.field-triggered error omits \
-         `response`, which Solr's fixture carries since it detects this error post-query",
-    ),
-    (
-        "facet_err_query_field",
-        "Same root cause as facet_unknown_field (issue #35): the query error wins precedence \
-         (finding 38) but still omits `response`, which Solr's fixture carries",
-    ),
-    (
-        "facet_err_query_vs_unfacetable",
-        "Same root cause as facet_unknown_field (issue #35): the query error wins over the \
-         unfacetable-field non-error (finding 38) but still omits `response`, which Solr's \
-         fixture carries",
-    ),
-];
+/// Issue #35 (the `facet_unknown_field` / `facet_err_query_single` /
+/// `facet_err_field_single` / `facet_err_query_field` /
+/// `facet_err_query_vs_unfacetable` divergences found in issues #31 and #33)
+/// is fixed: `src/lib.rs::select` now builds the `response` block before
+/// computing `facet_counts`, and attaches it to a `facet.query`/`facet.field`
+/// error the same way Solr's own fixtures for those cases do. A
+/// `facet.range` error still carries no `response` (Solr detects it before
+/// the base query ever runs — `facet_err_range_single`/`_query_range`/
+/// `_field_range`/`_all_three` are unaffected and were never listed here),
+/// which is why the fix distinguishes the two in `src/facet.rs`'s
+/// `PreQueryFacetError` marker rather than attaching `response` to every
+/// facet error uniformly. This list is empty; a future divergence gets a new
+/// entry with its own reason.
+const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[];
 
 fn expected_divergence_manifest_errors_reason(name: &str) -> Option<&'static str> {
     EXPECTED_DIVERGENCES_MANIFEST_ERRORS

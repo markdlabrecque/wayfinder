@@ -2064,3 +2064,80 @@ async fn facet_range_on_a_fast_text_field_is_a_400_with_wayfinders_own_message()
     .await;
     assert_facet_400(status, &body, "tag", Refusal::TextRange);
 }
+
+// --- 23. facet.query/facet.field errors carry the base query's `response`
+//     block (issue #35) ------------------------------------------------------
+//
+// Solr detects a `facet.range` error before running the base query at all, so
+// its error response has no `response` key (`facet_err_range_single.json`,
+// covered by section 18/22 above — unaffected by this issue). A
+// `facet.query`/`facet.field` error is detected *after* the base query has
+// already run, so Solr's fixture carries the base query's real `response`
+// block (`numFound`/`start`/`numFoundExact`/`docs`) alongside `error`
+// (`facet_unknown_field.json`, `facet_err_query_single.json`,
+// `facet_err_field_single.json`). Wayfinder's `select` handler currently
+// `?`-propagates the facet error before the `response` block is ever built,
+// so it is missing entirely — these are red until issue #35 lands.
+
+/// Asserts the base query's real `response` block is present alongside
+/// `error`, matching `expect_num_found` (never zeroed out just because the
+/// request errored) — the exact shape Solr's fixtures for a post-query facet
+/// failure carry.
+fn assert_response_block_alongside_error(body: &Value, expect_num_found: i64) {
+    assert_eq!(
+        body.pointer("/response/numFound").and_then(Value::as_i64),
+        Some(expect_num_found),
+        "response.numFound must be the base query's real count, not zeroed out \
+         because faceting failed; got {body}"
+    );
+    assert_eq!(
+        body.pointer("/response/start").and_then(Value::as_i64),
+        Some(0),
+        "response.start must be present, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/response/numFoundExact")
+            .and_then(Value::as_bool),
+        Some(true),
+        "response.numFoundExact must be present, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/response/docs")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(0),
+        "response.docs must be an empty array (rows=0), got {body}"
+    );
+    assert!(
+        body.get("error").is_some(),
+        "the error block must still be present alongside response, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn facet_field_error_still_carries_the_base_querys_response_block() {
+    // Mirrors `facet_unknown_field.json`'s exact request against the same
+    // 5-doc corpus the fixture was captured against.
+    let (app, _dir) = indexed_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=nosuchfield&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_response_block_alongside_error(&body, 5);
+}
+
+#[tokio::test]
+async fn facet_query_error_still_carries_the_base_querys_response_block() {
+    // Mirrors `facet_err_query_single.json`'s exact request against
+    // `debt_app()`'s 5-doc corpus, which the fixture was captured against.
+    let (app, _dir) = debt_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.query=views:[bad&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_response_block_alongside_error(&body, 5);
+}
