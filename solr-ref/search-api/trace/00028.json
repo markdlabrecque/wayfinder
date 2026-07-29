@@ -1,0 +1,26 @@
+{
+  "request": {
+    "body": "",
+    "headers": {
+      "Accept": "*/*",
+      "Host": "solr:8983"
+    },
+    "method": "GET",
+    "path": "/solr/search_api_capture/terms?omitHeader=true&wt=json&json.nl=flat&terms=true&terms.fl=tm_X3b_en_title"
+  },
+  "response": {
+    "body": "{\n  \"terms\":{\n    \"tm_X3b_en_title\":[\n      \"dog\",2,\n      \"lazi\",2,\n      \"quick\",2,\n      \"about\",1,\n      \"afternoon\",1,\n      \"archiv\",1,\n      \"brown\",1,\n      \"cat\",1,\n      \"day\",1,\n      \"document\",1]}}\n",
+    "headers": {
+      "Content-Length": "211",
+      "Content-Security-Policy": "default-src 'none'; base-uri 'none'; connect-src 'self'; form-action 'self'; font-src 'self'; frame-ancestors 'none'; img-src 'self' data:; media-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self';",
+      "Content-Type": "application/json;charset=utf-8",
+      "Vary": "Accept-Encoding",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "SAMEORIGIN",
+      "X-XSS-Protection": "1; mode=block"
+    },
+    "status_code": 200
+  },
+  "seq": 28,
+  "timestamp": 1785366500.7518408
+}

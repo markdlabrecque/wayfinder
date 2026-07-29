@@ -1,0 +1,26 @@
+{
+  "request": {
+    "body": "",
+    "headers": {
+      "Accept": "*/*",
+      "Host": "solr:8983"
+    },
+    "method": "GET",
+    "path": "/solr/search_api_capture/mlt?omitHeader=true&TZ=UTC&wt=json&json.nl=flat&q=id%3A%224m8z66-capture_index-4m8z66-capture_index-entity%3Anode%2F1%3Aen%22&start=0&rows=10&fl=%2A%2Cscore&fq=%2Bindex_id%3Acapture_index+%2Bhash%3A4m8z66&fq=ss_search_api_language%3A%28%22en%22+%22und%22%29&mlt.fl=tm_X3b_en_body%2Ctm_X3b_und_body&mlt.mintf=1&mlt.mindf=1&mlt.maxqt=100&mlt.maxntp=2000&mlt.boost=false&mlt.match.include=false&mlt.match.offset=0&mlt.interestingTerms=none"
+  },
+  "response": {
+    "body": "{\n  \"response\":null}\n",
+    "headers": {
+      "Content-Length": "21",
+      "Content-Security-Policy": "default-src 'none'; base-uri 'none'; connect-src 'self'; form-action 'self'; font-src 'self'; frame-ancestors 'none'; img-src 'self' data:; media-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self';",
+      "Content-Type": "application/json;charset=utf-8",
+      "Vary": "Accept-Encoding",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "SAMEORIGIN",
+      "X-XSS-Protection": "1; mode=block"
+    },
+    "status_code": 200
+  },
+  "seq": 22,
+  "timestamp": 1785366343.6474986
+}

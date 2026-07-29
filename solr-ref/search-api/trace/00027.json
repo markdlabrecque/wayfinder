@@ -1,0 +1,31 @@
+{
+  "request": {
+    "body": "",
+    "headers": {
+      "Accept": "*/*",
+      "Host": "solr:8983"
+    },
+    "method": "GET",
+    "path": "/solr/search_api_capture/admin/system?wt=json&json.nl=flat"
+  },
+  "response": {
+    "body": "{\n  \"responseHeader\":{\n    \"status\":0,\n    \"QTime\":4},\n  \"core\":{\n    \"schema\":\"drupal-4.4.0-solr-9.x-0\",\n    \"host\":\"29826ed7f4fd\",\n    \"now\":\"2026-07-29T23:08:12.322Z\",\n    \"start\":\"2026-07-29T23:03:37.507Z\",\n    \"directory\":{\n      \"cwd\":\"/opt/solr-9.10.1/server\",\n      \"instance\":\"/var/solr/data/search_api_capture\",\n      \"data\":\"/var/solr/data/search_api_capture/data\",\n      \"dirimpl\":\"org.apache.solr.core.NRTCachingDirectoryFactory\",\n      \"index\":\"/var/solr/data/search_api_capture/data/index\"}},\n  \"mode\":\"std\",\n  \"lucene\":{\n    \"solr-spec-version\":\"9.10.1\",\n    \"solr-impl-version\":\"9.10.1 c135e6335c7158fa26e96b0dc386f825255b47c0 - gerlowskija - 2026-01-15 09:36:55\",\n    \"lucene-spec-version\":\"9.12.3\",\n    \"lucene-impl-version\":\"9.12.3 f965e930673c1f5cb478dc6a8907f5fc4ef7b539 - 2025-09-24 07:44:31\"},\n  \"jvm\":{\n    \"version\":\"17.0.19 17.0.19+10\",\n    \"name\":\"Eclipse Adoptium OpenJDK 64-Bit Server VM\",\n    \"spec\":{\n      \"vendor\":\"Oracle Corporation\",\n      \"name\":\"Java Platform API Specification\",\n      \"version\":\"17\"},\n    \"jre\":{\n      \"vendor\":\"Eclipse Adoptium\",\n      \"version\":\"17.0.19\"},\n    \"vm\":{\n      \"vendor\":\"Eclipse Adoptium\",\n      \"name\":\"OpenJDK 64-Bit Server VM\",\n      \"version\":\"17.0.19+10\"},\n    \"processors\":5,\n    \"memory\":{\n      \"free\":\"355.3 MB\",\n      \"total\":\"512 MB\",\n      \"max\":\"512 MB\",\n      \"used\":\"156.7 MB (%30.6)\",\n      \"raw\":{\n        \"free\":372571784,\n        \"total\":536870912,\n        \"max\":536870912,\n        \"used\":164299128,\n        \"used%\":30.60309737920761}},\n    \"jmx\":{\n      \"classpath\":\"start.jar\",\n      \"commandLineArgs\":[\"-Xms512m\",\n        \"-Xmx512m\",\n        \"-XX:+UseG1GC\",\n        \"-XX:+PerfDisableSharedMem\",\n        \"-XX:+ParallelRefProcEnabled\",\n        \"-XX:MaxGCPauseMillis=250\",\n        \"-XX:+UseLargePages\",\n        \"-XX:+AlwaysPreTouch\",\n        \"-XX:+ExplicitGCInvokesConcurrent\",\n        \"-Xlog:gc*:file=/var/solr/logs/solr_gc.log:time,uptime:filecount=9,filesize=20M\",\n        \"-Dsolr.jetty.inetaccess.includes=\",\n        \"-Dsolr.jetty.inetaccess.excludes=\",\n        \"-Dsolr.log.dir=/var/solr/logs\",\n        \"-Djetty.port=8983\",\n        \"-DSTOP.PORT=7983\",\n        \"-DSTOP.KEY=solrrocks\",\n        \"-Djava.io.tmpdir=/tmp\",\n        \"-Duser.timezone=UTC\",\n        \"-XX:-OmitStackTraceInFastThrow\",\n        \"-XX:+CrashOnOutOfMemoryError\",\n        \"-XX:ErrorFile=/var/solr/logs/jvm_crash_%p.log\",\n        \"-Djetty.home=/opt/solr-9.10.1/server\",\n        \"-Dsolr.solr.home=/var/solr/data\",\n        \"-Dsolr.install.dir=/opt/solr-9.10.1\",\n        \"-Dsolr.install.symDir=/opt/solr\",\n        \"-Dsolr.default.confdir=/opt/solr-9.10.1/server/solr/configsets/_default/conf\",\n        \"-Dlog4j.configurationFile=/var/solr/log4j2.xml\",\n        \"-Dsolr.jetty.host=0.0.0.0\",\n        \"-Dsolr.zk.embedded.host=0.0.0.0\",\n        \"-Xss256k\",\n        \"-XX:CompileCommand=exclude,com.github.benmanes.caffeine.cache.BoundedLocalCache::put\",\n        \"-Djava.security.manager\",\n        \"-Djava.security.policy=/opt/solr-9.10.1/server/etc/security.policy\",\n        \"-Djava.security.properties=/opt/solr-9.10.1/server/etc/security.properties\",\n        \"-Dsolr.internal.network.permission=*\",\n        \"-DdisableAdminUI=false\"],\n      \"startTime\":\"2026-07-29T23:03:27.679Z\",\n      \"upTimeMS\":284676}},\n  \"security\":{},\n  \"system\":{\n    \"name\":\"Linux\",\n    \"arch\":\"aarch64\",\n    \"availableProcessors\":5,\n    \"systemLoadAverage\":0.30908203125,\n    \"version\":\"7.0.11-orbstack-00360-gc9bc4d96ac70\",\n    \"committedVirtualMemorySize\":4785774592,\n    \"cpuLoad\":0.0,\n    \"freeMemorySize\":1844457472,\n    \"freePhysicalMemorySize\":1844277248,\n    \"freeSwapSpaceSize\":7141285888,\n    \"processCpuLoad\":0.0,\n    \"processCpuTime\":8670000000,\n    \"systemCpuLoad\":0.0,\n    \"totalMemorySize\":9437208576,\n    \"totalPhysicalMemorySize\":9437208576,\n    \"totalSwapSpaceSize\":10510942208,\n    \"maxFileDescriptorCount\":1048576,\n    \"openFileDescriptorCount\":187}}\n",
+    "headers": {
+      "Cache-Control": "no-cache, no-store",
+      "Content-Length": "3899",
+      "Content-Security-Policy": "default-src 'none'; base-uri 'none'; connect-src 'self'; form-action 'self'; font-src 'self'; frame-ancestors 'none'; img-src 'self' data:; media-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self';",
+      "Content-Type": "application/json;charset=utf-8",
+      "ETag": "\"19fb022b4a7\"",
+      "Expires": "Sat, 01 Jan 2000 01:00:00 GMT",
+      "Last-Modified": "Wed, 29 Jul 2026 23:08:12 GMT",
+      "Pragma": "no-cache",
+      "Vary": "Accept-Encoding",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "SAMEORIGIN",
+      "X-XSS-Protection": "1; mode=block"
+    },
+    "status_code": 200
+  },
+  "seq": 27,
+  "timestamp": 1785366492.3282225
+}

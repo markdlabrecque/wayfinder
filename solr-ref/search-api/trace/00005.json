@@ -1,0 +1,26 @@
+{
+  "request": {
+    "body": "",
+    "headers": {
+      "Accept": "*/*",
+      "Host": "solr:8983"
+    },
+    "method": "GET",
+    "path": "/solr/search_api_capture/select?omitHeader=true&TZ=UTC&wt=json&json.nl=flat&q=%28%7B%21edismax+qf%3D%27tm_X3b_en_title%5E1+tm_X3b_und_title%5E1+tm_X3b_en_body%5E1+tm_X3b_und_body%5E1%27%7D%22quick%22+%22rocket%22%29&start=0&rows=10&fl=%2A%2Cscore&fq=%2Bindex_id%3Acapture_index+%2Bhash%3A4m8z66&fq=ss_search_api_language%3A%28%22en%22+%22und%22%29&hl=true&hl.fl=%2A&hl.requireFieldMatch=false&hl.snippets=3&hl.fragsize=0&hl.mergeContiguous=false&hl.simple.pre=%5BHIGHLIGHT%5D&hl.simple.post=%5B%2FHIGHLIGHT%5D"
+  },
+  "response": {
+    "body": "{\n  \"response\":{\"numFound\":2,\"start\":0,\"maxScore\":0.44401813,\"numFoundExact\":true,\"docs\":[\n      {\n        \"id\":\"4m8z66-capture_index-entity:node/1:en\",\n        \"sm_context_tags\":[\"search_api_X2f_index_X3a_capture_index\",\n          \"search_api_solr_X2f_site_hash_X3a_4m8z66\",\n          \"drupal_X2f_langcode_X3a_en\"],\n        \"tm_X3b_en_body\":[\"A classic pangram used to test typefaces and search relevance. The fox is quick and clever.\"],\n        \"tm_X3b_en_title\":[\"The quick brown fox jumps over the lazy dog\"],\n        \"_root_\":\"4m8z66-capture_index-entity:node/1:en\",\n        \"ss_field_sku\":\"ART-001\",\n        \"ss_type\":\"article\",\n        \"ds_field_event_date\":\"2026-01-15T12:00:00Z\",\n        \"bs_field_featured\":true,\n        \"bs_sticky\":true,\n        \"ss_search_api_id\":\"entity:node/1:en\",\n        \"site\":\"http://default/\",\n        \"its_field_rating\":5,\n        \"its_nid\":1,\n        \"boost_document\":1.0,\n        \"ds_created\":\"2026-07-29T23:03:57Z\",\n        \"_version_\":1872092202365091840,\n        \"ss_search_api_datasource\":\"entity:node\",\n        \"index_id\":\"capture_index\",\n        \"sm_field_keywords\":[\"animals\",\n          \"classic\",\n          \"pangram\"],\n        \"hash\":\"4m8z66\",\n        \"timestamp\":\"2026-07-29T23:04:11Z\",\n        \"ss_search_api_language\":\"en\",\n        \"score\":0.44401813},\n      {\n        \"id\":\"4m8z66-capture_index-entity:node/3:en\",\n        \"sm_context_tags\":[\"search_api_X2f_index_X3a_capture_index\",\n          \"search_api_solr_X2f_site_hash_X3a_4m8z66\",\n          \"drupal_X2f_langcode_X3a_en\"],\n        \"tm_X3b_en_body\":[\"Engineers had to think quickly when the rocket launch sequence hit an anomaly.\"],\n        \"tm_X3b_en_title\":[\"Quick thinking saves the day at the rocket launch\"],\n        \"_root_\":\"4m8z66-capture_index-entity:node/3:en\",\n        \"ss_field_sku\":\"ART-003\",\n        \"ss_type\":\"article\",\n        \"ds_field_event_date\":\"2026-03-05T12:00:00Z\",\n        \"bs_field_featured\":true,\n        \"bs_sticky\":false,\n        \"ss_search_api_id\":\"entity:node/3:en\",\n        \"site\":\"http://default/\",\n        \"its_field_rating\":4,\n        \"its_nid\":3,\n        \"boost_document\":1.0,\n        \"ds_created\":\"2026-07-29T23:03:57Z\",\n        \"_version_\":1872092202369286144,\n        \"ss_search_api_datasource\":\"entity:node\",\n        \"index_id\":\"capture_index\",\n        \"sm_field_keywords\":[\"engineering\",\n          \"mission\",\n          \"rocket\"],\n        \"hash\":\"4m8z66\",\n        \"timestamp\":\"2026-07-29T23:04:11Z\",\n        \"ss_search_api_language\":\"en\",\n        \"score\":0.44401813}]\n  },\n  \"highlighting\":{\n    \"4m8z66-capture_index-entity:node/1:en\":{\n      \"tm_X3b_en_body\":[\"A classic pangram used to test typefaces and search relevance. The fox is [HIGHLIGHT]quick[/HIGHLIGHT] and clever.\"],\n      \"tm_X3b_en_title\":[\"The [HIGHLIGHT]quick[/HIGHLIGHT] brown fox jumps over the lazy dog\"]},\n    \"4m8z66-capture_index-entity:node/3:en\":{\n      \"tm_X3b_en_body\":[\"Engineers had to think [HIGHLIGHT]quickly[/HIGHLIGHT] when the [HIGHLIGHT]rocket[/HIGHLIGHT] launch sequence hit an anomaly.\"],\n      \"tm_X3b_en_title\":[\"[HIGHLIGHT]Quick[/HIGHLIGHT] thinking saves the day at the [HIGHLIGHT]rocket[/HIGHLIGHT] launch\"]}}}\n",
+    "headers": {
+      "Content-Length": "3148",
+      "Content-Security-Policy": "default-src 'none'; base-uri 'none'; connect-src 'self'; form-action 'self'; font-src 'self'; frame-ancestors 'none'; img-src 'self' data:; media-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self';",
+      "Content-Type": "application/json;charset=utf-8",
+      "Vary": "Accept-Encoding",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "SAMEORIGIN",
+      "X-XSS-Protection": "1; mode=block"
+    },
+    "status_code": 200
+  },
+  "seq": 5,
+  "timestamp": 1785366306.3881395
+}
