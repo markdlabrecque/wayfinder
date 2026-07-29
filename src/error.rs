@@ -35,7 +35,20 @@ pub struct WfError {
     class: &'static str,
     msg: String,
     envelope: Envelope,
-    params: Value,
+    /// Boxed alongside `response` below to keep `WfError` — and therefore
+    /// every `Result<_, WfError>` in the crate — small
+    /// (`clippy::result_large_err`); `serde_json::Value` alone is large
+    /// enough to push the unboxed struct past clippy's threshold.
+    params: Box<Value>,
+    /// Issue #35: some errors are detected only after the base query has
+    /// already run, so Solr's own fixture for them carries the base query's
+    /// `response` block alongside `error` (e.g. `facet_unknown_field.json`).
+    /// `None` when never set, which must render with no `response` key at
+    /// all — not a regression for errors detected before any query runs
+    /// (`facet_err_range_single.json`). Boxed so this rarely-used field does
+    /// not inflate the size of every `Result<_, WfError>` in the crate
+    /// (`clippy::result_large_err`).
+    response: Option<Box<Value>>,
 }
 
 impl WfError {
@@ -45,7 +58,8 @@ impl WfError {
             class,
             msg: msg.into(),
             envelope: Envelope::WithParams,
-            params: Value::Object(serde_json::Map::new()),
+            params: Box::new(Value::Object(serde_json::Map::new())),
+            response: None,
         }
     }
 
@@ -59,12 +73,20 @@ impl WfError {
 
     /// Attaches the request params for the `WithParams` envelope.
     pub fn with_params(mut self, params: &Params) -> Self {
-        self.params = params.echo();
+        self.params = Box::new(params.echo());
         self
     }
 
     pub fn envelope(mut self, envelope: Envelope) -> Self {
         self.envelope = envelope;
+        self
+    }
+
+    /// Attaches a `response` block, rendered between `responseHeader` and
+    /// `error` (`WithParams` envelope only — see the module docs on issue
+    /// #35).
+    pub fn with_response(mut self, response: Value) -> Self {
+        self.response = Some(Box::new(response));
         self
     }
 }
@@ -84,11 +106,106 @@ impl IntoResponse for WfError {
                 "responseHeader": { "status": code, "QTime": 0 },
                 "error": error,
             }),
-            Envelope::WithParams => json!({
-                "responseHeader": { "status": code, "QTime": 0, "params": self.params },
-                "error": error,
-            }),
+            Envelope::WithParams => match self.response.map(|b| *b) {
+                Some(response) => json!({
+                    "responseHeader": { "status": code, "QTime": 0, "params": self.params },
+                    "response": response,
+                    "error": error,
+                }),
+                None => json!({
+                    "responseHeader": { "status": code, "QTime": 0, "params": self.params },
+                    "error": error,
+                }),
+            },
         };
         (self.status, Json(body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    async fn body_of(resp: Response) -> Value {
+        let bytes = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body must be readable");
+        serde_json::from_slice(&bytes).expect("body must be valid JSON")
+    }
+
+    /// Issue #35: a facet.query/facet.field error is detected *after* the base
+    /// query has already run, so Solr's fixture (`facet_unknown_field.json`,
+    /// `facet_err_query_single.json`) carries the base query's real `response`
+    /// block alongside `error` — positioned between `responseHeader` and
+    /// `error`, matching Solr's own key order. `WfError` currently has no way
+    /// to attach one.
+    #[tokio::test]
+    async fn with_response_places_response_between_header_and_error() {
+        let params = Params::parse("q=*:*&facet.field=nosuchfield&rows=0&facet=true&wt=json");
+        let response_block = json!({
+            "numFound": 5,
+            "start": 0,
+            "numFoundExact": true,
+            "docs": []
+        });
+        let err = WfError::bad_request("undefined-field", "undefined field: \"nosuchfield\"")
+            .with_params(&params)
+            .with_response(response_block.clone())
+            .into_response();
+
+        let status = err.status();
+        let body = body_of(err).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.get("response"),
+            Some(&response_block),
+            "with_response must attach the given response block, got {body}"
+        );
+
+        // Key order must be responseHeader, response, error — matching Solr's
+        // fixture, since some client JSON readers are order-sensitive and the
+        // repo's own `tests/json_key_order.rs` treats key order as contract.
+        let keys: Vec<&str> = body
+            .as_object()
+            .expect("body must be a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let header_idx = keys
+            .iter()
+            .position(|&k| k == "responseHeader")
+            .expect("responseHeader must be present");
+        let response_idx = keys
+            .iter()
+            .position(|&k| k == "response")
+            .expect("response must be present");
+        let error_idx = keys
+            .iter()
+            .position(|&k| k == "error")
+            .expect("error must be present");
+        assert!(
+            header_idx < response_idx && response_idx < error_idx,
+            "key order must be responseHeader, response, error; got {keys:?}"
+        );
+    }
+
+    /// Existing errors that never call `with_response` must not regress: no
+    /// `response` key appears at all (e.g. `facet_err_range_single.json`,
+    /// where Solr detects the error before running the base query).
+    #[tokio::test]
+    async fn without_with_response_there_is_no_response_key() {
+        let params = Params::parse("q=*:*&facet.range=tag&wt=json");
+        let err =
+            WfError::bad_request("range-unfacetable", "can not range facet on the text field")
+                .with_params(&params)
+                .into_response();
+
+        let body = body_of(err).await;
+        assert!(
+            body.get("response").is_none(),
+            "an error with no attached response block must not carry `response`, got {body}"
+        );
     }
 }
