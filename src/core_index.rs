@@ -2,8 +2,12 @@
 //! core (PRD open question 1 — single-core-per-process, so there's exactly
 //! one of these per running `app()`).
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Map, Value, json};
@@ -20,6 +24,7 @@ use tantivy::time::OffsetDateTime;
 use tantivy::time::format_description::well_known::Rfc3339;
 use tantivy::{
     DateTime, DocAddress, Index, IndexReader, IndexWriter, ReloadPolicy, Score, TantivyDocument,
+    Term,
 };
 
 use crate::collector::{AllScoredHits, SortClause};
@@ -67,6 +72,42 @@ fn render_double(v: f64) -> String {
         format!("{v:.1}")
     } else {
         v.to_string()
+    }
+}
+
+/// Flattens an incoming JSON field value (scalar, `null`, or array) into a
+/// list of non-null owned values, for `build_document`'s combined
+/// own-value-plus-copy-field single-valued check (finding 48e). `null` (bare
+/// or inside an array) contributes nothing — mirrors the pre-issue-#9
+/// `add_value`'s null handling exactly, just applied before combination
+/// rather than during the write.
+/// The effective string value of `obj`'s `unique_key` field, for the
+/// overwrite-delete step in `add_documents` — a bare string, or a
+/// one-element array of one (mirroring `flatten_values`'/finding 48e's
+/// single-element-array unwrap, since `id: ["u1"]` is exactly as valid a
+/// uniqueKey value as `id: "u1"`). Anything else (no value, a multi-element
+/// array, a non-string scalar) returns `None`: schema load time guarantees
+/// `unique_key` is string-typed (review round 1, five-minute item), so a doc
+/// whose value doesn't resolve to a single string here will fail the same
+/// way in `build_document`'s own single-valued/type checks a few lines
+/// later — skipping the overwrite delete for it is harmless because the add
+/// itself is about to be rejected.
+fn unique_key_value<'a>(obj: &'a Map<String, Value>, unique_key: &str) -> Option<&'a str> {
+    match obj.get(unique_key)? {
+        Value::String(s) => Some(s.as_str()),
+        Value::Array(vs) => match vs.as_slice() {
+            [Value::String(s)] => Some(s.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn flatten_values(value: &Value) -> Vec<Value> {
+    match value {
+        Value::Array(vs) => vs.iter().filter(|v| !v.is_null()).cloned().collect(),
+        Value::Null => Vec::new(),
+        other => vec![other.clone()],
     }
 }
 
@@ -119,11 +160,115 @@ fn coerce_json(field: &str, kind: ValueKind, value: &Value) -> Result<Value> {
     })
 }
 
+/// The writer/reader machinery shared between `CoreIndex` and its background
+/// commit-scheduler thread (issue #9). Holding both behind one `Arc` is what
+/// lets the scheduler fire a commit — through the same writer `Mutex`, then a
+/// reader reload — without `CoreIndex` itself needing a `&mut self` anywhere.
+struct CommitState {
+    writer: Mutex<IndexWriter>,
+    reader: IndexReader,
+    /// Uncommitted docs added since the last commit (of any kind — manual,
+    /// scheduled, or autocommit). Drives `autocommit_max_docs`; deletes are
+    /// not counted, since Solr's own `autoCommit` thresholds are documented
+    /// in terms of added docs, and no fixture pins delete-driven autocommit.
+    pending_docs: AtomicU64,
+    /// The next scheduled commit deadline, if any — set by `commitWithin` and
+    /// `autocommit_max_time`, cleared by any commit (manual or fired). `None`
+    /// means "no pending schedule".
+    deadline: Mutex<Option<Instant>>,
+    condvar: Condvar,
+}
+
+impl CommitState {
+    /// Hard-commits pending writes, reloads the reader, resets the pending-doc
+    /// counter, and absorbs (clears) any pending scheduled deadline — a manual
+    /// commit makes a later scheduled one redundant, per the task spec's
+    /// "a manual commit cancels/absorbs pending schedules".
+    fn commit(&self) -> Result<()> {
+        *self
+            .deadline
+            .lock()
+            .expect("commit deadline mutex poisoned") = None;
+        let mut writer = self.writer.lock().expect("index writer mutex poisoned");
+        writer.commit()?;
+        self.reader.reload()?;
+        self.pending_docs.store(0, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Arms (or tightens) the scheduled-commit deadline. Per the task spec, a
+    /// pending deadline is only ever moved EARLIER — a later request asking
+    /// for a longer `commitWithin` must not push an already-armed sooner
+    /// commit back out.
+    fn schedule(&self, at: Instant) {
+        let mut deadline = self
+            .deadline
+            .lock()
+            .expect("commit deadline mutex poisoned");
+        if deadline.is_none_or(|current| at < current) {
+            *deadline = Some(at);
+            self.condvar.notify_one();
+        }
+    }
+}
+
+/// How long the background scheduler thread sleeps with nothing due, and how
+/// often it re-checks whether `CoreIndex` (and so this `CommitState`) has been
+/// dropped. Bounds shutdown latency without a busy loop: the thread blocks on
+/// the condvar for at most this long per iteration, woken early by
+/// `CommitState::schedule`'s `notify_one` whenever a deadline moves earlier.
+const SCHEDULER_IDLE_POLL: Duration = Duration::from_millis(200);
+
+/// The commit-scheduler background thread body (issue #9): one mechanism
+/// serving both `commitWithin` and config autocommit's `autocommit_max_time`,
+/// since both are just "commit at this deadline". Holds only a `Weak` handle
+/// so it exits (within `SCHEDULER_IDLE_POLL`) once the owning `CoreIndex`
+/// drops, rather than leaking a thread per test app.
+///
+/// Not a busy loop: every iteration either fires a due commit or blocks on
+/// the condvar for the lesser of "time to the deadline" and
+/// `SCHEDULER_IDLE_POLL`, waking early on `notify_one` when a deadline moves
+/// earlier.
+fn run_scheduler(weak: std::sync::Weak<CommitState>) {
+    loop {
+        let Some(state) = weak.upgrade() else { return };
+        let mut deadline = state
+            .deadline
+            .lock()
+            .expect("commit deadline mutex poisoned");
+        let now = Instant::now();
+        if matches!(*deadline, Some(d) if d <= now) {
+            *deadline = None;
+            drop(deadline);
+            // Best-effort: a background autocommit has no request to report a
+            // failure to. A poisoned writer mutex would already have panicked
+            // elsewhere; a transient commit error here just leaves the next
+            // scheduled/manual commit to retry.
+            let _ = state.commit();
+            continue;
+        }
+        let wait = match *deadline {
+            Some(d) => (d - now).min(SCHEDULER_IDLE_POLL),
+            None => SCHEDULER_IDLE_POLL,
+        };
+        let _ = state
+            .condvar
+            .wait_timeout(deadline, wait)
+            .expect("commit deadline condvar poisoned");
+    }
+}
+
 pub struct CoreIndex {
     pub wf_schema: WayfinderSchema,
     index: Index,
-    writer: Mutex<IndexWriter>,
+    state: Arc<CommitState>,
     reader: IndexReader,
+    /// From `ServerConfig.commit` (parsed since #12, consumed here since #9).
+    /// The Nth uncommitted doc triggers a commit.
+    autocommit_max_docs: Option<u64>,
+    /// The first uncommitted doc since the last commit arms a deadline this
+    /// many ms out.
+    autocommit_max_time_ms: Option<u64>,
 }
 
 impl CoreIndex {
@@ -172,44 +317,188 @@ impl CoreIndex {
             .context("creating index writer")?;
         writer.set_merge_policy(config.merge_policy()?);
 
-        let reader = index
+        let reader: IndexReader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
             .try_into()
             .context("creating index reader")?;
 
+        let state = Arc::new(CommitState {
+            writer: Mutex::new(writer),
+            reader: reader.clone(),
+            pending_docs: AtomicU64::new(0),
+            deadline: Mutex::new(None),
+            condvar: Condvar::new(),
+        });
+        // A `Weak` handle, not a strong one: the scheduler thread must not be
+        // the thing keeping `CommitState` (and so the writer/reader) alive —
+        // it should exit once `CoreIndex` itself drops, not leak forever.
+        let weak = Arc::downgrade(&state);
+        thread::spawn(move || run_scheduler(weak));
+
         Ok(CoreIndex {
             wf_schema,
             index,
-            writer: Mutex::new(writer),
+            state,
             reader,
+            autocommit_max_docs: config.commit.autocommit_max_docs,
+            autocommit_max_time_ms: config.commit.autocommit_max_time,
         })
     }
 
     /// Adds documents from a Solr-style JSON array-of-docs body. Returns the
     /// number of documents added.
-    pub fn add_documents(&self, docs: &[Value]) -> Result<usize> {
-        let writer = self.writer.lock().expect("index writer mutex poisoned");
-        for doc in docs {
-            let obj = doc
-                .as_object()
-                .ok_or_else(|| anyhow!("each document in the update body must be a JSON object"))?;
-            let tantivy_doc = self.build_document(obj)?;
-            writer.add_document(tantivy_doc)?;
+    ///
+    /// `overwrite` mirrors Solr's own default: replace-by-uniqueKey before
+    /// each add unless the caller passed `overwrite=false` (finding 48a/b).
+    /// The uniqueKey is `wf_schema.core.unique_key` — schema load time now
+    /// rejects a non-string-typed `core.unique_key` outright (review round 1,
+    /// five-minute item), so resolving it as a text term below is a real
+    /// guarantee, not just "a declared field".
+    ///
+    /// Each successfully-added doc bumps the shared pending-doc counter (and,
+    /// on crossing `autocommit_max_docs` or arming the first
+    /// `autocommit_max_time` deadline, triggers the corresponding action)
+    /// immediately after `writer.add_document` — not batched to the end of
+    /// the loop. The counter update and its autocommit/deadline
+    /// consequences run even when a LATER doc in the same batch fails
+    /// validation (review round 1 must-fix): the loop below records its
+    /// `Result` instead of returning `?` straight out of the function, so
+    /// `arm_deadline`/`should_autocommit` are always acted on for whatever
+    /// prefix of the batch actually reached the writer before the error is
+    /// propagated to the caller. Previously the early `?` return skipped
+    /// that follow-through entirely — the doc that landed stayed pending
+    /// with `autocommit_max_time` never arming a deadline for it, and
+    /// because the pending counter was already nonzero, no LATER add ever
+    /// saw `prior == 0` again either, so `autocommit_max_time` alone could
+    /// never fire again until a manual commit.
+    pub fn add_documents(&self, docs: &[Value], overwrite: bool) -> Result<usize> {
+        let unique_key_field = self
+            .wf_schema
+            .field(&self.wf_schema.core.unique_key)
+            .expect("core.unique_key is validated to be a declared, string-typed field at schema load time");
+
+        let mut arm_deadline = false;
+        let mut should_autocommit = false;
+        let added: Result<usize> = (|| {
+            let writer = self
+                .state
+                .writer
+                .lock()
+                .expect("index writer mutex poisoned");
+            let mut added = 0usize;
+            for doc in docs {
+                let obj = doc.as_object().ok_or_else(|| {
+                    anyhow!("each document in the update body must be a JSON object")
+                })?;
+                if overwrite
+                    && let Some(id) = unique_key_value(obj, &self.wf_schema.core.unique_key)
+                {
+                    writer.delete_term(Term::from_field_text(unique_key_field, id));
+                }
+                let tantivy_doc = self.build_document(obj)?;
+                writer.add_document(tantivy_doc)?;
+                added += 1;
+
+                let prior = self.state.pending_docs.fetch_add(1, Ordering::SeqCst);
+                let now_pending = prior + 1;
+                if prior == 0 {
+                    arm_deadline = true;
+                }
+                if self
+                    .autocommit_max_docs
+                    .is_some_and(|max| now_pending >= max)
+                {
+                    should_autocommit = true;
+                }
+            }
+            Ok(added)
+        })();
+
+        // Run on BOTH the `Ok` and `Err` paths, before propagating any
+        // error: every doc that reached `writer.add_document` above is
+        // genuinely pending regardless of whether a later doc in the same
+        // batch failed, and the writer lock is already released by now, so
+        // `commit()` (which locks the same mutex) cannot deadlock here.
+        if arm_deadline && let Some(ms) = self.autocommit_max_time_ms {
+            self.schedule_commit(ms);
         }
-        Ok(docs.len())
+        if should_autocommit {
+            self.commit()?;
+        }
+        added
     }
 
-    /// Commits pending writes and makes them visible to subsequent searches.
-    pub fn commit(&self) -> Result<()> {
-        let mut writer = self.writer.lock().expect("index writer mutex poisoned");
-        writer.commit()?;
-        self.reader.reload()?;
+    /// Deletes every document sharing any of `ids` on the uniqueKey term —
+    /// Solr's delete-by-id, which removes ALL docs with that key, including
+    /// `overwrite=false` duplicates (finding 48c). A delete of an id matching
+    /// nothing is not an error (finding 46's `update_delete_id_missing`).
+    pub fn delete_by_ids(&self, ids: &[String]) -> Result<()> {
+        let unique_key_field = self.wf_schema.field(&self.wf_schema.core.unique_key).expect(
+            "core.unique_key is validated to be a declared, string-typed field at schema load time",
+        );
+        let writer = self
+            .state
+            .writer
+            .lock()
+            .expect("index writer mutex poisoned");
+        for id in ids {
+            writer.delete_term(Term::from_field_text(unique_key_field, id));
+        }
         Ok(())
+    }
+
+    /// Deletes every document matching `query`, parsed through the SAME
+    /// `parse_query` `/select` uses — finding 48d pins that delete-by-query is
+    /// analyzed identically (`body:lazy` on a `text_en` field matches multiple
+    /// docs the same way a `/select?q=body:lazy` would).
+    pub fn delete_by_query(&self, query: &str, default_field_name: &str) -> Result<()> {
+        let parsed = self.parse_query(query, default_field_name)?;
+        let writer = self
+            .state
+            .writer
+            .lock()
+            .expect("index writer mutex poisoned");
+        writer.delete_query(parsed)?;
+        Ok(())
+    }
+
+    /// Schedules a commit at most `within_ms` out (`commitWithin`), through
+    /// the same background scheduler `autocommit_max_time` uses. Per the task
+    /// spec, `commitWithin` is a HARD commit + reader reload in Wayfinder —
+    /// Tantivy has no in-memory-searchable segment for a "soft" commit to
+    /// leave uncommitted-but-visible, so there is no less-durable state to
+    /// schedule into. Wire-visible behaviour (the doc becomes searchable once
+    /// the window elapses) matches Solr; only the internal durability differs
+    /// (stronger here, never weaker).
+    pub fn schedule_commit(&self, within_ms: u64) {
+        self.state
+            .schedule(Instant::now() + Duration::from_millis(within_ms));
+    }
+
+    /// Hard-commits pending writes and reloads the reader, making them
+    /// visible to subsequent searches. Used for the explicit `commit=true`
+    /// param and — per the task spec's honest divergence note — also for
+    /// `softCommit=true`: Tantivy has no in-memory-searchable segment, so a
+    /// reader reload alone cannot reproduce Solr's soft-commit visibility
+    /// (`update_select_softcommit_visible.json`); a real (hard) commit is the
+    /// only way Wayfinder can make wire-visible behaviour match. The
+    /// difference is durability only (stronger, never weaker) — never fewer
+    /// documents visible than Solr would show.
+    pub fn commit(&self) -> Result<()> {
+        self.state.commit()
     }
 
     fn build_document(&self, obj: &Map<String, Value>) -> Result<TantivyDocument> {
         let mut doc = TantivyDocument::default();
+        // Pass 1: collect every value destined for each declared field —
+        // its own JSON value AND whatever `[[copy_fields]]` copies in from a
+        // source field — before writing anything. Single-valued enforcement
+        // (pass 2 below) needs the COMBINED count: a copy-field landing a
+        // second value in a single-valued destination is a 400 (finding 48e)
+        // even though neither the destination's own value nor the copied one
+        // is individually more than one value.
+        let mut pending: HashMap<&str, Vec<Value>> = HashMap::new();
         for field_config in &self.wf_schema.fields {
             let Some(value) = obj.get(&field_config.name) else {
                 if field_config.required {
@@ -220,21 +509,45 @@ impl CoreIndex {
                 }
                 continue;
             };
-            let kind = self
-                .wf_schema
-                .value_kind(&field_config.name)
-                .expect("a declared field always has a value kind");
-            self.add_value(&mut doc, &field_config.name, kind, value)?;
+            pending
+                .entry(field_config.name.as_str())
+                .or_default()
+                .extend(flatten_values(value));
 
             // copy_fields: index-time only, so a copy destination sees the
             // source's raw value and analyzes it with its own field type.
             for dest in self.wf_schema.copy_dests(&field_config.name) {
-                let dest_kind = self
-                    .wf_schema
-                    .value_kind(dest)
-                    .expect("copy_fields destinations are validated at load time");
-                self.add_value(&mut doc, dest, dest_kind, value)?;
+                pending
+                    .entry(dest)
+                    .or_default()
+                    .extend(flatten_values(value));
             }
+        }
+
+        // Pass 2: enforce single-valuedness on the combined list, then write.
+        // A JSON array with exactly one element unwraps to a scalar rather
+        // than erroring (finding 48e) — `flatten_values` already produced a
+        // one-element `Vec` for that case, so there is nothing extra to do
+        // for it here; the write path below is identical either way.
+        for field_config in &self.wf_schema.fields {
+            let Some(values) = pending.get(field_config.name.as_str()) else {
+                continue;
+            };
+            if values.is_empty() {
+                continue;
+            }
+            if !field_config.multi_valued && values.len() > 1 {
+                return Err(anyhow!(
+                    "multiple values encountered for non multiValued field {}: {:?}",
+                    field_config.name,
+                    values
+                ));
+            }
+            let kind = self
+                .wf_schema
+                .value_kind(&field_config.name)
+                .expect("a declared field always has a value kind");
+            self.add_values(&mut doc, &field_config.name, kind, values)?;
         }
 
         // Everything left over is either a dynamic-field match or an error.
@@ -285,27 +598,21 @@ impl CoreIndex {
         Ok(doc)
     }
 
-    /// Adds `value` (scalar or array) to `field_name`, coerced to `kind`.
-    fn add_value(
+    /// Writes an already-validated, already-flattened value list to
+    /// `field_name`, coerced to `kind`. Single-valuedness is enforced by the
+    /// caller (`build_document`'s pass 2) before this is reached.
+    fn add_values(
         &self,
         doc: &mut TantivyDocument,
         field_name: &str,
         kind: ValueKind,
-        value: &Value,
+        values: &[Value],
     ) -> Result<()> {
         let field = self
             .wf_schema
             .field(field_name)
             .expect("caller passes a declared field name");
-        let values: Vec<&Value> = match value {
-            Value::Array(vs) => vs.iter().collect(),
-            Value::Null => return Ok(()),
-            single => vec![single],
-        };
         for v in values {
-            if v.is_null() {
-                continue;
-            }
             match kind {
                 ValueKind::Text => doc.add_text(field, as_text(field_name, v)?),
                 ValueKind::I64 => doc.add_i64(field, as_i64(field_name, v)?),
@@ -786,9 +1093,10 @@ stored = true
     /// for a `body:quick` query — a real BM25 score, not a placeholder.
     fn indexed_scored_hit(index: &CoreIndex) -> (Score, DocAddress) {
         index
-            .add_documents(&[
-                json!({"id": "doc1", "body": "the quick brown fox", "extra_s": "tag"}),
-            ])
+            .add_documents(
+                &[json!({"id": "doc1", "body": "the quick brown fox", "extra_s": "tag"})],
+                true,
+            )
             .expect("add_documents");
         index.commit().expect("commit");
         let query = index.parse_query("quick", "body").expect("parse_query");

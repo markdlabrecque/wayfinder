@@ -69,3 +69,37 @@ facet_range_end_not_gap_aligned	200	GET	facets33/select?q=*:*&rows=0&facet=true&
 facet_json_nl_arrarr	200	GET	facets33/select?q=*:*&rows=0&facet=true&facet.field=tag&json.nl=arrarr&wt=json		http://localhost:8988/solr
 facet_json_nl_arrmap	200	GET	facets33/select?q=*:*&rows=0&facet=true&facet.field=tag&json.nl=arrmap&wt=json		http://localhost:8988/solr
 facet_json_nl_map_missing	200	GET	facets33/select?q=*:*&rows=0&facet=true&facet.field=tag&facet.missing=true&json.nl=map&wt=json		http://localhost:8988/solr
+update_add_nocommit	200	POST	update9/update?wt=json	[{"id":"u6","body":"pending doc","category":["pending"]}]	http://localhost:8989/solr
+update_select_uncommitted	200	GET	update9/select?q=id:u6&wt=json		http://localhost:8989/solr
+update_add_commit	200	POST	update9/update?commit=true&wt=json	[{"id":"u7","body":"committed doc","category":["keep"]}]	http://localhost:8989/solr
+update_select_committed	200	GET	update9/select?q=id:u7&wt=json		http://localhost:8989/solr
+update_overwrite_default	200	POST	update9/update?commit=true&wt=json	[{"id":"u7","body":"replaced body","category":["keep"]}]	http://localhost:8989/solr
+update_select_overwritten	200	GET	update9/select?q=id:u7&wt=json		http://localhost:8989/solr
+update_overwrite_false	200	POST	update9/update?commit=true&overwrite=false&wt=json	[{"id":"u7","body":"duplicate body","category":["dup"]}]	http://localhost:8989/solr
+update_select_overwrite_false	200	GET	update9/select?q=id:u7&wt=json		http://localhost:8989/solr
+update_delete_id_obj	200	POST	update9/update?commit=true&wt=json	{"delete":{"id":"u7"}}	http://localhost:8989/solr
+update_select_after_delete_id	200	GET	update9/select?q=id:u7&wt=json		http://localhost:8989/solr
+update_delete_id_list	200	POST	update9/update?commit=true&wt=json	{"delete":["u1","u4"]}	http://localhost:8989/solr
+update_select_after_delete_list	200	GET	update9/select?q=*:*&fl=id&rows=20&sort=id+asc&wt=json		http://localhost:8989/solr
+update_delete_query	200	POST	update9/update?commit=true&wt=json	{"delete":{"query":"body:lazy"}}	http://localhost:8989/solr
+update_select_after_delete_query	200	GET	update9/select?q=*:*&fl=id&rows=20&sort=id+asc&wt=json		http://localhost:8989/solr
+update_mixed_commands	200	POST	update9/update?wt=json	{"add":{"doc":{"id":"u8","body":"mixed add","category":["keep"]}},"delete":{"id":"u6"},"commit":{}}	http://localhost:8989/solr
+update_select_after_mixed	200	GET	update9/select?q=*:*&fl=id&rows=20&sort=id+asc&wt=json		http://localhost:8989/solr
+update_commitwithin	200	POST	update9/update?commitWithin=500&wt=json	[{"id":"u9","body":"commit within doc","category":["keep"]}]	http://localhost:8989/solr
+update_select_commitwithin_visible	200	GET	update9/select?q=id:u9&wt=json		http://localhost:8989/solr
+update_softcommit	200	POST	update9/update?softCommit=true&wt=json	[{"id":"u10","body":"soft committed doc","category":["keep"]}]	http://localhost:8989/solr
+update_select_softcommit_visible	200	GET	update9/select?q=id:u10&wt=json		http://localhost:8989/solr
+update_get	400	GET	update9/update?wt=json		http://localhost:8989/solr
+update_get_commit	200	GET	update9/update?commit=true&wt=json		http://localhost:8989/solr
+update_unknown_core	404	POST	nosuchcore/update?commit=true&wt=json	[{"id":"x","body":"y"}]	http://localhost:8989/solr
+ping_unknown_core	404	GET	nosuchcore/admin/ping?wt=json		http://localhost:8989/solr
+ping_unknown_core_delete	405	DELETE	nosuchcore/admin/ping?wt=json		http://localhost:8989/solr
+update_single_valued_array	400	POST	update9/update?commit=true&wt=json	[{"id":"u11","title":["one","two"]}]	http://localhost:8989/solr
+update_copyfield_single_valued	400	POST	update9/update?commit=true&wt=json	[{"id":"u12","nick":"nn","alias":"aa"}]	http://localhost:8989/solr
+update_copyfield_single_ok	200	POST	update9/update?commit=true&wt=json	[{"id":"u13","nick":"solo"}]	http://localhost:8989/solr
+update_select_copyfield_dest	200	GET	update9/select?q=id:u13&fl=id,nick,alias&wt=json		http://localhost:8989/solr
+update_dynamic_date	200	POST	update9/update?commit=true&wt=json	[{"id":"u14","when_dt":"2021-06-01T12:30:45Z"}]	http://localhost:8989/solr
+update_select_dynamic_date	200	GET	update9/select?q=when_dt:%5B2021-01-01T00:00:00Z%20TO%202022-01-01T00:00:00Z%5D&fl=id,when_dt&wt=json		http://localhost:8989/solr
+update_single_valued_array_one	200	POST	update9/update?commit=true&wt=json	[{"id":"u15","title":["only"]}]	http://localhost:8989/solr
+update_select_single_valued_array_one	200	GET	update9/select?q=id:u15&fl=id,title&wt=json		http://localhost:8989/solr
+update_delete_id_missing	200	POST	update9/update?commit=true&wt=json	{"delete":{"id":"nosuch"}}	http://localhost:8989/solr

@@ -1,0 +1,20 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"id:u15",
+      "fl":"id,title",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"u15",
+      "title":"only"
+    }]
+  }
+}

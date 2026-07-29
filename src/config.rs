@@ -81,8 +81,13 @@ pub struct Resources {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Commit {
-    /// Hard-commit thresholds. Parsed and exposed here; consumed by the update
-    /// pipeline (issue #9).
+    /// Hard-commit thresholds, consumed by the update pipeline (issue #9):
+    /// `autocommit_max_docs` fires a commit on the Nth uncommitted doc,
+    /// `autocommit_max_time` arms a deadline (ms) on the first uncommitted
+    /// doc since the last commit. Both make docs VISIBLE (commit + reader
+    /// reload), which differs from Solr's own hard-autocommit default of
+    /// `openSearcher=false` — a deliberate, documented Wayfinder divergence
+    /// (operator-config behaviour, not wire format), not a bug.
     pub autocommit_max_docs: Option<u64>,
     pub autocommit_max_time: Option<u64>,
 }

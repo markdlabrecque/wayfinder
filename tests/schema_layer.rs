@@ -272,6 +272,31 @@ fn unsupported_field_type_errors_naming_the_field() {
     );
 }
 
+// --- unique_key must be string-typed (issue #9 review round 1, five-minute
+// item) ---------------------------------------------------------------------
+
+/// The update pipeline resolves `core.unique_key` as a Tantivy text term
+/// (`Term::from_field_text` in `add_documents`/`delete_by_ids`) — a
+/// non-string-typed uniqueKey would let that silently match nothing
+/// (`overwrite=true` would duplicate instead of replace; delete-by-id would
+/// 200 while deleting nothing). Schema load time rejects it loudly instead.
+#[test]
+fn non_string_unique_key_is_rejected_at_load_time() {
+    let toml = FULL_SCHEMA_TOML.replace(
+        r#"name = "id"
+type = "string""#,
+        r#"name = "id"
+type = "int""#,
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path).expect_err("an int-typed uniqueKey must be rejected");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("unique_key") && msg.contains("id"),
+        "error must name core.unique_key and the field, got: {msg}"
+    );
+}
+
 // --- copy fields ------------------------------------------------------------
 
 #[test]
@@ -297,12 +322,14 @@ async fn copy_field_makes_source_text_searchable_on_dest() {
     let dir = TempDir::new().expect("temp dir");
     let app = common::app_with_schema(dir.path(), FULL_SCHEMA_TOML).expect("app builds");
 
-    // `zarquon` appears only in `title`, which copy-fields into `body`.
-    let (status, _) = common::post_docs(
-        &app,
-        &json!([{"id":"c1","title":"zarquon rising","body":"unrelated words"}]),
-    )
-    .await;
+    // `zarquon` appears only in `title`, which copy-fields into `body`. No
+    // direct `body` value here (issue #9): `body` is single-valued
+    // (`multi_valued` unset), and the copy-field destination gets the same
+    // single-valued enforcement as any other field across its combined own
+    // + copied values (finding 48e) — a direct `body` value here would
+    // collide with the copied `title` value and 400, which is not what this
+    // test is about.
+    let (status, _) = common::post_docs(&app, &json!([{"id":"c1","title":"zarquon rising"}])).await;
     assert_eq!(status, StatusCode::OK, "indexing must succeed");
 
     // `body` is the default field, so a bare term hits the copy-field target.
