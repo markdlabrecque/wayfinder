@@ -1,0 +1,26 @@
+{
+  "request": {
+    "body": "",
+    "headers": {
+      "Accept": "*/*",
+      "Host": "solr:8983"
+    },
+    "method": "GET",
+    "path": "/solr/search_api_capture/select?omitHeader=true&TZ=UTC&wt=json&json.nl=flat&q=%28%7B%21edismax+qf%3D%27tm_X3b_en_title%5E1+tm_X3b_und_title%5E1+tm_X3b_en_body%5E1+tm_X3b_und_body%5E1%27%7D%2B%22quick%22+%2B%22fox%22%29&start=0&rows=10&fl=%2A%2Cscore&fq=%2Bindex_id%3Acapture_index+%2Bhash%3A4m8z66&fq=ss_search_api_language%3A%28%22en%22+%22und%22%29&hl=true&hl.fl=%2A&hl.requireFieldMatch=false&hl.snippets=3&hl.fragsize=0&hl.mergeContiguous=false&hl.simple.pre=%5BHIGHLIGHT%5D&hl.simple.post=%5B%2FHIGHLIGHT%5D"
+  },
+  "response": {
+    "body": "{\n  \"response\":{\"numFound\":0,\"start\":0,\"maxScore\":0.0,\"numFoundExact\":true,\"docs\":[]\n  },\n  \"highlighting\":{}}\n",
+    "headers": {
+      "Content-Length": "111",
+      "Content-Security-Policy": "default-src 'none'; base-uri 'none'; connect-src 'self'; form-action 'self'; font-src 'self'; frame-ancestors 'none'; img-src 'self' data:; media-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self';",
+      "Content-Type": "application/json;charset=utf-8",
+      "Vary": "Accept-Encoding",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "SAMEORIGIN",
+      "X-XSS-Protection": "1; mode=block"
+    },
+    "status_code": 200
+  },
+  "seq": 4,
+  "timestamp": 1785366306.36928
+}

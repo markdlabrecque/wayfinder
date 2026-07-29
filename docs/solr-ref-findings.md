@@ -1222,3 +1222,65 @@ edismax-specific behaviour.
     response for `bf` would be real Solr ground truth for behaviour Wayfinder is explicitly not
     building, and comparing against it would either force scope creep or require a
     fixture-vs-fixture divergence carve-out for a param nobody asked to keep matching.
+
+76. **Captured against a real Drupal 11.3.2 + `drupal/search_api` 1.41.0 + `drupal/search_api_solr`
+    4.4.0 site, indexing/searching two node bundles through a stock, unmodified module (issue
+    #55), the endpoints the module actually calls are: `update` (bulk JSON body, one POST per
+    batch, `commitWithin` set rather than an explicit `commit=true` — no separate commit request
+    observed), `select` (all fulltext/filter/facet/sort/spellcheck/highlight traffic — the module
+    never uses a dedicated `/facet` or `/spellcheck` handler, everything rides on `select`'s
+    components), `mlt` (a dedicated handler for "more like this", not a `select` component),
+    `terms` (a dedicated handler, used by the module's own autocomplete/suggester code path —
+    `search_api_autocomplete` was not installed for this capture, but `SolrConnector::getTermsQuery()`
+    is core to `search_api_solr` itself), `schema/fieldtypes` (a Schema API introspection call
+    issued mid-query, not just at config time), and the admin/handshake set: `admin/info/system`
+    (server-level), `<core>/admin/system`, `<core>/admin/luke`, `<core>/admin/mbeans`. `/admin/ping`
+    is also called (via `SolrConnector::pingCore()`) but landed in this capture's pre-trace setup
+    noise rather than the frozen trace. Notably absent from the whole session: the module never
+    called anything shard/cluster-related (no `/admin/collections`, no ZooKeeper-flavoured calls),
+    consistent with PRD's non-goal of SolrCloud. See `solr-ref/search-api/manifest.tsv` for the
+    full request-by-request list (28 request/response pairs, all HTTP 200).
+
+77. **The module's own multi-term AND-conjunction edismax queries silently under-match, because of
+    a Solr local-params scoping quirk, not a `search_api_solr` bug in the usual sense.** Building a
+    query via the module's `edismax` parse mode with two keywords and the default `AND` conjunction
+    produces `q=({!edismax qf='...'}+"term1" +"term2")` — the whole expression wrapped in a literal
+    `(...)` group. Captured behaviour: `solr-ref/search-api/trace/00008.json` (`+"quick" +"fox"`,
+    both words present in `entity:node/1`'s title) returns `numFound:0`, while the *same* local-params
+    clause with only one term (`00006.json`, `+"quick"` alone) correctly returns 2 matches. Root
+    cause, confirmed by isolated curl probes against the same core: Solr's local-params syntax
+    (`{!edismax qf=...}rest`) only consumes the *entire remainder of the query string* when that
+    clause **is** the whole `q` value; once it is wrapped in an enclosing `(...)` group (as the
+    module always does for multi-clause queries), only the first whitespace-delimited token after
+    `}` is handed to the named sub-parser — every subsequent `+"term"` clause is instead parsed by
+    the *outer*, non-edismax, default query parser against Solr's configured `df` field (`id`, set
+    via `solr-ref/search-api/configset/solrconfig_extra.xml:113` on the `/select` handler — a
+    string field holding values like `4m8z66-capture_index-entity:node/1:en`), which does not carry
+    the module's per-field-boosted content and so those clauses can never match, making the
+    fall-through behaviour even more certain than a fulltext default field would. The module's
+    `OR`-conjunction case (`00007.json`, `"quick" "rocket"`)
+    happened to still return correct-looking results in this capture, but only because the corpus
+    has overlapping vocabulary (both matching documents also contain "quick") — the second term
+    ("rocket") was independently confirmed to be silently dropped there too. Net: `qf` weighting is
+    real and applied (finding 70 confirms this against a hand-built query), but the module's own
+    generated multi-term `q` string does not reliably deliver every keyword to `qf`-boosted fields
+    once more than one keyword is present — a discrepancy any Wayfinder edismax implementation
+    aiming for parity should match faithfully rather than "fixing" (PRD: divergence from captured
+    Solr behaviour is a bug unless the PRD says otherwise; this is upstream-module-generated Solr
+    input, not Wayfinder's own choice, so faithful parity means reproducing Solr's parse of *that*
+    string, local-params quirk included) — worth flagging explicitly against issue #7/PR #53's
+    edismax work for comparison, since a naive from-scratch edismax implementation is likely to
+    treat multi-term `q` more literally than real Solr's local-params scoping does.
+
+78. **Answering PRD open question 2** ("which Solr version does `/admin/system` report"): the
+    module detects the Solr version via `SolrConnector::getSolrVersion()`, which reads
+    `lucene.solr-spec-version` off `<core>/admin/system` (or `/admin/info/system` as fallback) and
+    regex-captures the leading `major.minor.patch`. Against this capture's pinned `solr:9` image,
+    that value was `9.10.1` (`solr-ref/search-api/trace/00026.json`) — so a real
+    `search_api_solr` 4.4.0 site talking to today's `solr:9` detects and reports Solr 9.10.1, not a
+    bare "9". Separately, the generated `schema.xml`'s `<schema name="drupal-4.4.0-solr-9.x-0" ...>`
+    attribute (`solr-ref/search-api/configset/schema.xml`) encodes the *targeted* Solr branch
+    (`9.x`) and module version (`4.4.0`) the config set was generated for — a second, independent
+    version signal the module reads via `getSchemaVersionString()`/`getSchemaTargetedSolrBranch()`.
+    Implementation of what Wayfinder itself should report is deferred to issue #59 per the issue's
+    scope; this finding is the discovered ground truth that decision should be checked against.

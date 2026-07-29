@@ -1,0 +1,26 @@
+{
+  "request": {
+    "body": "",
+    "headers": {
+      "Accept": "*/*",
+      "Host": "solr:8983"
+    },
+    "method": "GET",
+    "path": "/solr/search_api_capture/select?omitHeader=true&TZ=UTC&wt=json&json.nl=flat&q=%2A%3A%2A&start=0&rows=0&fl=%2A%2Cscore&fq=%2Bindex_id%3Acapture_index+%2Bhash%3A4m8z66&fq=ss_search_api_language%3A%28%22en%22+%22und%22%29&hl=true&hl.fl=%2A&hl.requireFieldMatch=false&hl.snippets=3&hl.fragsize=0&hl.mergeContiguous=false&hl.simple.pre=%5BHIGHLIGHT%5D&hl.simple.post=%5B%2FHIGHLIGHT%5D&facet.field=%7B%21key%3Dss_type%7Dss_type&f.ss_type.facet.missing=false&facet=true&facet.sort=count&facet.limit=10&facet.mincount=1&facet.missing=false"
+  },
+  "response": {
+    "body": "{\n  \"response\":{\"numFound\":6,\"start\":0,\"maxScore\":1.0,\"numFoundExact\":true,\"docs\":[]\n  },\n  \"facet_counts\":{\n    \"facet_queries\":{},\n    \"facet_fields\":{\n      \"ss_type\":[\n        \"article\",4,\n        \"page\",2]},\n    \"facet_ranges\":{},\n    \"facet_intervals\":{},\n    \"facet_heatmaps\":{}},\n  \"highlighting\":{}}\n",
+    "headers": {
+      "Content-Length": "309",
+      "Content-Security-Policy": "default-src 'none'; base-uri 'none'; connect-src 'self'; form-action 'self'; font-src 'self'; frame-ancestors 'none'; img-src 'self' data:; media-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self';",
+      "Content-Type": "application/json;charset=utf-8",
+      "Vary": "Accept-Encoding",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "SAMEORIGIN",
+      "X-XSS-Protection": "1; mode=block"
+    },
+    "status_code": 200
+  },
+  "seq": 18,
+  "timestamp": 1785366343.5655055
+}

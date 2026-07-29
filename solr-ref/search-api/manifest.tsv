@@ -1,0 +1,29 @@
+file	seq	method	endpoint	status	q_prefix
+00001.json	1	POST	/solr/search_api_capture/update	200	
+00002.json	2	GET	/solr/search_api_capture/select	200	(tm_X3b_en_body:(+"quick")^1 tm_X3b_und_body:(+"quick")^1 tm_X3b_en_title:(+"qui
+00003.json	3	GET	/solr/search_api_capture/select	200	({!edismax qf='tm_X3b_en_title^1 tm_X3b_und_title^1 tm_X3b_en_body^1 tm_X3b_und_
+00004.json	4	GET	/solr/search_api_capture/select	200	({!edismax qf='tm_X3b_en_title^1 tm_X3b_und_title^1 tm_X3b_en_body^1 tm_X3b_und_
+00005.json	5	GET	/solr/search_api_capture/select	200	({!edismax qf='tm_X3b_en_title^1 tm_X3b_und_title^1 tm_X3b_en_body^1 tm_X3b_und_
+00006.json	6	GET	/solr/search_api_capture/select	200	({!edismax qf='tm_X3b_en_title^1 tm_X3b_und_title^1 tm_X3b_en_body^1 tm_X3b_und_
+00007.json	7	GET	/solr/search_api_capture/select	200	({!edismax qf='tm_X3b_en_title^1 tm_X3b_und_title^1 tm_X3b_en_body^1 tm_X3b_und_
+00008.json	8	GET	/solr/search_api_capture/select	200	({!edismax qf='tm_X3b_en_title^1 tm_X3b_und_title^1 tm_X3b_en_body^1 tm_X3b_und_
+00009.json	9	GET	/solr/search_api_capture/select	200	(tm_X3b_en_title:((quick))^1 tm_X3b_und_title:((quick))^1 tm_X3b_en_body:((quick
+00010.json	10	GET	/solr/search_api_capture/select	200	*:*
+00011.json	11	GET	/solr/search_api_capture/select	200	*:*
+00012.json	12	GET	/solr/search_api_capture/select	200	*:*
+00013.json	13	GET	/solr/search_api_capture/select	200	*:*
+00014.json	14	GET	/solr/search_api_capture/select	200	*:*
+00015.json	15	GET	/solr/search_api_capture/select	200	*:*
+00016.json	16	GET	/solr/search_api_capture/select	200	*:*
+00017.json	17	GET	/solr/search_api_capture/select	200	*:*
+00018.json	18	GET	/solr/search_api_capture/select	200	*:*
+00019.json	19	GET	/solr/search_api_capture/select	200	*:*
+00020.json	20	GET	/solr/search_api_capture/schema/fieldtypes	200	
+00021.json	21	GET	/solr/search_api_capture/select	200	({!edismax qf='tm_X3b_en_title^1 tm_X3b_und_title^1 tm_X3b_en_body^1 tm_X3b_und_
+00022.json	22	GET	/solr/search_api_capture/mlt	200	id:"4m8z66-capture_index-4m8z66-capture_index-entity:node/1:en"
+00023.json	23	GET	/solr/admin/info/system	200	
+00024.json	24	GET	/solr/search_api_capture/admin/luke	200	
+00025.json	25	GET	/solr/search_api_capture/admin/mbeans	200	
+00026.json	26	GET	/solr/search_api_capture/admin/system	200	
+00027.json	27	GET	/solr/search_api_capture/admin/system	200	
+00028.json	28	GET	/solr/search_api_capture/terms	200	
