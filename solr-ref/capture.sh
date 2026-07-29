@@ -1143,3 +1143,86 @@ caps stats_zero_fq "$STATS_CORE/select?q=*:*&fq=id:nosuchdoc&rows=0&stats=true&s
 
 echo "stats core '$STATS_CORE' left in place on '$STATS_CONTAINER' (port 8992)"
 echo "  (docker rm -f $STATS_CONTAINER to stop)"
+
+# --- highlighting (issue #4, PRD Highlighting row: hl, hl.fl, hl.snippets, ---
+# hl.fragsize, hl.simple.pre/post, Tantivy SnippetGenerator) ------------------
+# Own container, own port (`wayfinder-solr-4`, 8991), per the
+# `wayfinder-solr-24`/`-32`/`-33`/`-39` precedent: several issue containers
+# (8983-8990) are already running concurrently and none may be reused or
+# stopped. Same schema and 5-doc "quick brown fox" corpus as the canonical
+# `content` core at the top of this script, so these are ordinary
+# `content`-core GETs and belong in `manifest.tsv` (via `caph()` below), not
+# `manifest-errors.tsv`. Not runnable standalone: this block builds its own
+# container from scratch every run rather than reusing state, since
+# highlighting has no captures yet to protect.
+HL_CONTAINER=wayfinder-solr-4
+HL_SOLR=http://localhost:8991/solr
+HL_CORE=content
+docker rm -f "$HL_CONTAINER" >/dev/null 2>&1 || true
+docker run -d --name "$HL_CONTAINER" -p 8991:8983 \
+  solr:9 solr-precreate "$HL_CORE" >/dev/null
+echo -n "waiting for highlighting solr"
+for _ in $(seq 60); do
+  if curl -sf "$HL_SOLR/$HL_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+  echo -n "."; sleep 1
+done
+curl -s "$HL_SOLR/$HL_CORE/schema" -H 'Content-Type: application/json' -d '{
+  "add-field": [
+    {"name":"body",     "type":"text_en", "indexed":true, "stored":true},
+    {"name":"category", "type":"string",  "indexed":true, "stored":true,
+     "docValues":true, "multiValued":true}
+  ]
+}' >/dev/null
+curl -sf "$HL_SOLR/$HL_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"doc1","body":"the quick brown fox jumps over the lazy dog","category":["animals","classic"]},
+    {"id":"doc2","body":"a lazy afternoon in the garden","category":["garden"]},
+    {"id":"doc3","body":"quick thinking saves the day","category":["misc","classic"]},
+    {"id":"doc4","body":"dogs and cats living together","category":["animals"]},
+    {"id":"doc5","body":"nothing much here at all"}
+]' >/dev/null
+caph() {  # caph <name> <path-with-query>, against $HL_SOLR/$HL_CORE
+  local name=$1 path=$2
+  curl -sg "$HL_SOLR/$HL_CORE/$path" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\n' "$name" "$(cat "$OUT/$name.status")" "$path" >> "$HERE/manifest.tsv"
+  rm -f "$OUT/$name.status"
+}
+
+# basic single-field highlight, matches doc1 ("lazy dog") and doc2 ("lazy afternoon")
+caph hl_basic            'select?q=lazy&df=body&hl=true&hl.fl=body&wt=json'
+
+# hl.snippets: no doc repeats a non-stopword term, so this pins the shape
+# Solr actually returns for hl.snippets>1 against a single-occurrence field,
+# not an assumed multi-snippet array.
+caph hl_snippets_two     'select?q=quick&df=body&hl=true&hl.fl=body&hl.snippets=2&wt=json'
+
+# custom pre/post markers instead of the <em>/</em> default
+caph hl_custom_markers   'select?q=lazy&df=body&hl=true&hl.fl=body&hl.simple.pre=%3Cb%3E&hl.simple.post=%3C%2Fb%3E&wt=json'
+
+# small hl.fragsize under the default (unified) hl.method: surprising rather
+# than a truncation -- captured as-is rather than assumed. The unified
+# highlighter's break iterator never cuts inside what it considers a single
+# sentence, so a short, punctuation-free field comes back whole regardless of
+# how small hl.fragsize is (verified down to hl.fragsize=1, not just 18).
+caph hl_fragsize_small   'select?q=quick&df=body&hl=true&hl.fl=body&hl.fragsize=18&wt=json'
+
+# hl.method=original (the classic Highlighter, not the hl.method=unified
+# default) DOES truncate to hl.fragsize -- this is the shape Tantivy's
+# SnippetGenerator's own char-budget truncation actually resembles, so it is
+# the fixture the fragsize test derives its truncation assertion from.
+caph hl_fragsize_truncated 'select?q=quick&df=body&hl=true&hl.fl=body&hl.method=original&hl.fragsize=10&wt=json'
+
+# a doc that matches the query via `category` (a non-highlighted field) but
+# whose `body` has no term overlap with the query at all -- the crux capture:
+# what shape does Solr give that doc's entry under `highlighting`?
+caph hl_no_field_match   'select?q=category:animals&hl=true&hl.fl=body&wt=json'
+
+# hl.fl with multiple fields, comma-separated
+caph hl_multi_field_comma 'select?q=lazy&df=body&hl=true&hl.fl=body,category&wt=json'
+# hl.fl with multiple fields, space-separated (URL-encoded space)
+caph hl_multi_field_space 'select?q=lazy&df=body&hl=true&hl.fl=body%20category&wt=json'
+
+# hl=true with no hl.fl at all -- capture Solr's default rather than guessing
+caph hl_default_fl        'select?q=lazy&df=body&hl=true&wt=json'
+
+echo "highlighting core '$HL_CORE' left in place on '$HL_CONTAINER' (port 8991)"
+echo "  (docker rm -f $HL_CONTAINER to stop)"
