@@ -52,7 +52,8 @@ mod common;
 use axum::Router;
 use axum::http::StatusCode;
 use common::diff::{diff, diff_ranked_ids, load_manifest, normalize, ranked_docs};
-use common::{fixture, get};
+use common::key_order::{assert_same_key_order, get_text};
+use common::{CORE, fixture, get};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -211,6 +212,54 @@ fn assert_matches_mlt_fixture_ignoring_score_magnitude(actual: Value, fixture_na
     );
 }
 
+/// Real (un-blanked) `maxScore` semantics check, specific to the
+/// `mlt_fl_rows_start` fixture's own data: `blank_bm25_score_magnitudes`
+/// blanks *both* sides of the comparison above, so a regression that changes
+/// `response.maxScore` from "the corpus-wide max over the full unpaginated
+/// MLT hit set" (finding 58) to "the max over just the returned page" would
+/// still pass every blanked-equality assert in this file, including the
+/// manifest loop below. This asserts the real, un-blanked relationship
+/// instead: `response.maxScore` must exceed the returned page's own max
+/// score (this fixture's page, `start=1&rows=2`, never contains the
+/// corpus-wide top hit), and `match.maxScore` — the *one*-doc `match`
+/// block's summary — must equal its own single doc's score exactly.
+fn assert_mlt_fl_rows_start_maxscore_semantics(actual: &Value) {
+    let response = actual
+        .get("response")
+        .expect("mlt_fl_rows_start's response must be present");
+    let page_max_score = response["docs"]
+        .as_array()
+        .expect("response.docs must be an array")
+        .iter()
+        .map(|doc| doc["score"].as_f64().expect("each doc must carry score"))
+        .fold(f64::MIN, f64::max);
+    let response_max_score = response["maxScore"]
+        .as_f64()
+        .expect("response.maxScore must be present when fl=score");
+    assert!(
+        response_max_score > page_max_score,
+        "response.maxScore ({response_max_score}) must be the corpus-wide max over the full \
+         unpaginated MLT hit set, strictly greater than this fixture's own returned page's max \
+         ({page_max_score}) — equal would mean maxScore was (wrongly) recomputed over just the \
+         page"
+    );
+
+    let match_block = actual
+        .get("match")
+        .expect("mlt_fl_rows_start's match must be present");
+    let match_doc_score = match_block["docs"][0]["score"]
+        .as_f64()
+        .expect("match.docs[0].score must be present");
+    let match_max_score = match_block["maxScore"]
+        .as_f64()
+        .expect("match.maxScore must be present when fl=score");
+    assert_eq!(
+        match_max_score, match_doc_score,
+        "match.maxScore must equal match.docs[0].score — match always resolves to exactly one \
+         source document"
+    );
+}
+
 // --- basic envelope / status ------------------------------------------------
 
 #[tokio::test]
@@ -360,7 +409,55 @@ async fn mlt_fl_rows_start_paginates_the_similar_docs_result_set() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_mlt_fl_rows_start_maxscore_semantics(&body);
     assert_matches_mlt_fixture_ignoring_score_magnitude(body, "mlt_fl_rows_start");
+}
+
+// --- key order (finding 52: responseHeader, match, response[, interestingTerms]) --
+
+/// The `/mlt` row's own manifest query (rather than hand-copying it), so
+/// editing `manifest.tsv` can't silently desynchronise this test from the
+/// request the fixture was actually captured against — same rationale as
+/// `tests/json_key_order.rs::keyorder_query_from_manifest`.
+fn mlt_manifest_query(name: &str) -> String {
+    let entries = load_manifest(&manifest_path());
+    entries
+        .iter()
+        .find(|e| e.name == name)
+        .unwrap_or_else(|| panic!("manifest.tsv has no row named `{name}`"))
+        .path
+        .clone()
+}
+
+#[tokio::test]
+async fn mlt_baseline_key_order_matches_solr() {
+    // finding 52: top-level `responseHeader, match, response` (no
+    // `interestingTerms` here, since `mlt.interestingTerms` was not
+    // requested), plus `match`/`response`'s own inner
+    // `numFound, start, numFoundExact, docs` order.
+    let (app, _dir) = mlt_app().await;
+    let (status, text) = get_text(&app, CORE, &mlt_manifest_query("mlt_baseline")).await;
+    assert_eq!(status, StatusCode::OK, "mlt_baseline must be a 200: {text}");
+    assert_same_key_order(&text, "mlt_baseline");
+}
+
+#[tokio::test]
+async fn mlt_interesting_terms_details_key_order_matches_solr() {
+    // The only fixture exercising `interestingTerms`'s trailing position as a
+    // top-level sibling of `match`/`response`.
+    let (app, _dir) = mlt_app().await;
+    let (status, text) = get_text(
+        &app,
+        CORE,
+        &mlt_manifest_query("mlt_interesting_terms_details"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "mlt_interesting_terms_details must be a 200: {text}"
+    );
+    assert_same_key_order(&text, "mlt_interesting_terms_details");
 }
 
 // --- interestingTerms gating -------------------------------------------------
@@ -459,8 +556,9 @@ async fn mlt_specific_params_are_not_rejected_as_unknown() {
 
     let (status, body) = get(
         &app,
-        "mlt?q=id:mlt1&mlt.fl=body,category&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&mlt.minwl=2&\
-         mlt.maxwl=20&mlt.maxqt=10&mlt.boost=true&fl=id,score&rows=5&start=0&wt=json",
+        "mlt?q=id:mlt1&df=body&mlt.fl=body,category&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&\
+         mlt.minwl=2&mlt.maxwl=20&mlt.maxqt=10&mlt.boost=true&mlt.interestingTerms=details&\
+         fl=id,score&rows=5&start=0&wt=json",
     )
     .await;
     assert_eq!(
@@ -468,6 +566,54 @@ async fn mlt_specific_params_are_not_rejected_as_unknown() {
         StatusCode::OK,
         "every mlt.* param in PRD §5's scope must be a registered param, not rejected under \
          strict_params: {body}"
+    );
+}
+
+// --- overwritten docs must not desync doc_freq vs. alive-doc count ---------
+
+#[tokio::test]
+async fn mlt_after_reindexing_overwrites_does_not_panic_or_garbage_score() {
+    // `mlt_idf`'s `doc_count` (`segment_reader.num_docs()`, alive docs only)
+    // can be less than a term's raw `doc_freq` (`Searcher::doc_freq`, which
+    // still counts docs an overwrite deleted from the term dictionary but
+    // has not yet merged away) once any doc has been overwritten —
+    // `add_documents` deletes-then-reinserts on every unique-key collision.
+    // Re-POSTing the same corpus (every doc overwrites itself by `id`)
+    // reproduces that gap without needing segment merges: this must not
+    // panic (subtract-with-overflow) or 500, and the response must still be
+    // a sane, well-formed `/mlt` result.
+    let (app, _dir) = mlt_app().await;
+    // A single overwrite is not enough to force `doc_freq > doc_count` for
+    // any term in this corpus (few enough docs share any one word that one
+    // extra generation of stale postings still leaves `doc_freq` well under
+    // the 20 alive docs) — repost several times so stale postings from
+    // multiple deleted-but-unmerged segments accumulate past `doc_count`.
+    for _ in 0..25 {
+        let (status, body) = common::post_docs(&app, &mlt_corpus()).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "re-indexing (overwriting) the mlt corpus must succeed, got {body}"
+        );
+    }
+
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/mlt after overwriting every doc must not panic or 500, got {body}"
+    );
+    let response = body
+        .get("response")
+        .expect("response must be present for a resolved source doc");
+    assert!(
+        response["numFound"].as_u64().unwrap_or(0) > 0,
+        "the astronomy cluster's loosened mintf/mindf query must still find real matches after \
+         overwriting, got: {body}"
     );
 }
 
@@ -507,11 +653,15 @@ async fn hermetic_mlt_manifest_entries_match_committed_fixtures() {
         // `mlt_fl_rows_start` is the one manifest row requesting `fl=score`;
         // its BM25 magnitude is exempt from exact comparison for the same
         // ratified reason `assert_matches_mlt_fixture_ignoring_score_magnitude`
-        // documents above (PRD ratified-divergence 4).
+        // documents above (PRD ratified-divergence 4). The real (un-blanked)
+        // `maxScore` semantics are still checked directly, so this loop
+        // can't be fooled by a regression that blanking alone would hide.
         let (expected, actual) = if entry.name == "mlt_fl_rows_start" {
+            let normalized_actual = normalize_mlt(actual);
+            assert_mlt_fl_rows_start_maxscore_semantics(&normalized_actual);
             (
                 blank_bm25_score_magnitudes(normalize_mlt(fixture(&entry.name))),
-                blank_bm25_score_magnitudes(normalize_mlt(actual)),
+                blank_bm25_score_magnitudes(normalized_actual),
             )
         } else {
             (normalize_mlt(fixture(&entry.name)), normalize_mlt(actual))

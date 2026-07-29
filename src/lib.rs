@@ -1048,12 +1048,12 @@ async fn mlt(
                 // weight (no `BoostQuery` wrapper at all) otherwise.
                 boost_factor: (params.get("mlt.boost") == Some("true")).then_some(1.0),
             };
-            let mlt_query = state
+            let (mlt_query, _scored_terms) = state
                 .index
                 .mlt_query(addr, mlt_fl.as_deref(), opts)
                 .map_err(|e| {
-                    WfError::internal("wayfinder::DocError", e.to_string()).with_params(&params)
-                })?;
+                WfError::internal("wayfinder::DocError", e.to_string()).with_params(&params)
+            })?;
 
             let mut mlt_hits = state.index.search(&mlt_query, &[], &[]).map_err(|e| {
                 WfError::internal("wayfinder::SearchError", e.to_string()).with_params(&params)
@@ -1097,22 +1097,24 @@ async fn mlt(
         "response": response_value,
     });
 
-    // `interestingTerms` only appears when `mlt.interestingTerms` is a
-    // truthy value (any value other than absent or `false`).
+    // Real Solr's `mlt.interestingTerms` value set is `none | list | details`
+    // (default `none`, which omits the key entirely) — `"false"` is not a
+    // value Solr recognizes at all, so the gate is an exact match on the two
+    // values that turn the key on, not "anything but false".
     //
-    // ponytail: tantivy's public `MoreLikeThis`/`MoreLikeThisQuery` API does
-    // not expose the scored interesting-terms list it builds internally
-    // (`retrieve_terms_from_doc_fields`/`create_score_term` in
-    // `tantivy::query::more_like_this` are private) — only the composed
-    // `BooleanQuery`. This renders an empty array once the key is gated on,
-    // which matches every captured fixture that exercises it (the one
-    // captured case's result set is itself empty, findings 53/55), but does
-    // not compute real weighted-term content. Revisit if tantivy exposes the
-    // scored term list publicly, or a fixture needs real content.
-    if params
-        .get("mlt.interestingTerms")
-        .is_some_and(|v| v != "false")
-    {
+    // ponytail: `CoreIndex::mlt_query` already returns the real scored terms
+    // it built the query from (`_scored_terms` above) — the remaining gap is
+    // not an API limitation, it is that no captured fixture pins the
+    // non-empty wire shape (finding 53: the one fixture that sets
+    // `mlt.interestingTerms=details` also has zero result docs, so its
+    // `interestingTerms` is `[]` regardless of what this renders). This
+    // still renders an empty array, matching every fixture that exercises
+    // the key today; wiring `_scored_terms` into a real per-term shape needs
+    // a fixture with a non-empty result set to pin the shape against first.
+    if matches!(
+        params.get("mlt.interestingTerms"),
+        Some("list") | Some("details")
+    ) {
         body["interestingTerms"] = json!([]);
     }
 

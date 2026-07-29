@@ -93,6 +93,14 @@ fn mlt_is_noise_word(
 /// `/mlt` term scoring weight (mirrors Tantivy's private, `pub(crate)`
 /// `tantivy::query::bm25::idf`, unreachable from outside the crate).
 fn mlt_idf(doc_freq: u64, doc_count: u64) -> Score {
+    // `doc_count` (sum of `segment_reader.num_docs()`, alive docs only) can be
+    // less than `doc_freq` (`Searcher::doc_freq`, which counts the raw term
+    // dictionary and so still includes docs deleted by an overwrite —
+    // `add_documents` deletes-then-reinserts on every unique-key collision)
+    // once a doc has been overwritten. Tantivy's own private `bm25::idf`
+    // asserts `doc_count >= doc_freq`; `saturating_sub` is this file's
+    // equivalent guard against the subtract-with-overflow/garbage-idf that
+    // would otherwise follow.
     let x = ((doc_count - doc_freq) as Score + 0.5) / (doc_freq as Score + 0.5);
     (1.0 + x).ln()
 }
@@ -1312,20 +1320,28 @@ impl CoreIndex {
     /// `MoreLikeThisQuery`/`MoreLikeThisQueryBuilder` are re-exported — and
     /// the builder offers no way to get `boost_factor: None` (Solr's
     /// `mlt.boost=false` default; the builder's own default is always
-    /// `Some(1.0)`, boost permanently on) or a custom stop-word list threaded
-    /// through the same code path as tf/idf tuning. This mirrors Tantivy
-    /// 0.26.1's private algorithm term-for-term (tokenize each mined field
-    /// with its own indexing analyzer, drop noise words, threshold by
-    /// term/doc frequency, score by `tf * idf` with the identical BM25-style
-    /// `idf` formula, keep the top `max_query_terms`), so it should track
-    /// upstream's actual output; revisit if that algorithm becomes public or
-    /// gains a `with_boost_factor(None)` escape hatch.
+    /// `Some(1.0)`, since `MoreLikeThis::boost_factor` itself is private and
+    /// `with_boost_factor(f32)` can only ever produce `Some`). That is the
+    /// one real gap in the public builder API; `with_stop_words` *is* public,
+    /// so the stop-word list alone would not have forced a reimplementation.
+    /// This mirrors Tantivy 0.26.1's private algorithm term-for-term
+    /// (tokenize each mined field with its own indexing analyzer, drop noise
+    /// words, threshold by term/doc frequency, score by `tf * idf` with the
+    /// identical BM25-style `idf` formula, keep the top `max_query_terms`),
+    /// so it should track upstream's actual output; revisit if that
+    /// algorithm becomes public or gains a `with_boost_factor(None)` escape
+    /// hatch.
+    ///
+    /// Returns both the composed query and the scored terms it was built
+    /// from (highest-scored first, already truncated to `max_query_terms`)
+    /// so a caller rendering `mlt.interestingTerms` has real weighted-term
+    /// data to work with rather than needing to re-derive it.
     pub fn mlt_query(
         &self,
         addr: DocAddress,
         field_names: Option<&[String]>,
         opts: MltOptions,
-    ) -> Result<BooleanQuery> {
+    ) -> Result<(BooleanQuery, Vec<(Term, Score)>)> {
         let searcher = self.reader.searcher();
         let doc: TantivyDocument = searcher.doc(addr)?;
         let schema = searcher.schema();
@@ -1404,9 +1420,9 @@ impl CoreIndex {
 
         let best_score = score_terms.first().map_or(1.0, |(_, score)| *score);
         let mut clauses: Vec<(tantivy::query::Occur, Box<dyn Query>)> = Vec::new();
-        for (term, score) in score_terms {
+        for (term, score) in &score_terms {
             let mut clause: Box<dyn Query> = Box::new(tantivy::query::TermQuery::new(
-                term,
+                term.clone(),
                 tantivy::schema::IndexRecordOption::Basic,
             ));
             if let Some(factor) = opts.boost_factor {
@@ -1417,7 +1433,7 @@ impl CoreIndex {
             }
             clauses.push((tantivy::query::Occur::Should, clause));
         }
-        Ok(BooleanQuery::from(clauses))
+        Ok((BooleanQuery::from(clauses), score_terms))
     }
 
     /// Number of documents matching `query`. The counting primitive behind
