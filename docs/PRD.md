@@ -146,8 +146,23 @@ chosen. Nothing may be added here without the same two things.
    which §3 rules out and Tantivy cannot do in place regardless. `[[dynamic_fields]]` is the
    supported way to accept fields not named individually. (issue #10)
 
+4. **`fl=score`'s BM25 float magnitude does not match Solr's; doc ranking order and the wire
+   shape do.** `select_term_scored.json` and `select_quick_scored.json` show Tantivy's BM25
+   score for a doc diverging from Solr's captured BM25 score by a non-constant ~1.9x-2.3x
+   ratio (e.g. `select_term_scored`'s `doc2`: Tantivy ~0.875 vs. Solr's captured 0.457;
+   `select_quick_scored`'s `doc3`: Tantivy ~0.940 vs. Solr's captured 0.413) — the ratio moving
+   per-doc rules out a missing constant factor and points at an internal scoring-formula
+   difference (idf / norm-encoding) between Tantivy's and Solr/Lucene's BM25Similarity, not a
+   wiring bug. Doc *ranking order* already matches Solr exactly for both fixtures. Per
+   `CLAUDE.md`'s compatibility contract ("Wire format only... Never Solr's config format"),
+   Wayfinder's compatibility obligation is to Solr's wire semantics, not to reproducing another
+   engine's internal ranking math bit-for-bit, so `fl=score`'s obligation is: the `score` key is
+   present/positioned/typed correctly and `response.maxScore` is present/typed correctly (both
+   gated on `fl` requesting `score`), and ranking order matches — not that the float values
+   themselves match. (issue #34)
+
 Note that divergence 3 is a difference from the *configset* the reference fixtures were captured
-against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1 and 2 are
+against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, and 4 are
 differences from Solr proper.
 
 ### How this is verified

@@ -30,6 +30,7 @@ use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use serde_json::{Map, Value, json};
+use tantivy::Score;
 use tantivy::query::{EmptyQuery, Occur, Query, QueryClone};
 
 use collector::{SortClause, SortKey};
@@ -472,11 +473,23 @@ async fn select(
         .copied()
         .collect::<Vec<_>>();
 
+    // `fl=score` is what turns scoring output on at all (Solr), so this is
+    // the single check that gates both the per-doc `score` key and
+    // `response.maxScore` below.
+    let wants_score = fl
+        .as_deref()
+        .is_some_and(|fl| fl.iter().any(|f| f == "score"));
+
     let mut docs = Vec::with_capacity(page.len());
-    for (_, addr) in page {
-        docs.push(state.index.render_doc(addr, fl.as_deref()).map_err(|e| {
-            WfError::internal("wayfinder::DocError", e.to_string()).with_params(&params)
-        })?);
+    for (score, addr) in page {
+        docs.push(
+            state
+                .index
+                .render_doc(addr, fl.as_deref(), Some(score))
+                .map_err(|e| {
+                    WfError::internal("wayfinder::DocError", e.to_string()).with_params(&params)
+                })?,
+        );
     }
 
     // `facet=true` gates the whole block; `facet.field` alone does not turn
@@ -532,14 +545,43 @@ async fn select(
     response_header.insert("QTime".to_string(), json!(0));
     response_header.insert("params".to_string(), json!(params.echo()));
 
+    // Key order in the fixtures is `numFound, start, maxScore, numFoundExact,
+    // docs` — `maxScore` sits between `start` and `numFoundExact`, which a
+    // `json!` object literal can't express conditionally, so this is built
+    // the same way `response_header` is above.
+    let mut response = Map::new();
+    response.insert("numFound".to_string(), json!(num_found));
+    response.insert("start".to_string(), json!(start));
+    if wants_score {
+        // ponytail: computed as the max score across the *whole*
+        // (unpaginated) match list, not just the current page — an
+        // unverified choice, not a fixtured fact. Every scored fixture
+        // (`select_term_scored.json`, `select_quick_scored.json`) has
+        // `start=0` with the full result set on one page, so page-max and
+        // global-max are indistinguishable there; no fixture pages a scored
+        // query to tell them apart.
+        //
+        // ponytail: no fixture covers `fl=score` against zero hits, so
+        // whether Solr omits `maxScore` or reports `0.0` there is
+        // unverified; this omits the key entirely on the (untested)
+        // assumption that Solr does the same, mirroring how `docs: []`
+        // still reports a real `numFound: 0` without inventing a score.
+        if let Some(max_score) = hits
+            .iter()
+            .map(|(score, _)| *score)
+            .fold(None, |acc: Option<Score>, s| {
+                Some(acc.map_or(s, |a| a.max(s)))
+            })
+        {
+            response.insert("maxScore".to_string(), json!(max_score));
+        }
+    }
+    response.insert("numFoundExact".to_string(), json!(true));
+    response.insert("docs".to_string(), json!(docs));
+
     let mut body = json!({
         "responseHeader": response_header,
-        "response": {
-            "numFound": num_found,
-            "start": start,
-            "numFoundExact": true,
-            "docs": docs,
-        }
+        "response": response,
     });
 
     if let Some((facet_counts, _)) = facet_result {

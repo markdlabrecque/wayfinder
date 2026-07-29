@@ -187,9 +187,11 @@ above (PRD §8). Two modes, one differ:
   diffs that against the committed fixture, i.e. a fixture-staleness check against the live
   container, not a Wayfinder compatibility check (that is the hermetic mode's job). This matters
   for the self-expiring list below: a divergence that only exists because Wayfinder lacks a
-  feature (e.g. `fl=score`, issue #34) trivially "matches" in live mode on every run, since real
-  Solr is internally consistent with its own past capture — so those entries' self-expiry is
-  decided by the hermetic run only, and live mode just logs them.
+  feature trivially "matches" in live mode on every run, since real Solr is internally
+  consistent with its own past capture — so those entries' self-expiry is decided by the
+  hermetic run only, and live mode just logs them. (`fl=score`, issue #34, used to be this
+  list's example of that; it no longer is, since it landed as a ratified permanent divergence —
+  PRD ratified-divergence 4 — rather than an unbuilt-feature one. See finding 31.)
 
 ### `manifest-errors.tsv` wiring (issue #31)
 
@@ -257,12 +259,15 @@ hand-edit the manifest or fixtures.
 
 `tests/differential.rs::EXPECTED_DIVERGENCES` names manifest entries with a *known, currently
 real* Wayfinder-vs-Solr divergence caused by an unbuilt feature (not a harness bug) — currently
-`ping` (reason below) plus `select_term_scored`/`select_quick_scored` (issue #31/#34, finding
-31: no `fl=score` support). `sort` *ordering* (issue #2) and the seven faceting entries this list
+just `ping` (reason below). `sort` *ordering* (issue #2) and the seven faceting entries this list
 used to carry (`facet.mincount`/`limit`/`missing`/`query`, `json.nl=map`, term-dictionary
 enumeration for the zero/all-filtered facets) were deleted when issues #2/#3 landed and they
-stopped diverging — the mechanism working exactly as designed. Each entry carries a mandatory
-reason naming the owning issue.
+stopped diverging — the mechanism working exactly as designed. `select_term_scored`/
+`select_quick_scored` (issue #31/#34) were here too, for the same reason (no `fl=score`
+support); issue #34 landed `fl=score`, and their remaining divergence (BM25 score magnitude)
+turned out to be a permanent scoring-formula difference rather than an unbuilt feature, so they
+moved to `RANKED_SCORE_VALUE_RATIFIED` (PRD ratified-divergence 4, finding 31) instead of being
+deleted outright. Each entry carries a mandatory reason naming the owning issue.
 
 Note what does **not** belong here: an *accepted, permanent* divergence (finding 15's unknown
 core, finding 16's unfacetable-field 400). Those get their fixtures in `manifest-errors.tsv` and
@@ -672,10 +677,24 @@ relevance queries) and `select_fl_reversed` (`fl=body,id`, see finding 24's upda
     ordered by descending score exactly as they are without `fl=score`, `fl` only adds which
     fields render, never reorders anything (finding 24's `fl`-order lesson generalises: `fl`
     governs field selection, not document order or field order for the fields it does select
-    when unreversed — see the reversed case above). Wayfinder does not implement `fl=score` at
-    all today (it is silently dropped, the same as any other unknown-but-harmless `fl` entry —
-    finding from `select_fl_missing`), so `response.maxScore` never appears and no doc ever
-    carries `score` — tracked as issue #34, and `tests/differential.rs::EXPECTED_DIVERGENCES`
-    carries `select_term_scored`/`select_quick_scored` as self-expiring entries naming it. The
-    ranked-ID-list differ's score-tolerance path (`diff_ranked_ids` in `tests/common/diff.rs`)
-    is now exercised against these real fixtures, not just synthetic id/score pairs.
+    when unreversed — see the reversed case above). **Update (issue #34):** `fl=score` is now
+    implemented — per-doc `score`, correct key position, and `response.maxScore` all render when
+    `fl` requests `score`, gated the same way `fl=*` field selection is. Doc ranking order
+    matches Solr exactly for both fixtures. What does *not* match is the BM25 float's magnitude:
+    Tantivy's own BM25 disagrees with Solr's BM25Similarity by a non-constant ~1.9x-2.3x ratio
+    (an internal scoring-formula difference — idf/norm-encoding — not a wiring gap), so this was
+    ratified as a permanent divergence rather than left as an unbuilt-feature to-do: PRD "Ratified
+    divergences from captured Solr behaviour" entry 4. `tests/differential.rs` reflects the
+    split — `RANKED_SCORE_VALUE_RATIFIED` waives only the `response.docs[*].score` *value*
+    for `select_term_scored`/`select_quick_scored`; doc ranking order and `response.maxScore`'s
+    presence/type are still checked for real, and both entries are gone from
+    `EXPECTED_DIVERGENCES` (which is `ping`-only now). The ranked-ID-list differ's
+    score-tolerance path (`diff_ranked_ids` in `tests/common/diff.rs`) is exercised against these
+    real fixtures, not just synthetic id/score pairs.
+
+42. **`response.maxScore` sits between `start` and `numFoundExact` in Solr's key order.**
+    `select_term_scored.json`/`select_quick_scored.json` show the `response` object as
+    `numFound, start, maxScore, numFoundExact, docs` when `fl` requests `score` — `maxScore`
+    is not appended at the end or led at the front. Wayfinder builds `response` as a `Map`
+    (rather than a `json!` object literal, which can't express a conditional key mid-object) to
+    match this exactly (`src/lib.rs`, around the `response.insert("maxScore", ...)` call).
