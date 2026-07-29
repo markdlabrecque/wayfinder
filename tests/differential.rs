@@ -1245,51 +1245,13 @@ const RANKED_RELEVANCE_ENTRIES: &[&str] =
 // ratified permanently as PRD ratified-divergence 4 and handled by
 // `RANKED_SCORE_VALUE_RATIFIED` above, so both entries are gone from this
 // list.
-// Issue #4 (highlighting) added nine `hl_*` manifest rows against its own
-// dedicated container (`wayfinder-solr-4`, port 8991, same schema/corpus as
-// the canonical `content` core, findings 51+). Wayfinder has no `hl`
-// implementation yet, so `highlighting` is simply absent from every one of
-// its responses where the fixture carries it — an unbuilt-feature to-do,
-// not a harness bug. Delete each entry as its behavior lands.
-const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[
-    (
-        "ping",
-        "`responseHeader.params` carries Solr ping-handler artifacts incl. a per-run `rid` counter no implementation can reproduce; see the same carve-out in `tracer_bullet.rs::ping_reports_ok`",
-    ),
-    (
-        "hl_basic",
-        "issue #4: `hl`/`hl.fl` not implemented, `highlighting` key absent from Wayfinder's response",
-    ),
-    ("hl_snippets_two", "issue #4: `hl.snippets` not implemented"),
-    (
-        "hl_custom_markers",
-        "issue #4: `hl.simple.pre`/`hl.simple.post` not implemented",
-    ),
-    (
-        "hl_fragsize_small",
-        "issue #4: `hl.fragsize` not implemented",
-    ),
-    (
-        "hl_fragsize_truncated",
-        "issue #4: `hl.fragsize` truncation not implemented",
-    ),
-    (
-        "hl_no_field_match",
-        "issue #4: highlighting not implemented; also pins the no-field-match shape (finding 52)",
-    ),
-    (
-        "hl_multi_field_comma",
-        "issue #4: multi-field `hl.fl` (comma-separated) not implemented",
-    ),
-    (
-        "hl_multi_field_space",
-        "issue #4: multi-field `hl.fl` (space-separated) not implemented",
-    ),
-    (
-        "hl_default_fl",
-        "issue #4: default `hl.fl` behavior not implemented",
-    ),
-];
+// the canonical `content` core, findings 52+). `hl`/`hl.fl` and friends are
+// now implemented (`src/highlight.rs`) and every `hl_*` row matches, so all
+// eight entries that were parked here are gone.
+const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[(
+    "ping",
+    "`responseHeader.params` carries Solr ping-handler artifacts incl. a per-run `rid` counter no implementation can reproduce; see the same carve-out in `tracer_bullet.rs::ping_reports_ok`",
+)];
 
 /// The `EXPECTED_DIVERGENCES` reason for `name`, or `None` if `name` is not
 /// in the list. Every entry has a mandatory reason by construction (the list
