@@ -34,10 +34,14 @@ for indexing and retrieval, configured by a TOML file.
 
 ### Eventual target: Drupal Search API
 
-The motivating consumer is Drupal's Search API via `search_api_solr`, but that integration
-is **deliberately deferred to Phase 2** (§4). Building the engine against Solr's own
-documented behaviour first keeps the design honest and avoids contorting the core around one
-client's quirks. §2 explains how the two contracts relate.
+The motivating consumer is Drupal's Search API via `search_api_solr`, and the *integration*
+is deliberately sequenced after v1 (§5). Building the engine against Solr's own documented
+behaviour first keeps the design honest and avoids contorting the core around one client's
+quirks.
+
+The module's request set, however, is more than one client's quirks: it is the best available
+evidence of which Solr features real applications depend on, so capturing it is phase v1.5 and
+feeds the roadmap rather than only the test suite. §2 explains how the two contracts relate.
 
 ### Non-goals
 
@@ -52,12 +56,46 @@ client's quirks. §2 explains how the two contracts relate.
 Wayfinder is compatible with Solr's **wire format** — request parameter names and response
 JSON envelope — and deliberately *not* with its configuration format.
 
-That split is the central design decision. The wire format is what clients depend on and is
-therefore worth matching precisely. The configuration format is what *operators* deal with,
-it is the single worst part of running Solr, and matching it would import the project's
+That split is the central design decision. The configuration format is what *operators* deal
+with, it is the single worst part of running Solr, and matching it would import the project's
 largest source of complexity for no gain.
 
+### The goal is coverage, not identity
+
+Wire compatibility is **an adoption mechanism, not the product**. The target is to serve the
+great majority of what real Solr deployments actually do — call it 75-80% of use cases — so
+that an existing user switches without touching their client. It is not to reproduce Solr's
+response bytes for their own sake.
+
+The distinction matters because two different things get called "Solr compatibility":
+
+- **Solr as a design teacher.** Twenty-one years of accumulated judgment about what a search
+  backend needs: the field-type and analyzer model, what faceting has to return, `mm`'s
+  conditional grammar, commit-visibility semantics, missing-values-last on sort. This is the
+  valuable inheritance, it is why the engine is built against Solr's documented behaviour
+  first, and Wayfinder keeps it regardless of what happens to the wire.
+- **Solr as a wire protocol.** Param names and envelope shape. Much less of this is wisdom
+  than it appears — `facet_fields` as a flat alternating name/count array is a 2006 decision
+  nobody could undo, not an insight. Reproducing it buys client compatibility and nothing else.
+
+Consequences, and they are the point of this section:
+
+1. **Fidelity is weighted by what clients exercise.** A response path a real client generates
+   is held exactly. A path no client reaches is worth matching only if it is cheap. The
+   differential harness (§7) is evidence that the exercised paths work — not a claim of
+   byte-identity across Solr's whole surface.
+2. **Divergence on the merits is policy, not apology.** Where Solr's captured behaviour is
+   actively worse for clients, Wayfinder may depart from it — recorded in the ratified list
+   below, with its fixture and its reason. That list is a design record, not a confession.
+3. **Coverage has to be measurable or it will drift.** "75-80%" is not an assertion, it is a
+   number to compute; the instrument is in §5's Phases notes.
+
+None of this loosens the rule that an *unintended* difference from a captured fixture is a bug.
+Divergence is a decision someone makes and writes down, never something a normaliser absorbs.
+
 ### What must match exactly
+
+For the request and response paths real clients exercise:
 
 - **Response envelope.** `responseHeader{status, QTime, params}`,
   `response{numFound, start, numFoundExact, docs}`, `facet_counts{facet_queries,
@@ -171,12 +209,14 @@ Differential testing against a real Solr, which needs no client and no trace —
 and a query set. Run both, diff the JSON, fail on any difference outside a normaliser for
 legitimately variable fields (`QTime`, timestamps, float tolerance on scores). Details in §7.
 
-### The Search API contract, later
+### The Search API contract, next
 
-`search_api_solr` generates a Solr config set and issues a bounded set of requests. When
-Phase 2 begins, capture both — the generated `schema.xml` and an HTTP trace of a real site
-against a real Solr — and freeze them as fixtures. That is a discovered contract rather than
-a guessed one, and it becomes the Phase 2 conformance suite.
+`search_api_solr` generates a Solr config set and issues a bounded set of requests. Capture
+both — the generated `schema.xml` and an HTTP trace of a real site against a real Solr — and
+freeze them as fixtures. That is a discovered contract rather than a guessed one, and it serves
+twice over: as the v2 conformance suite, and as the coverage denominator this section's target
+is measured against. It is phase v1.5 (§5) for that reason — the scope it defines is needed
+before the work it scopes.
 
 Importantly, that capture is expected to require **no XML parsing in Wayfinder** (§3).
 
@@ -390,10 +430,29 @@ conditional lists (`2<-1 5<80%`). Implement it fully; it is a small self-contain
 |---|---|
 | **POC** | The tracer bullet, §6 |
 | **v1** | The table above + edismax + the differential harness |
-| **v2 — Search API** | Contract capture (§2), `search-api.toml` preset, `/admin/system` version handshake, `/admin/luke`, `/terms`, `/admin/mbeans`, whatever the trace turns up |
+| **v1.5 — the capture** | The `search_api_solr` contract capture (§2), pulled ahead of the rest of v2: generated config set + HTTP trace of a real Drupal site, frozen as fixtures, plus the coverage denominator computed from them |
+| **v2 — Search API** | `search_api_wayfinder` connector module, `search-api.toml` preset, `/admin/system` version handshake, then whichever of `/admin/luke`, `/terms`, `/admin/mbeans` the trace shows the module actually calls |
 | **v3** | Result caches + autowarm, spellcheck/suggester, grouping/collapse, atomic updates + `_version_` optimistic concurrency |
 | **v4** | Function queries (`bf`, `{!func}`), spatial, snapshot-based read replicas |
 | **Deep roadmap** | Distributed / sharded search, SolrCloud. The majority of Solr's complexity and directly opposed to the operational-simplicity goal. |
+
+**Why the capture moved to its own phase.** `search_api_solr` is not merely the motivating
+client — it is a fifteen-year empirical answer to *which subset of Solr real applications use*,
+validated across tens of thousands of sites. Under §2's coverage framing that makes the capture
+a **scoping input, not just a conformance suite**: it decides what to build, not only what to
+test. Two things follow. First, it has to land before the endpoints it would justify, so v2's
+endpoint list is deliberately conditional — building `/terms` or `/admin/mbeans` because Solr
+has them is the old framing. Second, it informs work already in flight: the module leans on
+edismax, so the trace bears on issue #7's `qf`/`pf`/`mm` handling.
+
+Capture against **stock upstream `search_api_solr`, unmodified** — the connector module is the
+extension point and must not be in the loop while ground truth is being established.
+
+**The coverage instrument.** The capture yields the denominator: the set of params, endpoints,
+and response fields the module can emit across its configured features. Coverage is the fraction
+of that set Wayfinder serves, computed from the fixtures rather than asserted. Report it
+alongside the differential results (§8). A number that can be recomputed is what keeps
+"75-80%" from becoming a slogan.
 
 Notes on deferred items:
 
@@ -554,8 +613,9 @@ operational simplicity are where this project wins, and those are the primary go
 1. **Multi-core vs single-core-per-process.** Multi-core is more Solr-like; one process per
    core is simpler and better matches the operational-simplicity goal. Lean
    single-core-per-process unless something forces otherwise.
-2. **Which Solr version to report** from `/admin/system`. Phase 2 question — determined by
-   which feature gates in `search_api_solr` are cheapest to satisfy. Report the lowest version
+2. **Which Solr version to report** from `/admin/system`. Answered by the v1.5 capture —
+   determined by which feature gates in `search_api_solr` are cheapest to satisfy, and by which
+   `search_api_solr` release the capture pins. Report the lowest version
    whose feature set is fully implemented rather than claiming a high one and failing on
    unsupported parameters.
 3. ~~**Unknown parameters: reject or ignore?**~~ **Resolved by the reference capture:** Solr
