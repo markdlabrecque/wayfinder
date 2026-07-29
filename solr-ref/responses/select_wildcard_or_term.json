@@ -1,0 +1,33 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2,
+    "params":{
+      "q":"lazy OR *:*",
+      "df":"body",
+      "fl":"id,body",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"doc2",
+      "body":"a lazy afternoon in the garden"
+    },{
+      "id":"doc1",
+      "body":"the quick brown fox jumps over the lazy dog"
+    },{
+      "id":"doc3",
+      "body":"quick thinking saves the day"
+    },{
+      "id":"doc4",
+      "body":"dogs and cats living together"
+    },{
+      "id":"doc5",
+      "body":"nothing much here at all"
+    }]
+  }
+}

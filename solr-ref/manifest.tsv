@@ -55,3 +55,6 @@ facet_query_with_fq	200	select?q=*:*&fq=category:classic&rows=0&facet=true&facet
 select_term_scored	200	select?q=lazy&df=body&fl=id,score&rows=5&wt=json
 select_quick_scored	200	select?q=quick&df=body&fl=id,score&rows=5&wt=json
 select_fl_reversed	200	select?q=*:*&rows=2&fl=body,id&wt=json
+select_wildcard_and_term	200	select?q=*:*+AND+lazy&df=body&fl=id,body&wt=json
+select_wildcard_or_term	200	select?q=lazy+OR+*:*&df=body&fl=id,body&wt=json
+select_wildcard_minus_term	200	select?q=*:*+-lazy&df=body&fl=id,body&wt=json
