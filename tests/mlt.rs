@@ -163,6 +163,54 @@ fn assert_matches_mlt_fixture(actual: Value, fixture_name: &str) {
     );
 }
 
+/// Recursively blanks every `score`/`maxScore` value to `null`. PRD
+/// ratified-divergence 4 (also `tests/differential.rs`'s
+/// `RANKED_SCORE_VALUE_RATIFIED`, applied there to `select_term_scored`/
+/// `select_quick_scored`): Tantivy's BM25 magnitude is a real,
+/// permanently-accepted scoring-formula divergence from Solr/Lucene's
+/// BM25Similarity (observed here as a non-constant ~2.0x-2.2x ratio across
+/// `mlt_fl_rows_start`'s four scored docs) — ranking order and every other
+/// field still must match exactly, but the raw float is out of scope for
+/// exact-equality fixture comparison. `diff()`'s own per-key `score`
+/// tolerance (`score_tolerance() == 1e-3`) is for float/rounding noise, not a
+/// magnitude difference this large, so it does not help here.
+fn blank_bm25_score_magnitudes(mut value: Value) -> Value {
+    match &mut value {
+        Value::Object(map) => {
+            for (key, v) in map.iter_mut() {
+                if key == "score" || key == "maxScore" {
+                    *v = Value::Null;
+                } else {
+                    let taken = std::mem::take(v);
+                    *v = blank_bm25_score_magnitudes(taken);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                let taken = std::mem::take(item);
+                *item = blank_bm25_score_magnitudes(taken);
+            }
+        }
+        _ => {}
+    }
+    value
+}
+
+/// Same as `assert_matches_mlt_fixture`, but for fixtures that request
+/// `fl=score`: doc set, order, and every non-score field must still match
+/// the fixture exactly; `score`/`maxScore` values are blanked first per
+/// `blank_bm25_score_magnitudes`.
+fn assert_matches_mlt_fixture_ignoring_score_magnitude(actual: Value, fixture_name: &str) {
+    let expected = blank_bm25_score_magnitudes(normalize_mlt(fixture(fixture_name)));
+    let actual = blank_bm25_score_magnitudes(normalize_mlt(actual));
+    assert_eq!(
+        actual, expected,
+        "response for fixture `{fixture_name}` did not match modulo QTime / _version_ / _root_ / \
+         BM25 score magnitude (PRD ratified-divergence 4)"
+    );
+}
+
 // --- basic envelope / status ------------------------------------------------
 
 #[tokio::test]
@@ -299,7 +347,12 @@ async fn mlt_fl_rows_start_paginates_the_similar_docs_result_set() {
     // per-doc `score` plus a top-level `maxScore` once `fl` includes `score`
     // — `response.maxScore` is the corpus-wide max, not recomputed over the
     // returned page (PRD ratified-divergence 4's `/select` semantics extend
-    // here).
+    // here). The raw score magnitude itself is exempt from exact-equality
+    // comparison for the same reason `select_term_scored`/`select_quick_scored`
+    // are in `tests/differential.rs`'s `RANKED_SCORE_VALUE_RATIFIED`
+    // (Tantivy's BM25 vs. Solr/Lucene's BM25Similarity is a real, permanent,
+    // ratified scoring-formula divergence, not a wiring bug) — doc set,
+    // order, and every other field still must match exactly.
     let (app, _dir) = mlt_app().await;
     let (status, body) = get(
         &app,
@@ -307,7 +360,7 @@ async fn mlt_fl_rows_start_paginates_the_similar_docs_result_set() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_matches_mlt_fixture(body, "mlt_fl_rows_start");
+    assert_matches_mlt_fixture_ignoring_score_magnitude(body, "mlt_fl_rows_start");
 }
 
 // --- interestingTerms gating -------------------------------------------------
@@ -451,8 +504,18 @@ async fn hermetic_mlt_manifest_entries_match_committed_fixtures() {
             continue;
         }
 
-        let expected = normalize_mlt(fixture(&entry.name));
-        let actual = normalize_mlt(actual);
+        // `mlt_fl_rows_start` is the one manifest row requesting `fl=score`;
+        // its BM25 magnitude is exempt from exact comparison for the same
+        // ratified reason `assert_matches_mlt_fixture_ignoring_score_magnitude`
+        // documents above (PRD ratified-divergence 4).
+        let (expected, actual) = if entry.name == "mlt_fl_rows_start" {
+            (
+                blank_bm25_score_magnitudes(normalize_mlt(fixture(&entry.name))),
+                blank_bm25_score_magnitudes(normalize_mlt(actual)),
+            )
+        } else {
+            (normalize_mlt(fixture(&entry.name)), normalize_mlt(actual))
+        };
         let report = diff(&expected, &actual);
         if !report.diffs.is_empty() {
             failures.push(format!("{}: {:?}", entry.name, report.diffs));

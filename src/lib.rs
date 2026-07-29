@@ -94,6 +94,29 @@ const SELECT_PARAMS: &[&str] = &[
 /// `commitWithin` / `overwrite` / `softCommit` landed with #9.
 const UPDATE_PARAMS: &[&str] = &["commit", "commitWithin", "overwrite", "softCommit", "wt"];
 const PING_PARAMS: &[&str] = &["wt"];
+/// `/mlt` params in scope for issue #6 (PRD §5's MoreLikeThis row). `q`
+/// selects the source doc with the same query-parsing semantics as
+/// `/select`'s `q` (hence `df` alongside it); `fl`/`rows`/`start` page the
+/// similar-docs result set exactly as `/select` does. Out of scope, per the
+/// task spec: `mlt=true` as a `/select` search component, and content-stream
+/// MLT.
+const MLT_PARAMS: &[&str] = &[
+    "q",
+    "df",
+    "fl",
+    "rows",
+    "start",
+    "mlt.fl",
+    "mlt.mintf",
+    "mlt.mindf",
+    "mlt.maxdf",
+    "mlt.minwl",
+    "mlt.maxwl",
+    "mlt.maxqt",
+    "mlt.boost",
+    "mlt.interestingTerms",
+    "wt",
+];
 
 /// Builds the Wayfinder HTTP app for a single core with all server-config
 /// defaults (PRD §6). Use `app_with_config` to supply a config file.
@@ -129,6 +152,7 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
     let router = Router::new()
         .route("/solr/{core}/update", any(update))
         .route("/solr/{core}/select", any(select))
+        .route("/solr/{core}/mlt", any(mlt))
         .route("/solr/{core}/admin/ping", any(ping));
 
     // Test-only, never in a default/release build (#39): a route that always
@@ -893,6 +917,203 @@ async fn select(
 
     if let Some(highlighting) = highlighting_result {
         body["highlighting"] = highlighting;
+    }
+
+    Ok(axum::Json(body).into_response())
+}
+
+/// `GET /solr/<core>/mlt` (issue #6, PRD §5). `q` resolves the source
+/// document the same way `/select`'s `q` does; `mlt.fl` names which stored
+/// fields to mine for interesting terms (every declared field if absent);
+/// `fl`/`rows`/`start` page the similar-docs result set exactly as
+/// `/select` does. See `docs/solr-ref-findings.md` findings 51-58 for the
+/// captured envelope shape this mirrors.
+async fn mlt(
+    State(state): State<Arc<AppState>>,
+    AxPath(core): AxPath<String>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, WfError> {
+    let params = Params::parse(query.as_deref().unwrap_or(""));
+    check_core(&state, &core, &params, Envelope::WithParams)?;
+    check_params(&state, MLT_PARAMS, &params)?;
+
+    let default_field = params
+        .get("df")
+        .unwrap_or(&state.index.wf_schema.core.default_field)
+        .to_string();
+
+    let fl: Option<Vec<String>> = params
+        .get("fl")
+        .map(|fl| fl.split(',').map(|s| s.trim().to_string()).collect());
+    let wants_score = fl
+        .as_deref()
+        .is_some_and(|fl| fl.iter().any(|f| f == "score"));
+
+    let start: usize = params
+        .get("start")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let rows: usize = params
+        .get("rows")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10)
+        .min(state.config.query.rows_limit);
+
+    // `q` resolves the source document exactly as `/select`'s `q` does — no
+    // `q` matches nothing (findings fact per `/select`, extended here rather
+    // than defaulting to `*:*`).
+    let hits = match params.get("q") {
+        None => Vec::new(),
+        Some(q) => {
+            let query = state.index.parse_query(q, &default_field).map_err(|e| {
+                WfError::bad_request("wayfinder::SyntaxError", e.to_string()).with_params(&params)
+            })?;
+            state.index.search(query.as_ref(), &[], &[]).map_err(|e| {
+                WfError::internal("wayfinder::SearchError", e.to_string()).with_params(&params)
+            })?
+        }
+    };
+
+    // Solr's `/mlt` resolves exactly one source document from `q` (the top
+    // hit) — `match` reports the real `numFound` for `q` but only ever
+    // renders that one doc (every captured fixture has `match.numFound: 1`
+    // with a one-element `docs`; `match.numFound: 0` with an empty `docs`
+    // when `q` matched nothing, finding 54).
+    let source = hits.first().copied();
+
+    let max_score = |hits: &[(Score, tantivy::DocAddress)]| {
+        hits.iter()
+            .map(|(score, _)| *score)
+            .fold(None, |acc: Option<Score>, s| {
+                Some(acc.map_or(s, |a| a.max(s)))
+            })
+    };
+
+    let mut match_block = Map::new();
+    match_block.insert("numFound".to_string(), json!(hits.len()));
+    match_block.insert("start".to_string(), json!(0));
+    if wants_score && let Some(score) = max_score(&hits) {
+        match_block.insert("maxScore".to_string(), json!(score));
+    }
+    match_block.insert("numFoundExact".to_string(), json!(true));
+    let match_docs = match source {
+        Some((score, addr)) => vec![
+            state
+                .index
+                .render_doc(addr, fl.as_deref(), Some(score))
+                .map_err(|e| {
+                    WfError::internal("wayfinder::DocError", e.to_string()).with_params(&params)
+                })?,
+        ],
+        None => Vec::new(),
+    };
+    match_block.insert("docs".to_string(), json!(match_docs));
+
+    // `response` is the literal JSON `null` when `q` matched no source
+    // document at all (finding 54) — not the empty-object shape used below
+    // for a source doc with no interesting terms.
+    let response_value: Value = match source {
+        None => Value::Null,
+        Some((_, addr)) => {
+            let mlt_fl: Option<Vec<String>> = params
+                .get("mlt.fl")
+                .map(|fl| fl.split(',').map(|s| s.trim().to_string()).collect());
+
+            // Solr's defaults: mintf=2, mindf=5, maxqt=25, no word-length or
+            // max-doc-frequency gate, boost=false (equal-weighted terms).
+            let opts = core_index::MltOptions {
+                min_term_frequency: Some(
+                    params
+                        .get("mlt.mintf")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(2),
+                ),
+                min_doc_frequency: Some(
+                    params
+                        .get("mlt.mindf")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(5),
+                ),
+                max_doc_frequency: params.get("mlt.maxdf").and_then(|s| s.parse().ok()),
+                max_query_terms: Some(
+                    params
+                        .get("mlt.maxqt")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(25),
+                ),
+                min_word_length: params.get("mlt.minwl").and_then(|s| s.parse().ok()),
+                max_word_length: params.get("mlt.maxwl").and_then(|s| s.parse().ok()),
+                // Tantivy's own boost weighting (relative term score, best
+                // term normalised to 1.0) only when `mlt.boost=true`; equal
+                // weight (no `BoostQuery` wrapper at all) otherwise.
+                boost_factor: (params.get("mlt.boost") == Some("true")).then_some(1.0),
+            };
+            let mlt_query = state
+                .index
+                .mlt_query(addr, mlt_fl.as_deref(), opts)
+                .map_err(|e| {
+                    WfError::internal("wayfinder::DocError", e.to_string()).with_params(&params)
+                })?;
+
+            let mut mlt_hits = state.index.search(&mlt_query, &[], &[]).map_err(|e| {
+                WfError::internal("wayfinder::SearchError", e.to_string()).with_params(&params)
+            })?;
+            // The seed document itself is not a "similar" result.
+            mlt_hits.retain(|(_, a)| *a != addr);
+
+            let num_found = mlt_hits.len();
+            let page: Vec<_> = mlt_hits.iter().skip(start).take(rows).copied().collect();
+            let mut docs = Vec::with_capacity(page.len());
+            for (score, addr) in page {
+                docs.push(
+                    state
+                        .index
+                        .render_doc(addr, fl.as_deref(), Some(score))
+                        .map_err(|e| {
+                            WfError::internal("wayfinder::DocError", e.to_string())
+                                .with_params(&params)
+                        })?,
+                );
+            }
+
+            let mut response = Map::new();
+            response.insert("numFound".to_string(), json!(num_found));
+            response.insert("start".to_string(), json!(start));
+            if wants_score && let Some(score) = max_score(&mlt_hits) {
+                response.insert("maxScore".to_string(), json!(score));
+            }
+            response.insert("numFoundExact".to_string(), json!(true));
+            response.insert("docs".to_string(), json!(docs));
+            Value::Object(response)
+        }
+    };
+
+    let mut body = json!({
+        "responseHeader": {
+            "status": 0,
+            "QTime": 0,
+        },
+        "match": match_block,
+        "response": response_value,
+    });
+
+    // `interestingTerms` only appears when `mlt.interestingTerms` is a
+    // truthy value (any value other than absent or `false`).
+    //
+    // ponytail: tantivy's public `MoreLikeThis`/`MoreLikeThisQuery` API does
+    // not expose the scored interesting-terms list it builds internally
+    // (`retrieve_terms_from_doc_fields`/`create_score_term` in
+    // `tantivy::query::more_like_this` are private) — only the composed
+    // `BooleanQuery`. This renders an empty array once the key is gated on,
+    // which matches every captured fixture that exercises it (the one
+    // captured case's result set is itself empty, findings 53/55), but does
+    // not compute real weighted-term content. Revisit if tantivy exposes the
+    // scored term list publicly, or a fixture needs real content.
+    if params
+        .get("mlt.interestingTerms")
+        .is_some_and(|v| v != "false")
+    {
+        body["interestingTerms"] = json!([]);
     }
 
     Ok(axum::Json(body).into_response())

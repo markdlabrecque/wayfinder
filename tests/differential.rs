@@ -1281,6 +1281,17 @@ async fn hermetic_whole_query_set_matches_committed_fixtures() {
     let mut failures = Vec::new();
     eprintln!("--- differential run: every manifest entry ---");
     for entry in &entries {
+        // `mlt_*` rows need the dedicated 20-doc MLT corpus (real shared
+        // vocabulary across topic clusters), not this loop's 5-doc
+        // tracer-bullet corpus (`indexed_app()`) — same rationale as
+        // `FACETS_SCHEMA_TOML` above for `manifest-errors.tsv` rows that need
+        // a non-canonical corpus. `tests/mlt.rs`'s own
+        // `hermetic_mlt_manifest_entries_match_committed_fixtures` runs these
+        // ten rows against that corpus instead, so this is not lost
+        // coverage, just routed to the right harness (issue #6).
+        if entry.name.starts_with("mlt_") {
+            continue;
+        }
         let (status, actual) = get(&app, &entry.path).await;
         let divergence_reason = expected_divergence_reason(&entry.name);
 
