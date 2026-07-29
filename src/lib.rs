@@ -54,8 +54,7 @@ struct AppState {
 /// #3; still absent from it, and so still unlisted: `facet.method`,
 /// `facet.prefix`, `facet.pivot`, interval and heatmap faceting,
 /// `facet.range.other` / `.include` / `.hardend`, and `f.<field>.facet.*`
-/// per-field overrides. Also still missing, waiting on their issues:
-/// `commitWithin` / `overwrite` / `softCommit` (#9).
+/// per-field overrides.
 const SELECT_PARAMS: &[&str] = &[
     "q",
     "df",
@@ -78,7 +77,8 @@ const SELECT_PARAMS: &[&str] = &[
     "sort",
     "wt",
 ];
-const UPDATE_PARAMS: &[&str] = &["commit", "wt"];
+/// `commitWithin` / `overwrite` / `softCommit` landed with #9.
+const UPDATE_PARAMS: &[&str] = &["commit", "commitWithin", "overwrite", "softCommit", "wt"];
 const PING_PARAMS: &[&str] = &["wt"];
 
 /// Builds the Wayfinder HTTP app for a single core with all server-config
@@ -148,9 +148,12 @@ fn check_core(
 }
 
 /// Rejects methods Solr rejects on `/update`, with the bare no-`responseHeader`
-/// envelope Solr uses for it (`err_update_put.json`).
+/// envelope Solr uses for it (`err_update_put.json`). GET is not a method
+/// error (finding 47) — Solr serves it, either 400ing on the empty body
+/// (`missing content stream`) or committing if only asked to, both handled in
+/// `update` itself, not here.
 fn check_update_method(method: &Method) -> Result<(), WfError> {
-    if method != Method::POST {
+    if method != Method::POST && method != Method::GET {
         return Err(WfError::bad_request(
             "wayfinder::UnsupportedMethod",
             format!("Unsupported method: {method} for request /update"),
@@ -352,6 +355,100 @@ async fn ping(
     Ok(axum::Json(body).into_response())
 }
 
+/// The parsed shape of an `/update` POST body: either form Solr accepts.
+/// `add_docs` holds one JSON doc object per add (from either the bare-array
+/// form or a `{"add":{"doc":{...}}}` command); `delete_ids`/`delete_queries`
+/// and `commit` come only from the command-object form, since the bare-array
+/// form is adds-only (existing, pre-#9 behaviour, unchanged).
+#[derive(Default)]
+struct UpdateCommands {
+    add_docs: Vec<Value>,
+    delete_ids: Vec<String>,
+    delete_queries: Vec<String>,
+    commit: bool,
+}
+
+/// Parses a `/update` POST body into add/delete/commit commands (finding 46).
+/// Two shapes: the pre-#9 bare JSON array of docs (all adds, unchanged), and
+/// Solr's command-object form — `{"add":{"doc":{...}}, "delete":{"id":...} |
+/// [...] | {"query":"..."}, "commit":{}}`. Every key present in a
+/// command-object body executes; the mixed-command fixture
+/// (`update_mixed_commands.json`) has an add and a delete on independent ids,
+/// so any execution order passes — `update` below just does adds, then
+/// deletes-by-id, then deletes-by-query, then commit.
+///
+/// ponytail: `serde_json`'s `Value::Object` collapses a duplicate JSON key to
+/// the last occurrence (legal in Solr's own hand-rolled parser, but
+/// unobserved — no fixture repeats a command key), so that shape is out of
+/// scope per the task spec.
+fn parse_update_commands(body: &[u8]) -> Result<UpdateCommands, String> {
+    let value: Value =
+        serde_json::from_slice(body).map_err(|e| format!("invalid JSON body: {e}"))?;
+    let mut commands = UpdateCommands::default();
+    match value {
+        Value::Array(docs) => commands.add_docs = docs,
+        Value::Object(map) => {
+            for (key, val) in map {
+                match key.as_str() {
+                    "add" => {
+                        let doc = val
+                            .get("doc")
+                            .cloned()
+                            .ok_or_else(|| "\"add\" command is missing \"doc\"".to_string())?;
+                        commands.add_docs.push(doc);
+                    }
+                    "delete" => match val {
+                        Value::Array(ids) => {
+                            for id in ids {
+                                let id = id.as_str().ok_or_else(|| {
+                                    "\"delete\" id list entries must be strings".to_string()
+                                })?;
+                                commands.delete_ids.push(id.to_string());
+                            }
+                        }
+                        Value::Object(ref dm) if dm.contains_key("id") => {
+                            let id = dm["id"]
+                                .as_str()
+                                .ok_or_else(|| "\"delete.id\" must be a string".to_string())?;
+                            commands.delete_ids.push(id.to_string());
+                        }
+                        Value::Object(ref dm) if dm.contains_key("query") => {
+                            let q = dm["query"]
+                                .as_str()
+                                .ok_or_else(|| "\"delete.query\" must be a string".to_string())?;
+                            commands.delete_queries.push(q.to_string());
+                        }
+                        other => {
+                            return Err(format!("unsupported \"delete\" command shape: {other}"));
+                        }
+                    },
+                    "commit" => commands.commit = true,
+                    other => return Err(format!("unsupported update command `{other}`")),
+                }
+            }
+        }
+        other => {
+            return Err(format!(
+                "update body must be a JSON array of documents or a command object, got {other}"
+            ));
+        }
+    }
+    Ok(commands)
+}
+
+/// The bare `{"responseHeader":{"status":0,"QTime":0}}` envelope every
+/// `/update` success answers with, for every command shape (finding 46) —
+/// never a `params` echo, never per-command keys.
+fn update_success() -> Response {
+    axum::Json(json!({
+        "responseHeader": {
+            "status": 0,
+            "QTime": 0,
+        }
+    }))
+    .into_response()
+}
+
 async fn update(
     State(state): State<Arc<AppState>>,
     AxPath(core): AxPath<String>,
@@ -369,37 +466,77 @@ async fn update(
     check_core(&state, &core, &params, Envelope::NoParams)?;
     check_params(&state, UPDATE_PARAMS, &params).map_err(|e| e.envelope(Envelope::NoParams))?;
 
-    let docs: Value = serde_json::from_slice(&body).map_err(|e| {
-        update_err(
-            "wayfinder::BadUpdateBody",
-            format!("invalid JSON body: {e}"),
-        )
-    })?;
-    let docs = docs.as_array().cloned().ok_or_else(|| {
-        update_err(
-            "wayfinder::BadUpdateBody",
-            "update body must be a JSON array of documents".to_string(),
-        )
-    })?;
+    // GET carries no body (finding 47): it is not a method error, but a
+    // *content-stream* one — 400 "missing content stream" unless the only
+    // thing being asked is a commit, which really commits and answers 200.
+    if method == Method::GET {
+        let commit_requested =
+            params.get("commit") == Some("true") || params.get("softCommit") == Some("true");
+        if !commit_requested {
+            return Err(update_err(
+                "wayfinder::MissingContentStream",
+                "missing content stream".to_string(),
+            ));
+        }
+        state.index.commit().map_err(|e| {
+            WfError::internal("wayfinder::CommitError", e.to_string()).envelope(Envelope::NoParams)
+        })?;
+        return Ok(update_success());
+    }
 
-    state
-        .index
-        .add_documents(&docs)
-        .map_err(|e| update_err("wayfinder::IndexError", e.to_string()))?;
+    // `overwrite=false` skips the default replace-by-uniqueKey step
+    // (finding 48b); every other value (including absent) is Solr's default
+    // `overwrite=true`.
+    let overwrite = params.get("overwrite") != Some("false");
 
-    if params.get("commit") == Some("true") {
+    let commands =
+        parse_update_commands(&body).map_err(|msg| update_err("wayfinder::BadUpdateBody", msg))?;
+
+    if !commands.add_docs.is_empty() {
+        state
+            .index
+            .add_documents(&commands.add_docs, overwrite)
+            .map_err(|e| update_err("wayfinder::IndexError", e.to_string()))?;
+    }
+    if !commands.delete_ids.is_empty() {
+        state
+            .index
+            .delete_by_ids(&commands.delete_ids)
+            .map_err(|e| update_err("wayfinder::IndexError", e.to_string()))?;
+    }
+    for query in &commands.delete_queries {
+        state
+            .index
+            .delete_by_query(query, &state.index.wf_schema.core.default_field)
+            .map_err(|e| update_err("wayfinder::IndexError", e.to_string()))?;
+    }
+
+    // `commit=true` (existing) and `softCommit=true` both mean "commit and
+    // reload now" — per the task spec's softCommit note, Tantivy has no
+    // in-memory-searchable segment for a real soft commit to leave
+    // uncommitted-but-visible, so Wayfinder's softCommit is a hard commit
+    // too (wire-visible behaviour matches Solr; durability is only ever
+    // stronger, never weaker). A `commit` key in the body does the same.
+    let commit_now = commands.commit
+        || params.get("commit") == Some("true")
+        || params.get("softCommit") == Some("true");
+    if commit_now {
         state.index.commit().map_err(|e| {
             WfError::internal("wayfinder::CommitError", e.to_string()).envelope(Envelope::NoParams)
         })?;
     }
+    // `commitWithin=<ms>` schedules a commit at most that many ms out — also
+    // a HARD commit (+ reload) in Wayfinder, same divergence note as
+    // `softCommit` above (task spec: "Same for commitWithin: it schedules a
+    // HARD commit, where Solr's default is soft").
+    if let Some(ms) = params
+        .get("commitWithin")
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        state.index.schedule_commit(ms);
+    }
 
-    Ok(axum::Json(json!({
-        "responseHeader": {
-            "status": 0,
-            "QTime": 0,
-        }
-    }))
-    .into_response())
+    Ok(update_success())
 }
 
 async fn select(

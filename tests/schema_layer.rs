@@ -297,12 +297,14 @@ async fn copy_field_makes_source_text_searchable_on_dest() {
     let dir = TempDir::new().expect("temp dir");
     let app = common::app_with_schema(dir.path(), FULL_SCHEMA_TOML).expect("app builds");
 
-    // `zarquon` appears only in `title`, which copy-fields into `body`.
-    let (status, _) = common::post_docs(
-        &app,
-        &json!([{"id":"c1","title":"zarquon rising","body":"unrelated words"}]),
-    )
-    .await;
+    // `zarquon` appears only in `title`, which copy-fields into `body`. No
+    // direct `body` value here (issue #9): `body` is single-valued
+    // (`multi_valued` unset), and the copy-field destination gets the same
+    // single-valued enforcement as any other field across its combined own
+    // + copied values (finding 48e) — a direct `body` value here would
+    // collide with the copied `title` value and 400, which is not what this
+    // test is about.
+    let (status, _) = common::post_docs(&app, &json!([{"id":"c1","title":"zarquon rising"}])).await;
     assert_eq!(status, StatusCode::OK, "indexing must succeed");
 
     // `body` is the default field, so a bare term hits the copy-field target.

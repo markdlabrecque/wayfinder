@@ -19,6 +19,7 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::http::StatusCode;
@@ -364,6 +365,112 @@ async fn facets33_app() -> (Router, TempDir) {
     (app, dir)
 }
 
+// --- duplicated schema/corpus for manifest-errors.tsv's `update9` rows
+// (issue #9). Mirrors `tests/update_pipeline.rs::UPDATE9_SCHEMA_TOML` /
+// `update9_corpus` exactly — same duplication precedent as `sortdebt`/
+// `facets33` above. Like `sortdebt` (and unlike `facets`/`keyorder`/
+// `facets33`), this schema names its core `update9` literally, matching the
+// manifest-errors rows' own request paths verbatim, so `update9/...` rows are
+// NOT rewritten in `app_and_request_url` below.
+//
+// The `update9/...` rows replay IN MANIFEST ORDER against this ONE app
+// instance below (same statefulness `sortdebt`'s rows rely on for their own
+// ordering-sensitive assertions), which is exactly what lets
+// `update_select_after_delete_id` etc. reproduce the mutation sequence
+// `solr-ref/capture.sh`'s tail block captured.
+
+const UPDATE9_SCHEMA_TOML: &str = r#"
+[core]
+name = "update9"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "category"
+type = "string"
+stored = true
+fast = true
+multi_valued = true
+
+[[fields]]
+name = "title"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "nick"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "alias"
+type = "string"
+stored = true
+fast = true
+
+[[copy_fields]]
+source = "nick"
+dest = "alias"
+
+[[dynamic_fields]]
+pattern = "*_dt"
+type = "date"
+stored = true
+fast = true
+"#;
+
+/// The exact `u1..u5` seed corpus `capture.sh`'s reset step reseeds before
+/// every run — identical to `tests/update_pipeline.rs::update9_corpus`.
+fn update9_corpus() -> Value {
+    json!([
+        {"id":"u1","body":"quick brown fox","category":["keep"]},
+        {"id":"u2","body":"lazy dog","category":["temp"]},
+        {"id":"u3","body":"lazy afternoon","category":["temp"]},
+        {"id":"u4","body":"garden path","category":["keep"]},
+        {"id":"u5","body":"nothing much here","category":["temp","keep"]}
+    ])
+}
+
+/// `POST /solr/update9/update?commit=true` — cannot be `common::post_docs`,
+/// which is hardcoded to `common::CORE`.
+async fn update9_post_docs(app: &Router, docs: &Value) -> (StatusCode, Value) {
+    common::request_full(
+        app,
+        "POST",
+        "update9/update?commit=true",
+        Some(&docs.to_string()),
+    )
+    .await
+}
+
+/// Builds a fresh `update9`-schema app and seeds `update9_corpus()`, matching
+/// `capture.sh`'s reset-and-reseed step before its own captures run.
+async fn update9_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), UPDATE9_SCHEMA_TOML).expect("app must build");
+    let (status, body) = update9_post_docs(&app, &update9_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "seeding the update9 corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
 /// Ratified, **permanent** divergences from captured Solr behaviour — the
 /// opposite of `EXPECTED_DIVERGENCES` below, which is a self-expiring to-do
 /// list for unbuilt features. Every entry here cites the PRD/findings
@@ -394,6 +501,22 @@ const ACCEPTED_DIVERGENCES: &[(&str, &str)] = &[
     (
         "facet_stored_only_field",
         "finding 16 / PRD ratified-divergence 2, stored-only (non-indexed) field variant",
+    ),
+    (
+        "update_unknown_core",
+        "finding 49 / same divergence family as err_missing_core: an unknown core on POST \
+         /update is Solr's 404 HTML easter egg, Wayfinder's normal 404 JSON error envelope",
+    ),
+    (
+        "ping_unknown_core",
+        "finding 49 / same divergence family as err_missing_core: an unknown core on GET \
+         /admin/ping is Solr's 404 HTML easter egg, Wayfinder's normal 404 JSON error envelope",
+    ),
+    (
+        "ping_unknown_core_delete",
+        "finding 49: DELETE on an unknown core's /admin/ping is a Jetty-level 405 with an \
+         empty body in Solr; Wayfinder stays method-agnostic and serves its normal JSON 404 \
+         there too — noted, not matched",
     ),
 ];
 
@@ -1435,6 +1558,7 @@ fn app_and_request_url<'a>(
     keyorder_app: &'a Router,
     sortdebt_app: &'a Router,
     facets33_app: &'a Router,
+    update9_app: &'a Router,
 ) -> (&'a Router, String) {
     match entry.url.split_once('/') {
         Some(("content", rest)) => (content_app, format!("content/{rest}")),
@@ -1442,6 +1566,7 @@ fn app_and_request_url<'a>(
         Some(("keyorder", rest)) => (keyorder_app, format!("content/{rest}")),
         Some(("facets33", rest)) => (facets33_app, format!("content/{rest}")),
         Some(("sortdebt", _)) => (sortdebt_app, entry.url.clone()),
+        Some(("update9", _)) => (update9_app, entry.url.clone()),
         _ => (content_app, entry.url.clone()),
     }
 }
@@ -1475,6 +1600,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let (keyorder_app, _keyorder_dir) = keyorder_app().await;
     let (sortdebt_app, _sortdebt_dir) = sortdebt_app().await;
     let (facets33_app, _facets33_dir) = facets33_app().await;
+    let (update9_app, _update9_dir) = update9_app().await;
 
     let mut ran = 0usize;
     let mut diffed = 0usize;
@@ -1493,8 +1619,29 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
             &keyorder_app,
             &sortdebt_app,
             &facets33_app,
+            &update9_app,
         );
-        let (status, actual) = request_full(app, &entry.method, &url, entry.body.as_deref()).await;
+        // `update_select_commitwithin_visible` follows a `commitWithin=500`
+        // row with no settle delay in this hermetic replay, unlike
+        // `capture.sh`'s 3s sleep before it captured that fixture — a bounded
+        // retry (re-request until the diff is empty or ~5s) mirrors that
+        // settle sleep deterministically instead of flaking on a race.
+        let (status, actual) = if entry.name == "update_select_commitwithin_visible" {
+            let start = Instant::now();
+            loop {
+                let (status, actual) =
+                    request_full(app, &entry.method, &url, entry.body.as_deref()).await;
+                let expected_n = normalize(fixture(&entry.name));
+                let actual_n = normalize(actual.clone());
+                let report = diff(&expected_n.value, &actual_n.value);
+                if report.diffs.is_empty() || start.elapsed() >= Duration::from_secs(5) {
+                    break (status, actual);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        } else {
+            request_full(app, &entry.method, &url, entry.body.as_deref()).await
+        };
 
         if let Some(reason) = accepted_divergence_reason(&entry.name) {
             match entry.name.as_str() {
@@ -1544,6 +1691,44 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
                         ));
                     }
                 }
+                "update_unknown_core" | "ping_unknown_core" => {
+                    // Same shape as err_missing_core (finding 49): the 404
+                    // HTML easter egg is endpoint-agnostic, extending to
+                    // POST /update and GET /admin/ping unchanged.
+                    let text = fixture_text(&entry.name);
+                    assert!(
+                        serde_json::from_str::<Value>(&text).is_err(),
+                        "{}: fixture must be non-JSON for this accepted divergence to still \
+                         apply ({reason})",
+                        entry.name
+                    );
+                    if status.as_u16() != entry.status {
+                        failures.push(format!(
+                            "{}: HTTP status {} vs fixture status {} ({reason})",
+                            entry.name, status, entry.status
+                        ));
+                    }
+                }
+                "ping_unknown_core_delete" => {
+                    // Solr's fixture here is a Jetty-level 405 with an empty
+                    // body, not the 404 easter-egg page — a different shape
+                    // from the other two, so this checks Wayfinder's own
+                    // method-agnostic JSON 404 rather than the fixture's
+                    // status (finding 49: noted, not matched).
+                    assert_eq!(
+                        entry.status, 405,
+                        "{}: fixture must be 405 for this accepted divergence to still name \
+                         the gap ({reason})",
+                        entry.name
+                    );
+                    if status.as_u16() != 404 {
+                        failures.push(format!(
+                            "{}: expected Wayfinder's method-agnostic JSON 404, got {} \
+                             ({reason})",
+                            entry.name, status
+                        ));
+                    }
+                }
                 other => unreachable!(
                     "ACCEPTED_DIVERGENCES entry `{other}` has no matching check arm in this test"
                 ),
@@ -1565,8 +1750,35 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
         }
 
         let expected = fixture(&entry.name);
-        let expected_n = normalize(expected);
-        let actual_n = normalize(actual);
+        let mut expected_n = normalize(expected);
+        let mut actual_n = normalize(actual);
+        // `update_select_overwrite_false` alone: two live docs share
+        // uniqueKey `u7` (a deliberate `overwrite=false` duplicate), and no
+        // query field can tie-break them — orchestrator ruling, issue #9,
+        // recorded in `docs/solr-ref-findings.md`'s finding-46-49 block:
+        // even with no background merges, tantivy 0.26.1's `SegmentRegister`
+        // (`src/indexer/segment_register.rs`) holds segments in a
+        // `std::collections::HashMap<SegmentId, SegmentEntry>`, so segment
+        // ordinals — and therefore `AllScoredHits`'s ascending-`DocAddress`
+        // tie-break for two equally-scored docs — are per-process-random,
+        // not insertion order. Solr's own captured order for this exact
+        // pair is equally a Lucene-internals accident, not a wire contract.
+        // Sorting `response.docs` identically on both sides before the real
+        // differ runs is the narrowest possible relaxation: every other
+        // field (`responseHeader`, `numFound`/`start`, and each doc's full
+        // content) is still compared exactly, and this row still counts
+        // toward `diffed` below — nothing contractual is hidden, only the
+        // doc *sequence* is treated as a set for this one row.
+        if entry.name == "update_select_overwrite_false" {
+            for v in [&mut expected_n.value, &mut actual_n.value] {
+                if let Some(docs) = v
+                    .pointer_mut("/response/docs")
+                    .and_then(Value::as_array_mut)
+                {
+                    docs.sort_by_key(ToString::to_string);
+                }
+            }
+        }
         let report = diff(&expected_n.value, &actual_n.value);
         // The differ-bound counter: only rows that actually reach `diff()`
         // count here, so a bug that hollowed out this branch (while leaving
