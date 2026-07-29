@@ -1376,3 +1376,12 @@ cap grouped_wildcard       'select?q=(body:laz*)&wt=json'
 # field-exists on a text field with no docValues (`body`): Solr answers from
 # the postings, so this must be a 200 with every doc that has a body.
 cap exists_non_docvalues   'select?q=body:*&wt=json'
+
+# -- issue #8, review round 2: all-negative / mixed-negative queries ----------
+# Solr answers a purely negative query as the complement of its matches (the
+# implicit *:* MUST clause); Lucene alone matches nothing. These pin which.
+cap negative_only          'select?q=-lazy&df=body&wt=json'
+cap negative_not_keyword   'select?q=NOT+lazy&df=body&wt=json'
+cap negative_two_clauses   'select?q=-lazy+-dog&df=body&wt=json'
+cap negative_and_not       'select?q=lazy+AND+NOT+dog&df=body&wt=json'
+cap negative_fielded_and_not 'select?q=category:animals+AND+NOT+body:garden&wt=json'

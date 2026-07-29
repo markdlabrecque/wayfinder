@@ -1009,3 +1009,13 @@ is what makes the multi-term-analysis questions answerable at all.
     `grouped_wildcard.json`). (c) **`field:*` works on a plain indexed field with no docValues**:
     `body:*` is a 200 with all five docs (`exists_non_docvalues.json`) — Solr answers exists
     from the postings, so an implementation must not require a fast/docValues column for it.
+
+    **Round-2 review addendum (five more `manifest.tsv` rows, same block).** Purely negative
+    queries: Solr answers the **complement** (an implicit match-all MUST clause), never a
+    silent 0 and never a 400 — `q=-lazy&df=body` = doc3,doc4,doc5, `NOT lazy` identical,
+    `-lazy -dog` = doc3,doc5 (`negative_only.json`, `negative_not_keyword.json`,
+    `negative_two_clauses.json`). Mixed positive/negative composes as expected:
+    `lazy AND NOT dog` = doc2, `category:animals AND NOT body:garden` = doc1,doc4
+    (`negative_and_not.json`, `negative_fielded_and_not.json`). Pins the all-negative
+    regression fix (a `(Should, AllQuery)` companion clause when every built clause is
+    `MustNot`) to captured behaviour rather than prose.

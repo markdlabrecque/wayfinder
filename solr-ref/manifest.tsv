@@ -120,3 +120,8 @@ compound_wildcard_and	200	select?q=body:laz*+AND+category:animals&wt=json
 compound_fuzzy_or	200	select?q=category:animols~1+OR+body:garden&wt=json
 grouped_wildcard	200	select?q=(body:laz*)&wt=json
 exists_non_docvalues	200	select?q=body:*&wt=json
+negative_only	200	select?q=-lazy&df=body&wt=json
+negative_not_keyword	200	select?q=NOT+lazy&df=body&wt=json
+negative_two_clauses	200	select?q=-lazy+-dog&df=body&wt=json
+negative_and_not	200	select?q=lazy+AND+NOT+dog&df=body&wt=json
+negative_fielded_and_not	200	select?q=category:animals+AND+NOT+body:garden&wt=json

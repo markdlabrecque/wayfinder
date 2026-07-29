@@ -1,0 +1,28 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":7,
+    "params":{
+      "q":"-lazy -dog",
+      "df":"body",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"doc3",
+      "body":"quick thinking saves the day",
+      "category":["misc","classic"],
+      "_version_":1872007223576625152,
+      "_root_":"doc3"
+    },{
+      "id":"doc5",
+      "body":"nothing much here at all",
+      "_version_":1872007223577673729,
+      "_root_":"doc5"
+    }]
+  }
+}
