@@ -1,0 +1,25 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0
+  },
+  "match":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"mlt1",
+      "body":"the chef prepared a delicious pasta dish with fresh tomatoes and basil",
+      "category":["cooking","italian"],
+      "_version_":1872055772779642880,
+      "_root_":"mlt1"
+    }]
+  },
+  "response":{
+    "numFound":0,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "interestingTerms":[ ]
+}

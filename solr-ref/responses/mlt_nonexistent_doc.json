@@ -1,0 +1,13 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1
+  },
+  "match":{
+    "numFound":0,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "response":null
+}

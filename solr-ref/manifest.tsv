@@ -125,3 +125,13 @@ negative_not_keyword	200	select?q=NOT+lazy&df=body&wt=json
 negative_two_clauses	200	select?q=-lazy+-dog&df=body&wt=json
 negative_and_not	200	select?q=lazy+AND+NOT+dog&df=body&wt=json
 negative_fielded_and_not	200	select?q=category:animals+AND+NOT+body:garden&wt=json
+mlt_baseline	200	mlt?q=id:mlt1&mlt.fl=body,category&wt=json
+mlt_fl_restricted	200	mlt?q=id:mlt1&mlt.fl=body&wt=json
+mlt_mintf_mindf_maxdf	200	mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&wt=json
+mlt_minwl_maxwl	200	mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.minwl=6&mlt.maxwl=10&wt=json
+mlt_maxqt	200	mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxqt=2&wt=json
+mlt_boost	200	mlt?q=id:mlt1&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.boost=true&wt=json
+mlt_fl_rows_start	200	mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fl=id,score&rows=2&start=1&wt=json
+mlt_interesting_terms_details	200	mlt?q=id:mlt1&mlt.fl=body&mlt.interestingTerms=details&wt=json
+mlt_no_interesting_terms	200	mlt?q=id:mlt20&mlt.fl=body&wt=json
+mlt_nonexistent_doc	200	mlt?q=id:nosuchdoc&mlt.fl=body&wt=json

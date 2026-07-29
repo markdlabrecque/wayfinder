@@ -1,0 +1,42 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":5
+  },
+  "match":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"mlt1",
+      "body":"the chef prepared a delicious pasta dish with fresh tomatoes and basil",
+      "category":["cooking","italian"],
+      "_version_":1872055772779642880,
+      "_root_":"mlt1"
+    }]
+  },
+  "response":{
+    "numFound":3,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"mlt2",
+      "body":"fresh basil and ripe tomatoes make a wonderful pasta sauce",
+      "category":["cooking","italian"],
+      "_version_":1872055772783837184,
+      "_root_":"mlt2"
+    },{
+      "id":"mlt6",
+      "body":"planting tomatoes and basil in the garden this spring",
+      "category":["gardening"],
+      "_version_":1872055772788031488,
+      "_root_":"mlt6"
+    },{
+      "id":"mlt10",
+      "body":"growing herbs like basil and rosemary indoors year round",
+      "category":["gardening","cooking"],
+      "_version_":1872055772790128641,
+      "_root_":"mlt10"
+    }]
+  }
+}

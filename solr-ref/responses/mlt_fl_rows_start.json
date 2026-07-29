@@ -1,0 +1,29 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2
+  },
+  "match":{
+    "numFound":1,
+    "start":0,
+    "maxScore":1.1995715,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"mlt11",
+      "score":1.1995715
+    }]
+  },
+  "response":{
+    "numFound":4,
+    "start":1,
+    "maxScore":1.6043521,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"mlt15",
+      "score":1.5101938
+    },{
+      "id":"mlt12",
+      "score":1.0246769
+    }]
+  }
+}
