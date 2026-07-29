@@ -1,0 +1,43 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "q":"*:*",
+      "stats":"true",
+      "rows":"0",
+      "wt":"json",
+      "stats.field":["views","price"]
+    }
+  },
+  "response":{
+    "numFound":6,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "stats":{
+    "stats_fields":{
+      "views":{
+        "min":10.0,
+        "max":50.0,
+        "count":5,
+        "missing":1,
+        "sum":150.0,
+        "sumOfSquares":5500.0,
+        "mean":30.0,
+        "stddev":15.811388300841896
+      },
+      "price":{
+        "min":1.5,
+        "max":5.5,
+        "count":5,
+        "missing":1,
+        "sum":17.5,
+        "sumOfSquares":71.25,
+        "mean":3.5,
+        "stddev":1.5811388300841898
+      }
+    }
+  }
+}

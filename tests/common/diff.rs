@@ -113,13 +113,28 @@ pub struct DiffReport {
     pub touched: Vec<String>,
 }
 
+/// Object keys under `stats.stats_fields.<field>` (issue #5) whose values are
+/// diff-noise floats — Tantivy vs Solr/Lucene summation-order differences,
+/// same root cause as `score` — and therefore get `score_tolerance()` instead
+/// of exact equality. Deliberately excludes `min`/`max`/`count`/`missing`:
+/// those are exact integers/values in every captured fixture (`stats_views`,
+/// `stats_multi_fields`, `stats_zero`, `stats_zero_fq`) and a real regression
+/// in any of them must still fail. Reused, not duplicated, by `diff_at` below
+/// — matching is scoped to the `stats_fields` subtree specifically (checked
+/// via the parent `path`, not just the key name) so an unrelated object
+/// elsewhere in the envelope that happens to have a key named `sum` or `mean`
+/// is not accidentally tolerated too.
+const STATS_METRIC_TOLERANCE_KEYS: &[&str] = &["sum", "sumOfSquares", "mean", "stddev"];
+
 /// Structural diff of two already-normalised JSON values (human-readable
 /// `path: expected vs actual`, not a bare `assert_eq!`). Recurses through
 /// objects and arrays; any object key literally named `score` is compared
 /// with `score_tolerance()` instead of exact equality, and its path is
-/// recorded in `touched` regardless of whether it matched. Every other
-/// mismatch — an added/removed key, a changed value, a reordered array
-/// element — is a `Diff`. No key is ever silently ignored (spec: "no
+/// recorded in `touched` regardless of whether it matched. The same
+/// tolerance applies to `sum`/`sumOfSquares`/`mean`/`stddev` keys, but only
+/// under `stats.stats_fields.<field>` (see `STATS_METRIC_TOLERANCE_KEYS`).
+/// Every other mismatch — an added/removed key, a changed value, a reordered
+/// array element — is a `Diff`. No key is ever silently ignored (spec: "no
 /// blanket ignore-unknown-keys escape hatch").
 pub fn diff(expected: &Value, actual: &Value) -> DiffReport {
     let mut report = DiffReport::default();
@@ -135,14 +150,17 @@ fn diff_at(path: &str, expected: &Value, actual: &Value, report: &mut DiffReport
             let mut keys: Vec<&String> = e.keys().chain(a.keys()).collect();
             keys.sort();
             keys.dedup();
+            let in_stats_fields = path.starts_with("stats.stats_fields.");
             for key in keys {
                 let child_path = if path.is_empty() {
                     key.clone()
                 } else {
                     format!("{path}.{key}")
                 };
+                let tolerate = key == "score"
+                    || (in_stats_fields && STATS_METRIC_TOLERANCE_KEYS.contains(&key.as_str()));
                 match (e.get(key), a.get(key)) {
-                    (Some(ev), Some(av)) if key == "score" => {
+                    (Some(ev), Some(av)) if tolerate => {
                         report.touched.push(child_path.clone());
                         let matches = match (ev.as_f64(), av.as_f64()) {
                             (Some(ef), Some(af)) => (ef - af).abs() <= score_tolerance(),

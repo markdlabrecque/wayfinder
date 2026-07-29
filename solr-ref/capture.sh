@@ -1068,3 +1068,78 @@ capw select_wildcard_or_term    'select?q=lazy+OR+*:*&df=body&fl=id,body&wt=json
 capw select_wildcard_minus_term 'select?q=*:*+-lazy&df=body&fl=id,body&wt=json'
 echo "wildcard-panic core '$WILDCARD_CORE' left in place on '$WILDCARD_CONTAINER' (port 8990)"
 echo "  (docker rm -f $WILDCARD_CONTAINER to stop)"
+
+# --- stats component (issue #5) ---------------------------------------------
+# Appended block; nothing above is edited. Own container on its own port
+# (`wayfinder-solr-5`, 8992 -- 8983..8990 are all owned by other issues/
+# branches per the `wayfinder-solr-24`/`-32`/`-33`/`-39` precedent), own core
+# `stats`, own corpus. Not the canonical container, so every row here is a
+# `manifest-errors.tsv` 6-column row (own base URL), never `manifest.tsv`,
+# exactly like the `-32`/`-33` debt blocks.
+#
+# Premise check (issue #5's own task spec): the `facets` core's `views`/
+# `created` fields (issue #3) have a value on every doc (`r1..r4`), so they
+# cannot exercise "missing on some docs" -- stats' `missing` count and its
+# min/max/sum/mean/stddev-over-present-values-only requirement need a corpus
+# with an actual gap. Hence a dedicated corpus rather than reusing `facets`.
+#
+# Corpus `st1..st6`: `views` (pint) missing on `st6`, `price` (pdouble)
+# missing on `st5` -- two independent gaps so a single `stats.field=views&
+# stats.field=price` capture exercises repeatable `stats.field` AND two
+# different per-field `missing` counts in one response.
+STATS_CONTAINER=wayfinder-solr-5
+STATS_SOLR=http://localhost:8992/solr
+STATS_CORE=stats
+if ! docker ps --format '{{.Names}}' | grep -qx "$STATS_CONTAINER"; then
+  docker rm -f "$STATS_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$STATS_CONTAINER" -p 8992:8983 \
+    solr:9 solr-precreate "$STATS_CORE" >/dev/null
+fi
+echo -n "waiting for stats solr"
+for _ in $(seq 60); do
+  if curl -sf "$STATS_SOLR/$STATS_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+  echo -n "."; sleep 1
+done
+curl -s "$STATS_SOLR/$STATS_CORE/schema" -H 'Content-Type: application/json' -d '{
+  "add-field": [
+    {"name":"views", "type":"pint",    "indexed":true, "stored":true, "docValues":true},
+    {"name":"price", "type":"pdouble", "indexed":true, "stored":true, "docValues":true}
+  ]
+}' >/dev/null
+curl -sf "$STATS_SOLR/$STATS_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+  {"id":"st1","views":10,"price":1.5},
+  {"id":"st2","views":20,"price":2.5},
+  {"id":"st3","views":30,"price":3.5},
+  {"id":"st4","views":40,"price":4.5},
+  {"id":"st5","views":50},
+  {"id":"st6","price":5.5}
+]' >/dev/null
+
+# Same 6-column manifest-errors.tsv contract as `capd`/`capw` above.
+caps() {  # caps <name> <url-after-/solr/>
+  local name=$1 suffix=$2
+  curl -sg "$STATS_SOLR/$suffix" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$suffix" "" "$STATS_SOLR" \
+    >> "$HERE/manifest-errors.tsv"
+  rm -f "$OUT/$name.status"
+}
+
+# Normal case: whole corpus, one stats.field with a real gap (st6 has no
+# `views`), so min/max/sum/mean/stddev must come from the 5 docs that have a
+# value while `missing` reports the 1 that does not.
+caps stats_views "$STATS_CORE/select?q=*:*&rows=0&stats=true&stats.field=views&wt=json"
+# Repeatable stats.field: two fields in one request, each with its OWN
+# missing doc (`views` misses st6, `price` misses st5) -- proves `missing` is
+# computed per field, not shared.
+caps stats_multi_fields "$STATS_CORE/select?q=*:*&rows=0&stats=true&stats.field=views&stats.field=price&wt=json"
+# Zero matching docs: what does the stats block look like when q matches
+# nothing at all (not just a field-level gap)?
+caps stats_zero "$STATS_CORE/select?q=id:nosuchdoc&rows=0&stats=true&stats.field=views&wt=json"
+# Zero matching docs via fq narrowing rather than q itself, per the task
+# spec's "or an fq narrows to nothing" alternative -- pins that both paths to
+# a zero hit set produce the same stats shape.
+caps stats_zero_fq "$STATS_CORE/select?q=*:*&fq=id:nosuchdoc&rows=0&stats=true&stats.field=views&wt=json"
+
+echo "stats core '$STATS_CORE' left in place on '$STATS_CONTAINER' (port 8992)"
+echo "  (docker rm -f $STATS_CONTAINER to stop)"

@@ -1,0 +1,33 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":10,
+    "params":{
+      "q":"id:nosuchdoc",
+      "stats":"true",
+      "rows":"0",
+      "wt":"json",
+      "stats.field":"views"
+    }
+  },
+  "response":{
+    "numFound":0,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "stats":{
+    "stats_fields":{
+      "views":{
+        "min":null,
+        "max":null,
+        "count":0,
+        "missing":0,
+        "sum":0.0,
+        "sumOfSquares":0.0,
+        "mean":"NaN",
+        "stddev":0.0
+      }
+    }
+  }
+}

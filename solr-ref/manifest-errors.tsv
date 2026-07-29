@@ -103,3 +103,7 @@ update_select_dynamic_date	200	GET	update9/select?q=when_dt:%5B2021-01-01T00:00:
 update_single_valued_array_one	200	POST	update9/update?commit=true&wt=json	[{"id":"u15","title":["only"]}]	http://localhost:8989/solr
 update_select_single_valued_array_one	200	GET	update9/select?q=id:u15&fl=id,title&wt=json		http://localhost:8989/solr
 update_delete_id_missing	200	POST	update9/update?commit=true&wt=json	{"delete":{"id":"nosuch"}}	http://localhost:8989/solr
+stats_views	200	GET	stats/select?q=*:*&rows=0&stats=true&stats.field=views&wt=json		http://localhost:8992/solr
+stats_multi_fields	200	GET	stats/select?q=*:*&rows=0&stats=true&stats.field=views&stats.field=price&wt=json		http://localhost:8992/solr
+stats_zero	200	GET	stats/select?q=id:nosuchdoc&rows=0&stats=true&stats.field=views&wt=json		http://localhost:8992/solr
+stats_zero_fq	200	GET	stats/select?q=*:*&fq=id:nosuchdoc&rows=0&stats=true&stats.field=views&wt=json		http://localhost:8992/solr
