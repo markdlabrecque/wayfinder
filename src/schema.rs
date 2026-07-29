@@ -573,15 +573,41 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
                 parsed.core.unique_key
             )
         })?;
-    let unique_key_kind = value_kind_of(&unique_key_field_config.type_, &parsed.field_types)
-        .with_context(|| format!("on core.unique_key `{}`", parsed.core.unique_key))?;
-    if unique_key_kind != ValueKind::Text {
+    let unique_key_resolved_type =
+        resolve_type(&unique_key_field_config.type_, &parsed.field_types)
+            .with_context(|| format!("on core.unique_key `{}`", parsed.core.unique_key))?;
+    if !matches!(unique_key_resolved_type, ResolvedType::Str) {
         bail!(
-            "core.unique_key `{}` must be a string-typed field (`string`/`keyword`), got \
-             `{}` ({unique_key_kind:?}) — the update pipeline resolves the uniqueKey as a text \
-             term",
+            "core.unique_key `{}` must be an unanalyzed string-typed field (`string`/`keyword`), \
+             got `{}` — the update pipeline resolves the uniqueKey as a single exact text term \
+             via `Term::from_field_text`, and an analyzed type (e.g. `text_en`, `text_general`, \
+             or a custom analyzed [[field_types]] chain) would tokenize the value so a document \
+             no longer matches itself",
             parsed.core.unique_key,
             unique_key_field_config.type_,
+        );
+    }
+    // A multiValued uniqueKey has no single term to resolve against
+    // (`Term::from_field_text` takes one value): overwrite/delete-by-id would
+    // be undefined for a doc with e.g. `id: ["a", "b"]`. Solr refuses this
+    // outright; reject it loudly at load time too (issue #40).
+    if unique_key_field_config.multi_valued {
+        bail!(
+            "core.unique_key `{}` must not be multi-valued — the update pipeline resolves the \
+             uniqueKey as a single term, and a multi-valued field has no single value to \
+             resolve against",
+            parsed.core.unique_key,
+        );
+    }
+    // A document missing its uniqueKey has no term to overwrite/delete by;
+    // Solr requires the uniqueKey field to be present on every document.
+    // Require `required = true` on it at load time so that gap is caught
+    // once, up front, rather than per-document at request time (issue #40).
+    if !unique_key_field_config.required {
+        bail!(
+            "core.unique_key `{}` must be declared with `required = true` — every document \
+             needs a value for the field the update pipeline overwrites/deletes by",
+            parsed.core.unique_key,
         );
     }
     if !field_handles.contains_key(&parsed.core.default_field) {
