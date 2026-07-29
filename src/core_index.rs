@@ -81,6 +81,28 @@ fn render_double(v: f64) -> String {
 /// or inside an array) contributes nothing — mirrors the pre-issue-#9
 /// `add_value`'s null handling exactly, just applied before combination
 /// rather than during the write.
+/// The effective string value of `obj`'s `unique_key` field, for the
+/// overwrite-delete step in `add_documents` — a bare string, or a
+/// one-element array of one (mirroring `flatten_values`'/finding 48e's
+/// single-element-array unwrap, since `id: ["u1"]` is exactly as valid a
+/// uniqueKey value as `id: "u1"`). Anything else (no value, a multi-element
+/// array, a non-string scalar) returns `None`: schema load time guarantees
+/// `unique_key` is string-typed (review round 1, five-minute item), so a doc
+/// whose value doesn't resolve to a single string here will fail the same
+/// way in `build_document`'s own single-valued/type checks a few lines
+/// later — skipping the overwrite delete for it is harmless because the add
+/// itself is about to be rejected.
+fn unique_key_value<'a>(obj: &'a Map<String, Value>, unique_key: &str) -> Option<&'a str> {
+    match obj.get(unique_key)? {
+        Value::String(s) => Some(s.as_str()),
+        Value::Array(vs) => match vs.as_slice() {
+            [Value::String(s)] => Some(s.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn flatten_values(value: &Value) -> Vec<Value> {
     match value {
         Value::Array(vs) => vs.iter().filter(|v| !v.is_null()).cloned().collect(),
@@ -329,42 +351,54 @@ impl CoreIndex {
     ///
     /// `overwrite` mirrors Solr's own default: replace-by-uniqueKey before
     /// each add unless the caller passed `overwrite=false` (finding 48a/b).
-    /// The uniqueKey is `wf_schema.core.unique_key`, a string field per the
-    /// schema's own validation at load time.
+    /// The uniqueKey is `wf_schema.core.unique_key` — schema load time now
+    /// rejects a non-string-typed `core.unique_key` outright (review round 1,
+    /// five-minute item), so resolving it as a text term below is a real
+    /// guarantee, not just "a declared field".
     ///
     /// Each successfully-added doc bumps the shared pending-doc counter (and,
     /// on crossing `autocommit_max_docs` or arming the first
     /// `autocommit_max_time` deadline, triggers the corresponding action)
     /// immediately after `writer.add_document` — not batched to the end of
-    /// the loop — so a doc that lands in the writer before a later doc in the
-    /// same batch fails validation is still correctly counted as pending.
+    /// the loop. The counter update and its autocommit/deadline
+    /// consequences run even when a LATER doc in the same batch fails
+    /// validation (review round 1 must-fix): the loop below records its
+    /// `Result` instead of returning `?` straight out of the function, so
+    /// `arm_deadline`/`should_autocommit` are always acted on for whatever
+    /// prefix of the batch actually reached the writer before the error is
+    /// propagated to the caller. Previously the early `?` return skipped
+    /// that follow-through entirely — the doc that landed stayed pending
+    /// with `autocommit_max_time` never arming a deadline for it, and
+    /// because the pending counter was already nonzero, no LATER add ever
+    /// saw `prior == 0` again either, so `autocommit_max_time` alone could
+    /// never fire again until a manual commit.
     pub fn add_documents(&self, docs: &[Value], overwrite: bool) -> Result<usize> {
         let unique_key_field = self
             .wf_schema
             .field(&self.wf_schema.core.unique_key)
-            .expect("core.unique_key is validated to be a declared field at schema load time");
+            .expect("core.unique_key is validated to be a declared, string-typed field at schema load time");
 
         let mut arm_deadline = false;
         let mut should_autocommit = false;
-        {
+        let added: Result<usize> = (|| {
             let writer = self
                 .state
                 .writer
                 .lock()
                 .expect("index writer mutex poisoned");
+            let mut added = 0usize;
             for doc in docs {
                 let obj = doc.as_object().ok_or_else(|| {
                     anyhow!("each document in the update body must be a JSON object")
                 })?;
                 if overwrite
-                    && let Some(id) = obj
-                        .get(&self.wf_schema.core.unique_key)
-                        .and_then(Value::as_str)
+                    && let Some(id) = unique_key_value(obj, &self.wf_schema.core.unique_key)
                 {
                     writer.delete_term(Term::from_field_text(unique_key_field, id));
                 }
                 let tantivy_doc = self.build_document(obj)?;
                 writer.add_document(tantivy_doc)?;
+                added += 1;
 
                 let prior = self.state.pending_docs.fetch_add(1, Ordering::SeqCst);
                 let now_pending = prior + 1;
@@ -378,18 +412,21 @@ impl CoreIndex {
                     should_autocommit = true;
                 }
             }
-        }
-        // Fired after the writer lock is released: `commit()` (both the
-        // autocommit path here and the scheduler thread's own) locks the same
-        // mutex, so calling it while still holding the guard above would
-        // deadlock.
+            Ok(added)
+        })();
+
+        // Run on BOTH the `Ok` and `Err` paths, before propagating any
+        // error: every doc that reached `writer.add_document` above is
+        // genuinely pending regardless of whether a later doc in the same
+        // batch failed, and the writer lock is already released by now, so
+        // `commit()` (which locks the same mutex) cannot deadlock here.
         if arm_deadline && let Some(ms) = self.autocommit_max_time_ms {
             self.schedule_commit(ms);
         }
         if should_autocommit {
             self.commit()?;
         }
-        Ok(docs.len())
+        added
     }
 
     /// Deletes every document sharing any of `ids` on the uniqueKey term —
@@ -397,10 +434,9 @@ impl CoreIndex {
     /// `overwrite=false` duplicates (finding 48c). A delete of an id matching
     /// nothing is not an error (finding 46's `update_delete_id_missing`).
     pub fn delete_by_ids(&self, ids: &[String]) -> Result<()> {
-        let unique_key_field = self
-            .wf_schema
-            .field(&self.wf_schema.core.unique_key)
-            .expect("core.unique_key is validated to be a declared field at schema load time");
+        let unique_key_field = self.wf_schema.field(&self.wf_schema.core.unique_key).expect(
+            "core.unique_key is validated to be a declared, string-typed field at schema load time",
+        );
         let writer = self
             .state
             .writer

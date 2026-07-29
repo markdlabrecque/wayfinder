@@ -556,6 +556,34 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
             parsed.core.unique_key
         );
     }
+    // The update pipeline (issue #9) resolves the uniqueKey term with
+    // `Term::from_field_text`, which only makes sense for a string-typed
+    // field — an i64/date uniqueKey would let `delete_term`/`TermQuery`
+    // silently match nothing (overwrite=true would duplicate instead of
+    // replace, delete-by-id would 200 while deleting nothing). Reject that
+    // loudly at load time rather than let it fail silently at request time
+    // (review round 1, five-minute item).
+    let unique_key_field_config = parsed
+        .fields
+        .iter()
+        .find(|f| f.name == parsed.core.unique_key)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "core.unique_key `{}` must be a plain declared field, not a dynamic/catch-all one",
+                parsed.core.unique_key
+            )
+        })?;
+    let unique_key_kind = value_kind_of(&unique_key_field_config.type_, &parsed.field_types)
+        .with_context(|| format!("on core.unique_key `{}`", parsed.core.unique_key))?;
+    if unique_key_kind != ValueKind::Text {
+        bail!(
+            "core.unique_key `{}` must be a string-typed field (`string`/`keyword`), got \
+             `{}` ({unique_key_kind:?}) — the update pipeline resolves the uniqueKey as a text \
+             term",
+            parsed.core.unique_key,
+            unique_key_field_config.type_,
+        );
+    }
     if !field_handles.contains_key(&parsed.core.default_field) {
         bail!(
             "core.default_field `{}` is not a declared field",

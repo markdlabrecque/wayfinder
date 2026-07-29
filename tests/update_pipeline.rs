@@ -772,3 +772,47 @@ async fn autocommit_max_time_commits_after_the_deadline() {
         "autocommit_max_time=200ms must make the pending doc visible within the poll window: {body}"
     );
 }
+
+/// Review round 1, must-fix: a batch of `[{good doc}, {invalid doc}]` used to
+/// return the validation error from `add_documents` before the
+/// arm-deadline/autocommit follow-through for the good doc (already written
+/// to the writer) ever ran — so with only `autocommit_max_time` configured,
+/// that doc stayed pending forever (no deadline armed, and no LATER add
+/// could arm one either, since the pending counter was already nonzero).
+/// This pins the fix: the good doc in a rejected batch still gets its
+/// `autocommit_max_time` deadline armed and becomes visible within the poll
+/// window, even though the request itself is a 400.
+#[tokio::test]
+async fn autocommit_max_time_arms_even_when_a_later_doc_in_the_batch_is_invalid() {
+    let dir = TempDir::new().expect("temp dir");
+    let app = build_update9_app_with_config(dir.path(), "[commit]\nautocommit_max_time = 200\n")
+        .expect("app must build");
+
+    // `title` is single-valued; the second doc's array of two values is
+    // exactly the fixture-shaped 400 from `update_single_valued_array.json`.
+    let (status, body) = post9(
+        &app,
+        "update?wt=json",
+        &json!([
+            {"id":"c1","body":"pending doc"},
+            {"id":"c2","title":["one","two"]}
+        ])
+        .to_string(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the batch as a whole must still 400 on the invalid second doc: {body}"
+    );
+
+    let (status, body) =
+        poll_until_visible(&app, "select?q=id:c1&wt=json", Duration::from_secs(5)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "the good doc that landed in the writer before the batch's invalid doc must still get \
+         its autocommit_max_time deadline armed and become visible: {body}"
+    );
+}
