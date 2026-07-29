@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use axum::Router;
 use axum::http::StatusCode;
 use common::diff::{
-    ManifestEntry, ManifestErrorEntry, RankedDoc, diff, diff_ranked_ids, fetch_live_full,
+    Diff, ManifestEntry, ManifestErrorEntry, RankedDoc, diff, diff_ranked_ids, fetch_live_full,
     fetch_live_status, live_reachable, load_manifest, load_manifest_errors, normalize, ranked_docs,
     score_tolerance,
 };
@@ -399,6 +399,37 @@ const ACCEPTED_DIVERGENCES: &[(&str, &str)] = &[
 
 fn accepted_divergence_reason(name: &str) -> Option<&'static str> {
     ACCEPTED_DIVERGENCES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, reason)| *reason)
+}
+
+/// Ratified, **permanent** divergence for `fl=score`'s BM25 float magnitude —
+/// PRD ratified-divergence 4. Unlike `ACCEPTED_DIVERGENCES` above (whole-entry
+/// pass/fail), this list only waives the `response.docs[*].score` *value*
+/// within `RANKED_RELEVANCE_ENTRIES` below; everything else about these two
+/// entries — HTTP status, doc ranking order (`response.docs[].id`), and
+/// `response.maxScore`'s presence/type — is still checked for real by
+/// `hermetic_whole_query_set_matches_committed_fixtures`. See PRD's "Ratified
+/// divergences from captured Solr behaviour", entry 4, for the measured
+/// ratios and rationale (issue #34).
+const RANKED_SCORE_VALUE_RATIFIED: &[(&str, &str)] = &[
+    (
+        "select_term_scored",
+        "PRD ratified-divergence 4: Tantivy's BM25 score for doc2 (~0.875) vs. Solr's captured \
+         0.457 is a scoring-formula difference, not a wiring bug; ranking order and maxScore \
+         shape are still verified",
+    ),
+    (
+        "select_quick_scored",
+        "PRD ratified-divergence 4: Tantivy's BM25 score for doc3 (~0.940) vs. Solr's captured \
+         0.413 is a scoring-formula difference, not a wiring bug; ranking order and maxScore \
+         shape are still verified",
+    ),
+];
+
+fn ranked_score_value_ratified_reason(name: &str) -> Option<&'static str> {
+    RANKED_SCORE_VALUE_RATIFIED
         .iter()
         .find(|(n, _)| *n == name)
         .map(|(_, reason)| *reason)
@@ -1011,8 +1042,10 @@ fn load_manifest_errors_skips_blanks_and_comments_and_tolerates_missing_columns(
 /// relevance, so it is diffed generically like everything else.
 /// `select_term_scored`/`select_quick_scored` (issue #31) add score-bearing
 /// entries so the ranked+score path runs against real data, not just
-/// synthetic tests — both are also in `EXPECTED_DIVERGENCES` below, since
-/// Wayfinder does not implement `fl=score` yet (issue #34).
+/// synthetic tests. Those two carry a ratified, permanent BM25-magnitude
+/// divergence (`RANKED_SCORE_VALUE_RATIFIED` above, PRD ratified-divergence
+/// 4) — see the loop below for how that's handled differently from
+/// `select_term`.
 const RANKED_RELEVANCE_ENTRIES: &[&str] =
     &["select_term", "select_term_scored", "select_quick_scored"];
 
@@ -1036,28 +1069,19 @@ const RANKED_RELEVANCE_ENTRIES: &[&str] =
 // `facet_limit`, `facet_missing`, `facet_query`, `facet_json_nl_map`,
 // `facet_zero`, `facet_all_filtered`. Real fast-field aggregation over the whole
 // term dictionary made all seven match, so they are gone too.
-// `select_term_scored`/`select_quick_scored` (issue #31) are new: Wayfinder
-// silently drops `fl=score` (grep of src/ confirms no doc-score rendering,
-// the same `select_fl_missing` precedent for an unknown-but-harmless `fl`
-// entry), so the actual score is always absent on the Wayfinder side —
-// tracked as issue #34. Both entries expire the moment #34 lands: the guard
-// below fails and names them for deletion.
-const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[
-    (
-        "ping",
-        "`responseHeader.params` carries Solr ping-handler artifacts incl. a per-run `rid` counter no implementation can reproduce; see the same carve-out in `tracer_bullet.rs::ping_reports_ok`",
-    ),
-    (
-        "select_term_scored",
-        "Wayfinder does not implement fl=score (silently dropped, same as an unknown fl \
-         field) — see issue #34",
-    ),
-    (
-        "select_quick_scored",
-        "Wayfinder does not implement fl=score (silently dropped, same as an unknown fl \
-         field) — see issue #34",
-    ),
-];
+// `select_term_scored`/`select_quick_scored` (issue #31) used to say Wayfinder
+// silently dropped `fl=score`. Issue #34 implemented `fl=score` (per-doc
+// `score` key, correct key order, `response.maxScore`) and the *ranking*
+// (doc id order) now matches Solr exactly for both entries. The score
+// *magnitudes* still don't (Tantivy's own BM25 numerically disagrees with
+// Solr's BM25Similarity), but that's no longer parked here as a to-do: it's
+// ratified permanently as PRD ratified-divergence 4 and handled by
+// `RANKED_SCORE_VALUE_RATIFIED` above, so both entries are gone from this
+// list.
+const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[(
+    "ping",
+    "`responseHeader.params` carries Solr ping-handler artifacts incl. a per-run `rid` counter no implementation can reproduce; see the same carve-out in `tracer_bullet.rs::ping_reports_ok`",
+)];
 
 /// The `EXPECTED_DIVERGENCES` reason for `name`, or `None` if `name` is not
 /// in the list. Every entry has a mandatory reason by construction (the list
@@ -1120,19 +1144,93 @@ async fn hermetic_whole_query_set_matches_committed_fixtures() {
                 entry.name, ranked_report.diffs, ranked_report.touched
             );
 
-            match divergence_reason {
-                Some(reason) if ranked_report.diffs.is_empty() => failures.push(format!(
-                    "{}: EXPECTED_DIVERGENCES says this should still diverge ({reason}), \
-                     but it now matches — the underlying feature has landed, so remove this \
-                     entry from EXPECTED_DIVERGENCES in tests/differential.rs",
-                    entry.name
-                )),
-                Some(reason) => eprintln!("  (expected divergence: {reason})"),
-                None if !ranked_report.diffs.is_empty() => failures.push(format!(
-                    "{}: ranked-id diffs: {:?}",
-                    entry.name, ranked_report.diffs
-                )),
-                None => {}
+            if let Some(reason) = ranked_score_value_ratified_reason(&entry.name) {
+                // PRD ratified-divergence 4: BM25 score *magnitude* is not
+                // required to match, but ranking order and maxScore shape
+                // still are — this is not a blanket waiver for the entry.
+                let order_diffs: Vec<_> = ranked_report
+                    .diffs
+                    .iter()
+                    .filter(|d| d.path == "response.docs[].id")
+                    .collect();
+                if !order_diffs.is_empty() {
+                    failures.push(format!(
+                        "{}: doc ranking order diverges, which PRD ratified-divergence 4 does \
+                         NOT waive: {:?}",
+                        entry.name, order_diffs
+                    ));
+                }
+
+                let is_score_path =
+                    |d: &&Diff| d.path.starts_with("response.docs[") && d.path.ends_with("].score");
+                // Only a *magnitude* mismatch (both sides present, values
+                // differ) is the ratified divergence. A `score` key missing
+                // on one side is a wiring gap, not a scoring-formula
+                // difference, and must still fail — otherwise this waiver
+                // would silently pass a response that dropped `score`
+                // entirely.
+                let is_present_on_both =
+                    |d: &&Diff| d.expected != "<missing>" && d.actual != "<missing>";
+                let score_magnitude_diffs: Vec<_> = ranked_report
+                    .diffs
+                    .iter()
+                    .filter(|d| is_score_path(d) && is_present_on_both(d))
+                    .collect();
+                if !score_magnitude_diffs.is_empty() {
+                    eprintln!(
+                        "  (ratified BM25-magnitude divergence: {reason}): {score_magnitude_diffs:?}"
+                    );
+                }
+
+                let other_diffs: Vec<_> = ranked_report
+                    .diffs
+                    .iter()
+                    .filter(|d| {
+                        d.path != "response.docs[].id"
+                            && !(is_score_path(d) && is_present_on_both(d))
+                    })
+                    .collect();
+                if !other_diffs.is_empty() {
+                    failures.push(format!(
+                        "{}: ranked-id diffs outside the ratified score-value/order paths \
+                         (includes any score-presence mismatch, which is not ratified): {:?}",
+                        entry.name, other_diffs
+                    ));
+                }
+
+                // `diff_ranked_ids`/`ranked_docs` only ever look at
+                // `response.docs[]`, so they never notice if `maxScore` is
+                // missing or the wrong type — assert that structurally here,
+                // without pinning its exact (ratified-divergent) value.
+                match actual_n
+                    .value
+                    .pointer("/response/maxScore")
+                    .and_then(|v| v.as_f64())
+                {
+                    Some(max_score) => eprintln!(
+                        "  (response.maxScore present and numeric, value not pinned per PRD \
+                         ratified-divergence 4: {max_score})"
+                    ),
+                    None => failures.push(format!(
+                        "{}: response.maxScore missing or not a number",
+                        entry.name
+                    )),
+                }
+            } else {
+                match divergence_reason {
+                    Some(reason) if ranked_report.diffs.is_empty() => failures.push(format!(
+                        "{}: EXPECTED_DIVERGENCES says this should still diverge ({reason}), \
+                         but it now matches — the underlying feature has landed, so remove this \
+                         entry from EXPECTED_DIVERGENCES in tests/differential.rs",
+                        entry.name
+                    )),
+                    Some(reason) => eprintln!("  (expected divergence: {reason})"),
+                    None if !ranked_report.diffs.is_empty() => failures.push(format!(
+                        "{}: ranked-id diffs: {:?}",
+                        entry.name, ranked_report.diffs
+                    )),
+                    None => {}
+                }
             }
         } else {
             let report = diff(&expected_n.value, &actual_n.value);
@@ -1253,17 +1351,27 @@ fn live_solr_matches_committed_query_set() {
             // diverging must be removed, or the list quietly becomes a lie
             // here while the hermetic run still polices it.
             //
-            // This does NOT hold for `select_term_scored`/`select_quick_scored`
-            // (issue #31/#34): this loop's "actual" side is a *live re-fetch of
-            // Solr itself*, not Wayfinder (`fetch_live` always hits
-            // `WAYFINDER_DIFF_SOLR_URL`, Solr's own port) — see the comment
-            // above. A Wayfinder-only feature gap like missing `fl=score`
-            // support trivially "matches" here on every run, since real Solr's
-            // BM25 is deterministic against its own historical capture,
-            // regardless of whether #34 has landed. Self-expiry here would
-            // misfire unconditionally, so it is skipped for those two — the
-            // hermetic loop is the one that actually exercises Wayfinder and
-            // owns the self-expiry signal for this class of entry.
+            // This does NOT hold for any `RANKED_RELEVANCE_ENTRIES` member
+            // that's also in `EXPECTED_DIVERGENCES`: this loop's "actual"
+            // side is a *live re-fetch of Solr itself*, not Wayfinder
+            // (`fetch_live` always hits `WAYFINDER_DIFF_SOLR_URL`, Solr's own
+            // port) — see the comment above. A Wayfinder-only feature gap
+            // trivially "matches" here on every run, since real Solr is
+            // deterministic against its own historical capture, regardless of
+            // whether the feature has landed. Self-expiry here would misfire
+            // unconditionally, so it is skipped for those — the hermetic loop
+            // is the one that actually exercises Wayfinder and owns the
+            // self-expiry signal for this class of entry.
+            //
+            // Currently unreachable: `select_term_scored`/`select_quick_scored`
+            // (issue #31/#34) used to be the only `RANKED_RELEVANCE_ENTRIES`
+            // members with an `EXPECTED_DIVERGENCES` entry, and both are gone
+            // from that list now that `fl=score` has landed and their
+            // remaining BM25-magnitude divergence is ratified permanently
+            // (PRD ratified-divergence 4, `RANKED_SCORE_VALUE_RATIFIED`) —
+            // not tracked as a to-do here. The arm stays for the next
+            // Wayfinder-feature-gap `RANKED_RELEVANCE_ENTRIES` entry, if one
+            // shows up.
             (true, Some(reason)) if RANKED_RELEVANCE_ENTRIES.contains(&entry.name.as_str()) => {
                 eprintln!(
                     "{}: matches live Solr (expected — this loop compares Solr against its own \

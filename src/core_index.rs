@@ -395,7 +395,12 @@ impl CoreIndex {
     /// restricted to `fl` (schema field names) if given. Unknown `fl` fields
     /// are silently dropped (findings fact 6); fields with no stored value
     /// are omitted entirely, never emitted as `null`/`[]`.
-    pub fn render_doc(&self, addr: DocAddress, fl: Option<&[String]>) -> Result<Value> {
+    pub fn render_doc(
+        &self,
+        addr: DocAddress,
+        fl: Option<&[String]>,
+        score: Option<Score>,
+    ) -> Result<Value> {
         let searcher = self.reader.searcher();
         let doc: TantivyDocument = searcher.doc(addr)?;
 
@@ -422,6 +427,27 @@ impl CoreIndex {
                     values.into_iter().next().expect("checked non-empty"),
                 );
             }
+        }
+
+        // `score` only appears when `fl` explicitly names it, matching Solr:
+        // requesting `fl=score` is what turns scoring output on at all, so a
+        // caller passing a `Some(score)` without asking for it must still see
+        // it omitted.
+        //
+        // ponytail: positioned here — after the schema-declared stored fields,
+        // before the dynamic fields below — on an unverified assumption that
+        // this matches Solr's own key order. No captured fixture actually
+        // discriminates score-before-dynamic-fields from score-appended-last,
+        // since no scored fixture (`select_term_scored.json`,
+        // `select_quick_scored.json`) has a dynamic field. Finding 24
+        // (`docs/solr-ref-findings.md`) is evidence pointing the other way:
+        // Solr appends its own pseudo-fields (`_version_`, `_root_`) at the
+        // end in `select_all.json`, and `score` is itself a pseudo-field, so
+        // "appended last" may be the more faithful placement. Revisit if a
+        // fixture with `fl=score,<dynamic field>` ever gets captured.
+        if let Some(score) = score.filter(|_| fl.is_some_and(|fl| fl.iter().any(|f| f == "score")))
+        {
+            out.insert("score".to_string(), json!(score));
         }
 
         // Stored dynamic fields come back as top-level keys, the way Solr
@@ -704,5 +730,152 @@ impl FacetOrderKey {
             // `cmp`'s `Nanos` arm) — kept total rather than panicking.
             FacetOrderKey::Nanos(v) => *v as f64,
         }
+    }
+}
+
+/// Issue #34 (`fl=score`): unit-level pin for the `render_doc` contract
+/// stage 2 must implement, independent of the hermetic differential
+/// harness's fixture comparison. Solr renders each doc's BM25 score as a
+/// float `score` key when (and only when) `fl` explicitly names it
+/// (`select_term_scored.json`, `select_quick_scored.json`), positioned
+/// immediately after the schema-declared stored fields and before any
+/// dynamic-field keys (findings fact 6's ordering, extended).
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    const SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[dynamic_fields]]
+pattern = "*_s"
+type = "string"
+stored = true
+"#;
+
+    /// Opens a fresh `CoreIndex` against `SCHEMA_TOML` in a throwaway temp
+    /// dir. The `TempDir` guard must outlive the returned `CoreIndex`.
+    fn open_test_index() -> (TempDir, CoreIndex) {
+        let dir = TempDir::new().expect("create temp dir");
+        let schema_path = dir.path().join("schema.toml");
+        std::fs::write(&schema_path, SCHEMA_TOML).expect("write schema.toml");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let index = CoreIndex::open(&schema_path, &data_dir, &ServerConfig::default())
+            .expect("open test index");
+        (dir, index)
+    }
+
+    /// Indexes one doc, commits, and returns the doc's `(Score, DocAddress)`
+    /// for a `body:quick` query — a real BM25 score, not a placeholder.
+    fn indexed_scored_hit(index: &CoreIndex) -> (Score, DocAddress) {
+        index
+            .add_documents(&[
+                json!({"id": "doc1", "body": "the quick brown fox", "extra_s": "tag"}),
+            ])
+            .expect("add_documents");
+        index.commit().expect("commit");
+        let query = index.parse_query("quick", "body").expect("parse_query");
+        let hits = index
+            .search(query.as_ref(), &[], &[])
+            .expect("search should not fail");
+        hits.into_iter()
+            .next()
+            .expect("the indexed doc must match `quick`")
+    }
+
+    #[test]
+    fn render_doc_includes_score_when_fl_requests_it() {
+        let (_dir, index) = open_test_index();
+        let (score, addr) = indexed_scored_hit(&index);
+
+        let fl = vec!["id".to_string(), "score".to_string()];
+        let rendered = index
+            .render_doc(addr, Some(&fl), Some(score))
+            .expect("render_doc");
+
+        let obj = rendered.as_object().expect("doc is a JSON object");
+        assert_eq!(
+            obj.get("score").and_then(Value::as_f64),
+            Some(score as f64),
+            "`score` must be the BM25 score passed in, rendered as a float"
+        );
+    }
+
+    #[test]
+    fn render_doc_omits_score_when_fl_does_not_request_it() {
+        let (_dir, index) = open_test_index();
+        let (score, addr) = indexed_scored_hit(&index);
+
+        let fl = vec!["id".to_string()];
+        let rendered = index
+            .render_doc(addr, Some(&fl), Some(score))
+            .expect("render_doc");
+
+        let obj = rendered.as_object().expect("doc is a JSON object");
+        assert!(
+            !obj.contains_key("score"),
+            "`score` must not appear unless `fl` names it explicitly, even when a score is available"
+        );
+    }
+
+    #[test]
+    fn render_doc_omits_score_when_fl_is_absent() {
+        let (_dir, index) = open_test_index();
+        let (score, addr) = indexed_scored_hit(&index);
+
+        let rendered = index
+            .render_doc(addr, None, Some(score))
+            .expect("render_doc");
+
+        let obj = rendered.as_object().expect("doc is a JSON object");
+        assert!(
+            !obj.contains_key("score"),
+            "no `fl` means the default projection, which never includes `score`"
+        );
+    }
+
+    #[test]
+    fn render_doc_orders_score_after_stored_fields_and_before_dynamic_fields() {
+        let (_dir, index) = open_test_index();
+        let (score, addr) = indexed_scored_hit(&index);
+
+        // `fl` lists `extra_s` (dynamic) and `score` before the schema-declared
+        // stored fields, deliberately out of the expected output order, to pin
+        // that key order is driven by schema position, not by `fl`'s order.
+        let fl = vec![
+            "extra_s".to_string(),
+            "score".to_string(),
+            "body".to_string(),
+            "id".to_string(),
+        ];
+        let rendered = index
+            .render_doc(addr, Some(&fl), Some(score))
+            .expect("render_doc");
+
+        let obj = rendered.as_object().expect("doc is a JSON object");
+        let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec!["id", "body", "score", "extra_s"],
+            "`score` must sit immediately after the schema-declared stored \
+             fields and before any dynamic-field keys"
+        );
     }
 }
