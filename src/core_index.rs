@@ -636,10 +636,45 @@ impl CoreIndex {
             .field(default_field_name)
             .ok_or_else(|| anyhow!("unknown default field `{default_field_name}`"))?;
         let parser = QueryParser::for_index(&self.index, vec![default_field]);
-        let rewritten = self.rewrite_dynamic_fields(query_str);
+        let rewritten = self.rewrite_dynamic_fields(&self.rewrite_wildcard_subclause(query_str));
         parser
             .parse_query(&rewritten)
             .map_err(|e| anyhow!("could not parse query `{query_str}`: {e}"))
+    }
+
+    /// Rewrites an embedded `*:*` sub-clause (e.g. `*:* AND lazy`) to a bare
+    /// `*`, which tantivy's own query grammar parses as `UserInputLeaf::All`
+    /// (the same "match everything" leaf its own bare-`*` support produces),
+    /// rather than as an `Exists { field: "*" }` leaf.
+    ///
+    /// The whole-string `*:*` case is already handled by the `AllQuery`
+    /// special-case above and never reaches this function.
+    ///
+    /// Escalation note (resolved): the spec's original proposal was to
+    /// rewrite to `<uniqueKey>:*` (e.g. `id:*`). That does not work: tantivy
+    /// 0.26's own grammar parses any `field:*` as `UserInputLeaf::Exists`,
+    /// and `QueryParser::compute_logical_ast_for_leaf` in
+    /// `tantivy-0.26.1/src/query/query_parser/query_parser.rs` unconditionally
+    /// rejects `Exists` leaves with `QueryParserError::UnsupportedQuery`
+    /// ("Range query need to target a specific field.") regardless of
+    /// whether a field is present — `Exists` support was apparently never
+    /// wired up in `QueryParser`, so `id:*` alone fails to parse (verified
+    /// empirically: `index.parse_query("id:*", "body")` errors). A bare `*`
+    /// sub-clause, by contrast, is handled by the grammar's `leaf()`
+    /// combinator (checked before falling into field:value parsing) and
+    /// resolves through `UserInputLeaf::All` -> `LogicalLiteral::All`, which
+    /// `QueryParser` does support, with no field required — this is Wayfinder's
+    /// own real match-everything leaf resolving through the exact same path
+    /// its own whole-string `*:*` fixtures were captured against, just
+    /// reached via a sub-clause instead of the whole string.
+    ///
+    /// ponytail: a substring replace, not a syntax-aware rewrite (same
+    /// ceiling as `rewrite_dynamic_fields` below) — it would also fire inside
+    /// a quoted phrase that literally contains the text `*:*`. Acceptable for
+    /// now; no fixture exercises that case. Revisit if/when the query layer
+    /// grows its own parser (#8).
+    fn rewrite_wildcard_subclause(&self, query_str: &str) -> String {
+        query_str.replace("*:*", "*")
     }
 
     /// Rewrites `name:value` to `_dynamic.name:value` (or `_dynamic_text.`) for
@@ -1185,5 +1220,26 @@ stored = true
             "`score` must sit immediately after the schema-declared stored \
              fields and before any dynamic-field keys"
         );
+    }
+
+    /// A `*:*` sub-clause of a larger boolean query (e.g. `*:* AND lazy`)
+    /// must parse without panicking or erroring — issue #39. Correctness of
+    /// the resulting doc set/order is covered end-to-end against real Solr
+    /// fixtures by `tests/differential.rs`'s
+    /// `hermetic_whole_query_set_matches_committed_fixtures`; this test only
+    /// pins that `parse_query` itself succeeds for the three shapes the
+    /// panic was originally reported against.
+    #[test]
+    fn wildcard_subclause_parses_without_panicking() {
+        let (_dir, index) = open_test_index();
+        index
+            .parse_query("*:* AND lazy", "body")
+            .expect("*:* AND lazy must parse");
+        index
+            .parse_query("lazy OR *:*", "body")
+            .expect("lazy OR *:* must parse");
+        index
+            .parse_query("*:* -lazy", "body")
+            .expect("*:* -lazy must parse");
     }
 }

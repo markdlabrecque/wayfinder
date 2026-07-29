@@ -22,8 +22,11 @@ pub enum Envelope {
     /// `/update`-style: `responseHeader`, but no `params` echo — `/update`
     /// never echoes params. See `err_update_bad_json.json`.
     NoParams,
-    /// Unsupported HTTP method: no `responseHeader` at all, just `error`.
-    /// See `err_update_put.json`.
+    /// No `responseHeader` at all, just `error`. Originally the unsupported-
+    /// HTTP-method envelope (see `err_update_put.json`); also used by the
+    /// router's panic-catching layer (`src/lib.rs::handle_panic`), which runs
+    /// outside any single request's parsed `Params` and so has nothing to
+    /// echo.
     Bare,
 }
 
