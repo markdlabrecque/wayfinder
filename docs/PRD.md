@@ -307,7 +307,8 @@ manager, referenced by name from the field. The preset *is* the registration.
 
 ### Why no `schema.xml`, even for Search API
 
-An earlier draft proposed an `import-solr-config` converter for Phase 2. On inspection it is
+An earlier draft proposed an `import-solr-config` converter for the Search API phase (v2, §5).
+On inspection it is
 not needed, and shipping it would be building for a problem we do not have.
 
 `search_api_solr` does not declare a field per Drupal field. It encodes type and cardinality
@@ -320,7 +321,7 @@ repo, and reused by every Drupal site.
 Same for the language-specific text types the module generates — a fixed set per language,
 shipped as analyzer presets.
 
-Phase 2 therefore ships a `search-api.toml` preset, not a converter. Revisit only if a real
+v2 therefore ships a `search-api.toml` preset, not a converter. Revisit only if a real
 config set turns out to contain genuinely per-site content the preset cannot express; the
 fallback then is a converter, still a setup-time tool and never a runtime XML parser.
 
@@ -602,7 +603,7 @@ operational simplicity are where this project wins, and those are the primary go
 | Response-envelope fidelity is harder than it looks — Solr has accreted odd shapes (`facet_fields` alternating arrays, `json.nl`, inconsistent empty-value handling) | The differential harness, built early, with edge-weighted queries |
 | Relevance drifts visibly from Solr on migrated corpora | Both are BM25; drift comes from analyzer chains. Test ranked ID lists explicitly, not just membership. |
 | `softCommit` semantics differ enough to surprise clients that expect NRT | Document plainly; test the reindex/update flows a real client performs |
-| Phase 2 finds Search API needs something structurally absent (a component, a response field with no Tantivy-side source) | Capture the contract at the *start* of Phase 2, before building against it. The v1 engine is useful regardless. |
+| v2 finds Search API needs something structurally absent (a component, a response field with no Tantivy-side source) | The v1.5 capture exists to surface this *before* v2 builds against it. The v1 engine is useful regardless. |
 | Scope creep toward being a general Solr replacement | The non-goals in §1 and the phase table in §5. Every request gets asked: does the target use case need this? |
 | One `IndexWriter` per core becomes an indexing bottleneck | It is a Tantivy constraint, not a choice. Measure at 2 M docs; if it binds, the answer is batching, not architecture. |
 
