@@ -787,11 +787,12 @@ cap select_fl_reversed  'select?q=*:*&rows=2&fl=body,id&wt=json'
 #
 # Deletes MUTATE the corpus, which is exactly what issue #26 warns about: a
 # probe must never leave a core unable to reproduce its own fixtures. This
-# block's answer is idempotency-by-reset: the first thing it does on every run
-# is delete-by-query *:* + commit (not captured) and reseed the same corpus,
-# so the capture sequence always starts from the same state no matter what a
-# previous run left behind. The captures below are strictly ordered and each
-# comment tracks the corpus state; do not reorder them.
+# block's answer is idempotency-by-recreation: the first thing it does on
+# every run is delete and recreate the core (schema included — a doc-only
+# reset is NOT enough, see the copy-field note below) and reseed the same
+# corpus, so the capture sequence always starts from the same state no matter
+# what a previous run left behind. The captures below are strictly ordered and
+# each comment tracks the corpus state; do not reorder them.
 UPDATE9_CONTAINER=wayfinder-solr-9
 UPDATE9_SOLR=http://localhost:8989/solr
 UPDATE9_CORE=update9
@@ -806,13 +807,28 @@ for _ in $(seq 60); do
   echo -n "."; sleep 1
 done
 
+# Fresh core on EVERY run, not just a doc reset: `add-copy-field` is not
+# idempotent the way `add-field` is tolerant — a warm re-run appends a second
+# `nick`->`alias` directive, after which every copied value lands twice in the
+# single-valued destination and `update_copyfield_single_ok` flips 200 -> 400.
+# That is the issue-#26 failure class (a capture run leaving state that cannot
+# reproduce its own fixtures), caught live on this block's first warm re-run.
+# Deleting the core drops its schema too, so the block always builds both the
+# schema and the corpus from scratch.
+docker exec "$UPDATE9_CONTAINER" solr delete -c "$UPDATE9_CORE" >/dev/null 2>&1 || true
+docker exec "$UPDATE9_CONTAINER" solr create -c "$UPDATE9_CORE" >/dev/null
+echo -n "waiting for recreated update9 core"
+for _ in $(seq 60); do
+  if curl -sf "$UPDATE9_SOLR/$UPDATE9_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+  echo -n "."; sleep 1
+done
+
 # Schema: `title` is the single-valued docValues string for the
 # array-into-single-valued 400; `nick` -> `alias` is the copy-field pair whose
 # destination is single-valued (schema-layer follow-ups 1 and 2). `*_dt`
 # (dynamic pdate) already exists in the _default configset, which is what the
-# dynamic-date round trip uses (schema-layer follow-up 3). Tolerant re-run:
-# "field already exists" is fine, a genuinely broken schema surfaces on the
-# corpus POST below.
+# dynamic-date round trip uses (schema-layer follow-up 3). The core is always
+# freshly created (above), so none of this needs to tolerate leftovers.
 curl -s "$UPDATE9_SOLR/$UPDATE9_CORE/schema" -H 'Content-Type: application/json' -d '{
   "add-field": [
     {"name":"body",    "type":"text_en","indexed":true, "stored":true},
@@ -827,9 +843,8 @@ curl -s "$UPDATE9_SOLR/$UPDATE9_CORE/schema" -H 'Content-Type: application/json'
   ]
 }' >/dev/null
 
-# Reset + reseed (idempotency; NOT captured).
-curl -sf "$UPDATE9_SOLR/$UPDATE9_CORE/update?commit=true" -H 'Content-Type: application/json' \
-  -d '{"delete":{"query":"*:*"}}' >/dev/null
+# Seed the corpus (the fresh core above is what makes re-runs idempotent;
+# NOT captured).
 curl -sf "$UPDATE9_SOLR/$UPDATE9_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
   {"id":"u1","body":"quick brown fox","category":["keep"]},
   {"id":"u2","body":"lazy dog","category":["temp"]},

@@ -96,7 +96,7 @@ ping_unknown_core	404	GET	nosuchcore/admin/ping?wt=json		http://localhost:8989/s
 ping_unknown_core_delete	405	DELETE	nosuchcore/admin/ping?wt=json		http://localhost:8989/solr
 update_single_valued_array	400	POST	update9/update?commit=true&wt=json	[{"id":"u11","title":["one","two"]}]	http://localhost:8989/solr
 update_copyfield_single_valued	400	POST	update9/update?commit=true&wt=json	[{"id":"u12","nick":"nn","alias":"aa"}]	http://localhost:8989/solr
-update_copyfield_single_ok	400	POST	update9/update?commit=true&wt=json	[{"id":"u13","nick":"solo"}]	http://localhost:8989/solr
+update_copyfield_single_ok	200	POST	update9/update?commit=true&wt=json	[{"id":"u13","nick":"solo"}]	http://localhost:8989/solr
 update_select_copyfield_dest	200	GET	update9/select?q=id:u13&fl=id,nick,alias&wt=json		http://localhost:8989/solr
 update_dynamic_date	200	POST	update9/update?commit=true&wt=json	[{"id":"u14","when_dt":"2021-06-01T12:30:45Z"}]	http://localhost:8989/solr
 update_select_dynamic_date	200	GET	update9/select?q=when_dt:%5B2021-01-01T00:00:00Z%20TO%202022-01-01T00:00:00Z%5D&fl=id,when_dt&wt=json		http://localhost:8989/solr

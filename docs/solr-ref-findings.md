@@ -720,8 +720,24 @@ equal-score tie order is Lucene segment-merge history — the mixed-commands sel
 newest-doc-first purely as a merge artifact, which is not a wire contract and is not even
 reproducible across Tantivy runs (background merges race `commit()`). What these fixtures pin
 is *which* docs survive each mutation; the sort makes that deterministic on both sides.
-`update_select_overwrite_false` cannot take that fix (its two docs share the same id); its
-fixture shows insertion order, and the hermetic replay pins it under a `no_merge` policy.
+
+`update_select_overwrite_false` cannot take that fix: its two docs share uniqueKey `u7`, so no
+`sort` can discriminate them, and the tie falls to internal doc order on both engines. On the
+Wayfinder side that order is per-process random — tantivy 0.26.1's `SegmentRegister`
+(`src/indexer/segment_register.rs`) holds segments in a std `HashMap`, so segment ordinals
+(and with them cross-segment `DocAddress` order) change run to run — and on the Solr side it
+is equally a Lucene merge-internals accident, not a wire contract. The comparison for exactly
+this fixture (and only it) is therefore order-insensitive over the duplicate-id pair: it
+asserts both docs survive with their distinct bodies, not which internals-accident order they
+arrive in. Every other doc-order assertion stays strict. Ruled by the orchestrator during
+issue #9; recorded here so the next issue does not re-litigate it.
+
+A warm re-run also exposed a second #26-class trap, fixed in the block: Solr's
+`add-copy-field` is not idempotent (unlike `add-field`'s tolerated "already exists"), so a
+re-run against a warm core duplicated the `nick`->`alias` directive and flipped
+`update_copyfield_single_ok` from 200 to 400. The block now deletes and recreates the core
+(schema included) at its top; idempotency was verified by two consecutive warm runs producing
+identical statuses.
 
 46. **The `/update` success envelope is the bare `responseHeader` and nothing else — for every
     command shape.** Add-without-commit, add-with-commit, delete-by-id (object and list forms),

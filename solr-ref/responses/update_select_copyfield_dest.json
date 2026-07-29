@@ -9,9 +9,13 @@
     }
   },
   "response":{
-    "numFound":0,
+    "numFound":1,
     "start":0,
     "numFoundExact":true,
-    "docs":[ ]
+    "docs":[{
+      "nick":"solo",
+      "alias":"solo",
+      "id":"u13"
+    }]
   }
 }
