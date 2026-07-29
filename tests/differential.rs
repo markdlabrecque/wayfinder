@@ -471,6 +471,84 @@ async fn update9_app() -> (Router, TempDir) {
     (app, dir)
 }
 
+/// The `stats` core (issue #5): named `stats` literally, matching the
+/// `stats/...` leading segment `solr-ref/capture.sh`'s issue-#5 block wrote
+/// into `manifest-errors.tsv` — same "own name, unrewritten" treatment as
+/// `sortdebt`/`update9` rather than the rewritten-to-`content` treatment
+/// `facets`/`keyorder`/`facets33` get, since none of those needed both a
+/// non-`content` schema AND matched their manifest rows' own core segment
+/// simultaneously the way this one does.
+///
+/// `views` (missing on `st6`) and `price` (missing on `st5`) mirror
+/// `tests/stats.rs::STATS_SCHEMA_TOML` exactly — kept as an independent copy
+/// rather than shared, per that file's own doc comment on why the range/
+/// facet-debt/sortdebt cores each define their own schema string instead of
+/// exporting one from `common`.
+const STATS_SCHEMA_TOML: &str = r#"
+[core]
+name = "stats"
+unique_key = "id"
+default_field = "id"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "views"
+type = "int"
+stored = true
+fast = true
+
+[[fields]]
+name = "price"
+type = "double"
+stored = true
+fast = true
+"#;
+
+/// The exact `st1..st6` corpus `solr-ref/capture.sh`'s issue-#5 block
+/// indexes: `views` missing on `st6`, `price` missing on `st5`.
+fn stats_corpus() -> Value {
+    json!([
+        {"id":"st1","views":10,"price":1.5},
+        {"id":"st2","views":20,"price":2.5},
+        {"id":"st3","views":30,"price":3.5},
+        {"id":"st4","views":40,"price":4.5},
+        {"id":"st5","views":50},
+        {"id":"st6","price":5.5}
+    ])
+}
+
+/// `POST /solr/stats/update?commit=true` — cannot be `common::post_docs`,
+/// which is hardcoded to `common::CORE`.
+async fn stats_post_docs(app: &Router, docs: &Value) -> (StatusCode, Value) {
+    common::request_full(
+        app,
+        "POST",
+        "stats/update?commit=true",
+        Some(&docs.to_string()),
+    )
+    .await
+}
+
+/// Builds a fresh `stats`-schema app and indexes the full `st1..st6` corpus
+/// in one commit, matching `solr-ref/capture.sh`'s issue-#5 block.
+async fn stats_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), STATS_SCHEMA_TOML).expect("app must build");
+    let (status, body) = stats_post_docs(&app, &stats_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the stats corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
 /// Ratified, **permanent** divergences from captured Solr behaviour — the
 /// opposite of `EXPECTED_DIVERGENCES` below, which is a self-expiring to-do
 /// list for unbuilt features. Every entry here cites the PRD/findings
@@ -573,8 +651,13 @@ fn ranked_score_value_ratified_reason(name: &str) -> Option<&'static str> {
 /// `_field_range`/`_all_three` are unaffected and were never listed here),
 /// which is why the fix distinguishes the two in `src/facet.rs`'s
 /// `PreQueryFacetError` marker rather than attaching `response` to every
-/// facet error uniformly. This list is empty; a future divergence gets a new
-/// entry with its own reason.
+/// facet error uniformly.
+///
+/// Issue #5 (stats component) is fixed: `stats=true`/`stats.field` land in
+/// `src/stats.rs`, wired into `src/lib.rs::select`, so `stats_views`,
+/// `stats_multi_fields`, `stats_zero`, and `stats_zero_fq` all now match the
+/// captured fixtures for real and their entries are removed rather than left
+/// here — this list is empty until the next unbuilt-feature entry needs it.
 const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[];
 
 fn expected_divergence_manifest_errors_reason(name: &str) -> Option<&'static str> {
@@ -1512,6 +1595,7 @@ fn live_solr_matches_committed_query_set() {
 /// rewritten to `content` for every core except `sortdebt` (which keeps its
 /// own name — see the module comment above). An unrecognised segment is
 /// returned unrewritten against `content_app`.
+#[allow(clippy::too_many_arguments)] // one hermetic app per manifest-errors core; issue #5 added the 7th/8th
 fn app_and_request_url<'a>(
     entry: &ManifestErrorEntry,
     content_app: &'a Router,
@@ -1520,6 +1604,7 @@ fn app_and_request_url<'a>(
     sortdebt_app: &'a Router,
     facets33_app: &'a Router,
     update9_app: &'a Router,
+    stats_app: &'a Router,
 ) -> (&'a Router, String) {
     match entry.url.split_once('/') {
         Some(("content", rest)) => (content_app, format!("content/{rest}")),
@@ -1528,6 +1613,7 @@ fn app_and_request_url<'a>(
         Some(("facets33", rest)) => (facets33_app, format!("content/{rest}")),
         Some(("sortdebt", _)) => (sortdebt_app, entry.url.clone()),
         Some(("update9", _)) => (update9_app, entry.url.clone()),
+        Some(("stats", _)) => (stats_app, entry.url.clone()),
         _ => (content_app, entry.url.clone()),
     }
 }
@@ -1562,6 +1648,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let (sortdebt_app, _sortdebt_dir) = sortdebt_app().await;
     let (facets33_app, _facets33_dir) = facets33_app().await;
     let (update9_app, _update9_dir) = update9_app().await;
+    let (stats_app, _stats_dir) = stats_app().await;
 
     let mut ran = 0usize;
     let mut diffed = 0usize;
@@ -1581,6 +1668,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
             &sortdebt_app,
             &facets33_app,
             &update9_app,
+            &stats_app,
         );
         // `update_select_commitwithin_visible` follows a `commitWithin=500`
         // row with no settle delay in this hermetic replay, unlike

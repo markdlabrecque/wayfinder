@@ -818,3 +818,31 @@ Claiming finding 50 (46-49 are issue #9's, landed first).
     `EXPECTED_DIVERGENCES_MANIFEST_ERRORS` entries it tracked (`facet_unknown_field`,
     `facet_err_query_single`, `facet_err_field_single`, `facet_err_query_field`,
     `facet_err_query_vs_unfacetable`).
+
+## Findings from the issue #5 stats-component capture
+
+51. **`stats.field`'s `min`/`max` render as JSON floats even for an integer field, and zero
+    matching docs makes `mean` the literal JSON string `"NaN"`, not `null` and not a bare `NaN`
+    token.** Captured against a dedicated `stats` Solr core/corpus (`solr-ref/capture.sh`'s
+    issue-#5 block, container `wayfinder-solr-5`, port 8992, six docs `st1..st6` with `views`
+    missing on `st6` and `price` missing on `st5`, so `missing`/`min`/`max`/`sum`/etc. are
+    provably computed over present-only docs, not defaulted to 0). Four fixtures:
+    `stats_views.json` (single `stats.field`, real gap), `stats_multi_fields.json` (repeated
+    `stats.field=views&stats.field=price`, two independent gaps), `stats_zero.json` and
+    `stats_zero_fq.json` (zero matching docs via `q` and via `fq` respectively). Three facts
+    worth naming: (a) `min`/`max` for `views` (schema type `int`/`pint`) come back as `10.0`,
+    `50.0` — floats, not integers, matching Solr's stats-component convention of computing all
+    metrics in double precision regardless of the field's declared type; (b) `stats.field` in
+    the echoed `responseHeader.params` is a bare string when given once
+    (`"stats.field":"views"`) and a JSON array when repeated
+    (`"stats.field":["views","price"]`) — the same singular/array split other repeatable params
+    already show; (c) on zero matching docs, `min`/`max` are JSON `null`, `count`/`missing` are
+    `0`, `sum`/`sumOfSquares` are `0.0`, `stddev` is `0.0`, but **`mean` is the string `"NaN"`**
+    — Solr computes `mean = sum/count` in Java double arithmetic (`0.0/0`), gets a real
+    floating-point NaN, and its JSON writer renders that as a quoted string since bare `NaN` is
+    not valid JSON. A naive Rust implementation using `f64::NAN` would serialize via `serde_json`
+    as `null` instead and silently diverge — `tests/stats.rs` asserts this field literally rather
+    than only diffing against the fixture, for exactly that reason. Implemented under issue #5
+    (`src/stats.rs`, wired into `src/lib.rs::select`); closes the four
+    `EXPECTED_DIVERGENCES_MANIFEST_ERRORS` entries the four fixtures above tracked
+    (`stats_views`, `stats_multi_fields`, `stats_zero`, `stats_zero_fq`).

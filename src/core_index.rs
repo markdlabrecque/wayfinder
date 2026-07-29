@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Map, Value, json};
 use tantivy::aggregation::agg_req::{Aggregation, AggregationVariants, Aggregations};
-use tantivy::aggregation::agg_result::{AggregationResult, BucketResult};
+use tantivy::aggregation::agg_result::{AggregationResult, BucketResult, MetricResult};
 use tantivy::aggregation::bucket::TermsAggregation;
+use tantivy::aggregation::metric::{ExtendedStats, ExtendedStatsAggregation};
 use tantivy::aggregation::{
     AggContextParams, AggregationCollector, AggregationLimitsGuard, DEFAULT_BUCKET_LIMIT, Key,
 };
@@ -994,6 +995,54 @@ impl CoreIndex {
                 (term, order, bucket.doc_count)
             })
             .collect())
+    }
+
+    /// Solr's `stats.field`: min/max/count/sum/sumOfSquares/mean/stddev over a
+    /// numeric or date fast field, computed only over docs that actually have
+    /// a value in that field. Backed by Tantivy's `ExtendedStats` metric
+    /// aggregation (`tantivy::aggregation::metric`), which already ignores
+    /// docs missing the field rather than treating them as 0 — exactly the
+    /// "computed only over present docs" contract issue #5 needs; `missing`
+    /// itself is a separate `ExistsQuery` count, not part of this result.
+    ///
+    /// Solr's stddev is the *sample* standard deviation (dividing by `n - 1`),
+    /// confirmed against `stats_views.json`/`stats_multi_fields.json`: e.g.
+    /// `views`' five present values (10/20/30/40/50) have sample variance
+    /// 1000/4 = 250, `sqrt(250) = 15.811388300841896`, matching the fixture
+    /// exactly, while the population variance (1000/5 = 200) would not — so
+    /// this reads `std_deviation_sampling`, not `std_deviation`/
+    /// `std_deviation_population`.
+    pub fn field_stats(&self, field_name: &str, query: &dyn Query) -> Result<ExtendedStats> {
+        const AGG_NAME: &str = "wf_stats";
+
+        let mut aggs = Aggregations::default();
+        aggs.insert(
+            AGG_NAME.to_string(),
+            Aggregation {
+                agg: AggregationVariants::ExtendedStats(ExtendedStatsAggregation::from_field_name(
+                    field_name.to_string(),
+                )),
+                sub_aggregation: Aggregations::default(),
+            },
+        );
+
+        let collector = AggregationCollector::from_aggs(
+            aggs,
+            AggContextParams::new(
+                AggregationLimitsGuard::default(),
+                self.index.tokenizers().clone(),
+            ),
+        );
+        let results = self.reader.searcher().search(query, &collector)?;
+
+        let Some(AggregationResult::MetricResult(MetricResult::ExtendedStats(stats))) =
+            results.0.get(AGG_NAME)
+        else {
+            return Err(anyhow!(
+                "could not compute stats on field `{field_name}`: unexpected aggregation result"
+            ));
+        };
+        Ok((**stats).clone())
     }
 }
 
