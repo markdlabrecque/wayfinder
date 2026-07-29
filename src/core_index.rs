@@ -1093,9 +1093,10 @@ stored = true
     /// for a `body:quick` query — a real BM25 score, not a placeholder.
     fn indexed_scored_hit(index: &CoreIndex) -> (Score, DocAddress) {
         index
-            .add_documents(&[
-                json!({"id": "doc1", "body": "the quick brown fox", "extra_s": "tag"}),
-            ])
+            .add_documents(
+                &[json!({"id": "doc1", "body": "the quick brown fox", "extra_s": "tag"})],
+                true,
+            )
             .expect("add_documents");
         index.commit().expect("commit");
         let query = index.parse_query("quick", "body").expect("parse_query");
