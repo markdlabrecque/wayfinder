@@ -289,10 +289,11 @@ fn compare(actual: &KeyOrder, expected: &KeyOrder, path: &str, fixture: &str, ch
         (KeyOrder::Object(a), KeyOrder::Object(e)) => {
             // `IGNORED_KEYS` (`_version_`/`_root_`) is only ever a legitimate
             // Wayfinder omission *inside* `response.docs[<i>]` (findings fact
-            // 9) — elsewhere, e.g. at the top level, a `_version_` key
-            // present on only one side is a real key-order mismatch and must
-            // not be silently filtered away from both sides before the
-            // comparison (issue #31 follow-up 1).
+            // 9) or `/mlt`'s `match.docs[<i>]` (issue #6, same doc shape) —
+            // elsewhere, e.g. at the top level, a `_version_` key present on
+            // only one side is a real key-order mismatch and must not be
+            // silently filtered away from both sides before the comparison
+            // (issue #31 follow-up 1).
             let scope_ignored = is_response_docs_entry(path);
             let got = filtered_keys(a, scope_ignored);
             let want = filtered_keys(e, scope_ignored);
@@ -326,17 +327,24 @@ fn compare(actual: &KeyOrder, expected: &KeyOrder, path: &str, fixture: &str, ch
     }
 }
 
-/// True if `path` is exactly `response.docs[<i>]` for some array index `i` —
-/// the one place `IGNORED_KEYS` applies (see `compare` above), not any depth
-/// under it or anywhere else in the envelope.
+/// True if `path` is exactly `response.docs[<i>]` or `match.docs[<i>]` for
+/// some array index `i` — the places `IGNORED_KEYS` applies (see `compare`
+/// above), not any depth under either or anywhere else in the envelope.
+/// `match.docs[<i>]` was added for `/mlt` (issue #6): `match` is its own
+/// nested search-result object, so it carries the same real-doc internal
+/// fields (`_version_`/`_root_`) `response.docs[<i>]` does, per
+/// `tests/mlt.rs`'s `normalize_mlt` doc comment.
 fn is_response_docs_entry(path: &str) -> bool {
-    match path.strip_prefix("response.docs[") {
-        Some(rest) => match rest.strip_suffix(']') {
-            Some(idx) => !idx.is_empty() && idx.bytes().all(|b| b.is_ascii_digit()),
-            None => false,
-        },
-        None => false,
+    for prefix in ["response.docs[", "match.docs["] {
+        if let Some(rest) = path.strip_prefix(prefix)
+            && let Some(idx) = rest.strip_suffix(']')
+            && !idx.is_empty()
+            && idx.bytes().all(|b| b.is_ascii_digit())
+        {
+            return true;
+        }
     }
+    false
 }
 
 fn filtered_keys(entries: &[(String, KeyOrder)], scope_ignored: bool) -> Vec<&str> {

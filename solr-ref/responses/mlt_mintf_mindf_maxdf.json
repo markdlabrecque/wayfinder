@@ -1,0 +1,48 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":5
+  },
+  "match":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"mlt11",
+      "body":"astronomers observed a bright comet streaking across the night sky",
+      "category":["astronomy"],
+      "_version_":1872055772790128642,
+      "_root_":"mlt11"
+    }]
+  },
+  "response":{
+    "numFound":4,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"mlt13",
+      "body":"a lunar eclipse darkened the night sky for hours",
+      "category":["astronomy"],
+      "_version_":1872055772791177217,
+      "_root_":"mlt13"
+    },{
+      "id":"mlt15",
+      "body":"the night sky was clear enough to see the milky way",
+      "category":["astronomy"],
+      "_version_":1872055772792225792,
+      "_root_":"mlt15"
+    },{
+      "id":"mlt12",
+      "body":"the telescope revealed distant galaxies and bright stars",
+      "category":["astronomy"],
+      "_version_":1872055772791177216,
+      "_root_":"mlt12"
+    },{
+      "id":"mlt17",
+      "body":"camping near the lake was peaceful and quiet at night",
+      "category":["outdoors"],
+      "_version_":1872055772792225794,
+      "_root_":"mlt17"
+    }]
+  }
+}

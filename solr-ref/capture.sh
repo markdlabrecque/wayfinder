@@ -1385,3 +1385,110 @@ cap negative_not_keyword   'select?q=NOT+lazy&df=body&wt=json'
 cap negative_two_clauses   'select?q=-lazy+-dog&df=body&wt=json'
 cap negative_and_not       'select?q=lazy+AND+NOT+dog&df=body&wt=json'
 cap negative_fielded_and_not 'select?q=category:animals+AND+NOT+body:garden&wt=json'
+# --- MoreLikeThis (issue #6) --------------------------------------------------
+# `/mlt` needs term statistics that mean something, which the 5-doc
+# tracer-bullet corpus cannot give: with 5 docs almost every term is either
+# unique to one doc or shared by all of them, so `mlt.mindf`/`mlt.maxdf`
+# tuning has nothing to bite on. Own container on its own port
+# (`wayfinder-solr-6`, 8993, per the `wayfinder-solr-39`/8990 precedent above),
+# own 20-doc corpus with real overlapping/disjoint vocabulary across four
+# topic clusters (cooking, gardening, astronomy, outdoors) plus two
+# deliberately unrelated docs. Same schema shape as the canonical `content`
+# core (`body` text_en, `category` string/fast/multiValued), so this is an
+# ordinary `content`-core GET set — belongs in `manifest.tsv`, not
+# `manifest-errors.tsv`, via its own `capm()` mirroring `capw()`.
+MLT_CONTAINER=wayfinder-solr-6
+MLT_SOLR=http://localhost:8993/solr
+MLT_CORE=content
+if ! docker ps --format '{{.Names}}' | grep -qx "$MLT_CONTAINER"; then
+  docker rm -f "$MLT_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$MLT_CONTAINER" -p 8993:8983 \
+    solr:9 solr-precreate "$MLT_CORE" >/dev/null
+fi
+echo -n "waiting for mlt solr"
+for _ in $(seq 60); do
+  if curl -sf "$MLT_SOLR/$MLT_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+  echo -n "."; sleep 1
+done
+curl -s "$MLT_SOLR/$MLT_CORE/schema" -H 'Content-Type: application/json' -d '{
+  "add-field": [
+    {"name":"body",     "type":"text_en", "indexed":true, "stored":true},
+    {"name":"category", "type":"string",  "indexed":true, "stored":true,
+     "docValues":true, "multiValued":true}
+  ]
+}' >/dev/null
+# The `_default` configset's solrconfig.xml (Solr 7+, managed-schema-based)
+# does NOT register a `/mlt` request handler the way the classic example
+# configs used to -- a bare `solr-precreate` core 404s every /mlt request
+# (findings: issue #6). Add it via the Config API; tolerant of "already
+# exists" on a warm re-run the same way the schema add-field calls above are.
+curl -s "$MLT_SOLR/$MLT_CORE/config" -H 'Content-Type: application/json' -d '{
+  "add-requesthandler": {
+    "name": "/mlt",
+    "class": "solr.MoreLikeThisHandler"
+  }
+}' >/dev/null
+# Four topic clusters (cooking, gardening, astronomy, outdoors) with shared
+# vocabulary within a cluster and little across clusters, plus two
+# deliberately unrelated docs (mlt19, mlt20) for the no-interesting-terms
+# case. mlt1/mlt2 are near-duplicates (pasta/tomatoes/basil) so a baseline
+# `/mlt?q=id:mlt1` has an obvious top match; mlt11-mlt15 (astronomy) share
+# "night sky"/"stars"/"distant" densely, which is what the mintf/mindf/maxdf
+# and minwl/maxwl/maxqt captures tune against.
+curl -sf "$MLT_SOLR/$MLT_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"mlt1", "body":"the chef prepared a delicious pasta dish with fresh tomatoes and basil","category":["cooking","italian"]},
+    {"id":"mlt2", "body":"fresh basil and ripe tomatoes make a wonderful pasta sauce","category":["cooking","italian"]},
+    {"id":"mlt3", "body":"grilling chicken with garlic and rosemary is a classic dinner","category":["cooking","grilling"]},
+    {"id":"mlt4", "body":"roasted vegetables with olive oil and garlic taste amazing","category":["cooking","vegetarian"]},
+    {"id":"mlt5", "body":"baking bread requires yeast flour water and patience","category":["cooking","baking"]},
+    {"id":"mlt6", "body":"planting tomatoes and basil in the garden this spring","category":["gardening"]},
+    {"id":"mlt7", "body":"the garden needs watering every morning during summer heat","category":["gardening"]},
+    {"id":"mlt8", "body":"pruning rose bushes keeps the garden looking tidy","category":["gardening"]},
+    {"id":"mlt9", "body":"composting kitchen scraps enriches garden soil naturally","category":["gardening"]},
+    {"id":"mlt10","body":"growing herbs like basil and rosemary indoors year round","category":["gardening","cooking"]},
+    {"id":"mlt11","body":"astronomers observed a bright comet streaking across the night sky","category":["astronomy"]},
+    {"id":"mlt12","body":"the telescope revealed distant galaxies and bright stars","category":["astronomy"]},
+    {"id":"mlt13","body":"a lunar eclipse darkened the night sky for hours","category":["astronomy"]},
+    {"id":"mlt14","body":"scientists study the orbit of planets around distant stars","category":["astronomy"]},
+    {"id":"mlt15","body":"the night sky was clear enough to see the milky way","category":["astronomy"]},
+    {"id":"mlt16","body":"hiking through the mountains offers stunning views of the valley","category":["outdoors"]},
+    {"id":"mlt17","body":"camping near the lake was peaceful and quiet at night","category":["outdoors"]},
+    {"id":"mlt18","body":"the river flows quietly through the quiet forest valley","category":["outdoors"]},
+    {"id":"mlt19","body":"a short trip to buy office supplies and paper clips","category":["misc"]},
+    {"id":"mlt20","body":"nothing here relates to any other document in this corpus","category":["misc"]}
+]' >/dev/null
+capm() {  # capm <name> <path-with-query>, against $MLT_SOLR/$MLT_CORE
+  local name=$1 path=$2
+  curl -sg "$MLT_SOLR/$MLT_CORE/$path" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\n' "$name" "$(cat "$OUT/$name.status")" "$path" >> "$HERE/manifest.tsv"
+  rm -f "$OUT/$name.status"
+}
+# baseline: mlt1's nearest neighbour should be mlt2 (near-duplicate vocabulary)
+capm mlt_baseline              'mlt?q=id:mlt1&mlt.fl=body,category&wt=json'
+# mlt.fl restricted to one field
+capm mlt_fl_restricted         'mlt?q=id:mlt1&mlt.fl=body&wt=json'
+# mlt.mintf / mlt.mindf / mlt.maxdf tuning, against the denser astronomy cluster
+capm mlt_mintf_mindf_maxdf     'mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&wt=json'
+# mlt.minwl / mlt.maxwl (word-length gate on interesting terms). Stacked on
+# the same mintf=1/mindf=1 loosening as the tuning capture above -- the
+# handler's real defaults (mintf=2, mindf=5) are already too strict for a
+# 20-doc corpus, so every default-threshold capture below is a genuine 0-hit
+# result (see mlt_baseline/mlt_fl_restricted); this and the next three
+# captures deliberately loosen mintf/mindf first so the *other* param's
+# narrowing effect is visible against a non-empty baseline.
+capm mlt_minwl_maxwl           'mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.minwl=6&mlt.maxwl=10&wt=json'
+# mlt.maxqt caps how many interesting terms feed the generated query
+capm mlt_maxqt                 'mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxqt=2&wt=json'
+# mlt.boost turns on per-term IDF-ish boosting
+capm mlt_boost                 'mlt?q=id:mlt1&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.boost=true&wt=json'
+# standard fl/rows/start applied to the MLT result set
+capm mlt_fl_rows_start         'mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fl=id,score&rows=2&start=1&wt=json'
+# mlt.interestingTerms=details, to capture the real key/shape it adds
+capm mlt_interesting_terms_details 'mlt?q=id:mlt1&mlt.fl=body&mlt.interestingTerms=details&wt=json'
+# a doc with no meaningfully-shared vocabulary: genuinely-empty-or-degenerate
+# result shape, captured rather than guessed
+capm mlt_no_interesting_terms  'mlt?q=id:mlt20&mlt.fl=body&wt=json'
+# a source doc that does not exist at all
+capm mlt_nonexistent_doc       'mlt?q=id:nosuchdoc&mlt.fl=body&wt=json'
+echo "mlt core '$MLT_CORE' left in place on '$MLT_CONTAINER' (port 8993)"
+echo "  (docker rm -f $MLT_CONTAINER to stop)"

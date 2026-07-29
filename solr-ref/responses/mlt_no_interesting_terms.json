@@ -1,0 +1,24 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1
+  },
+  "match":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"mlt20",
+      "body":"nothing here relates to any other document in this corpus",
+      "category":["misc"],
+      "_version_":1872055772793274370,
+      "_root_":"mlt20"
+    }]
+  },
+  "response":{
+    "numFound":0,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  }
+}

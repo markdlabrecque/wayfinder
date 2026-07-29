@@ -1019,3 +1019,93 @@ is what makes the multi-term-analysis questions answerable at all.
     (`negative_and_not.json`, `negative_fielded_and_not.json`). Pins the all-negative
     regression fix (a `(Should, AllQuery)` companion clause when every built clause is
     `MustNot`) to captured behaviour rather than prose.
+## Findings from issue #6 (MoreLikeThis)
+
+Claiming findings 60-67 (issue #8's query-types capture has 56-59, above).
+
+60. **The `_default` configset does not register `/mlt` at all — a bare `solr-precreate` core
+    404s every `/mlt` request with the generic "you must type the correct path" easter egg, not
+    a Solr-shaped 404 or an empty result.** Unlike `/select`/`/update`/`/admin/ping`, `/mlt` is
+    not a handler `_default`'s `solrconfig.xml` wires up by default (that config ships only the
+    implicit `/select`, `/update`, `/get`, and admin handlers). Getting *any* `/mlt` response at
+    all required registering the handler via the Config API first:
+    `POST /solr/<core>/config {"add-requesthandler":{"name":"/mlt","class":"solr.MoreLikeThisHandler"}}`
+    — `solr-ref/capture.sh`'s MLT block does this before indexing. This is a fact about the
+    reference container's setup, not a wire-format divergence to track: once the handler exists,
+    every fixture below is a plain 200. Not applicable to Wayfinder, which is expected to serve
+    `/mlt` unconditionally per PRD §5.
+
+61. **The `/mlt` envelope is `{responseHeader, match, response[, interestingTerms]}` — `match` is
+    the source document as its own nested search result, not a bare doc.** `mlt_baseline.json`
+    (and every other fixture here): `match` has the full `numFound`/`start`/`numFoundExact`/`docs`
+    shape of an ordinary `/select` response, holding exactly the one document `q` resolved to
+    (`docs` empty and `numFound:0` if `q` matched nothing — see finding 63). `response` is the
+    same four-key shape holding the *similar* documents, i.e. the actual MLT result set that
+    `fl`/`rows`/`start`/`sort` semantics apply to. `_version_`/`_root_` appear on stored docs in
+    both blocks exactly as `/select` findings 8-9 describe — Wayfinder's default-`fl` decision
+    presumably extends here unchanged, but that's the implementor's call to make explicit.
+
+62. **`interestingTerms` only appears at all when `mlt.interestingTerms` is set to a truthy value
+    (`details` here), and is a bare top-level array sibling to `match`/`response` — never nested
+    under either.** `mlt_interesting_terms_details.json` has `interestingTerms:[]` (empty, because
+    the query in that fixture also produced zero result docs — see finding 64 on why); no other
+    fixture carries the key at all. This capture run never exercised a case where interesting
+    terms exist *and* `mlt.interestingTerms=details` is set simultaneously — the implementor
+    needs a fixture with a real (non-empty) `interestingTerms` array to pin the per-term shape
+    (Solr's classic form is `"term:field:weight"` strings, but that is from memory, not this
+    capture; treat it as unverified until a fixture actually shows one).
+
+63. **A `q` that resolves to zero source documents is a 200 with `response: null` (JSON `null`,
+    not an empty result object) and no `interestingTerms` key at all — not a 404 and not an
+    empty-result shape.** `mlt_nonexistent_doc.json` (`q=id:nosuchdoc`): `match.numFound:0`,
+    `match.docs:[]` (the ordinary empty-result shape), but `response` is the bare JSON value
+    `null`. This is a genuinely different shape from every other captured case, where `response`
+    is always an object even when its own `docs` array is empty (`mlt_no_interesting_terms.json`:
+    `response:{numFound:0,start:0,numFoundExact:true,docs:[]}`). A response builder that always
+    emits the four-key object here would diverge; `response` must be nullable independently of
+    `match`.
+
+64. **The handler's real defaults (`mlt.mintf=2`, `mlt.mindf=5`) are already too strict to
+    produce any match on a 20-document corpus** — `mlt_baseline.json`/`mlt_fl_restricted.json`
+    (`q=id:mlt1`, no tuning params) both get `response:{numFound:0,...,docs:[]}` despite `mlt1`
+    and `mlt2` sharing "fresh", "basil", "tomatoes", "pasta" almost verbatim: those terms each
+    appear in only 2 of the 20 docs, one short of Solr's default `mindf=5` floor. This is a real,
+    intentional Solr default (tuned for corpora far larger than a five-or-twenty-doc fixture set,
+    per Lucene's own `MoreLikeThis` javadoc), not a bug or a capture mistake — `mlt_baseline`/
+    `mlt_fl_restricted` are legitimate degenerate-empty fixtures in their own right (same shape
+    as finding 63's `response` object, `docs:[]`, distinct from finding 63's `response: null`
+    case because `match` still finds the source doc here). Every other tuning fixture
+    (`mlt_mintf_mindf_maxdf.json` and everything downstream of it) deliberately sets
+    `mlt.mintf=1&mlt.mindf=1` first to get a non-empty baseline, so the *other* parameter's
+    narrowing effect (`mlt.minwl`/`mlt.maxwl`, `mlt.maxqt`) is visible against real matches
+    instead of against another 0.
+
+65. **`mlt.minwl`/`mlt.maxwl` and `mlt.maxqt` measurably narrow the interesting-terms set, and
+    `mlt.maxqt` can narrow it all the way to zero real matches even with `mintf`/`mindf`
+    loosened.** Starting from `mlt_mintf_mindf_maxdf.json`'s `mlt.mintf=1&mlt.mindf=1` baseline
+    (4 matches for `mlt11`: `mlt13, mlt15, mlt12, mlt17`), adding `mlt.minwl=6&mlt.maxwl=10`
+    (`mlt_minwl_maxwl.json`) drops the match set to 1 (`mlt12`) — words shorter than 6 letters
+    ("night", "sky", "bright") stop counting as interesting terms, which removes enough shared
+    vocabulary to sever most of the cluster. Adding `mlt.maxqt=2` instead
+    (`mlt_maxqt.json`) drops it to **0** — capping to the top 2 interesting terms by weight
+    apparently picks terms too sparse/generic to match anything else in this corpus. Both are
+    real, captured Solr behaviour on this corpus, not something to soften in a normaliser.
+
+66. **`mlt.boost=true` changes both the match set and its order relative to the unboosted
+    query, on the same loosened thresholds.** `mlt_boost.json` (`q=id:mlt1`,
+    `mlt.mintf=1&mlt.mindf=1&mlt.boost=true`) returns 3 matches in order `mlt2, mlt6, mlt10` —
+    `mlt2` (the near-duplicate) ranks first as expected, but `mlt6`/`mlt10` (weaker, partial
+    vocabulary overlap via the gardening cluster) also surface, an order the differential tests
+    must compare via ranked-ID comparison (`diff_ranked_ids`), not membership alone, per PRD §8.
+
+67. **`fl`/`rows`/`start` apply to `response` (the similar-docs list) exactly as they do on
+    `/select`, including per-doc `score` and top-level `maxScore` on *both* `match` and
+    `response` when `fl` includes `score`.** `mlt_fl_rows_start.json`
+    (`mlt.mintf=1&mlt.mindf=1&fl=id,score&rows=2&start=1`, source doc `mlt11`, 4 total matches):
+    `response.start:1`, `response.docs` holds exactly 2 entries (`mlt15`, `mlt12`, matching the
+    second page of the same order finding 61's `boost` case implies is real, not incidental), and
+    `response.maxScore` is the corpus-wide max (1.6043521) — **not** recomputed over just the
+    returned page, same as ordinary `/select` `fl=score` semantics (PRD ratified-divergence 4).
+    `match` also carries `score`/`maxScore` for the one source doc once `fl` includes `score`,
+    even though `match` is a single-doc lookup, not a ranked list — `match.docs[0].score` and
+    `match.maxScore` are numerically identical (1.1995715) since there is only one "hit".

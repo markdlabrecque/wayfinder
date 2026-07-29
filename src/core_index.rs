@@ -23,10 +23,12 @@ use tantivy::query::{
     AllQuery, BooleanQuery, BoostQuery, EmptyQuery, ExistsQuery, Occur, Query, QueryParser,
     RegexQuery, TermQuery,
 };
+use tantivy::schema::document::Value as _;
 use tantivy::schema::{Field, IndexRecordOption, OwnedValue};
 use tantivy::snippet::SnippetGenerator;
 use tantivy::time::OffsetDateTime;
 use tantivy::time::format_description::well_known::Rfc3339;
+use tantivy::tokenizer::TokenStream;
 use tantivy::{
     DateTime, DocAddress, Index, IndexReader, IndexWriter, ReloadPolicy, Score, TantivyDocument,
     Term,
@@ -41,6 +43,67 @@ use crate::schema::{self, ValueKind, WayfinderSchema};
 /// own aggregation bucket limit is the binding constraint, so the request asks
 /// for exactly that many and no more.
 const MAX_FACET_TERMS: u32 = DEFAULT_BUCKET_LIMIT;
+
+/// Lucene's classic English stopword list (`StandardAnalyzer`'s default,
+/// also Solr's own `text_en` field type) — see `CoreIndex::mlt_query`'s doc
+/// comment for why `/mlt` injects this explicitly rather than relying on
+/// `text_en`'s own (stopword-free) analyzer chain.
+const ENGLISH_STOPWORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into", "is", "it",
+    "no", "not", "of", "on", "or", "such", "that", "the", "their", "then", "there", "these",
+    "they", "this", "to", "was", "will", "with",
+];
+
+/// Tuning knobs for `CoreIndex::mlt_query`, one field per `/mlt` request
+/// param `src/lib.rs`'s handler parses. Solr's own defaults (`mlt.mintf=2`,
+/// `mlt.mindf=5`, `mlt.maxqt=25`, `mlt.boost=false`, no word-length/max-doc-
+/// frequency gate) are the caller's job to supply when a param is absent —
+/// this struct carries only the resolved values, no further defaulting.
+pub struct MltOptions {
+    pub min_doc_frequency: Option<u64>,
+    pub max_doc_frequency: Option<u64>,
+    pub min_term_frequency: Option<usize>,
+    pub max_query_terms: Option<usize>,
+    pub min_word_length: Option<usize>,
+    pub max_word_length: Option<usize>,
+    pub boost_factor: Option<f32>,
+}
+
+/// `/mlt` term-mining noise filter (mirrors Tantivy's private
+/// `MoreLikeThis::is_noise_word`): a word is dropped if it fails the
+/// min/max length gate or is one of `ENGLISH_STOPWORDS`.
+fn mlt_is_noise_word(
+    word: &str,
+    min_word_length: Option<usize>,
+    max_word_length: Option<usize>,
+) -> bool {
+    let len = word.len();
+    if len == 0 {
+        return true;
+    }
+    if min_word_length.is_some_and(|min| len < min) {
+        return true;
+    }
+    if max_word_length.is_some_and(|max| len > max) {
+        return true;
+    }
+    ENGLISH_STOPWORDS.contains(&word)
+}
+
+/// `/mlt` term scoring weight (mirrors Tantivy's private, `pub(crate)`
+/// `tantivy::query::bm25::idf`, unreachable from outside the crate).
+fn mlt_idf(doc_freq: u64, doc_count: u64) -> Score {
+    // `doc_count` (sum of `segment_reader.num_docs()`, alive docs only) can be
+    // less than `doc_freq` (`Searcher::doc_freq`, which counts the raw term
+    // dictionary and so still includes docs deleted by an overwrite —
+    // `add_documents` deletes-then-reinserts on every unique-key collision)
+    // once a doc has been overwritten. Tantivy's own private `bm25::idf`
+    // asserts `doc_count >= doc_freq`; `saturating_sub` is this file's
+    // equivalent guard against the subtract-with-overflow/garbage-idf that
+    // would otherwise follow.
+    let x = ((doc_count - doc_freq) as Score + 0.5) / (doc_freq as Score + 0.5);
+    (1.0 + x).ln()
+}
 
 /// Renders one stored Tantivy value as the JSON Solr would return for it.
 fn render_value<'a>(v: impl tantivy::schema::Value<'a>) -> Value {
@@ -1227,6 +1290,150 @@ impl CoreIndex {
         }
         snippet.set_snippet_prefix_postfix(pre, post);
         Ok(vec![snippet.to_html()])
+    }
+
+    /// Builds the `/mlt` similarity query for `addr` — mines terms from
+    /// `field_names`'s stored values (every declared field if absent, from
+    /// `mlt.fl`), tuned by `opts`.
+    ///
+    /// ponytail: `MoreLikeThis::stop_words` is filled with a fixed Lucene
+    /// English stopword list unconditionally, rather than deriving one from
+    /// the field's own analyzer. Wayfinder's `text_en` preset deliberately
+    /// stems but does not strip stopwords (PRD open question 5's
+    /// resolution), unlike the real Solr `text_en` field type the reference
+    /// fixtures were captured against (`solr-ref/capture.sh`'s MLT block),
+    /// which does. Left as-is, common words like "a"/"the"/"with" become
+    /// real, low-but-nonzero-doc-frequency terms in Wayfinder's own index —
+    /// absent from Solr's, where the analyzer strips them before they ever
+    /// reach the term dictionary — and a loosened `mlt.mindf`/`mlt.maxdf`
+    /// (as `mlt_mintf_mindf_maxdf`/`mlt_boost` exercise) then pulls in
+    /// spurious cross-cluster matches on that shared noise alone. Injecting
+    /// the same stopword list `/mlt` itself, rather than teaching `text_en`
+    /// to strip stopwords for every field everywhere, keeps this a
+    /// `/mlt`-local compensation for a schema-preset decision made
+    /// elsewhere, not a change to indexing/query behaviour anywhere else in
+    /// the crate. Revisit if `text_en` ever grows real stopword removal.
+    ///
+    /// ponytail: reimplements (rather than calls) Tantivy's own
+    /// `MoreLikeThis`/`MoreLikeThisQuery` algorithm. That type's containing
+    /// module (`tantivy::query::more_like_this`) is private — only
+    /// `MoreLikeThisQuery`/`MoreLikeThisQueryBuilder` are re-exported — and
+    /// the builder offers no way to get `boost_factor: None` (Solr's
+    /// `mlt.boost=false` default; the builder's own default is always
+    /// `Some(1.0)`, since `MoreLikeThis::boost_factor` itself is private and
+    /// `with_boost_factor(f32)` can only ever produce `Some`). That is the
+    /// one real gap in the public builder API; `with_stop_words` *is* public,
+    /// so the stop-word list alone would not have forced a reimplementation.
+    /// This mirrors Tantivy 0.26.1's private algorithm term-for-term
+    /// (tokenize each mined field with its own indexing analyzer, drop noise
+    /// words, threshold by term/doc frequency, score by `tf * idf` with the
+    /// identical BM25-style `idf` formula, keep the top `max_query_terms`),
+    /// so it should track upstream's actual output; revisit if that
+    /// algorithm becomes public or gains a `with_boost_factor(None)` escape
+    /// hatch.
+    ///
+    /// Returns both the composed query and the scored terms it was built
+    /// from (highest-scored first, already truncated to `max_query_terms`)
+    /// so a caller rendering `mlt.interestingTerms` has real weighted-term
+    /// data to work with rather than needing to re-derive it.
+    pub fn mlt_query(
+        &self,
+        addr: DocAddress,
+        field_names: Option<&[String]>,
+        opts: MltOptions,
+    ) -> Result<(BooleanQuery, Vec<(Term, Score)>)> {
+        let searcher = self.reader.searcher();
+        let doc: TantivyDocument = searcher.doc(addr)?;
+        let schema = searcher.schema();
+        let tokenizer_manager = searcher.index().tokenizers();
+
+        let mut term_frequencies: HashMap<Term, usize> = HashMap::new();
+        for field_config in &self.wf_schema.fields {
+            if field_names.is_some_and(|names| !names.iter().any(|n| n == &field_config.name)) {
+                continue;
+            }
+            let Some(field) = self.wf_schema.field(&field_config.name) else {
+                continue;
+            };
+            let field_entry = schema.get_field_entry(field);
+            if !field_entry.is_indexed() {
+                continue;
+            }
+            let tantivy::schema::FieldType::Str(text_options) = field_entry.field_type() else {
+                continue;
+            };
+            let Some(mut tokenizer) = text_options
+                .get_indexing_options()
+                .map(|o| o.tokenizer())
+                .and_then(|name| tokenizer_manager.get(name))
+            else {
+                continue;
+            };
+            for value in doc.get_all(field) {
+                let Some(text) = value.as_str() else {
+                    continue;
+                };
+                let mut token_stream = tokenizer.token_stream(text);
+                token_stream.process(&mut |token: &tantivy::tokenizer::Token| {
+                    if mlt_is_noise_word(&token.text, opts.min_word_length, opts.max_word_length) {
+                        return;
+                    }
+                    let term = Term::from_field_text(field, &token.text);
+                    *term_frequencies.entry(term).or_insert(0) += 1;
+                });
+            }
+        }
+
+        let num_docs: u64 = searcher
+            .segment_readers()
+            .iter()
+            .map(|r| r.num_docs() as u64)
+            .sum();
+
+        let mut score_terms: Vec<(Term, Score)> = Vec::new();
+        for (term, term_frequency) in term_frequencies {
+            if opts
+                .min_term_frequency
+                .is_some_and(|min| term_frequency < min)
+            {
+                continue;
+            }
+            let doc_freq = searcher.doc_freq(&term)?;
+            if opts.min_doc_frequency.is_some_and(|min| doc_freq < min) {
+                continue;
+            }
+            if opts.max_doc_frequency.is_some_and(|max| doc_freq > max) {
+                continue;
+            }
+            if doc_freq == 0 {
+                continue;
+            }
+            let idf = mlt_idf(doc_freq, num_docs);
+            score_terms.push((term, term_frequency as Score * idf));
+        }
+        score_terms.sort_by(|(_, left), (_, right)| {
+            right.partial_cmp(left).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if let Some(limit) = opts.max_query_terms {
+            score_terms.truncate(limit);
+        }
+
+        let best_score = score_terms.first().map_or(1.0, |(_, score)| *score);
+        let mut clauses: Vec<(tantivy::query::Occur, Box<dyn Query>)> = Vec::new();
+        for (term, score) in &score_terms {
+            let mut clause: Box<dyn Query> = Box::new(tantivy::query::TermQuery::new(
+                term.clone(),
+                tantivy::schema::IndexRecordOption::Basic,
+            ));
+            if let Some(factor) = opts.boost_factor {
+                clause = Box::new(tantivy::query::BoostQuery::new(
+                    clause,
+                    score * factor / best_score,
+                ));
+            }
+            clauses.push((tantivy::query::Occur::Should, clause));
+        }
+        Ok((BooleanQuery::from(clauses), score_terms))
     }
 
     /// Number of documents matching `query`. The counting primitive behind
