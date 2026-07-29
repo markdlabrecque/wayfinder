@@ -1,10 +1,11 @@
 {
   "responseHeader":{
     "status":0,
-    "QTime":7,
+    "QTime":25,
     "params":{
-      "q":"category:animals",
+      "q":"*:*",
       "hl":"true",
+      "fq":"category:animals",
       "hl.fl":"body",
       "wt":"json"
     }
@@ -17,13 +18,13 @@
       "id":"doc1",
       "body":"the quick brown fox jumps over the lazy dog",
       "category":["animals","classic"],
-      "_version_":1872055469200113664,
+      "_version_":1872055843045769216,
       "_root_":"doc1"
     },{
       "id":"doc4",
       "body":"dogs and cats living together",
       "category":["animals"],
-      "_version_":1872055469223182336,
+      "_version_":1872055843067789312,
       "_root_":"doc4"
     }]
   },

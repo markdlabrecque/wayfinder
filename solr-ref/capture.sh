@@ -1211,10 +1211,17 @@ caph hl_fragsize_small   'select?q=quick&df=body&hl=true&hl.fl=body&hl.fragsize=
 # the fixture the fragsize test derives its truncation assertion from.
 caph hl_fragsize_truncated 'select?q=quick&df=body&hl=true&hl.fl=body&hl.method=original&hl.fragsize=10&wt=json'
 
-# a doc that matches the query via `category` (a non-highlighted field) but
+# A doc that matches via `fq` (a non-highlighted, non-scoring field) but
 # whose `body` has no term overlap with the query at all -- the crux capture:
-# what shape does Solr give that doc's entry under `highlighting`?
-caph hl_no_field_match   'select?q=category:animals&hl=true&hl.fl=body&wt=json'
+# what shape does Solr give that doc's entry under `highlighting`? Uses
+# q=*:*&fq=category:animals rather than q=category:animals directly: the
+# latter was tried first and produced doc4-before-doc1 in Wayfinder against
+# doc1-before-doc4 in Solr -- a real but unrelated BM25/norm ranking
+# divergence on a bare category-field term query, not a highlighting
+# question. q=*:*+fq gives every matching doc an identical score, so the
+# ascending-doc-order tie-break (finding 19) is deterministic on both
+# engines and the fixture isolates the highlighting fact it exists to pin.
+caph hl_no_field_match   'select?q=*:*&fq=category:animals&hl=true&hl.fl=body&wt=json'
 
 # hl.fl with multiple fields, comma-separated
 caph hl_multi_field_comma 'select?q=lazy&df=body&hl=true&hl.fl=body,category&wt=json'

@@ -846,3 +846,75 @@ Claiming finding 50 (46-49 are issue #9's, landed first).
     (`src/stats.rs`, wired into `src/lib.rs::select`); closes the four
     `EXPECTED_DIVERGENCES_MANIFEST_ERRORS` entries the four fixtures above tracked
     (`stats_views`, `stats_multi_fields`, `stats_zero`, `stats_zero_fq`).
+
+## Findings from the issue #4 highlighting capture
+
+Claiming findings 52-55 (51 already claimed by issue #5's stats-component capture, above). Nine
+new `manifest.tsv` rows (`hl_*`) against a new self-contained `content` core on its own container
+(`wayfinder-solr-4`, port 8991), same schema and 5-doc "quick brown fox" corpus as the canonical
+container at the top of `capture.sh`. All core-relative GETs, so all in `manifest.tsv`, not
+`manifest-errors.tsv`.
+
+52. **The `highlighting` envelope is a top-level object keyed by the unique key, each value
+    `{field: [snippet, ...]}` — and critically, a doc that matched the query through a field
+    other than the one(s) named in `hl.fl` still gets a key, but that key's value is an *empty
+    object*, not an absent key and not `{"body":[]}`.** `hl_no_field_match.json`
+    (`q=*:*&fq=category:animals`, `hl.fl=body`, matching doc1 and doc4 through the non-scoring
+    `fq` while neither doc's `body` contains "animals") shows exactly
+    `"highlighting":{"doc1":{},"doc4":{}}`. This is the single fact this issue most needed pinned
+    rather than guessed: Solr does **not** omit the doc, and does **not** emit an empty-array
+    field placeholder — it emits the doc key with an empty snippet object. (The fixture uses
+    `q=*:*&fq=category:animals` rather than the more obvious `q=category:animals` directly:
+    the latter was tried first and surfaced an unrelated, real divergence — Wayfinder orders
+    doc4 before doc1 for a bare category-field term query where Solr orders doc1 before doc4, a
+    BM25/norm ranking difference orthogonal to highlighting. `q=*:*` gives every matching doc an
+    identical score, making the ascending-doc-order tie-break (finding 19) deterministic on both
+    engines, so the fixture isolates the highlighting fact without tripping over that separate,
+    unfixed ranking gap.) `hl_multi_field_comma.json`/`hl_multi_field_space.json` show the same rule at the
+    *field* level within a doc that does have a match elsewhere: `hl.fl=body,category` on a query
+    that matches `body` but never `category` (category's values are `garden`/`animals`/`classic`,
+    none of which is `lazy`) renders `"doc1":{"body":[...]}` — no `"category"` key at all, not
+    `"category":[]`. So the rule is uniform at both levels: a field/doc with no match is *absent*
+    from its parent object, and the parent object itself is *never* absent, only ever present
+    (possibly empty).
+
+53. **`hl.snippets` does not fabricate snippets that do not exist — one field occurrence still
+    yields a one-element array even when `hl.snippets` asks for more.** Neither `hl_basic.json`
+    nor `hl_snippets_two.json`'s corpus has a doc where the query term appears twice in `body`
+    (the corpus's one repeated word, "the", is an English stopword and never indexed), so
+    `hl_snippets_two.json` (`hl.snippets=2`) renders identically to the `hl.snippets`-unset case
+    apart from the params echo: `"body":["<em>quick</em> thinking saves the day"]`, a single-
+    element array. `hl.snippets` bounds the *maximum* snippet count per field, it does not pad to
+    it — there is nothing in scope here proving Solr *can* return more than one, only that it
+    never invents one, which is the property Wayfinder's implementation must not violate either.
+
+54. **`hl=true` with no `hl.fl` at all defaults to highlighting the search's default field
+    (`df`), not every stored field and not nothing.** `hl_default_fl.json` (`df=body`, no
+    `hl.fl`) renders identically to `hl_basic.json` (`hl.fl=body` given explicitly) — only
+    `body` is highlighted, `category` never appears in any doc's `highlighting` entry despite
+    being stored and docValues. This settles the PRD task spec's "capture it rather than
+    assuming" instruction: the default is `df`, not `*` (all fields) and not an empty/absent
+    `highlighting` block.
+
+55. **`hl.fragsize` under Solr's default `hl.method=unified` does not truncate a short,
+    punctuation-free field at all — not even at `hl.fragsize=1`, verified interactively down to
+    that value though only `hl.fragsize=18` is a committed fixture (`hl_fragsize_small.json`).**
+    The unified highlighter's sentence `BreakIterator` refuses to cut inside what it considers a
+    single sentence, and this corpus's fields have no internal punctuation, so every field comes
+    back whole regardless of `hl.fragsize`. This contradicted the issue's premise that a small
+    `hl.fragsize` value "forces truncation" under Solr's actual default configuration. Truncation
+    *is* observable under `hl.method=original` (the pre-unified classic Highlighter with a
+    `GapFragmenter`), captured as `hl_fragsize_truncated.json`
+    (`hl.method=original&hl.fragsize=10`): `"quick thinking saves the day"` (29 chars) becomes
+    `"<em>quick</em>"` and `"the quick brown fox jumps over the lazy dog"` becomes
+    `"the <em>quick</em>"` — truncated hard around the match, no trailing context, no sentence
+    awareness. Tantivy's `SnippetGenerator` truncates by a character budget the same
+    match-centered way the classic highlighter does, not by sentence boundaries, so
+    `hl_fragsize_truncated.json` is the fixture the fragsize *truncation* test derives its
+    assertion from; `hl_fragsize_small.json` is kept as the documented default-method surprise
+    (a no-truncation control), not as a truncation assertion's source.
+
+Not yet captured for highlighting: `hl.maxAnalyzedChars`, `hl.requireFieldMatch`,
+`hl.highlightMultiTerm`, per-field `f.<field>.hl.*` overrides, and any field type other than
+`text_en` (a highlighted `string`/numeric/date field was not exercised — `category` above is
+requested but never actually matched, so its shape when it *does* highlight remains unseen).
