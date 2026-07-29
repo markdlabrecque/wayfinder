@@ -1253,9 +1253,12 @@ edismax-specific behaviour.
     clause **is** the whole `q` value; once it is wrapped in an enclosing `(...)` group (as the
     module always does for multi-clause queries), only the first whitespace-delimited token after
     `}` is handed to the named sub-parser — every subsequent `+"term"` clause is instead parsed by
-    the *outer*, non-edismax, default query parser against Solr's default field (`df`, here
-    `_text_`), which does not carry the module's per-field-boosted content and so those clauses
-    almost never match. The module's `OR`-conjunction case (`00007.json`, `"quick" "rocket"`)
+    the *outer*, non-edismax, default query parser against Solr's configured `df` field (`id`, set
+    via `solr-ref/search-api/configset/solrconfig_extra.xml:113` on the `/select` handler — a
+    string field holding values like `4m8z66-capture_index-entity:node/1:en`), which does not carry
+    the module's per-field-boosted content and so those clauses can never match, making the
+    fall-through behaviour even more certain than a fulltext default field would. The module's
+    `OR`-conjunction case (`00007.json`, `"quick" "rocket"`)
     happened to still return correct-looking results in this capture, but only because the corpus
     has overlapping vocabulary (both matching documents also contain "quick") — the second term
     ("rocket") was independently confirmed to be silently dropped there too. Net: `qf` weighting is

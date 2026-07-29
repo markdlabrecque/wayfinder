@@ -65,7 +65,7 @@ docker exec wf55-drupal bash -lc "
     mv tmp_build/* .
     rmdir tmp_build
   fi
-  composer require drush/drush:^13 drupal/search_api:^1.38 drupal/search_api_solr:^4.4 --no-interaction
+  composer require drush/drush:13.7.6 drupal/search_api:1.41.0 drupal/search_api_solr:4.4.0 --no-interaction
 "
 
 echo "--- site install (sqlite) ---"
