@@ -5,6 +5,7 @@
     "params":{
       "q":"*:*",
       "fl":"id",
+      "sort":"id asc",
       "rows":"20",
       "wt":"json"
     }
@@ -14,9 +15,9 @@
     "start":0,
     "numFoundExact":true,
     "docs":[{
-      "id":"u8"
-    },{
       "id":"u5"
+    },{
+      "id":"u8"
     }]
   }
 }

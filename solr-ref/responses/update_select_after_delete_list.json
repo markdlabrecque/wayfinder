@@ -1,10 +1,11 @@
 {
   "responseHeader":{
     "status":0,
-    "QTime":1,
+    "QTime":4,
     "params":{
       "q":"*:*",
       "fl":"id",
+      "sort":"id asc",
       "rows":"20",
       "wt":"json"
     }

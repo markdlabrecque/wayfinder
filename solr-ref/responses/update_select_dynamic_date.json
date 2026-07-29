@@ -1,7 +1,7 @@
 {
   "responseHeader":{
     "status":0,
-    "QTime":2,
+    "QTime":1,
     "params":{
       "q":"when_dt:[2021-01-01T00:00:00Z TO 2022-01-01T00:00:00Z]",
       "fl":"id,when_dt",

@@ -1,11 +1,11 @@
 {
   "responseHeader":{
     "status":400,
-    "QTime":1
+    "QTime":2
   },
   "error":{
-    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","java.lang.IllegalArgumentException"],
-    "msg":"Exception writing document id u12 to the index; possible analysis error: DocValuesField \"alias\" appears more than once in this document (only one value is allowed per field)",
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"ERROR: [doc=u12] Error adding field 'nick'='nn' msg=Multiple values encountered for non multiValued copy field alias: nn",
     "code":400
   }
 }

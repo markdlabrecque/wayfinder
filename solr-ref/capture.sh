@@ -902,10 +902,19 @@ capup update_delete_id_obj "$UPDATE9_CORE/update?commit=true&wt=json" \
 capu update_select_after_delete_id GET \
   "$UPDATE9_CORE/select?q=id:u7&wt=json"
 # Delete-by-id, list form: u1 and u4 go. Corpus is now u2,u3,u5,u6.
+#
+# The corpus-state selects here and below carry an explicit `sort=id asc`,
+# deliberately: with `q=*:*` every doc scores identically, and the tie order
+# is Lucene/Tantivy internal doc order — a segment-merge-history artifact,
+# not a wire contract (the first capture of `update_select_after_mixed`,
+# without a sort, pinned merge internals that no other engine — nor even
+# another Solr run with different merge timing — is obliged to reproduce).
+# What these fixtures exist to pin is WHICH docs survive each mutation;
+# the sort makes that assertable deterministically on both sides.
 capup update_delete_id_list "$UPDATE9_CORE/update?commit=true&wt=json" \
   '{"delete":["u1","u4"]}'
 capu update_select_after_delete_list GET \
-  "$UPDATE9_CORE/select?q=*:*&fl=id&rows=20&wt=json"
+  "$UPDATE9_CORE/select?q=*:*&fl=id&rows=20&sort=id+asc&wt=json"
 # Delete-by-query on a TEXT field (`body:lazy`), not a string term: pins that
 # delete-by-query goes through the same analyzed-query semantics as /select
 # ("lazy" matches u2 "lazy dog" and u3 "lazy afternoon" via text_en analysis).
@@ -913,7 +922,7 @@ capu update_select_after_delete_list GET \
 capup update_delete_query "$UPDATE9_CORE/update?commit=true&wt=json" \
   '{"delete":{"query":"body:lazy"}}'
 capu update_select_after_delete_query GET \
-  "$UPDATE9_CORE/select?q=*:*&fl=id&rows=20&wt=json"
+  "$UPDATE9_CORE/select?q=*:*&fl=id&rows=20&sort=id+asc&wt=json"
 
 # --- mixed-command body (capture decides scope, per the issue) ----------------
 # add + delete + commit in one body. The delete targets u6; the add is u8.
@@ -921,7 +930,7 @@ capu update_select_after_delete_query GET \
 capup update_mixed_commands "$UPDATE9_CORE/update?wt=json" \
   '{"add":{"doc":{"id":"u8","body":"mixed add","category":["keep"]}},"delete":{"id":"u6"},"commit":{}}'
 capu update_select_after_mixed GET \
-  "$UPDATE9_CORE/select?q=*:*&fl=id&rows=20&wt=json"
+  "$UPDATE9_CORE/select?q=*:*&fl=id&rows=20&sort=id+asc&wt=json"
 
 # --- commitWithin / softCommit ------------------------------------------------
 # commitWithin=500ms, then a settle sleep well past the window before the

@@ -1,6 +1,11 @@
 {
   "responseHeader":{
-    "status":0,
-    "QTime":31
+    "status":400,
+    "QTime":0
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"ERROR: [doc=u13] Error adding field 'nick'='solo' msg=Multiple values encountered for non multiValued copy field alias: solo",
+    "code":400
   }
 }

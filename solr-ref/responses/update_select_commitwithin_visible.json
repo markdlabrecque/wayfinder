@@ -1,7 +1,7 @@
 {
   "responseHeader":{
     "status":0,
-    "QTime":3,
+    "QTime":2,
     "params":{
       "q":"id:u9",
       "wt":"json"
@@ -15,7 +15,7 @@
       "id":"u9",
       "body":"commit within doc",
       "category":["keep"],
-      "_version_":1871993710964637696,
+      "_version_":1872005122407530496,
       "_root_":"u9"
     }]
   }

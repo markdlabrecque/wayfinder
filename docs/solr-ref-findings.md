@@ -714,6 +714,15 @@ every run starts with an uncaptured delete-by-query `*:*` + reseed of the same 5
 (`u1..u5`), and the captures are strictly ordered with the corpus state tracked in comments
 (the issue-#26 lesson, applied to a probe whose whole *purpose* is mutation).
 
+The corpus-state selects (`update_select_after_delete_list`/`_query`/`_mixed`) carry an
+explicit `sort=id asc`, added on a re-capture: their first capture used bare `q=*:*`, whose
+equal-score tie order is Lucene segment-merge history — the mixed-commands select came back
+newest-doc-first purely as a merge artifact, which is not a wire contract and is not even
+reproducible across Tantivy runs (background merges race `commit()`). What these fixtures pin
+is *which* docs survive each mutation; the sort makes that deterministic on both sides.
+`update_select_overwrite_false` cannot take that fix (its two docs share the same id); its
+fixture shows insertion order, and the hermetic replay pins it under a `no_merge` policy.
+
 46. **The `/update` success envelope is the bare `responseHeader` and nothing else — for every
     command shape.** Add-without-commit, add-with-commit, delete-by-id (object and list forms),
     delete-by-query, delete of a nonexistent id, and a mixed-command body all return exactly
