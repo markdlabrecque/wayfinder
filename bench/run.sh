@@ -95,9 +95,15 @@ run_query_load() { # base_url core out_latency_file -> prints max RSS sample see
   local base=$1 core=$2 outfile=$3
   : > "$outfile"
   for _ in $(seq 1 "$N_QUERIES"); do
-    curl -s -o /dev/null -w '%{time_total}\n' \
-      "$base/$core/select?q=rocket&defType=edismax&qf=title+body&fq=category:animals&facet=true&facet.field=category&hl=true&hl.fl=body&rows=10&wt=json" \
-      | awk '{printf "%.2f\n", $1*1000}' >> "$outfile"
+    local result status
+    result=$(curl -s -o /dev/null -w '%{http_code} %{time_total}' \
+      "$base/$core/select?q=rocket&defType=edismax&qf=title+body&fq=category:animals&facet=true&facet.field=category&hl=true&hl.fl=body&rows=10&wt=json")
+    status="${result%% *}"
+    if [ "${status:0:1}" != "2" ]; then
+      echo "run_query_load: non-2xx response ($status) from $base/$core/select" >&2
+      return 1
+    fi
+    echo "${result#* }" | awk '{printf "%.2f\n", $1*1000}' >> "$outfile"
   done
 }
 
@@ -142,25 +148,36 @@ docker run -d --name "$SOLR_CONTAINER" -p "$SOLR_HOST_PORT:8983" solr:9 solr-pre
 SOLR_COLD_MS=$(wait_for_ping "$SOLR_URL/$SOLR_CORE/admin/ping?wt=json")
 echo "solr cold start: ${SOLR_COLD_MS}ms"
 
-curl -sS "$SOLR_URL/$SOLR_CORE/schema" -H 'Content-Type: application/json' -d '{
+SCHEMA_RESP=$(curl -sSf "$SOLR_URL/$SOLR_CORE/schema" -H 'Content-Type: application/json' -d '{
   "add-field": [
     {"name":"title",    "type":"text_en", "indexed":true, "stored":true},
     {"name":"body",     "type":"text_en", "indexed":true, "stored":true},
     {"name":"category", "type":"string",  "indexed":true, "stored":true,
      "docValues":true, "multiValued":true}
   ]
-}' >/dev/null
+}')
+# curl -f catches non-2xx HTTP responses; Solr's schema API can also return
+# 200 with an "errors" body on a rejected add-field, so check that too.
+if echo "$SCHEMA_RESP" | grep -q '"errors"'; then
+  echo "solr schema add-field failed: $SCHEMA_RESP" >&2
+  exit 1
+fi
 
 echo "== indexing solr =="
 index_corpus "$SOLR_URL" "$SOLR_CORE"
 
 sleep 1
 solr_mem_mb() {
+  # docker's MemUsage field has no space between the number and its unit
+  # (e.g. "2.10GiB", not "2.10 GiB"), so splitting on whitespace never
+  # isolates the unit -- match it against the raw token instead.
   docker stats --no-stream --format '{{.MemUsage}}' "$SOLR_CONTAINER" \
     | awk -F'/' '{print $1}' \
     | awk '{
-        v=$1; unit=$2;
-        if (unit ~ /GiB/) v = v*1024;
+        s=$1;
+        if (s ~ /GiB/) { gsub(/GiB/, "", s); v = s * 1024; }
+        else if (s ~ /KiB/) { gsub(/KiB/, "", s); v = s / 1024; }
+        else { gsub(/MiB/, "", s); v = s; }
         printf "%.2f", v
       }'
 }
@@ -192,6 +209,7 @@ echo "== rendering docs/benchmarks.md =="
 "$BENCH_BIN/render_report" \
   "$SOLR_IDLE_MB" "$SOLR_LOAD_MB" "$SOLR_COLD_MS" "$SOLR_IMAGE_MB" "$SOLR_INDEX_MB" "$SOLR_LATENCIES" \
   "$WF_IDLE_MB" "$WF_LOAD_MB" "$WF_COLD_MS" "$WF_IMAGE_MB" "$WF_INDEX_MB" "$WF_LATENCIES" \
+  "$SIZE" \
   "$ROOT/docs/benchmarks.md"
 
 echo "done: see $ROOT/docs/benchmarks.md"
