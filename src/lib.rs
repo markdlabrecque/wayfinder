@@ -64,6 +64,15 @@ const SELECT_PARAMS: &[&str] = &[
     "q",
     "df",
     "fq",
+    // edismax (issue #7, PRD §5 v1 exception): `defType=edismax` switches the
+    // query parser; `qf`/`pf`/`mm`/`tie`/`boost`/`bq` are its own params.
+    "defType",
+    "qf",
+    "pf",
+    "mm",
+    "tie",
+    "boost",
+    "bq",
     "fl",
     "rows",
     "start",

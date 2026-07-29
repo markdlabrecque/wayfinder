@@ -1,0 +1,24 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2,
+    "params":{
+      "q":"rocket -mission",
+      "defType":"edismax",
+      "qf":"title body",
+      "fl":"id",
+      "fq":"id:(eA OR eB OR eC OR eD)",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"eB"
+    },{
+      "id":"eA"
+    }]
+  }
+}

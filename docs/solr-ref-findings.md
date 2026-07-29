@@ -1109,3 +1109,116 @@ Claiming findings 60-67 (issue #8's query-types capture has 56-59, above).
     `match` also carries `score`/`maxScore` for the one source doc once `fl` includes `score`,
     even though `match` is a single-doc lookup, not a ranked list — `match.docs[0].score` and
     `match.maxScore` are numerically identical (1.1995715) since there is only one "hit".
+
+## Findings from issue #7 (edismax)
+
+Claiming findings 68-75 (issue #6's MoreLikeThis capture has 60-67, above). Own container/corpus
+(`solr-ref/capture.sh`'s edismax block, container `wayfinder-solr-7`, port 8994, 10 docs over
+`title`/`body` text_en fields) — same rationale as the MLT block: the 5-doc tracer-bullet corpus
+has one text field and no second field to reward differently via `qf`, so it cannot exercise any
+edismax-specific behaviour.
+
+68. **The `mm` grammar's exact arithmetic was verified empirically against a live Solr, not taken
+    from memory of the reference-guide table** — this is the "hardest single piece" the PRD names,
+    and reasoning it out by hand produces plausible-looking numbers that a real capture proves
+    wrong (see the `-25%` case below). Verification corpus: a disposable 16-doc probe core (not
+    committed — `d0..d15`, doc `dN` containing exactly tokens `t1..tN`) queried with
+    `q=t1 t2 ... tK&defType=edismax&qf=body&mm=<spec>`; since doc `dJ` (`J<=K`) matches exactly
+    `J` of the `K` optional clauses, the lowest-`J` doc present in the result set *is* the
+    required-match count, read directly off real Solr rather than inferred. Confirmed algorithm,
+    `calc(spec, clause_count) -> required`:
+    - Default (no spec, or a plain absolute/percentage token): `result = clause_count`.
+    - A `X<Y` pair: if `clause_count > X`, set `result = apply(Y, clause_count)` and continue to
+      the next pair (a later pair can override again); if `clause_count <= X`, leave `result`
+      unchanged and continue — **the pair is skipped, not applied**, which is the opposite of the
+      naive reading of "if clause_count <= X".
+    - `apply(Y, n)`: a bare positive integer is `min(Y, n)`; a bare negative integer is
+      `max(0, n + Y)`; a positive percentage `P%` is `floor(P * n / 100)`; a negative percentage
+      `-P%` is `n - floor(P * n / 100)` — **floor in both the positive and negative percentage
+      cases**, not ceiling for the negative side (the plausible-sounding alternative). This is
+      the case memory got wrong: `-25%` at `clause_count=3` is **not** 2 (which a ceiling-based
+      "1 clause may be missing" reading gives) — real Solr returns 3 (`floor(0.25*3)=0` clauses
+      may be missing, so all 3 are required).
+    - Verified table (`spec`, `clause_count` -> `required`): `("1",3)->1`, `("-1",3)->2`,
+      `("75%",3)->2`, `("-25%",3)->3`, `("5",3)->3` (clamped), `("0",3)->0`, `("-5",3)->0`
+      (clamped), `("100%",3)->3`, `("-100%",3)->0`, `("50%",4)->2`, `("50%",3)->1`, `("33%",5)->1`,
+      `("-25%",8)->6`, `("3<-1 10<-2",3)->3`, `("3<-1 10<-2",10)->9`, `("3<-1 10<-2",15)->13`,
+      `("2<-1 5<80%",2)->2`, `("2<-1 5<80%",3)->2`, `("2<-1 5<80%",6)->4`. `tests/mm.rs` asserts
+      this exact table.
+    - Not independently verifiable on this corpus: whether an all-optional `BooleanQuery` floors
+      an effective 0-or-negative minimum-should-match up to 1 at the Lucene execution layer.
+      Every corpus doc that shares zero terms with the query also shares zero terms with *any*
+      disjunction clause, so it can never appear in results regardless of `mm` — Lucene's
+      disjunction scorer only iterates postings for docs that hit at least one clause, structurally
+      independent of the `mm` value. Treated as out of scope for the *pure* `(spec, clause_count)
+      -> required` function per the issue's own framing ("small, pure, self-contained
+      function") — a floor-at-1 belongs to the `BooleanQuery`-construction layer, not the grammar
+      parser, if Wayfinder needs it at all.
+
+69. **`qf` per-field boosts change which of two same-relevance documents ranks first, and the
+    reordering is real (not merely a magnitude change).** `edismax_qf_equal.json`
+    (`qf=title body`, unboosted) ranks `eB, eA` (title-only vs body-only matches for the same
+    three-word query); `edismax_qf_boost_title.json` (`qf=title^10 body`) ranks `eA` first;
+    `edismax_qf_boost_body.json` (`qf=title body^10`) ranks `eB` first — `eA`/`eB` swap ends of
+    the result list purely from which field's boost is raised, over the identical query and
+    identical two documents.
+
+70. **`pf` adds a phrase-query score on top of the `qf` bag-of-words score; it does not replace or
+    re-weight it, and two documents with identical term frequencies score identically without
+    it.** `edismax_pf_off.json` (`pf` absent): `pA` and `pB` — same two words, adjacent in `pA`'s
+    body ("a quick fox ran away"), split apart in `pB`'s ("a fox that is quick ran away") — score
+    **exactly equal** (1.2725438 each; no adjacency-sensitivity leaks in from `qf` alone).
+    `edismax_pf_on.json` (`pf=body` added, same `qf`): `pA`'s score exactly **doubles**
+    (2.5450876) while `pB`'s is unchanged (1.2725438) — the phrase clause's own score happened to
+    equal the bag-of-words clause's score here, which is a property of this fixture's specific
+    term statistics, not a general "pf always doubles" rule; what generalizes is additive-not-
+    replacing and zero effect on a non-adjacent match.
+
+71. **`tie` blends per-field scores only for a document that actually matches in more than one
+    of the `qf` fields — a document matching in exactly one field is untouched by `tie` at any
+    value.** `edismax_tie_0.json`/`edismax_tie_1.json` (`q=rocket`, `qf=title body`): `eC`
+    ("rocket" in both title and body) scores 0.871532 at `tie=0` and 1.480436 at `tie=1` — up,
+    not just different, since `tie=1` sums in the previously-ignored second field's score in
+    full. `eD` ("rocket" only in its title) scores 0.72299594 at **both** `tie=0` and `tie=1`,
+    bit for bit — there is no second field's score for `tie` to add in.
+
+72. **`boost` is a pure, uniform multiplier — every document's score in the result set scales by
+    exactly the same factor, and document order is therefore unaffected by `boost` alone.**
+    `edismax_score_baseline.json` vs `edismax_boost_multiplicative.json` (`boost=2` added, same
+    `q`/`qf`, same four docs): every one of `eA`/`eB`/`eC`/`eD`'s scores exactly doubles
+    (0.5274755->1.054951, 0.71525735->1.4305147, 0.72299594->1.4459919, 0.871532->1.743064) —
+    confirms `boost` composes as a multiplicative wrapper around the whole query, per PRD §5's
+    v1-exception framing, not a per-field or per-clause effect.
+
+73. **`bq` adds an independent, real (idf/tf/norm-scored) query's score on top of the base score
+    — it is not a flat per-doc offset, and it leaves non-matching documents' scores byte-for-byte
+    unchanged.** `edismax_bq_additive.json` (`bq=title:mission^5`, same base query/docs as finding
+    72's baseline): `eA`/`eB` (no "mission" in title) keep their exact baseline scores
+    (0.5274755, 0.71525735); `eC`/`eD` (both have "mission" in title) gain different amounts
+    (0.871532->4.810618, a gain of ~3.94; 0.72299594->3.4152434, a gain of ~2.69) — the two
+    matching docs gain *different* absolute amounts despite matching the same `bq` clause,
+    because `bq`'s own score depends on each doc's own term statistics (`eD`'s title has "mission"
+    among fewer/shorter tokens than the surrounding boilerplate would suggest), confirming `bq` is
+    a real additive sub-query, not a bonus constant.
+
+74. **Quoted phrases and `+`/`-` operators inside `q` work exactly as in the plain (non-edismax)
+    query grammar findings already established (`compound_*`/`negative_*` in the tracer-bullet
+    capture), unaffected by `defType=edismax`.** `edismax_quoted_phrase.json`
+    (`q="quick fox"&qf=body`) matches only `pA` (the doc with the two words adjacent) — a bag-of-
+    words match on `pB` does not qualify once the query itself is a quoted phrase, independent of
+    `pf`. `edismax_operators_exclude.json` (`q=rocket -mission&qf=title body`) drops `eC`/`eD`
+    (both have "mission"); `edismax_operators_required.json` (`q=+rocket +launch&qf=title body`)
+    drops `eC` (the one document with no "launch" anywhere in either field) — `+`/`-` apply across
+    the whole `qf` field set per term, not per individual field.
+
+75. **`bf` (function-query boost) is a real, scoring-affecting edismax parameter in Solr itself —
+    it is not something Solr silently ignores.** A probe query (`bf=recip(rord(id),1,2,3)`
+    against this corpus, not committed as a fixture) changed every document's score relative to
+    the no-`bf` baseline. The PRD's "unsupported edismax params are ignored like any unknown
+    param (finding 8)" therefore describes **Wayfinder's own chosen behaviour for a
+    deliberately-out-of-scope param**, not a claim about what real Solr does with it — this is a
+    ratified, PRD-documented divergence (full function-query syntax is out of scope per PRD §5),
+    not a compatibility bug, and it is why no `bf` fixture is committed here: a captured Solr
+    response for `bf` would be real Solr ground truth for behaviour Wayfinder is explicitly not
+    building, and comparing against it would either force scope creep or require a
+    fixture-vs-fixture divergence carve-out for a param nobody asked to keep matching.

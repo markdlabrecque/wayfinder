@@ -1,0 +1,23 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "mm":"3",
+      "q":"alpha beta gamma",
+      "defType":"edismax",
+      "qf":"body",
+      "fl":"id",
+      "fq":"id:(mmA OR mmB OR mmC OR mmD)",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"mmA"
+    }]
+  }
+}

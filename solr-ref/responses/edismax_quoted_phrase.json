@@ -1,0 +1,22 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "q":"\"quick fox\"",
+      "defType":"edismax",
+      "qf":"body",
+      "fl":"id",
+      "fq":"id:(pA OR pB)",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"pA"
+    }]
+  }
+}
