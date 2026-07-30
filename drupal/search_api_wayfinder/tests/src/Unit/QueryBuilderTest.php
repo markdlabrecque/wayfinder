@@ -482,4 +482,215 @@ class QueryBuilderTest extends TestCase {
     $this->assertSame('field\\:value', $params['q']);
   }
 
+  /**
+   * M3 facets. `$query->getOption('search_api_facets')` is the contrib
+   * `facets` module's option shape (verified against
+   * `facets/src/QueryType/QueryTypePluginBase::getFacetOptions()`, not
+   * guessed): an associative array keyed by facet delta (in practice the
+   * facet's field identifier), each entry `['field' => <SA field id>,
+   * 'limit' => int, 'operator' => 'and'|'or', 'min_count' => int,
+   * 'missing' => bool, 'query_type' => string]`. Plan doc locked decision 4
+   * says OR facets are out of scope (no `{!ex}`/`{!tag}`), so 'operator' is
+   * not translated to anything here.
+   *
+   * `facet.sort` is not part of that contrib shape (`getFacetOptions()` never
+   * sets a 'sort' key) but the plan doc calls for "facet.sort from the
+   * facet's sort if given" -- so these tests treat 'sort' as an optional key
+   * on the per-facet info array, present or absent, per plan doc wording.
+   *
+   * `src/facet.rs` (`facet_fields()`) reads `facet.limit`/`facet.mincount`/
+   * `facet.missing`/`facet.sort` as single global params applied to every
+   * `facet.field` entry -- there is no `f.<field>.facet.*` per-field
+   * override and no local-params support (matches locked decision 4). So
+   * these tests only exercise multi-facet requests where every facet shares
+   * identical limit/mincount/missing/sort settings; a query with two facets
+   * asking for different values is left unspecified deliberately (see
+   * handoff notes -- this is a real premise gap in the plan doc's per-facet
+   * phrasing, not a guessed requirement).
+   *
+   * @covers ::build
+   */
+  public function testNoFacetsOptionProducesNoFacetParams(): void {
+    $index = $this->mockIndex([], [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+    ]);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], []);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertArrayNotHasKey('facet', $params);
+    $this->assertArrayNotHasKey('facet.field', $params);
+    $this->assertArrayNotHasKey('facet.limit', $params);
+    $this->assertArrayNotHasKey('facet.mincount', $params);
+    $this->assertArrayNotHasKey('facet.missing', $params);
+    $this->assertArrayNotHasKey('facet.sort', $params);
+  }
+
+  /**
+   * @covers ::build
+   */
+  public function testSingleFacetProducesFacetParams(): void {
+    $index = $this->mockIndex([], [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+    ]);
+    $facets = [
+      'category' => [
+        'field' => 'category',
+        'limit' => 10,
+        'min_count' => 2,
+        'missing' => FALSE,
+        'operator' => 'and',
+        'query_type' => 'search_api_string',
+      ],
+    ];
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], ['search_api_facets' => $facets]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('true', $params['facet']);
+    $this->assertSame('ss_category', $params['facet.field']);
+    $this->assertSame(10, $params['facet.limit']);
+    $this->assertSame(2, $params['facet.mincount']);
+    $this->assertSame('false', $params['facet.missing']);
+    $this->assertArrayNotHasKey('facet.sort', $params);
+  }
+
+  /**
+   * @covers ::build
+   */
+  public function testFacetMissingTrueSendsFacetMissingStringTrue(): void {
+    $index = $this->mockIndex([], [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+    ]);
+    $facets = [
+      'category' => [
+        'field' => 'category',
+        'limit' => 10,
+        'min_count' => 1,
+        'missing' => TRUE,
+      ],
+    ];
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], ['search_api_facets' => $facets]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('true', $params['facet.missing']);
+  }
+
+  /**
+   * @covers ::build
+   */
+  public function testFacetSortIsSentWhenGivenOnTheFacetOption(): void {
+    $index = $this->mockIndex([], [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+    ]);
+    $facets = [
+      'category' => [
+        'field' => 'category',
+        'limit' => 10,
+        'min_count' => 1,
+        'missing' => FALSE,
+        'sort' => 'index',
+      ],
+    ];
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], ['search_api_facets' => $facets]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('index', $params['facet.sort']);
+  }
+
+  /**
+   * @covers ::build
+   */
+  public function testMultipleFacetsProduceMultipleFacetFieldEntries(): void {
+    $index = $this->mockIndex([], [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+      'brand' => $this->mockIndexField('brand', 'string', TRUE),
+    ]);
+    // Both facets share identical limit/mincount/missing -- see class-level
+    // doc comment on why this test suite does not exercise divergent
+    // per-facet settings.
+    $facets = [
+      'category' => [
+        'field' => 'category',
+        'limit' => 10,
+        'min_count' => 1,
+        'missing' => FALSE,
+      ],
+      'brand' => [
+        'field' => 'brand',
+        'limit' => 10,
+        'min_count' => 1,
+        'missing' => FALSE,
+      ],
+    ];
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], ['search_api_facets' => $facets]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    // "brand" is multi-valued (per mockIndexField's TRUE arg above), so its
+    // mapped name must use the 'm' infix, exactly as qf/fq mapping already
+    // does elsewhere in this test class.
+    $this->assertSame(['ss_category', 'sm_brand'], $params['facet.field']);
+    $this->assertSame(10, $params['facet.limit']);
+    $this->assertSame(1, $params['facet.mincount']);
+    $this->assertSame('false', $params['facet.missing']);
+  }
+
+  /**
+   * Search API's facet arrays use `limit => 0` to mean "no limit" -- it is the
+   * ordinary case, not an edge case: every facet array in
+   * `vendor/drupal/search_api/tests/src/Kernel/BackendTestBase.php` uses it,
+   * and `search_api_db` reads it as unlimited (`if ((int) $limit > 0)`).
+   * Wayfinder disagrees: `facet.limit=0` truncates to zero buckets
+   * (`solr-ref/responses/facet_limit_zero.json` returns an empty array) and
+   * only a *negative* limit means "as many as the server allows"
+   * (`facet_limit_unlimited.json`; `src/facet.rs` `facet_fields()` maps
+   * `requested_limit < 0` to `config.query.facet_limit_max`). So the builder
+   * must translate, or a default facet config silently returns nothing.
+   *
+   * @covers ::build
+   */
+  public function testFacetLimitZeroMeansUnlimitedAndIsSentAsMinusOne(): void {
+    $index = $this->mockIndex([], [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+    ]);
+    $facets = [
+      'category' => [
+        'field' => 'category',
+        'limit' => 0,
+        'min_count' => 1,
+        'missing' => FALSE,
+      ],
+    ];
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], ['search_api_facets' => $facets]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame(-1, $params['facet.limit']);
+  }
+
+  /**
+   * @covers ::build
+   */
+  public function testFacetFieldNameUsesTheSameFieldMapperAsFilters(): void {
+    $index = $this->mockIndex([], [
+      'weight' => $this->mockIndexField('weight', 'integer', FALSE),
+    ]);
+    $facets = [
+      'weight' => [
+        'field' => 'weight',
+        'limit' => 5,
+        'min_count' => 1,
+        'missing' => FALSE,
+      ],
+    ];
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], ['search_api_facets' => $facets]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('its_weight', $params['facet.field']);
+  }
+
 }
