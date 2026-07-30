@@ -66,6 +66,13 @@ class FieldMapper {
       case 'boolean':
         return $value ? 'true' : 'false';
 
+      case 'text':
+        // Fulltext field values arrive as TextValue objects (not plain
+        // strings); json_encode() would otherwise serialize them to '{}'.
+        // __toString() delegates to toText(), reflecting the current text
+        // (post-mutation via setText()), not just the constructor value.
+        return $value instanceof \Stringable ? (string) $value : $value;
+
       default:
         return $value;
     }
