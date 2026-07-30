@@ -658,7 +658,24 @@ fn ranked_score_value_ratified_reason(name: &str) -> Option<&'static str> {
 /// `stats_multi_fields`, `stats_zero`, and `stats_zero_fq` all now match the
 /// captured fixtures for real and their entries are removed rather than left
 /// here — this list is empty until the next unbuilt-feature entry needs it.
-const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[];
+/// Issue #59 (`/admin/info/system` version handshake): the reported
+/// `lucene.solr-spec-version` is deliberately configured (default `9.0.0`,
+/// PRD open question 2) rather than mirroring the captured Solr's own
+/// `9.10.1`, and the rest of the envelope (`jvm`/`system` stats — uptime,
+/// memory, load, hostnames, command-line args) is inherently unreproducible
+/// host-specific volatility, same category as `ping`'s `rid` problem below.
+/// Both are permanent, not a to-do: there is no real Wayfinder host JVM/OS to
+/// introspect meaningfully, and the version is a config choice, not a bug.
+const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[(
+    "admin_info_system",
+    "issue #59: `responseHeader`, `mode`, `solr_home`, `core_root`, and the top-level key set \
+     are compared exactly and do match. The suppressed diffs are: `lucene.solr-spec-version` \
+     (a deliberate config-driven choice, default 9.0.0 per PRD open question 2, not a mirror of \
+     the captured Solr's 9.10.1) and `lucene.solr-impl-version`/`lucene-impl-version` (build \
+     hash + date, unreproducible); `jvm.*` (memory/uptime/vendor/processors, real host JVM \
+     stats Wayfinder has no equivalent of); and `system.*` (host CPU/memory/load stats) — same \
+     permanent category as `ping`'s `rid` in EXPECTED_DIVERGENCES below",
+)];
 
 fn expected_divergence_manifest_errors_reason(name: &str) -> Option<&'static str> {
     EXPECTED_DIVERGENCES_MANIFEST_ERRORS
@@ -1248,10 +1265,25 @@ const RANKED_RELEVANCE_ENTRIES: &[&str] =
 // the canonical `content` core, findings 52+). `hl`/`hl.fl` and friends are
 // now implemented (`src/highlight.rs`) and every `hl_*` row matches, so all
 // eight entries that were parked here are gone.
-const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[(
-    "ping",
-    "`responseHeader.params` carries Solr ping-handler artifacts incl. a per-run `rid` counter no implementation can reproduce; see the same carve-out in `tracer_bullet.rs::ping_reports_ok`",
-)];
+const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[
+    (
+        "ping",
+        "`responseHeader.params` carries Solr ping-handler artifacts incl. a per-run `rid` counter no implementation can reproduce; see the same carve-out in `tracer_bullet.rs::ping_reports_ok`",
+    ),
+    (
+        "admin_system",
+        "issue #59: `responseHeader`, `mode`, the top-level key set, and `core.schema` \
+         (finding 78's version-detection field, `\"drupal-4.4.0-solr-9.x-0\"`) are compared \
+         exactly and do match. The suppressed diffs are: `lucene.solr-spec-version` (a \
+         deliberate config-driven choice, default 9.0.0 per PRD open question 2, not a mirror \
+         of the captured Solr's 9.10.1) and `lucene.solr-impl-version`/`lucene-impl-version` \
+         (build hash + date, unreproducible); `jvm.*` (memory/uptime/vendor/processors, real \
+         host JVM stats Wayfinder has no equivalent of); `system.*` (host CPU/memory/load \
+         stats); and `core.host`/`core.now`/`core.start`/`core.directory.*` (hostname, \
+         timestamps, real filesystem paths on the capture host) — same permanent category as \
+         `admin_info_system` in EXPECTED_DIVERGENCES_MANIFEST_ERRORS above and `ping`'s `rid`",
+    ),
+];
 
 /// The `EXPECTED_DIVERGENCES` reason for `name`, or `None` if `name` is not
 /// in the list. Every entry has a mandatory reason by construction (the list
