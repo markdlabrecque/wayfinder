@@ -20,6 +20,7 @@ mod admin_ui;
 mod collector;
 mod config;
 mod core_index;
+mod coverage;
 pub mod edismax;
 mod error;
 mod facet;
@@ -30,6 +31,7 @@ pub mod schema;
 mod stats;
 
 pub use config::ServerConfig;
+pub use coverage::report as coverage_report;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -46,6 +48,7 @@ use tower_http::catch_panic::CatchPanicLayer;
 
 use collector::{SortClause, SortKey};
 use core_index::CoreIndex;
+use coverage::{ResponseRenderer, rendered_key};
 use error::{Envelope, WfError};
 use params::Params;
 
@@ -107,7 +110,14 @@ const SELECT_PARAMS: &[&str] = &[
     "wt",
 ];
 /// `commitWithin` / `overwrite` / `softCommit` landed with #9.
-const UPDATE_PARAMS: &[&str] = &["commit", "commitWithin", "overwrite", "softCommit", "wt"];
+const UPDATE_PARAMS: &[&str] = &[
+    "commit",
+    "commitWithin",
+    "overwrite",
+    "softCommit",
+    "wt",
+    "json.nl",
+];
 const PING_PARAMS: &[&str] = &["wt"];
 /// `/admin/info/system` (server-level) and `<core>/admin/system`
 /// (core-scoped fallback) — issue #59's version-handshake endpoints.
@@ -118,6 +128,35 @@ const ADMIN_INFO_PARAMS: &[&str] = &["wt", "json.nl"];
 /// similar-docs result set exactly as `/select` does. Out of scope, per the
 /// task spec: `mlt=true` as a `/select` search component, and content-stream
 /// MLT.
+/// One route table wires the real Router and supplies the coverage endpoint
+/// surface. A route cannot be reported without being passed to Axum below.
+macro_rules! search_api_routes {
+    ($apply:ident) => {
+        $apply! {
+            ("/solr/{core}/update", update),
+            ("/solr/{core}/select", select),
+            ("/solr/{core}/mlt", mlt),
+            ("/solr/{core}/admin/ping", ping),
+            ("/solr/admin/info/system", admin_info_system),
+            ("/solr/{core}/admin/system", core_admin_system),
+        }
+    };
+}
+
+macro_rules! route_paths {
+    ($(($path:literal, $handler:ident)),+ $(,)?) => {
+        &[$($path),+]
+    };
+}
+
+macro_rules! wire_routes {
+    ($(($path:literal, $handler:ident)),+ $(,)?) => {
+        Router::new()$(.route($path, any($handler)))+
+    };
+}
+
+const ROUTE_PATHS: &[&str] = search_api_routes!(route_paths);
+
 const MLT_PARAMS: &[&str] = &[
     "q",
     "df",
@@ -171,18 +210,14 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
     // so a 405 from the router would be a divergence. `/update` does reject
     // some methods (`err_update_put.json`), which it does itself, with Solr's
     // envelope for it.
-    let router = Router::new()
-        .route("/solr/{core}/update", any(update))
-        .route("/solr/{core}/select", any(select))
-        .route("/solr/{core}/mlt", any(mlt))
-        .route("/solr/{core}/admin/ping", any(ping))
-        .route("/solr/admin/info/system", any(admin_info_system))
-        .route("/solr/{core}/admin/system", any(core_admin_system))
+    let router = search_api_routes!(wire_routes)
         // Admin UI (issue #94, PRD §5 v2.5). Outside `/solr/*` on purpose:
         // this is Wayfinder's own surface, not part of the Solr wire API, so
-        // it can never shadow a path a Solr client expects. `get`, not `any`
-        // — the method-agnostic routing above exists to match Solr's request
-        // handlers, and that reason does not apply here.
+        // it can never shadow a path a Solr client expects — deliberately
+        // not part of `search_api_routes!`, which drives the coverage
+        // denominator's route surface. `get`, not `any` — the
+        // method-agnostic routing the macro uses exists to match Solr's
+        // request handlers, and that reason does not apply here.
         .route("/ui", get(core_ui));
 
     // Test-only, never in a default/release build (#39): a route that always
@@ -592,6 +627,22 @@ async fn admin_info_system(
     check_params(&state, ADMIN_INFO_PARAMS, &params)?;
     let (jvm, system, security) = admin_info_jvm_system_security();
     let version = &state.config.admin.reported_solr_version;
+    let mut lucene = Map::new();
+    lucene.insert(
+        rendered_key(
+            ResponseRenderer::AdminInfo,
+            "admin.info-system.lucene.solr-spec-version",
+            "solr-spec-version",
+        )
+        .to_string(),
+        json!(version),
+    );
+    lucene.insert(
+        "solr-impl-version".to_string(),
+        json!(format!("{version} wayfinder")),
+    );
+    lucene.insert("lucene-spec-version".to_string(), json!("9.12.3"));
+    lucene.insert("lucene-impl-version".to_string(), json!("9.12.3 wayfinder"));
     let body = json!({
         "responseHeader": {
             "status": 0,
@@ -600,12 +651,7 @@ async fn admin_info_system(
         "mode": "std",
         "solr_home": "/var/solr/data",
         "core_root": "/var/solr/data",
-        "lucene": {
-            "solr-spec-version": version,
-            "solr-impl-version": format!("{version} wayfinder"),
-            "lucene-spec-version": "9.12.3",
-            "lucene-impl-version": "9.12.3 wayfinder",
-        },
+        "lucene": lucene,
         "jvm": jvm,
         "security": security,
         "system": system,
@@ -640,17 +686,22 @@ async fn core_admin_system(
     check_params(&state, ADMIN_INFO_PARAMS, &params)?;
     let (jvm, system, security) = admin_info_jvm_system_security();
     let version = &state.config.admin.reported_solr_version;
-    let body = json!({
-        "responseHeader": {
-            "status": 0,
-            "QTime": 0,
-        },
-        "core": {
-            "schema": CORE_ADMIN_SCHEMA,
-            "host": "wayfinder",
-            "now": "1970-01-01T00:00:00.000Z",
-            "start": "1970-01-01T00:00:00.000Z",
-            "directory": {
+    let mut core_response = Map::new();
+    core_response.insert(
+        rendered_key(
+            ResponseRenderer::CoreAdmin,
+            "admin.system.core.schema",
+            "schema",
+        )
+        .to_string(),
+        json!(CORE_ADMIN_SCHEMA),
+    );
+    core_response.insert("host".to_string(), json!("wayfinder"));
+    core_response.insert("now".to_string(), json!("1970-01-01T00:00:00.000Z"));
+    core_response.insert("start".to_string(), json!("1970-01-01T00:00:00.000Z"));
+    core_response.insert(
+        "directory".to_string(),
+        json!({
                 "cwd": "/var/wayfinder",
                 "instance": format!("/var/wayfinder/{core}"),
                 "data": format!("/var/wayfinder/{core}/data"),
@@ -659,8 +710,14 @@ async fn core_admin_system(
                 // ceiling here, not a real Tantivy directory-factory class.
                 "dirimpl": "wayfinder::CoreIndex",
                 "index": format!("/var/wayfinder/{core}/data/index"),
-            },
+        }),
+    );
+    let body = json!({
+        "responseHeader": {
+            "status": 0,
+            "QTime": 0,
         },
+        "core": core_response,
         "mode": "std",
         "lucene": {
             "solr-spec-version": version,
@@ -688,6 +745,29 @@ struct UpdateCommands {
     commit: bool,
 }
 
+/// Parser representation used by the live `/update` command path. Keeping it
+/// explicit lets coverage report duplicate-key semantics from the actual
+/// parser, rather than from a hand-maintained classification.
+enum UpdateCommandParser {
+    SerdeValue,
+}
+
+impl UpdateCommandParser {
+    fn parse(self, body: &[u8]) -> Result<Value, String> {
+        serde_json::from_slice(body).map_err(|e| format!("invalid JSON body: {e}"))
+    }
+
+    const fn preserves_duplicate_keys(self) -> bool {
+        match self {
+            Self::SerdeValue => false,
+        }
+    }
+}
+
+pub(crate) const fn update_command_parser_preserves_duplicate_keys() -> bool {
+    UpdateCommandParser::SerdeValue.preserves_duplicate_keys()
+}
+
 /// Parses a `/update` POST body into add/delete/commit commands (finding 46).
 /// Two shapes: the pre-#9 bare JSON array of docs (all adds, unchanged), and
 /// Solr's command-object form — `{"add":{"doc":{...}}, "delete":{"id":...} |
@@ -702,8 +782,7 @@ struct UpdateCommands {
 /// unobserved — no fixture repeats a command key), so that shape is out of
 /// scope per the task spec.
 fn parse_update_commands(body: &[u8]) -> Result<UpdateCommands, String> {
-    let value: Value =
-        serde_json::from_slice(body).map_err(|e| format!("invalid JSON body: {e}"))?;
+    let value = UpdateCommandParser::SerdeValue.parse(body)?;
     let mut commands = UpdateCommands::default();
     match value {
         Value::Array(docs) => commands.add_docs = docs,
@@ -1011,7 +1090,15 @@ async fn select(
     // this `response` block alongside `error` — it has to exist already so it
     // can be attached to that error below.
     let mut response = Map::new();
-    response.insert("numFound".to_string(), json!(num_found));
+    response.insert(
+        rendered_key(
+            ResponseRenderer::Select,
+            "select.response.numFound",
+            "numFound",
+        )
+        .to_string(),
+        json!(num_found),
+    );
     response.insert("start".to_string(), json!(start));
     if wants_score {
         // ponytail: computed as the max score across the *whole*
@@ -1038,7 +1125,10 @@ async fn select(
         }
     }
     response.insert("numFoundExact".to_string(), json!(true));
-    response.insert("docs".to_string(), json!(docs));
+    response.insert(
+        rendered_key(ResponseRenderer::Select, "select.response.docs", "docs").to_string(),
+        json!(docs),
+    );
 
     // Facet and stats counts are both aggregated over a *real* query (`q` AND
     // every `fq`), not over `hits`: Solr enumerates the field's whole term
@@ -1170,14 +1260,22 @@ async fn select(
     });
 
     if let Some((facet_counts, _)) = facet_result {
-        body["facet_counts"] = facet_counts;
+        body[rendered_key(
+            ResponseRenderer::Select,
+            "select.facet_counts",
+            "facet_counts",
+        )] = facet_counts;
     }
     if let Some(stats) = stats_result {
         body["stats"] = stats;
     }
 
     if let Some(highlighting) = highlighting_result {
-        body["highlighting"] = highlighting;
+        body[rendered_key(
+            ResponseRenderer::Select,
+            "select.highlighting",
+            "highlighting",
+        )] = highlighting;
     }
 
     Ok(axum::Json(body).into_response())
@@ -1355,8 +1453,8 @@ async fn mlt(
             "QTime": 0,
         },
         "match": match_block,
-        "response": response_value,
     });
+    body[rendered_key(ResponseRenderer::Mlt, "mlt.response", "response")] = response_value;
 
     // Real Solr's `mlt.interestingTerms` value set is `none | list | details`
     // (default `none`, which omits the key entirely) — `"false"` is not a
