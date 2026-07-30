@@ -248,6 +248,35 @@ pub async fn request(
     .await
 }
 
+/// Issues `GET <path>` against `app` and returns the HTTP status, response
+/// headers, and raw UTF-8 text body — for routes outside the JSON `/solr/*`
+/// wire API (e.g. the admin UI, issue #94), where the response is HTML, not
+/// JSON, so `get()`'s `serde_json::from_slice` would fail on a valid
+/// response. `path` is the full path (no `/solr/` prefix implied), unlike
+/// `get()`.
+pub async fn get_text(app: &Router, path: &str) -> (StatusCode, axum::http::HeaderMap, String) {
+    let req = Request::builder()
+        .method("GET")
+        .uri(path)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(req)
+        .await
+        .expect("request must not fail at the transport level");
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("response body must be readable")
+        .to_bytes();
+    let text = String::from_utf8(bytes.to_vec()).expect("response body must be valid utf-8");
+    (status, headers, text)
+}
+
 /// Loads a captured reference fixture from `solr-ref/responses/<name>.json`.
 pub fn fixture(name: &str) -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
