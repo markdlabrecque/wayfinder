@@ -549,6 +549,42 @@ async fn stats_app() -> (Router, TempDir) {
     (app, dir)
 }
 
+/// The issue-#99 capture uses a dedicated three-document core. Its version
+/// values are deliberately time-seeded, so the manifest row is run here for
+/// its request/envelope shape while `tests/version_field.rs` verifies the
+/// local metrics against these actual indexed values.
+const VERSION99_SCHEMA_TOML: &str = r#"
+[core]
+name = "version99"
+unique_key = "id"
+default_field = "id"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+"#;
+
+async fn version99_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), VERSION99_SCHEMA_TOML).expect("app must build");
+    let (status, body) = common::request_full(
+        &app,
+        "POST",
+        "version99/update?commit=true",
+        Some(r#"[{"id":"v1"},{"id":"v2"},{"id":"v3"}]"#),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the version99 corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
 /// Ratified, **permanent** divergences from captured Solr behaviour — the
 /// opposite of `EXPECTED_DIVERGENCES` below, which is a self-expiring to-do
 /// list for unbuilt features. Every entry here cites the PRD/findings
@@ -666,16 +702,24 @@ fn ranked_score_value_ratified_reason(name: &str) -> Option<&'static str> {
 /// host-specific volatility, same category as `ping`'s `rid` problem below.
 /// Both are permanent, not a to-do: there is no real Wayfinder host JVM/OS to
 /// introspect meaningfully, and the version is a config choice, not a bug.
-const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[(
-    "admin_info_system",
-    "issue #59: `responseHeader`, `mode`, `solr_home`, `core_root`, and the top-level key set \
-     are compared exactly and do match. The suppressed diffs are: `lucene.solr-spec-version` \
-     (a deliberate config-driven choice, default 9.0.0 per PRD open question 2, not a mirror of \
-     the captured Solr's 9.10.1) and `lucene.solr-impl-version`/`lucene-impl-version` (build \
-     hash + date, unreproducible); `jvm.*` (memory/uptime/vendor/processors, real host JVM \
-     stats Wayfinder has no equivalent of); and `system.*` (host CPU/memory/load stats) — same \
-     permanent category as `ping`'s `rid` in EXPECTED_DIVERGENCES below",
-)];
+const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[
+    (
+        "admin_info_system",
+        "issue #59: `responseHeader`, `mode`, `solr_home`, `core_root`, and the top-level key set \
+         are compared exactly and do match. The suppressed diffs are: `lucene.solr-spec-version` \
+         (a deliberate config-driven choice, default 9.0.0 per PRD open question 2, not a mirror of \
+         the captured Solr's 9.10.1) and `lucene.solr-impl-version`/`lucene-impl-version` (build \
+         hash + date, unreproducible); `jvm.*` (memory/uptime/vendor/processors, real host JVM \
+         stats Wayfinder has no equivalent of); and `system.*` (host CPU/memory/load stats) — same \
+         permanent category as `ping`'s `rid` in EXPECTED_DIVERGENCES below",
+    ),
+    (
+        "stats_version_max",
+        "issue #99: Solr `_version_` values are update-log/time-derived and Wayfinder deliberately \
+         seeds per-core values from Unix-epoch milliseconds, so exact metrics cannot be fixture-stable; \
+         tests/version_field.rs checks this row's envelope and the actual fast-field maximum",
+    ),
+];
 
 fn expected_divergence_manifest_errors_reason(name: &str) -> Option<&'static str> {
     EXPECTED_DIVERGENCES_MANIFEST_ERRORS
@@ -1647,10 +1691,10 @@ fn live_solr_matches_committed_query_set() {
 
 /// Selects the app for `entry` by its URL's leading core segment and
 /// returns `(app, request_url)`, where `request_url` has that segment
-/// rewritten to `content` for every core except `sortdebt` (which keeps its
-/// own name — see the module comment above). An unrecognised segment is
-/// returned unrewritten against `content_app`.
-#[allow(clippy::too_many_arguments)] // one hermetic app per manifest-errors core; issue #5 added the 7th/8th
+/// rewritten to `content` for every core except `sortdebt`, `stats`, and
+/// `version99` (which keep their own names — see the module comment above).
+/// An unrecognised segment is returned unrewritten against `content_app`.
+#[allow(clippy::too_many_arguments)] // one hermetic app per manifest-errors core
 fn app_and_request_url<'a>(
     entry: &ManifestErrorEntry,
     content_app: &'a Router,
@@ -1660,6 +1704,7 @@ fn app_and_request_url<'a>(
     facets33_app: &'a Router,
     update9_app: &'a Router,
     stats_app: &'a Router,
+    version99_app: &'a Router,
 ) -> (&'a Router, String) {
     match entry.url.split_once('/') {
         Some(("content", rest)) => (content_app, format!("content/{rest}")),
@@ -1669,6 +1714,7 @@ fn app_and_request_url<'a>(
         Some(("sortdebt", _)) => (sortdebt_app, entry.url.clone()),
         Some(("update9", _)) => (update9_app, entry.url.clone()),
         Some(("stats", _)) => (stats_app, entry.url.clone()),
+        Some(("version99", _)) => (version99_app, entry.url.clone()),
         _ => (content_app, entry.url.clone()),
     }
 }
@@ -1704,6 +1750,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let (facets33_app, _facets33_dir) = facets33_app().await;
     let (update9_app, _update9_dir) = update9_app().await;
     let (stats_app, _stats_dir) = stats_app().await;
+    let (version99_app, _version99_dir) = version99_app().await;
 
     let mut ran = 0usize;
     let mut diffed = 0usize;
@@ -1724,6 +1771,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
             &facets33_app,
             &update9_app,
             &stats_app,
+            &version99_app,
         );
         // `update_select_commitwithin_visible` follows a `commitWithin=500`
         // row with no settle delay in this hermetic replay, unlike

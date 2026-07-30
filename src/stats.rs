@@ -25,7 +25,7 @@ use tantivy::query::{BooleanQuery, ExistsQuery, Occur};
 use crate::core_index::CoreIndex;
 use crate::facet::{self, BaseClauses};
 use crate::params::Params;
-use crate::schema::{ValueKind, WayfinderSchema};
+use crate::schema::{VERSION_FIELD, ValueKind, WayfinderSchema};
 
 /// Builds the whole `stats` block: `{"stats_fields": {...}}`, one entry per
 /// `stats.field`. Returns `None` when `stats.field` was not given at all —
@@ -104,6 +104,12 @@ pub fn stats(index: &CoreIndex, params: &Params, base: &BaseClauses) -> Result<V
 /// `facet_non_docvalues_text`'s ratified divergence, so revisit if a stats
 /// error fixture ever gets captured.
 fn check_statable(schema: &WayfinderSchema, field_name: &str) -> Result<()> {
+    // `_version_` is the sole internal exception. Keeping it here, alongside
+    // the existing stats validation and aggregation call, avoids making it a
+    // general schema-resolved field for sort, facet, or dynamic JSON paths.
+    if field_name == VERSION_FIELD {
+        return Ok(());
+    }
     match schema.field_config(field_name) {
         None => bail!("can not compute stats on undefined field: {field_name}"),
         Some(field) if !field.fast => {

@@ -96,6 +96,9 @@ const SELECT_PARAMS: &[&str] = &[
     "json.nl",
     "stats",
     "stats.field",
+    // Solr accepts and echoes search_api_solr's `function=max(_version_)`
+    // watermark shape; stats.field remains the sole aggregation key.
+    "function",
     "sort",
     "hl",
     "hl.fl",

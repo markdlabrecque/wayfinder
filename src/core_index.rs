@@ -4,12 +4,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value, json};
 use tantivy::aggregation::agg_req::{Aggregation, AggregationVariants, Aggregations};
 use tantivy::aggregation::agg_result::{AggregationResult, BucketResult, MetricResult};
@@ -44,6 +44,19 @@ use crate::schema::{self, ValueKind, WayfinderSchema};
 /// own aggregation bucket limit is the binding constraint, so the request asks
 /// for exactly that many and no more.
 const MAX_FACET_TERMS: u32 = DEFAULT_BUCKET_LIMIT;
+
+/// Seeds each core's in-process `_version_` source from wall-clock time. A
+/// restart therefore starts later than ordinary pre-restart writes without
+/// persisting write-side version semantics; unusually fast restart/write
+/// cycles remain outside this narrow stats-only compatibility scope.
+fn version_seed() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
+}
 
 /// Lucene's classic English stopword list (`StandardAnalyzer`'s default,
 /// also Solr's own `text_en` field type) — see `CoreIndex::mlt_query`'s doc
@@ -481,6 +494,10 @@ pub struct CoreIndex {
     /// The first uncommitted doc since the last commit arms a deadline this
     /// many ms out.
     autocommit_max_time_ms: Option<u64>,
+    /// One source per core. Versions are assigned after validation, directly
+    /// before writer insertion, and intentionally are not update-response or
+    /// optimistic-concurrency semantics.
+    version_source: AtomicI64,
 }
 
 impl CoreIndex {
@@ -516,6 +533,13 @@ impl CoreIndex {
             .create_in_dir(data_dir)
             .or_else(|_| Index::open_in_dir(data_dir))
             .context("opening/creating Tantivy index")?;
+        if index.schema().get_field(schema::VERSION_FIELD).is_err() {
+            bail!(
+                "the index in {} predates internal field `{}`; reindex into a fresh data directory",
+                data_dir.display(),
+                schema::VERSION_FIELD
+            );
+        }
         index.set_tokenizers(wf_schema.tokenizers.clone());
         std::fs::write(&snapshot, &schema_toml)
             .with_context(|| format!("writing stored schema {}", snapshot.display()))?;
@@ -556,6 +580,7 @@ impl CoreIndex {
             reader,
             autocommit_max_docs: config.commit.autocommit_max_docs,
             autocommit_max_time_ms: config.commit.autocommit_max_time,
+            version_source: AtomicI64::new(version_seed()),
         })
     }
 
@@ -609,7 +634,18 @@ impl CoreIndex {
                 {
                     writer.delete_term(Term::from_field_text(unique_key_field, id));
                 }
-                let tantivy_doc = self.build_document(obj)?;
+                let mut tantivy_doc = self.build_document(obj)?;
+                let version_field = self
+                    .index
+                    .schema()
+                    .get_field(schema::VERSION_FIELD)
+                    .expect("the internal _version_ field exists in every Wayfinder schema");
+                // Validation above completed before consuming a version; this
+                // is the last operation before the document reaches Tantivy.
+                tantivy_doc.add_i64(
+                    version_field,
+                    self.version_source.fetch_add(1, Ordering::SeqCst),
+                );
                 writer.add_document(tantivy_doc)?;
                 added += 1;
 
