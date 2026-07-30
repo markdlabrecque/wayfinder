@@ -32,21 +32,29 @@ pub struct BenchmarkResults {
     pub solr: EngineMeasurements,
     pub wayfinder: EngineMeasurements,
     /// Number of docs actually indexed for this run. Only a run with
-    /// `corpus_size >= 2_000_000` may report real numbers on the "2M docs
-    /// under query load" row -- anything smaller renders "not measured"
-    /// there rather than passing off the load-under-this-corpus numbers as
-    /// the PRD's 2M scenario (see issue #13 round-2 review, item 4).
+    /// `corpus_size == 2_000_000` (the literal PRD scenario) may report real
+    /// numbers on the "2M docs under query load" row -- anything else
+    /// renders "not measured" there rather than passing off a
+    /// load-under-this-corpus number as the PRD's 2M scenario (see issue
+    /// #13 round-2 review, item 4). Every corpus size other than exactly 2M
+    /// -- above or below -- also gets its own honest
+    /// "{corpus_size} docs under query load" row so the real measurement
+    /// is never silently discarded (see issue #63 round-2 review, item 1).
     pub corpus_size: u64,
 }
 
 /// Renders the exact 6-column markdown table pinned by
 /// `bench/tests/results_table.rs`: header + separator + the six PRD §8
-/// metric rows, in PRD order. PRD's baseline/target text is reproduced
-/// ASCII-only (`2-4 GB`, `10-30 s`, `<=`, `1.2x`) per this repo's
-/// ASCII-only convention for committed text. The "Measurement path" column
-/// discloses, for every row, whether each engine's number came from a
-/// Docker container or a native host process -- the two paths carry
-/// different overhead (issue #13 round-2 review, item 5).
+/// metric rows, in PRD order, plus one additional honest
+/// "{corpus_size} docs under query load" memory row for any run whose
+/// `corpus_size` is not exactly 2,000,000 (see issue #63 round-2 review,
+/// item 4) -- so the table has 8 lines for a literal-2M run and 9 lines
+/// otherwise. PRD's baseline/target text is reproduced ASCII-only
+/// (`2-4 GB`, `10-30 s`, `<=`, `1.2x`) per this repo's ASCII-only
+/// convention for committed text. The "Measurement path" column discloses,
+/// for every row, whether each engine's number came from a Docker
+/// container or a native host process -- the two paths carry different
+/// overhead (issue #13 round-2 review, item 5).
 pub fn render_markdown_table(results: &BenchmarkResults) -> String {
     let solr = &results.solr;
     let wf = &results.wayfinder;
@@ -71,7 +79,7 @@ pub fn render_markdown_table(results: &BenchmarkResults) -> String {
         "| Resident memory, idle | ~1 GB | < 50 MB | {:.1} MB | {:.1} MB | {MEM_PATH} |\n",
         solr.resident_mem_idle_mb, wf.resident_mem_idle_mb
     ));
-    if results.corpus_size >= 2_000_000 {
+    if results.corpus_size == 2_000_000 {
         out.push_str(&format!(
             "| Resident memory, 2M docs under query load | 2-4 GB | < 500 MB | {:.1} MB | {:.1} MB | {MEM_PATH} |\n",
             solr.resident_mem_load_mb, wf.resident_mem_load_mb
@@ -81,6 +89,10 @@ pub fn render_markdown_table(results: &BenchmarkResults) -> String {
             "| Resident memory, 2M docs under query load | 2-4 GB | < 500 MB | not measured | not measured | Not measured: this run indexed {} docs, not 2M. |\n",
             results.corpus_size
         ));
+        out.push_str(&format!(
+            "| Resident memory, {} docs under query load | 2-4 GB | < 500 MB | {:.1} MB | {:.1} MB | {MEM_PATH} |\n",
+            results.corpus_size, solr.resident_mem_load_mb, wf.resident_mem_load_mb
+        ));
     }
     out.push_str(&format!(
         "| Cold start to first query served | 10-30 s | < 1 s | {:.2} s | {:.2} s | {COLD_START_PATH} |\n",
@@ -88,7 +100,8 @@ pub fn render_markdown_table(results: &BenchmarkResults) -> String {
         wf.cold_start_ms / 1000.0
     ));
     out.push_str(&format!(
-        "| p95 query latency (facet+filter+highlight, 50k docs) | baseline | <= baseline | {solr_p95:.2} ms | {wf_p95:.2} ms | {LATENCY_PATH} |\n"
+        "| p95 query latency (facet+filter+highlight, {} docs) | baseline | <= baseline | {solr_p95:.2} ms | {wf_p95:.2} ms | {LATENCY_PATH} |\n",
+        results.corpus_size
     ));
     out.push_str(&format!(
         "| Container image size | ~500 MB | < 30 MB | {:.1} MB | {:.1} MB | {IMAGE_PATH} |\n",
