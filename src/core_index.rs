@@ -421,27 +421,33 @@ fn terms_to_should_query(field: Field, terms: Vec<String>) -> Box<dyn Query> {
 
 /// Flattens a `tantivy::query_grammar::UserInputAst` (the same grammar
 /// entry point `CoreIndex::parse_query` walks — finding 74) into a flat list
-/// of `(Occur, leaf)` pairs for edismax's `q`, whose scope is exactly the
-/// flat "words, quoted phrases, `+`/`-`" grammar this produces for every
-/// query this issue's fixtures exercise. Nested clauses (parens, `AND`/`OR`)
-/// are supported by recursing rather than assumed away, combining an outer
-/// clause's `Occur` with each descendant leaf's own via `combine_occur` —
-/// once any ancestor is `MustNot` the leaf is excluded, once any ancestor
-/// (with no `MustNot` ancestor) is `Must` the leaf is required, and only a
-/// leaf with every ancestor `Should` stays optional and counts toward `mm`.
+/// of `(Occur, boost, leaf)` triples for edismax's `q`, whose scope is
+/// exactly the flat "words, quoted phrases, `+`/`-`" grammar this produces
+/// for every query this issue's fixtures exercise. Nested clauses (parens,
+/// `AND`/`OR`) are supported by recursing rather than assumed away,
+/// combining an outer clause's `Occur` with each descendant leaf's own via
+/// `combine_occur` — once any ancestor is `MustNot` the leaf is excluded,
+/// once any ancestor (with no `MustNot` ancestor) is `Must` the leaf is
+/// required, and only a leaf with every ancestor `Should` stays optional
+/// and counts toward `mm`. `boost` (issue #109: `q=rocket^5`) multiplies
+/// down through nested `Boost` nodes rather than being discarded, matching
+/// the plain-parser `build_ast` path's own `UserInputAst::Boost` handling.
 fn flatten_edismax_clauses(
     ast: tantivy::query_grammar::UserInputAst,
-) -> Vec<(Occur, tantivy::query_grammar::UserInputLeaf)> {
+) -> Vec<(Occur, f32, tantivy::query_grammar::UserInputLeaf)> {
     use tantivy::query_grammar::UserInputAst;
     match ast {
-        UserInputAst::Leaf(leaf) => vec![(Occur::Should, *leaf)],
-        UserInputAst::Boost(inner, _) => flatten_edismax_clauses(*inner),
+        UserInputAst::Leaf(leaf) => vec![(Occur::Should, 1.0, *leaf)],
+        UserInputAst::Boost(inner, boost) => flatten_edismax_clauses(*inner)
+            .into_iter()
+            .map(|(occur, weight, leaf)| (occur, weight * boost.into_inner() as f32, leaf))
+            .collect(),
         UserInputAst::Clause(subqueries) => {
             let mut out = Vec::with_capacity(subqueries.len());
             for (occur_opt, sub) in subqueries {
                 let occur = occur_opt.unwrap_or(Occur::Should);
-                for (sub_occur, leaf) in flatten_edismax_clauses(sub) {
-                    out.push((combine_occur(occur, sub_occur), leaf));
+                for (sub_occur, weight, leaf) in flatten_edismax_clauses(sub) {
+                    out.push((combine_occur(occur, sub_occur), weight, leaf));
                 }
             }
             out
@@ -1016,22 +1022,19 @@ impl CoreIndex {
         let parser = QueryParser::for_index(&self.index, vec![default_field]);
         let mut literal_texts: Vec<String> = Vec::new();
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::with_capacity(flat.len());
-        for (occur, leaf) in flat {
-            match &leaf {
+        for (occur, leaf_boost, leaf) in flat {
+            let built: Box<dyn Query> = match &leaf {
                 tantivy::query_grammar::UserInputLeaf::Literal(lit) if lit.field_name.is_none() => {
                     literal_texts.push(lit.phrase.clone());
-                    let built = self.build_field_disjunction(&lit.phrase, &qf_fields, tie);
-                    clauses.push((occur, built));
+                    self.build_field_disjunction(&lit.phrase, &qf_fields, tie)
                 }
-                _ => {
-                    let built = self.build_ast(
-                        tantivy::query_grammar::UserInputAst::Leaf(Box::new(leaf)),
-                        &parser,
-                        default_field_name,
-                    )?;
-                    clauses.push((occur, built));
-                }
-            }
+                _ => self.build_ast(
+                    tantivy::query_grammar::UserInputAst::Leaf(Box::new(leaf)),
+                    &parser,
+                    default_field_name,
+                )?,
+            };
+            clauses.push((occur, Box::new(BoostQuery::new(built, leaf_boost))));
         }
 
         if clauses.is_empty() {
