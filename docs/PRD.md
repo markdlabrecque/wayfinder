@@ -446,7 +446,7 @@ conditional lists (`2<-1 5<80%`). Implement it fully; it is a small self-contain
 | **v1.5 — the capture** | The `search_api_solr` contract capture (§2), pulled ahead of the rest of v2: generated config set + HTTP trace of a real Drupal site, frozen as fixtures, plus the coverage denominator computed from them |
 | **v2 — Search API** | `search_api_wayfinder` connector module (issue #57, done), `search-api.toml` preset (done), `/admin/system` version handshake (done). `/admin/luke`, `/terms`, `/admin/mbeans` explicitly descoped — see below. |
 | **v2.5 — Admin web UI** | A read-only operator dashboard, server-rendered by the same binary. See below. |
-| **v3** | Result caches + autowarm, spellcheck/suggester, grouping/collapse, atomic updates + `_version_` optimistic concurrency |
+| **v3** | Result caches + autowarm, spellcheck/suggester, grouping/collapse, `_version_` (issue TBD — scope narrowed, see below) |
 | **v4** | Function queries (`bf`, `{!func}`), spatial, snapshot-based read replicas |
 | **Deep roadmap** | Distributed / sharded search, SolrCloud. The majority of Solr's complexity and directly opposed to the operational-simplicity goal. |
 
@@ -488,8 +488,8 @@ Notes on deferred items:
   signal to build it.
 - **Spellcheck / suggester** — needs a build step over the term dictionary. Tantivy's FST and
   fuzzy support give a foundation, not the component.
-- **Atomic updates** — needs stored-field read-modify-write plus a version field. Most
-  clients reindex whole documents.
+- **Atomic updates + `_version_`** — narrowed by evidence to just `_version_`; see the "v3 —
+  `_version_`" subsection below.
 - **Grouping / collapse** — no native equivalent; needs a custom collector.
 
 ### v2.5 — Admin web UI
@@ -544,6 +544,66 @@ view, stats, and the query tester are the "flesh it out" that follows, not part 
 required at this scope — assert on rendered HTML/text content and HTTP status, the same style as the
 existing route tests). A browser-driven check is a fair addition later if the UI grows enough
 interactivity to need one; a static dashboard doesn't.
+
+### v3 — `_version_`, narrowed from "atomic updates + optimistic concurrency"
+
+The Phases table originally listed this item as full atomic updates (`{"set"/"inc"/"add-distinct":
+...}` field modifiers) plus write-time optimistic concurrency (`versions=true`, a client-supplied
+`_version_` on update, HTTP 409 on a stale write) — Solr's whole story around `_version_`. Checked
+against the real client the same way v2's `terms`/`admin/luke`/`admin/mbeans` clause was: **the
+evidence does not support building most of that.**
+
+`search_api_solr` 4.4.0 (`SearchApiSolrBackend.php`) writes exclusively through Solarium's
+`addDocument(s)` — always whole documents, never Solr's atomic-update JSON. It references
+`_version_` exactly once, read-only: `stats.field=_version_&function=max(_version_)`, to compute an
+incremental-indexing watermark for its own admin UI. No `versions=true`, no conflict handling. The
+coverage contract (`coverage/search_api_coverage_contract.json`) confirms zero hits for
+`set`/`inc`/`add-distinct`/`versions`. This is a real feature described in the Phases table only
+because it's a Solr concept, the same premise gap the capture is supposed to close (§5's "coverage
+instrument" note).
+
+**In scope (v1 of this item):**
+
+- **A real `_version_` field**, `i64`, `fast` (docValues), auto-populated per document — not
+  user-schema-defined, not user-visible in `schema.toml`, the same kind of internal pseudo-field
+  `_root_` already is in the response envelope (§2 envelope fact 8). Monotonic per core (a simple
+  counter is sufficient; Solr's own `_version_` has no semantic meaning beyond "increases on every
+  write" — see below).
+- **`stats.field=_version_`** (and `function=max(_version_)`, Solr's equivalent phrasing for the same
+  aggregate) working against it via the stats component that already exists (`src/stats.rs`, issue
+  #5) — `_version_` just needs to be a real, statable, fast numeric field; no new aggregation code.
+
+**Out of scope, explicitly** (each needs its own evidence before it's worth building):
+
+- Atomic update field modifiers (`set`/`inc`/`add`/`add-distinct`/`remove`/`remove-regex`). No
+  client evidence of use; would need Tantivy read-modify-write under the hood regardless (segments
+  are immutable — Tantivy's `IndexWriter` has no partial-field mutation primitive, so this is never
+  "atomic" at the storage layer, only at the request-response boundary), a materially bigger and
+  riskier feature than a version counter.
+- `versions=true` on `/update` and 409-on-stale-write optimistic concurrency. No client sends a
+  `_version_` on write or checks for a conflict response. Revisit only if a client that does
+  surfaces.
+- Any ordering/semantic guarantee on `_version_` values beyond monotonic increase (Solr's own is an
+  opaque `long` tied to its update log; clients that need `max(_version_)` as a watermark only need
+  "bigger means newer," which a simple counter already gives).
+
+**Architecture.** Add `_version_` at the same layer `_root_` is added today (`core_index.rs`, where
+Solr's pseudo-fields are appended to the response — see the comment at line ~1540) — but as a real
+schema field this time, not just an envelope-shape addition, since it has to be `fast` for
+`stats.field` to aggregate on it. A per-core atomic counter (`AtomicI64`, bumped on every
+`add_documents` call) is enough; no persistence of the counter's last value across restarts is
+needed for a "bigger means newer" watermark, though restart behavior should be a documented,
+deliberate choice (reset to a value that can't collide with pre-restart versions, e.g. seed from
+current Unix-epoch millis) rather than an accident.
+
+**Tracer bullet.** One field, one path: index a document, confirm `_version_` is present and
+`fast`, then confirm `stats.field=_version_&function=max(_version_)`-shaped requests (both spellings
+if they differ in practice — verify against a captured Solr fixture) return the right max. No
+atomic-update work, no optimistic concurrency, in this slice or after it unless new evidence appears.
+
+**Testing.** Hermetic — no live Solr needed beyond what already exists for `stats.field`. Extend
+`src/stats.rs`'s existing fixture-backed test style (`solr-ref/responses/stats_*.json`) with a
+`_version_`-specific case if the real Solr capture doesn't already have one; capture one if not.
 
 ---
 
