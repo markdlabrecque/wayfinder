@@ -502,7 +502,11 @@ functionally depends on v2 or blocks on it.
 
 **In scope (v1 of this phase):**
 
-- **Core list** — name, doc count, on-disk size, field count. One page, the landing view.
+- **Core view** — name, doc count, on-disk size, field count for the one core this process
+  serves (§7/open question 1: single-core-per-process is current architecture, not just a
+  lean — `app()` takes exactly one schema/data-dir). One page, the landing view. A
+  multi-core *list* would need a core registry that does not exist yet; out of scope here,
+  revisit if/when open question 1 resolves toward multi-core.
 - **Schema view** — the core's persisted TOML schema rendered read-only: fields, types, `stored`/
   `fast`/`multi_valued` flags, dynamic-field patterns, copy-fields. Sourced from the same on-disk
   schema §3 already persists and diffs against at startup — no new storage.
@@ -513,7 +517,7 @@ functionally depends on v2 or blocks on it.
 - **Query tester** — a form for `q`/`fq`/`fl`/`rows`/`start`/`facet.field`, submitted to the core's own
   `/select`, rendering the JSON response. This is a thin UI wrapper over the existing endpoint — no new
   query logic, no second code path to keep in sync with the real one.
-- **Ping/health** — per-core status, reusing `/admin/ping`.
+- **Ping/health** — this process's core status, reusing `/admin/ping`.
 
 **Out of scope, explicitly, for this phase** (each is a bigger surface than a dashboard and needs its
 own scoping pass if ever pursued):
@@ -526,19 +530,20 @@ own scoping pass if ever pursued):
   that posture and documents it as a deployment responsibility (reverse proxy / firewall / network
   policy), not something Wayfinder arbitrates. Flagged as a risk below, not silently assumed away.
 - Multi-instance/cluster views. Out of scope for the same reason SolrCloud is (§1 non-goals) — one
-  process, one set of local cores.
+  process, one core.
 
 **Architecture.** New routes under `/ui` (or `/admin` — naming TBD at implementation time), served by
 the same axum app, alongside the existing `/solr/*` API routes — not a second process, not a second
 deployment artifact. Server-rendered HTML, compiled in via `askama` (compile-time-checked templates,
 no runtime template parsing, no JS build step) rather than a client-side framework — this keeps the
 "single static binary" goal intact the same way TOML-not-XML config does. Data comes from the same
-in-process core registry the query pipeline already reads; no new stats-collection subsystem, only
-what's already tracked or trivially derivable (e.g. index directory size via `std::fs`).
+in-process index/schema state the query pipeline already reads (no core registry exists — `app()`
+serves exactly one core, per open question 1); no new stats-collection subsystem, only what's
+already tracked or trivially derivable (e.g. index directory size via `std::fs`).
 
-**Tracer bullet for this phase.** One page: the core list, reading real doc count and on-disk size
-from one running core. Done when that page renders correctly against a core with data in it — schema
-view, stats, and the query tester are the "flesh it out" that follows, not part of the slice.
+**Tracer bullet for this phase.** One page: the core view, reading real doc count and on-disk size
+from the one running core. Done when that page renders correctly against a core with data in it —
+schema view, stats, and the query tester are the "flesh it out" that follows, not part of the slice.
 
 **Testing.** Hermetic unit/integration tests against a real in-process core (no browser automation
 required at this scope — assert on rendered HTML/text content and HTTP status, the same style as the
