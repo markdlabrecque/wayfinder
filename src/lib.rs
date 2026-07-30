@@ -30,7 +30,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{Path as AxPath, RawQuery, State};
+use axum::extract::{DefaultBodyLimit, Path as AxPath, RawQuery, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -151,6 +151,10 @@ pub fn app_with_config(
 fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::Result<Router> {
     let index = CoreIndex::open(schema_path, data_dir, &config)?;
     let core_name = index.wf_schema.core.name.clone();
+    // Issue #64: raise (and make configurable via `resources.max_body_size`)
+    // the request-body cap that axum's `Bytes`/`Json` extractors otherwise
+    // enforce at a bare, hardcoded 2MB via `DefaultBodyLimit`.
+    let max_body_size = config.resources.max_body_size;
     let state = Arc::new(AppState {
         core_name,
         index,
@@ -188,7 +192,8 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
     // last-resort net, not a substitute for fixing the panic at its source.
     Ok(router
         .with_state(state)
-        .layer(CatchPanicLayer::custom(handle_panic)))
+        .layer(CatchPanicLayer::custom(handle_panic))
+        .layer(DefaultBodyLimit::max(max_body_size)))
 }
 
 /// Test-only handler behind the `test-support` feature (see `build()`): an

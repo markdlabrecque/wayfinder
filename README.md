@@ -70,6 +70,11 @@ doc_store_blocksize = 16384
 # Accepted but inert: Tantivy 0.26 creates searchers on demand rather than from
 # a fixed pool, so there is nothing to size. Kept because PRD §6 names it.
 searcher_pool_size = 1
+# Hard cap, in bytes, on an incoming request body. Wired to an axum
+# DefaultBodyLimit layer, which otherwise defaults to a bare 2MB cap -- too
+# small for a realistic bulk /update. Default is a round headroom figure over
+# the largest known captured fixture, not a verified Solr equivalent.
+max_body_size = 10000000
 
 [commit]
 # Hard-commit thresholds. Parsed and exposed; the update pipeline that consumes
@@ -87,7 +92,7 @@ cache does the work Solr's heap sizing does. The absence is a feature.
 |---|---|
 | `strict_params`, `query.rows_limit` | `query.time_allowed` |
 | `indexing.writer_heap`, `writer_threads`, `merge_policy` (+ its params) | `query.facet_limit_max` |
-| `resources.doc_store_compression`, `doc_store_blocksize` | `commit.autocommit_max_docs`, `autocommit_max_time` |
+| `resources.doc_store_compression`, `doc_store_blocksize`, `max_body_size` | `commit.autocommit_max_docs`, `autocommit_max_time` |
 | | `resources.searcher_pool_size` (no Tantivy equivalent) |
 
 ## Tests

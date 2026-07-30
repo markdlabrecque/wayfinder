@@ -1284,3 +1284,19 @@ edismax-specific behaviour.
     version signal the module reads via `getSchemaVersionString()`/`getSchemaTargetedSolrBranch()`.
     Implementation of what Wayfinder itself should report is deferred to issue #59 per the issue's
     scope; this finding is the discovered ground truth that decision should be checked against.
+
+79. **`multipartUploadLimitInKB`/`formdataUploadLimitInKB` do not govern raw `application/json`
+    `/update` bodies** (issue #64). The generated `solrconfig.xml`'s `<requestDispatcher>` section
+    documents these two `requestParsers` attributes as caps on `multipart/form-data` file uploads
+    and `application/x-www-form-urlencoded` POST params respectively — neither content type
+    `search_api_solr`'s bulk `/update` uses. Worse, the example block that names them
+    (`solr-ref/search-api/configset/solrconfig.xml` lines ~500-537) is itself inside an HTML
+    comment; the actual active `<requestDispatcher>` content is the entity-included
+    `solr-ref/search-api/configset/solrconfig_requestdispatcher.xml`, which sets neither attribute
+    at all (just `httpCaching`). So this capture gives no evidence of an active Solr-side cap on
+    raw JSON update bodies, and none of `search-api`'s own captured bulk-update traffic exceeds a
+    few KB (the largest fixture in `solr-ref/responses/` is ~7KB) — there is no in-repo, hermetic
+    signal for what Solr's own effective raw-body ceiling is. Absent a live-Solr probe (gated
+    behind `WAYFINDER_DIFF_SOLR=1`, not run here), Wayfinder's `resources.max_body_size` default
+    (see `src/config.rs`) is a deliberate round headroom figure over the largest known fixture, not
+    a value derived from a verified Solr default.

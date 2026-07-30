@@ -508,6 +508,13 @@ Scoped to v1 features. Server TOML plus per-request params where Solr has them.
 **Resources:**
 - `doc_store_compression`, `doc_store_blocksize` — stored-field compression trade-off.
 - `searcher_pool_size`.
+- `max_body_size` — hard cap, in bytes, on an incoming request body (issue #64), wired to an
+  axum `DefaultBodyLimit` layer. Default `10_000_000`, a round headroom figure over the largest
+  known captured fixture; axum's own bare default is 2MB, too small for a realistic bulk
+  `/update`. Could not be derived from a verified Solr-side max-request-size default (finding 79,
+  `docs/solr-ref-findings.md`) — the closest Solr knobs (`requestParsers`'s
+  `formdataUploadLimitInKB`/`multipartUploadLimitInKB`) govern form/multipart uploads, not raw
+  JSON bodies.
 - No heap tuning, by design. Tantivy is mmap-based; the OS page cache does the work Solr's
   heap sizing does. The absence is a feature and should be documented as one.
 
