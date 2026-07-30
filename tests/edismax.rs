@@ -264,6 +264,154 @@ async fn dynamic_field_in_q_is_rewritten_under_edismax() {
     );
 }
 
+// --- qf/pf: dynamic-field names, not just static ones (issue #84) ----------
+//
+// `resolve_field_weights` (the shared machinery behind both `qf` and `pf`)
+// resolves every name with the same static-before-dynamic precedence
+// indexing uses: a declared `[[fields]]` entry wins, and a name that only
+// matches a `[[dynamic_fields]]` pattern falls back to `match_dynamic` and
+// the catch-all container's JSON sub-path (`_dynamic[_text].<name>`) — the
+// list-shaped equivalent of what `rewrite_dynamic_fields` does for the `q`
+// text path (pinned above by
+// `dynamic_field_in_q_is_rewritten_under_edismax`). The names in question
+// are exactly the `presets/search-api.toml` `ts_*`/`tm_*` convention
+// search_api_solr clients rely on.
+//
+// Before issue #84 that fallback did not exist: the lookup was a literal
+// `wf_schema.field(&name)`, so a dynamic-only name was dropped from the
+// disjunction outright. The two failure modes that dropping produced are
+// what the tests below pin against regression — a `qf` naming *only*
+// dynamic fields resolved to an empty list and hard-errored as "edismax
+// `qf` names no field this core has", while `pf` (which never hard-errors —
+// an empty resolution just skips the phrase-boost clause per
+// `build_pf_query`'s doc comment) failed silently as a missing boost
+// instead.
+const DYNAMIC_QF_EDISMAX_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[dynamic_fields]]
+pattern = "ts_*"
+type = "text_general"
+stored = true
+"#;
+
+/// A `qf` naming only a dynamic field (`ts_title`, matching the
+/// `presets/search-api.toml` `ts_*` pattern) must resolve through the same
+/// dynamic-field machinery `q` already gets, not drop to an empty field
+/// list. Two docs share unrelated `body` text so only `ts_title` can
+/// distinguish a match, so a `qf=ts_title` that resolved to zero fields
+/// would 400 before either doc was ever considered — which is exactly what
+/// happened before issue #84.
+#[tokio::test]
+async fn qf_naming_only_a_dynamic_field_matches_instead_of_dropping_it() {
+    let dir = TempDir::new().expect("temp dir");
+    let app = app_with_schema(dir.path(), DYNAMIC_QF_EDISMAX_SCHEMA_TOML).expect("app must build");
+    let (status, body) = common::post_docs(
+        &app,
+        &serde_json::json!([
+            {"id": "d1", "body": "filler unrelated text", "ts_title": "rocket launch success"},
+            {"id": "d2", "body": "filler unrelated text", "ts_title": "completely different words"}
+        ]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "indexing must succeed, got {body}");
+
+    let (status, body) = get(
+        &app,
+        "select?q=rocket&defType=edismax&qf=ts_title&fl=id&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a `qf` naming only a dynamic field must not 400 with \"names no field this core \
+         has\": {body}"
+    );
+    assert_eq!(
+        body["response"]["numFound"],
+        Value::from(1),
+        "qf=ts_title must be honored in the disjunction and match only d1: {body}"
+    );
+    assert_eq!(
+        body.pointer("/response/docs/0/id").and_then(Value::as_str),
+        Some("d1"),
+        "the matching doc must be d1 (whose ts_title carries \"rocket\"): {body}"
+    );
+}
+
+/// `pf` shares `resolve_field_weights` with `qf` but never hard-errors on an
+/// empty resolution (`build_pf_query` just skips the phrase-boost clause) —
+/// so a `pf` naming only a dynamic field would fail *silently* if it ever
+/// stopped resolving: the request would still succeed, only the phrase
+/// boost would go missing. That is why this asserts on scores rather than
+/// on status, and why a 200 alone proves nothing here. `qf=body` resolves
+/// fine (a real static field) so the main query and the request itself
+/// succeed either way; `body` is identical bag-of-words text for both docs,
+/// so only `pf`'s adjacency-sensitive boost over the *dynamic* `ts_phrase`
+/// field can tell them apart.
+#[tokio::test]
+async fn pf_naming_only_a_dynamic_field_still_boosts_the_adjacent_match() {
+    let dir = TempDir::new().expect("temp dir");
+    let app = app_with_schema(dir.path(), DYNAMIC_QF_EDISMAX_SCHEMA_TOML).expect("app must build");
+    let (status, body) = common::post_docs(
+        &app,
+        &serde_json::json!([
+            {"id": "adjA", "body": "quick fox", "ts_phrase": "quick fox"},
+            {"id": "adjB", "body": "quick fox", "ts_phrase": "fox is quick"}
+        ]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "indexing must succeed, got {body}");
+
+    let (status_off, body_off) = get(
+        &app,
+        "select?q=quick+fox&defType=edismax&qf=body&fl=id,score&wt=json",
+    )
+    .await;
+    assert_eq!(status_off, StatusCode::OK, "pf-off request: {body_off}");
+    let scores_off = scores_by_id(&body_off);
+    assert_eq!(
+        scores_off.len(),
+        2,
+        "both adjA and adjB must match on bag-of-words `body` terms alone, got {scores_off:?}"
+    );
+    assert!(
+        (scores_off["adjA"] - scores_off["adjB"]).abs() <= score_tolerance(),
+        "with no `pf`, adjA and adjB must score equally (identical `body` text): {scores_off:?}"
+    );
+
+    let (status_on, body_on) = get(
+        &app,
+        "select?q=quick+fox&defType=edismax&qf=body&pf=ts_phrase&fl=id,score&wt=json",
+    )
+    .await;
+    assert_eq!(status_on, StatusCode::OK, "pf-on request: {body_on}");
+    let scores_on = scores_by_id(&body_on);
+    let adj_a = scores_on["adjA"];
+    let adj_b = scores_on["adjB"];
+    assert!(
+        adj_a > adj_b + score_tolerance(),
+        "pf=ts_phrase (a dynamic-only field name) must still boost adjA (adjacent phrase \
+         \"quick fox\" in ts_phrase) above adjB (non-adjacent \"fox is quick\"), got \
+         adjA={adj_a}, adjB={adj_b}"
+    );
+}
+
 #[tokio::test]
 async fn edismax_basic_matches_committed_fixture() {
     // Self-expiring skip guard, issue #51 (corrected root cause per
