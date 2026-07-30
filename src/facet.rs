@@ -688,6 +688,21 @@ fn check_facetable(schema: &WayfinderSchema, field_name: &str, allow_dynamic: bo
         schema.field_config(field_name).map(|f| f.fast)
     };
     match fast {
+        None if !allow_dynamic && schema.resolved_fast(field_name).is_some() => {
+            // ponytail: `facet.range` only resolves statically-declared
+            // fields (see the module doc above `check_facetable`) because it
+            // needs the field's physical `Field` handle for
+            // `Term::from_field_i64`/etc, which a dynamic-only match has no
+            // handle for (only the catch-all container field does). So a
+            // field that matches a `[[dynamic_fields]]` pattern — and would
+            // be perfectly facetable via `facet.field` — is still refused
+            // here. Upgrade when `RangeEnd::to_term` (or its callers) no
+            // longer needs a physical `Field`, then flip this to
+            // `allow_dynamic = true` like `facet.field` already is.
+            bail!(
+                "field {field_name} matches a dynamic pattern but facet.range does not yet support dynamic fields"
+            )
+        }
         None => bail!("can not facet on undefined field: {field_name}"),
         Some(false) => bail!("can not facet on a field w/o fast values (docValues): {field_name}"),
         Some(true) => Ok(()),
