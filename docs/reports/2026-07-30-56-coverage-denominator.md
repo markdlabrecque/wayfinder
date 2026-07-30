@@ -8,9 +8,17 @@ issue #55's frozen `search_api_solr` 4.4.0 capture.
 | Bucket | Covered | Total | Fraction |
 |---|---:|---:|---:|
 | Endpoints | 5 | 9 | 5/9 |
-| Request semantics | 28 | 51 | 28/51 |
+| Request semantics | 27 | 51 | 27/51 |
 | Client-consumed response fields | 9 | 15 | 9/15 |
-| **Overall** | **42** | **75** | **42/75** |
+| **Overall** | **41** | **75** | **41/75** |
+
+**Update (post-merge follow-up):** fixed three non-discriminating request-semantics probes
+(`select.q.plain-query`, `select.highlight.snippets`, `select.highlight.fragsize`) — see
+"Follow-up: probe honesty pass" below. `select.highlight.snippets` moved from covered to
+uncovered (`28/51` → `27/51`, overall `42/75` → `41/75`): the old probe passed regardless of
+whether `hl.snippets` did anything, because the seeded corpus only ever had one possible
+snippet window. Wayfinder's `CoreIndex::highlight_field` is genuinely capped at one snippet
+(tracked as issue #103); the honest number is 41/75 until that lands.
 
 ## Denominator and provenance
 
@@ -123,3 +131,31 @@ variants to the uncovered list. The exact source was restored before gates.
 - `cargo test --test search_api_coverage -- --nocapture` — pass (6 tests).
 - `cargo test --test search_api_coverage_endpoint_provenance -- --exact each_endpoint_cites_every_frozen_exchange_with_its_method_and_shape --nocapture` — pass (1 test).
 - `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` — pass; fmt clean, clippy clean, 498 tests passed, 0 failed (including doc tests).
+
+## Follow-up: probe honesty pass
+
+Three request-semantics probes reported `covered` without actually discriminating supported
+from unsupported behavior:
+
+- **`select.q.plain-query`** — the contract's captured value is Search API Solr's *internal*
+  expanded Lucene syntax against dynamic fields Wayfinder doesn't host
+  (`tm_X3b_en_body:(+"quick")^1 ...`), never something a real client sends as an opaque `q=`.
+  Kept the existing `numFound` behavioral proxy, documented why.
+- **`select.highlight.snippets`** — probed `hl.snippets=1` (the default), so it passed whether
+  or not `hl.snippets` was honored at all; the seeded corpus only ever had one possible
+  snippet window per doc. Added a dedicated fixture doc (`hl-snippets-gizmo`, a term repeated
+  three times spaced past a snippet-window width) and switched the probe to the real captured
+  value, `hl.snippets=3`. This uncovered a genuine gap: `CoreIndex::highlight_field` is capped
+  at exactly one snippet (Tantivy's public `SnippetGenerator` only exposes its single
+  best-scoring fragment) — filed as **issue #103**. The probe now honestly reports uncovered;
+  request semantics moved `28/51` → `27/51`, overall `42/75` → `41/75`.
+- **`select.highlight.fragsize`** — the presence-only check passed even with `hl.fragsize`
+  handling mutated out entirely. Added a second, fixture-backed request
+  (`hl.method=original&hl.fragsize=10`, matching `hl_fragsize_truncated.json`) asserting real
+  truncation. The captured shape (`hl.fragsize=0`, no `hl.method`) stays a presence check —
+  no fixture has a field long enough to make whole-field-vs-fragmented observable — filed as
+  **issue #104**.
+
+Mutation-tested: each fixed probe was confirmed to flip from pass to fail when the underlying
+behavior was temporarily broken, then the break was reverted. `cargo test` (512 tests),
+`cargo fmt --check`, and `cargo clippy --all-targets -- -D warnings` all clean afterward.

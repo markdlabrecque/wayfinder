@@ -411,6 +411,22 @@ const PROBE_DOCS: &str = r#"[
   {"id":"mlt20","body":"nothing here relates to any other document in this corpus","category":["misc"],"rating":29,"created":"2024-02-20T00:00:00Z","featured":"m"}
 ]"#;
 
+/// Seeded alongside `PROBE_DOCS`, but kept a separate batch on purpose: this
+/// doc exists only so the `hl.snippets` probe has a corpus that can tell "the
+/// cap is honored" apart from "the cap is ignored", and holding it out of
+/// `PROBE_DOCS` keeps that intent legible next to the field-value assertions
+/// the other probes make against `doc1`/`doc2`/`doc3`/`mlt*`.
+///
+/// `body` repeats a term unique to this doc ("gizmo") three times, each
+/// occurrence separated by 100+ chars of filler that shares no term with any
+/// other probe doc -- wide enough that a real multi-fragment highlighter would
+/// produce three distinct, non-overlapping ~150-char snippet windows rather
+/// than merging them into one. It carries no `category`/`rating`/`created`/
+/// `featured` value, so the facet-count and sort probes are untouched by it.
+const HL_SNIPPETS_PROBE_DOCS: &str = r#"[
+  {"id":"hl-snippets-gizmo","body":"gizmo prototype unveiled at the trade show. the weather in the valley stayed mild and overcast for most of the week without much wind at all. a second gizmo shipment arrived at the warehouse yesterday. meanwhile the local council debated a new bridge proposal for nearly three hours last tuesday evening. engineers are already testing a third gizmo revision in the lab. several farmers reported an unusually early harvest this year thanks to the warm and sunny spring season."}
+]"#;
+
 impl ProbeApp {
     async fn new() -> Self {
         let workspace = ProbeWorkspace::new();
@@ -430,6 +446,18 @@ impl ProbeApp {
             .request(Method::POST, "content/update?commit=true", Some(PROBE_DOCS))
             .await;
         assert_eq!(status, StatusCode::OK, "seed coverage probe corpus: {body}");
+        let (status, body) = probe
+            .request(
+                Method::POST,
+                "content/update?commit=true",
+                Some(HL_SNIPPETS_PROBE_DOCS),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "seed coverage probe hl.snippets corpus: {body}"
+        );
         probe
     }
 
@@ -596,6 +624,16 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
             probe.ok("select?q=*:*&TZ=UTC").await
                 && probe.ok("mlt?q=id:doc1&mlt.fl=body&TZ=UTC").await
         }
+        // Deliberately not the contract's literal captured value. The
+        // `select.q.plain-query` entry records Search API Solr's *internal*
+        // expanded Lucene syntax (`tm_X3b_en_body:(+"quick")^1 ...`) -- the
+        // per-language field fan-out that module builds against a Solr-side
+        // dynamic-field naming scheme Wayfinder does not host. No real client
+        // ever sends that string as an opaque `q=`; it is query construction
+        // detail, not wire semantics. What the entry actually asserts about
+        // Wayfinder is "a plain single-term `q` finds the docs containing that
+        // term", so numFound on `q=quick` is the behavioral stand-in, not a
+        // corpus or probe shortcut.
         "select.q.plain-query" => {
             probe.number("select?q=quick", "/response/numFound").await == Some(2)
         }
@@ -713,21 +751,59 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
         "select.highlight.require-field-match" => {
             probe.ok("select?q=quick&hl.requireFieldMatch=false").await
         }
+        // Every captured exchange sends `hl.snippets=3` (contract entry
+        // `select.highlight.snippets`, variant "three"), so that is what this
+        // probe asks for, against the `hl-snippets-gizmo` doc whose `body`
+        // holds three well-separated "gizmo" hits. It reports `false` today:
+        // `CoreIndex::highlight_field` is capped at Tantivy's single
+        // best-scoring fragment, so `hl.snippets > 1` is a structural no-op
+        // (issue #103). That `false` is the honest answer -- do not swap this
+        // back to `hl.snippets=1`, which any implementation passes whether or
+        // not the cap means anything. When #103 lands this flips to `true` on
+        // its own.
         "select.highlight.snippets" => {
             probe
-                .has(
-                    "select?q=quick&hl=true&hl.fl=body&hl.snippets=1",
-                    "/highlighting/doc1/body/0",
-                )
+                .response("select?q=gizmo&hl=true&hl.fl=body&hl.snippets=3")
                 .await
+                .and_then(|body| {
+                    body.pointer("/highlighting/hl-snippets-gizmo/body")
+                        .and_then(Value::as_array)
+                        .map(Vec::len)
+                })
+                == Some(3)
         }
+        // Two requests, because the captured shape and the discriminating
+        // shape are not the same request. `hl.fragsize=0` with no `hl.method`
+        // is what the captured traffic sends (contract variant
+        // "zero-whole-field"), and no fixture pins what Solr returns for it,
+        // so that half stays a presence check -- tracked as issue #104 (needs
+        // a long-field capture.sh fixture to make whole-field-vs-fragmented
+        // observable). Truncation is only observable
+        // under `hl.method=original` (finding 54, `src/highlight.rs` module
+        // docs; fixture `hl_fragsize_truncated.json`), so the second half
+        // asks for a 10-char budget over `doc1`'s "quick brown fox rocket"
+        // and requires the snippet to actually come back shorter than the
+        // untruncated field -- otherwise an implementation that dropped
+        // `hl.fragsize` on the floor entirely would still score this covered.
         "select.highlight.fragsize" => {
-            probe
+            let captured_shape = probe
                 .has(
                     "select?q=quick&hl=true&hl.fl=body&hl.fragsize=0",
                     "/highlighting/doc1/body/0",
                 )
+                .await;
+            let truncated = probe
+                .response("select?q=quick&hl=true&hl.fl=body&hl.method=original&hl.fragsize=10")
                 .await
+                .and_then(|body| {
+                    body.pointer("/highlighting/doc1/body/0")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .is_some_and(|snippet| {
+                    snippet.contains("<em>quick</em>") && !snippet.contains("rocket")
+                });
+            captured_shape && truncated
         }
         "select.highlight.merge-contiguous" => {
             probe.ok("select?q=quick&hl.mergeContiguous=false").await
@@ -1159,5 +1235,102 @@ mod tests {
         let mut contract: serde_json::Value = serde_json::from_str(CONTRACT).unwrap();
         contract["request_semantics"][0]["covered"] = serde_json::json!(true);
         assert!(serde_json::from_value::<Contract>(contract).is_err());
+    }
+
+    /// `"select.highlight.snippets"` used to probe with `hl.snippets=1`, which
+    /// is exactly `DEFAULT_SNIPPETS` in `src/highlight.rs`. Against `doc1.body`
+    /// ("quick brown fox rocket") -- which contains "quick" exactly once --
+    /// Tantivy's `SnippetGenerator` can only ever produce one snippet window
+    /// for that query, so that probe passed identically whether or not
+    /// `hl.snippets` was honored at all. Distinguishing the two needs a doc
+    /// where more than one snippet is even possible.
+    ///
+    /// `HL_SNIPPETS_PROBE_DOCS` supplies that corpus: `hl-snippets-gizmo`'s
+    /// `body` repeats a term unique to it ("gizmo") three times, each
+    /// occurrence separated by 100+ chars of unrelated filler -- wide enough
+    /// that a real multi-fragment highlighter would return three distinct,
+    /// non-overlapping windows rather than merging them into one.
+    ///
+    /// The `hl.snippets=3` assertion below locks in a *known ceiling*, not the
+    /// desired behavior: `CoreIndex::highlight_field` can only ever return
+    /// Tantivy's single best-scoring fragment
+    /// (`select_best_fragment_combination` is private in
+    /// `tantivy-0.26.1/src/snippet/mod.rs`), so `hl.snippets > 1` is a
+    /// structural no-op today. Lifting that is issue #103
+    /// ("hl.snippets > 1 is a structural no-op (single-fragment ceiling in
+    /// highlight_field)").
+    ///
+    /// This is written as an assertion on current behavior rather than an
+    /// `#[ignore]` on purpose, per the "deliberate skips must expire" rule: it
+    /// fails the moment #103 lands, naming itself as the thing to update
+    /// (`1` becomes `3`) instead of quietly staying green on a stale premise.
+    /// It equally catches the opposite regression -- a change that starts
+    /// emitting a *different* number of snippets without anyone deciding to.
+    #[tokio::test]
+    async fn snippets_cap_is_distinguishable_from_default() {
+        let probe = ProbeApp::new().await;
+
+        let one = probe
+            .response("select?q=gizmo&hl=true&hl.fl=body&hl.snippets=1")
+            .await
+            .expect("hl.snippets=1 select response");
+        let one_snippets = one
+            .pointer("/highlighting/hl-snippets-gizmo/body")
+            .and_then(Value::as_array)
+            .expect("hl.snippets=1 highlighting/hl-snippets-gizmo/body array");
+        assert_eq!(
+            one_snippets.len(),
+            1,
+            "hl.snippets=1 should cap to exactly one snippet, got {one_snippets:?}"
+        );
+
+        let three = probe
+            .response("select?q=gizmo&hl=true&hl.fl=body&hl.snippets=3")
+            .await
+            .expect("hl.snippets=3 select response");
+        let three_snippets = three
+            .pointer("/highlighting/hl-snippets-gizmo/body")
+            .and_then(Value::as_array)
+            .expect("hl.snippets=3 highlighting/hl-snippets-gizmo/body array");
+        assert_eq!(
+            three_snippets.len(),
+            1,
+            "issue #103: hl.snippets=3 still yields the single-fragment ceiling, \
+             identical to hl.snippets=1; update this to 3 when #103 lands. Got {three_snippets:?}"
+        );
+    }
+
+    /// Pins the property the two tests above depend on: pure string math, no
+    /// Tantivy involved, so a future edit to `HL_SNIPPETS_PROBE_DOCS` that
+    /// shrinks the filler back below a snippet window (`TANTIVY_DEFAULT_MAX_CHARS`
+    /// in `src/highlight.rs`, currently 150) fails here instead of silently
+    /// making `snippets_cap_is_distinguishable_from_default` untestable-by-#103
+    /// -- both `hl.snippets=1` and `hl.snippets=3` would then read `1` for a
+    /// reason unrelated to the single-fragment ceiling.
+    #[test]
+    fn hl_snippets_probe_doc_gaps_exceed_a_snippet_window() {
+        const TANTIVY_DEFAULT_MAX_CHARS: usize = 150;
+        let doc: Value =
+            serde_json::from_str(HL_SNIPPETS_PROBE_DOCS).expect("parse HL_SNIPPETS_PROBE_DOCS");
+        let body = doc[0]["body"].as_str().expect("hl-snippets-gizmo body");
+        let offsets: Vec<usize> = body
+            .match_indices("gizmo")
+            .map(|(offset, _)| offset)
+            .collect();
+        assert_eq!(
+            offsets.len(),
+            3,
+            "expected exactly three \"gizmo\" occurrences, found {offsets:?}"
+        );
+        for pair in offsets.windows(2) {
+            let gap = pair[1] - pair[0];
+            assert!(
+                gap > TANTIVY_DEFAULT_MAX_CHARS,
+                "gizmo occurrences at {} and {} are only {gap} chars apart, \
+                 not wider than a {TANTIVY_DEFAULT_MAX_CHARS}-char snippet window",
+                pair[0],
+                pair[1]
+            );
+        }
     }
 }

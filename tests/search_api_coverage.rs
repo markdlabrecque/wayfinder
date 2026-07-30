@@ -1156,6 +1156,11 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
             "select.facet.per-field-missing",
             "select.highlight.merge-contiguous",
             "select.highlight.require-field-match",
+            // Issue #103: the captured traffic always sends `hl.snippets=3`,
+            // and `CoreIndex::highlight_field` is capped at Tantivy's single
+            // best-scoring fragment, so `hl.snippets > 1` is a structural
+            // no-op. Delete this line when #103 lands.
+            "select.highlight.snippets",
             "select.highlight.wildcard-fields",
             "select.q.local-params-edismax.and",
             "select.q.local-params-edismax.or",
@@ -1191,7 +1196,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     assert_eq!(report.overall.total, total);
     assert_eq!(report.overall.fraction, format!("{covered}/{total}"));
     assert_eq!(
-        report.overall.fraction, "42/75",
+        report.overall.fraction, "41/75",
         "initial coverage fraction"
     );
 }
