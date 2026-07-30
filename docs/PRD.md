@@ -444,7 +444,8 @@ conditional lists (`2<-1 5<80%`). Implement it fully; it is a small self-contain
 | **POC** | The tracer bullet, §6 |
 | **v1** | The table above + edismax + the differential harness |
 | **v1.5 — the capture** | The `search_api_solr` contract capture (§2), pulled ahead of the rest of v2: generated config set + HTTP trace of a real Drupal site, frozen as fixtures, plus the coverage denominator computed from them |
-| **v2 — Search API** | `search_api_wayfinder` connector module, `search-api.toml` preset, `/admin/system` version handshake, then whichever of `/admin/luke`, `/terms`, `/admin/mbeans` the trace shows the module actually calls |
+| **v2 — Search API** | `search_api_wayfinder` connector module (issue #57, done), `search-api.toml` preset (done), `/admin/system` version handshake (done). `/admin/luke`, `/terms`, `/admin/mbeans` explicitly descoped — see below. |
+| **v2.5 — Admin web UI** | A read-only operator dashboard, server-rendered by the same binary. See below. |
 | **v3** | Result caches + autowarm, spellcheck/suggester, grouping/collapse, atomic updates + `_version_` optimistic concurrency |
 | **v4** | Function queries (`bf`, `{!func}`), spatial, snapshot-based read replicas |
 | **Deep roadmap** | Distributed / sharded search, SolrCloud. The majority of Solr's complexity and directly opposed to the operational-simplicity goal. |
@@ -460,6 +461,19 @@ edismax, so the trace bears on issue #7's `qf`/`pf`/`mm` handling.
 
 Capture against **stock upstream `search_api_solr`, unmodified** — the connector module is the
 extension point and must not be in the loop while ground truth is being established.
+
+**v2's conditional endpoint clause, resolved by descoping rather than by building.** The capture
+(finding 76, `docs/solr-ref-findings.md`) confirmed the module does call `terms`, `<core>/admin/luke`,
+and `<core>/admin/mbeans` — so the trace answered the "whichever" question above. But issue #57's own
+scoping doc (`docs/plans/57-search-api-wayfinder-backend.md`) narrowed v2 further than the trace alone
+would: the connector module implements only what the Wayfinder *server* already exposes, and the
+server has no `terms`/`admin/luke`/`admin/mbeans` endpoints. Building the client side of three
+endpoints the server can't answer would be exactly the "stub methods for later" the plan doc rules
+out, so all three are out of scope for #57, not merely deferred silently. `terms` backs the module's
+autocomplete/suggester path (`search_api_autocomplete`, not installed in the capture); `admin/luke`
+and `admin/mbeans` back Search API's own schema-browsing/server-stats admin screens — none of the
+three sit on the query or index path v1-v2 already cover. Revisit if a later phase adds server-side
+support for any of them; until then this is a recorded, deliberate gap, not an open PRD commitment.
 
 **The coverage instrument.** The capture yields the denominator: the set of params, endpoints,
 and response fields the module can emit across its configured features. Coverage is the fraction
@@ -477,6 +491,59 @@ Notes on deferred items:
 - **Atomic updates** — needs stored-field read-modify-write plus a version field. Most
   clients reindex whole documents.
 - **Grouping / collapse** — no native equivalent; needs a custom collector.
+
+### v2.5 — Admin web UI
+
+Solr operators get `/solr/#/`, an AngularJS console bundled with the JVM process, for free. Wayfinder
+has no equivalent today — the only way to see what a running instance is doing is `curl`. This phase
+closes that gap, scoped deliberately small: **a read-only dashboard, nothing more,** landed after v2
+because by then there are real cores (Search API sites) worth looking at, though nothing here
+functionally depends on v2 or blocks on it.
+
+**In scope (v1 of this phase):**
+
+- **Core list** — name, doc count, on-disk size, field count. One page, the landing view.
+- **Schema view** — the core's persisted TOML schema rendered read-only: fields, types, `stored`/
+  `fast`/`multi_valued` flags, dynamic-field patterns, copy-fields. Sourced from the same on-disk
+  schema §3 already persists and diffs against at startup — no new storage.
+- **Index stats** — doc count, segment count, on-disk size, uptime. "Resident memory" is reported as
+  best-effort OS-level info, with the same honesty §6 already applies to the absent heap knob: Wayfinder
+  is mmap-based, so there is no JVM-heap-shaped number to show, and the page says so rather than
+  faking one.
+- **Query tester** — a form for `q`/`fq`/`fl`/`rows`/`start`/`facet.field`, submitted to the core's own
+  `/select`, rendering the JSON response. This is a thin UI wrapper over the existing endpoint — no new
+  query logic, no second code path to keep in sync with the real one.
+- **Ping/health** — per-core status, reusing `/admin/ping`.
+
+**Out of scope, explicitly, for this phase** (each is a bigger surface than a dashboard and needs its
+own scoping pass if ever pursued):
+
+- Core create/delete, schema editing, or any config mutation from the browser. §3 already refuses to
+  start on an incompatible schema change; a UI that could trigger one is a different, much larger
+  feature.
+- Document edit/delete from the UI (the update pipeline stays API-only).
+- Authentication/authorization. Solr's own admin UI has none by default either — this phase matches
+  that posture and documents it as a deployment responsibility (reverse proxy / firewall / network
+  policy), not something Wayfinder arbitrates. Flagged as a risk below, not silently assumed away.
+- Multi-instance/cluster views. Out of scope for the same reason SolrCloud is (§1 non-goals) — one
+  process, one set of local cores.
+
+**Architecture.** New routes under `/ui` (or `/admin` — naming TBD at implementation time), served by
+the same axum app, alongside the existing `/solr/*` API routes — not a second process, not a second
+deployment artifact. Server-rendered HTML, compiled in via `askama` (compile-time-checked templates,
+no runtime template parsing, no JS build step) rather than a client-side framework — this keeps the
+"single static binary" goal intact the same way TOML-not-XML config does. Data comes from the same
+in-process core registry the query pipeline already reads; no new stats-collection subsystem, only
+what's already tracked or trivially derivable (e.g. index directory size via `std::fs`).
+
+**Tracer bullet for this phase.** One page: the core list, reading real doc count and on-disk size
+from one running core. Done when that page renders correctly against a core with data in it — schema
+view, stats, and the query tester are the "flesh it out" that follows, not part of the slice.
+
+**Testing.** Hermetic unit/integration tests against a real in-process core (no browser automation
+required at this scope — assert on rendered HTML/text content and HTTP status, the same style as the
+existing route tests). A browser-driven check is a fair addition later if the UI grows enough
+interactivity to need one; a static dashboard doesn't.
 
 ---
 
