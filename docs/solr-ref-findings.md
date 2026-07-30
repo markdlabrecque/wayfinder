@@ -1388,3 +1388,19 @@ fragment" to be different answers at all.
     intentional rather than incidental, plus a test
     (`non_numeric_boost_is_ignored_like_any_unsupported_function_query_not_rejected`) locking the
     behavior in alongside the existing `bf` one.
+
+## Finding from issue #111 (`qf` naming one undefined field among valid ones)
+
+84. **A `qf` naming a mix of valid and undefined fields 400s on the undefined name alone, even
+    when another name in the same `qf` is perfectly valid.** Confirmed by a one-off capture
+    (`edismax_qf_partial_invalid.json`, not committed through `capture.sh`'s `cape` helper since
+    it's an error envelope and the generic hermetic sweep compares `error.msg`/`error.metadata`
+    verbatim — same narrow, non-verbatim contract as `tests/error_shapes.rs`):
+    `qf=title+nosuchfield` 400s with `"Query Field 'nosuchfield' is not a valid field name"` even
+    though `title` in the same `qf` is a real field. Before this fix, `resolve_field_weights`'s
+    drop-unknown filtering (built for `pf`'s deliberate unknown-field leniency, finding 8, and
+    `qf`'s empty-spec default-field fallback) silently dropped `nosuchfield` and 200d using
+    `title` alone — the wrong-answer bug this issue tracks. The fix validates every raw `qf` name
+    up front via `field_target` (the same static-before-dynamic resolution `resolve_field_weights`
+    itself uses, so a `qf` naming only a dynamic field, issue #84, is unaffected) before falling
+    through to the existing empty-resolution 400 for a `qf` naming *only* undefined fields.
