@@ -121,7 +121,7 @@ Implemented and locally audited on branch `56-coverage-denominator`.
 - `cargo test --test search_api_coverage` — pass (5 tests).
 - `cargo fmt --check` — pass.
 - `cargo clippy --all-targets -- -D warnings` — pass (no warnings).
-- `cargo test` — pass (495 tests, 0 failed across unit, integration, and doc-test targets).
+- `cargo test` — pass (497 tests, 0 failed across unit, integration, and doc-test targets).
 
 ### Mutation evidence
 
