@@ -117,9 +117,10 @@ fn render_markdown_table_does_not_fabricate_2m_numbers_for_a_smaller_run() {
 //
 // Interpretation (ambiguity flagged, see handoff): the new honest
 // "Resident memory, {corpus_size} docs under query load" row is emitted
-// only when corpus_size < 2_000_000, since a 2M run's own dedicated row
-// already carries the same information under the "2M docs" label -- an
-// extra row would be a duplicate, not a new disclosure.
+// when corpus_size != 2_000_000 (above or below), since a literal 2M
+// run's own dedicated row already carries the same information under
+// the "2M docs" label -- an extra row would be a duplicate, not a new
+// disclosure.
 
 #[test]
 fn p95_label_reflects_the_actual_corpus_size_for_a_sub_2m_run() {
