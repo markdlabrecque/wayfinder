@@ -6,23 +6,39 @@ namespace Drupal\Tests\search_api_wayfinder\Unit;
 
 use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\Field\FieldStorageDefinitionInterface;
+use Drupal\Core\Messenger\MessengerInterface;
+use Drupal\Core\StringTranslation\TranslationInterface;
 use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Item\FieldInterface;
 use Drupal\search_api\Query\ConditionGroup;
 use Drupal\search_api\Query\QueryInterface;
 use Drupal\search_api\Query\ResultSet;
+use Drupal\search_api\Utility\FieldsHelper;
 use Drupal\search_api_wayfinder\Plugin\search_api\backend\WayfinderBackend;
 use Drupal\search_api_wayfinder\WayfinderClient;
+use GuzzleHttp\Client;
+use GuzzleHttp\Handler\MockHandler;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Psr7\Response;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
- * Tests WayfinderBackend's feature flags and the /select vs /mlt routing
- * decision in search() (M4, issue #78).
+ * Tests WayfinderBackend's feature flags, the /select vs /mlt routing
+ * decision in search() (M4, issue #78), and viewSettings() (M5, issue #79).
  *
- * getClient() builds a real WayfinderClient from Guzzle config, so these
- * tests use a minimal subclass that substitutes a mocked WayfinderClient
- * instead of touching HTTP at all -- WayfinderBackend's own HTTP behaviour is
- * WayfinderClientTest's job, not this class's.
+ * getClient() builds a real WayfinderClient from Guzzle config, so the
+ * search()/routing tests use a minimal subclass that substitutes a mocked
+ * WayfinderClient instead of touching HTTP at all -- WayfinderBackend's own
+ * HTTP behaviour is WayfinderClientTest's job, not this class's. The
+ * viewSettings() tests below instead build a real backend via its DI
+ * factory with a mocked http_client, since viewSettings() calls
+ * {core}/admin/system directly through getClient()'s Guzzle client.
+ *
+ * The version string's location in the admin/system response
+ * (lucene.solr-spec-version = "9.10.1") is ground truth from
+ * solr-ref/responses/admin_system.json -- read the fixture, per the plan
+ * doc's "Premises to verify before implementing" item (c).
  *
  * @coversDefaultClass \Drupal\search_api_wayfinder\Plugin\search_api\backend\WayfinderBackend
  * @group search_api_wayfinder
@@ -214,6 +230,80 @@ class WayfinderBackendTest extends TestCase {
 
     $backend = $this->backendWithClient($client, ['highlight' => TRUE]);
     $backend->search($query);
+  }
+
+  /**
+   * Builds a WayfinderBackend via its DI factory, with a mocked http_client
+   * that serves the given response for any request (matching the
+   * MockHandler/HandlerStack pattern already used in WayfinderClientTest).
+   */
+  private function createBackend(Response $adminSystemResponse, array $configuration = []): WayfinderBackend {
+    $mock = new MockHandler([$adminSystemResponse]);
+    $handlerStack = HandlerStack::create($mock);
+    $httpClient = new Client(['handler' => $handlerStack]);
+
+    $stringTranslation = $this->createMock(TranslationInterface::class);
+    $stringTranslation->method('translate')
+      ->willReturnCallback(fn (string $string, array $args = []) => strtr($string, $args));
+
+    $container = $this->createMock(ContainerInterface::class);
+    $container->method('get')->willReturnMap([
+      ['http_client', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE, $httpClient],
+      ['search_api.fields_helper', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE, $this->createMock(FieldsHelper::class)],
+      ['messenger', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE, $this->createMock(MessengerInterface::class)],
+      ['string_translation', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE, $stringTranslation],
+    ]);
+
+    $configuration += [
+      'scheme' => 'http',
+      'host' => 'localhost',
+      'port' => 8983,
+      'path' => '/solr',
+      'core' => 'mycore',
+      'timeout' => 5,
+      'commitWithin' => 1000,
+    ];
+
+    /** @var \Drupal\search_api_wayfinder\Plugin\search_api\backend\WayfinderBackend $backend */
+    $backend = WayfinderBackend::create($container, $configuration, 'wayfinder', ['id' => 'wayfinder']);
+    return $backend;
+  }
+
+  /**
+   * @covers ::viewSettings
+   */
+  public function testViewSettingsIncludesVersionStringFromAdminSystem(): void {
+    $body = (string) file_get_contents(__DIR__ . '/../../../../../solr-ref/responses/admin_system.json');
+    $backend = $this->createBackend(new Response(200, [], $body));
+
+    $settings = $backend->viewSettings();
+
+    $versionRows = array_filter(
+      $settings,
+      fn (array $row) => str_contains(strtolower((string) $row['info']), '9.10.1')
+    );
+
+    $this->assertNotEmpty(
+      $versionRows,
+      'viewSettings() should include a row whose info is the Wayfinder version string ("9.10.1") sourced from admin/system (solr-ref/responses/admin_system.json: lucene.solr-spec-version).'
+    );
+  }
+
+  /**
+   * @covers ::viewSettings
+   */
+  public function testViewSettingsStillIncludesServerUrl(): void {
+    $body = (string) file_get_contents(__DIR__ . '/../../../../../solr-ref/responses/admin_system.json');
+    $backend = $this->createBackend(new Response(200, [], $body), ['core' => 'mycore']);
+
+    $settings = $backend->viewSettings();
+
+    $urlRows = array_filter(
+      $settings,
+      fn (array $row) => str_contains((string) $row['info'], 'http://localhost:8983/solr/mycore')
+    );
+
+    $this->assertNotEmpty($urlRows, 'viewSettings() should still include the server core URL alongside the version handshake.');
   }
 
 }
