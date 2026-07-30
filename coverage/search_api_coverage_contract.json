@@ -1120,57 +1120,66 @@
   "endpoints": [
     {
       "id": "POST /solr/{core}/update",
-      "covered": true,
       "trace": [
         "00001.json"
       ]
     },
     {
       "id": "GET /solr/{core}/select",
-      "covered": true,
       "trace": [
         "00002.json",
+        "00003.json",
+        "00004.json",
+        "00005.json",
+        "00006.json",
+        "00007.json",
+        "00008.json",
+        "00009.json",
+        "00010.json",
+        "00011.json",
+        "00012.json",
+        "00013.json",
+        "00014.json",
+        "00015.json",
+        "00016.json",
+        "00017.json",
+        "00018.json",
+        "00019.json",
         "00021.json"
       ]
     },
     {
       "id": "GET /solr/{core}/schema/fieldtypes",
-      "covered": false,
       "trace": [
         "00020.json"
       ]
     },
     {
       "id": "GET /solr/{core}/mlt",
-      "covered": true,
       "trace": [
         "00022.json"
       ]
     },
     {
       "id": "GET /solr/admin/info/system",
-      "covered": true,
       "trace": [
         "00023.json"
       ]
     },
     {
       "id": "GET /solr/{core}/admin/luke",
-      "covered": false,
       "trace": [
         "00024.json"
       ]
     },
     {
       "id": "GET /solr/{core}/admin/mbeans",
-      "covered": false,
       "trace": [
         "00025.json"
       ]
     },
     {
       "id": "GET /solr/{core}/admin/system",
-      "covered": true,
       "trace": [
         "00026.json",
         "00027.json"
@@ -1178,7 +1187,6 @@
     },
     {
       "id": "GET /solr/{core}/terms",
-      "covered": false,
       "trace": [
         "00028.json"
       ]
@@ -1187,7 +1195,6 @@
   "request_semantics": [
     {
       "id": "update.json-command-add-batch",
-      "covered": false,
       "trace": [
         "00001.json"
       ],
@@ -1203,7 +1210,6 @@
     },
     {
       "id": "update.commitWithin",
-      "covered": true,
       "trace": [
         "00001.json"
       ],
@@ -1223,7 +1229,6 @@
     },
     {
       "id": "request.omitHeader",
-      "covered": false,
       "trace": [
         "00001.json",
         "00002.json"
@@ -1246,7 +1251,6 @@
     },
     {
       "id": "request.wt.json",
-      "covered": true,
       "trace": [
         "00001.json",
         "00002.json",
@@ -1320,7 +1324,6 @@
     },
     {
       "id": "request.json-nl.flat",
-      "covered": true,
       "trace": [
         "00001.json",
         "00002.json",
@@ -1344,7 +1347,6 @@
     },
     {
       "id": "request.json-nl.repeated-map-and-flat",
-      "covered": false,
       "trace": [
         "00025.json"
       ],
@@ -1365,7 +1367,6 @@
     },
     {
       "id": "request.timezone.utc",
-      "covered": false,
       "trace": [
         "00002.json",
         "00022.json"
@@ -1387,7 +1388,6 @@
     },
     {
       "id": "select.q.plain-query",
-      "covered": true,
       "trace": [
         "00002.json",
         "00009.json"
@@ -1410,7 +1410,6 @@
     },
     {
       "id": "select.q.local-params-edismax",
-      "covered": false,
       "trace": [
         "00003.json",
         "00008.json",
@@ -1436,7 +1435,6 @@
     },
     {
       "id": "select.pagination.start-and-rows",
-      "covered": true,
       "trace": [
         "00002.json",
         "00022.json"
@@ -1469,7 +1467,6 @@
     },
     {
       "id": "select.rows.zero",
-      "covered": true,
       "trace": [
         "00018.json",
         "00019.json"
@@ -1491,7 +1488,6 @@
     },
     {
       "id": "select.fl.wildcard-plus-score",
-      "covered": false,
       "trace": [
         "00002.json"
       ],
@@ -1511,7 +1507,6 @@
     },
     {
       "id": "select.fq.string",
-      "covered": true,
       "trace": [
         "00013.json"
       ],
@@ -1533,7 +1528,6 @@
     },
     {
       "id": "select.fq.range",
-      "covered": true,
       "trace": [
         "00014.json",
         "00015.json"
@@ -1558,7 +1552,6 @@
     },
     {
       "id": "select.fq.boolean",
-      "covered": true,
       "trace": [
         "00016.json"
       ],
@@ -1580,7 +1573,6 @@
     },
     {
       "id": "select.fq.multi-value-or",
-      "covered": true,
       "trace": [
         "00017.json"
       ],
@@ -1602,7 +1594,6 @@
     },
     {
       "id": "select.sort.integer",
-      "covered": true,
       "trace": [
         "00010.json"
       ],
@@ -1622,7 +1613,6 @@
     },
     {
       "id": "select.sort.string",
-      "covered": true,
       "trace": [
         "00011.json"
       ],
@@ -1642,7 +1632,6 @@
     },
     {
       "id": "select.sort.date",
-      "covered": true,
       "trace": [
         "00012.json"
       ],
@@ -1662,7 +1651,6 @@
     },
     {
       "id": "select.highlight.enabled",
-      "covered": true,
       "trace": [
         "00002.json"
       ],
@@ -1682,7 +1670,6 @@
     },
     {
       "id": "select.highlight.wildcard-fields",
-      "covered": false,
       "trace": [
         "00002.json"
       ],
@@ -1702,7 +1689,6 @@
     },
     {
       "id": "select.highlight.require-field-match",
-      "covered": false,
       "trace": [
         "00002.json"
       ],
@@ -1722,7 +1708,6 @@
     },
     {
       "id": "select.highlight.snippets",
-      "covered": true,
       "trace": [
         "00002.json"
       ],
@@ -1742,7 +1727,6 @@
     },
     {
       "id": "select.highlight.fragsize",
-      "covered": true,
       "trace": [
         "00002.json"
       ],
@@ -1762,7 +1746,6 @@
     },
     {
       "id": "select.highlight.merge-contiguous",
-      "covered": false,
       "trace": [
         "00002.json"
       ],
@@ -1782,7 +1765,6 @@
     },
     {
       "id": "select.highlight.custom-markers",
-      "covered": true,
       "trace": [
         "00002.json"
       ],
@@ -1812,7 +1794,6 @@
     },
     {
       "id": "select.facet.field",
-      "covered": true,
       "trace": [
         "00018.json"
       ],
@@ -1842,7 +1823,6 @@
     },
     {
       "id": "select.facet.local-key",
-      "covered": false,
       "trace": [
         "00018.json",
         "00019.json"
@@ -1865,7 +1845,6 @@
     },
     {
       "id": "select.facet.per-field-missing",
-      "covered": false,
       "trace": [
         "00018.json",
         "00019.json"
@@ -1896,7 +1875,6 @@
     },
     {
       "id": "select.facet.sort-limit-mincount",
-      "covered": true,
       "trace": [
         "00018.json"
       ],
@@ -1936,7 +1914,6 @@
     },
     {
       "id": "select.facet.global-missing",
-      "covered": true,
       "trace": [
         "00018.json"
       ],
@@ -1956,7 +1933,6 @@
     },
     {
       "id": "select.spellcheck.enable",
-      "covered": false,
       "trace": [
         "00021.json"
       ],
@@ -1976,7 +1952,6 @@
     },
     {
       "id": "select.spellcheck.query",
-      "covered": false,
       "trace": [
         "00021.json"
       ],
@@ -1996,7 +1971,6 @@
     },
     {
       "id": "select.spellcheck.dictionaries",
-      "covered": false,
       "trace": [
         "00021.json"
       ],
@@ -2017,7 +1991,6 @@
     },
     {
       "id": "select.spellcheck.collate",
-      "covered": false,
       "trace": [
         "00021.json"
       ],
@@ -2037,7 +2010,6 @@
     },
     {
       "id": "mlt.base-lookup",
-      "covered": true,
       "trace": [
         "00022.json"
       ],
@@ -2067,7 +2039,6 @@
     },
     {
       "id": "mlt.pagination.start-and-rows",
-      "covered": true,
       "trace": [
         "00022.json"
       ],
@@ -2097,7 +2068,6 @@
     },
     {
       "id": "mlt.fl.wildcard-plus-score",
-      "covered": false,
       "trace": [
         "00022.json"
       ],
@@ -2117,7 +2087,6 @@
     },
     {
       "id": "mlt.filters",
-      "covered": false,
       "trace": [
         "00022.json"
       ],
@@ -2138,7 +2107,6 @@
     },
     {
       "id": "mlt.mintf",
-      "covered": true,
       "trace": [
         "00022.json"
       ],
@@ -2158,7 +2126,6 @@
     },
     {
       "id": "mlt.mindf",
-      "covered": true,
       "trace": [
         "00022.json"
       ],
@@ -2178,7 +2145,6 @@
     },
     {
       "id": "mlt.maxqt",
-      "covered": true,
       "trace": [
         "00022.json"
       ],
@@ -2198,7 +2164,6 @@
     },
     {
       "id": "mlt.maxntp",
-      "covered": false,
       "trace": [
         "00022.json"
       ],
@@ -2218,7 +2183,6 @@
     },
     {
       "id": "mlt.boost",
-      "covered": true,
       "trace": [
         "00022.json"
       ],
@@ -2238,7 +2202,6 @@
     },
     {
       "id": "mlt.match-include-and-offset",
-      "covered": false,
       "trace": [
         "00022.json"
       ],
@@ -2268,7 +2231,6 @@
     },
     {
       "id": "mlt.interesting-terms-none",
-      "covered": true,
       "trace": [
         "00022.json"
       ],
@@ -2288,7 +2250,6 @@
     },
     {
       "id": "admin.mbeans.stats",
-      "covered": false,
       "trace": [
         "00025.json"
       ],
@@ -2308,7 +2269,6 @@
     },
     {
       "id": "terms.enumeration",
-      "covered": false,
       "trace": [
         "00028.json"
       ],
@@ -2340,7 +2300,6 @@
   "response_fields": [
     {
       "id": "select.response.numFound",
-      "covered": true,
       "trace": [
         "00002.json"
       ],
@@ -2351,7 +2310,6 @@
     },
     {
       "id": "select.response.docs",
-      "covered": true,
       "trace": [
         "00002.json"
       ],
@@ -2362,7 +2320,6 @@
     },
     {
       "id": "select.response.docs.score",
-      "covered": true,
       "trace": [
         "00002.json"
       ],
@@ -2373,7 +2330,6 @@
     },
     {
       "id": "select.highlighting",
-      "covered": true,
       "trace": [
         "00002.json"
       ],
@@ -2384,7 +2340,6 @@
     },
     {
       "id": "select.facet_counts",
-      "covered": true,
       "trace": [
         "00018.json"
       ],
@@ -2395,7 +2350,6 @@
     },
     {
       "id": "select.facet_counts.facet_fields",
-      "covered": true,
       "trace": [
         "00018.json"
       ],
@@ -2406,7 +2360,6 @@
     },
     {
       "id": "select.spellcheck.suggestions",
-      "covered": false,
       "trace": [
         "00021.json"
       ],
@@ -2417,7 +2370,6 @@
     },
     {
       "id": "select.spellcheck.collations",
-      "covered": false,
       "trace": [
         "00021.json"
       ],
@@ -2428,7 +2380,6 @@
     },
     {
       "id": "mlt.response",
-      "covered": true,
       "trace": [
         "00022.json"
       ],
@@ -2439,7 +2390,6 @@
     },
     {
       "id": "admin.info-system.lucene.solr-spec-version",
-      "covered": true,
       "trace": [
         "00023.json"
       ],
@@ -2450,7 +2400,6 @@
     },
     {
       "id": "admin.system.core.schema",
-      "covered": true,
       "trace": [
         "00026.json"
       ],
@@ -2461,7 +2410,6 @@
     },
     {
       "id": "schema.fieldtypes.fieldTypes",
-      "covered": false,
       "trace": [
         "00020.json"
       ],
@@ -2472,7 +2420,6 @@
     },
     {
       "id": "admin.luke.index",
-      "covered": false,
       "trace": [
         "00024.json"
       ],
@@ -2483,7 +2430,6 @@
     },
     {
       "id": "admin.mbeans.solr-mbeans",
-      "covered": false,
       "trace": [
         "00025.json"
       ],
@@ -2494,7 +2440,6 @@
     },
     {
       "id": "terms.terms",
-      "covered": false,
       "trace": [
         "00028.json"
       ],

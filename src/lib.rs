@@ -48,7 +48,7 @@ use tower_http::catch_panic::CatchPanicLayer;
 
 use collector::{SortClause, SortKey};
 use core_index::CoreIndex;
-use coverage::{ResponseRenderer, rendered_key};
+use coverage::RenderedResponseField;
 use error::{Envelope, WfError};
 use params::Params;
 
@@ -128,34 +128,48 @@ const ADMIN_INFO_PARAMS: &[&str] = &["wt", "json.nl"];
 /// similar-docs result set exactly as `/select` does. Out of scope, per the
 /// task spec: `mlt=true` as a `/select` search component, and content-stream
 /// MLT.
-/// One route table wires the real Router and supplies the coverage endpoint
-/// surface. A route cannot be reported without being passed to Axum below.
+/// Route behavior shared by the real Axum router and coverage report. A route
+/// cannot be reported as covered unless this table wires it and accepts the
+/// captured method.
+struct RouteSpec {
+    path: &'static str,
+    accepts_method: fn(&str) -> bool,
+}
+
+fn any_method(_: &str) -> bool {
+    true
+}
+
+fn update_method(method: &str) -> bool {
+    matches!(method, "POST" | "GET")
+}
+
 macro_rules! search_api_routes {
     ($apply:ident) => {
         $apply! {
-            ("/solr/{core}/update", update),
-            ("/solr/{core}/select", select),
-            ("/solr/{core}/mlt", mlt),
-            ("/solr/{core}/admin/ping", ping),
-            ("/solr/admin/info/system", admin_info_system),
-            ("/solr/{core}/admin/system", core_admin_system),
+            ("/solr/{core}/update", update, update_method),
+            ("/solr/{core}/select", select, any_method),
+            ("/solr/{core}/mlt", mlt, any_method),
+            ("/solr/{core}/admin/ping", ping, any_method),
+            ("/solr/admin/info/system", admin_info_system, any_method),
+            ("/solr/{core}/admin/system", core_admin_system, any_method),
         }
     };
 }
 
-macro_rules! route_paths {
-    ($(($path:literal, $handler:ident)),+ $(,)?) => {
-        &[$($path),+]
+macro_rules! route_specs {
+    ($(($path:literal, $handler:ident, $accepts_method:ident)),+ $(,)?) => {
+        &[$(RouteSpec { path: $path, accepts_method: $accepts_method }),+]
     };
 }
 
 macro_rules! wire_routes {
-    ($(($path:literal, $handler:ident)),+ $(,)?) => {
+    ($(($path:literal, $handler:ident, $accepts_method:ident)),+ $(,)?) => {
         Router::new()$(.route($path, any($handler)))+
     };
 }
 
-const ROUTE_PATHS: &[&str] = search_api_routes!(route_paths);
+const ROUTES: &[RouteSpec] = search_api_routes!(route_specs);
 
 const MLT_PARAMS: &[&str] = &[
     "q",
@@ -331,7 +345,7 @@ fn check_core(
 /// (`missing content stream`) or committing if only asked to, both handled in
 /// `update` itself, not here.
 fn check_update_method(method: &Method) -> Result<(), WfError> {
-    if method != Method::POST && method != Method::GET {
+    if !update_method(method.as_str()) {
         return Err(WfError::bad_request(
             "wayfinder::UnsupportedMethod",
             format!("Unsupported method: {method} for request /update"),
@@ -629,12 +643,9 @@ async fn admin_info_system(
     let version = &state.config.admin.reported_solr_version;
     let mut lucene = Map::new();
     lucene.insert(
-        rendered_key(
-            ResponseRenderer::AdminInfo,
-            "admin.info-system.lucene.solr-spec-version",
-            "solr-spec-version",
-        )
-        .to_string(),
+        RenderedResponseField::AdminInfoSolrSpecVersion
+            .key()
+            .to_string(),
         json!(version),
     );
     lucene.insert(
@@ -688,12 +699,7 @@ async fn core_admin_system(
     let version = &state.config.admin.reported_solr_version;
     let mut core_response = Map::new();
     core_response.insert(
-        rendered_key(
-            ResponseRenderer::CoreAdmin,
-            "admin.system.core.schema",
-            "schema",
-        )
-        .to_string(),
+        RenderedResponseField::CoreAdminSchema.key().to_string(),
         json!(CORE_ADMIN_SCHEMA),
     );
     core_response.insert("host".to_string(), json!("wayfinder"));
@@ -1091,12 +1097,7 @@ async fn select(
     // can be attached to that error below.
     let mut response = Map::new();
     response.insert(
-        rendered_key(
-            ResponseRenderer::Select,
-            "select.response.numFound",
-            "numFound",
-        )
-        .to_string(),
+        RenderedResponseField::SelectNumFound.key().to_string(),
         json!(num_found),
     );
     response.insert("start".to_string(), json!(start));
@@ -1126,7 +1127,7 @@ async fn select(
     }
     response.insert("numFoundExact".to_string(), json!(true));
     response.insert(
-        rendered_key(ResponseRenderer::Select, "select.response.docs", "docs").to_string(),
+        RenderedResponseField::SelectDocs.key().to_string(),
         json!(docs),
     );
 
@@ -1260,22 +1261,14 @@ async fn select(
     });
 
     if let Some((facet_counts, _)) = facet_result {
-        body[rendered_key(
-            ResponseRenderer::Select,
-            "select.facet_counts",
-            "facet_counts",
-        )] = facet_counts;
+        body[RenderedResponseField::SelectFacetCounts.key()] = facet_counts;
     }
     if let Some(stats) = stats_result {
         body["stats"] = stats;
     }
 
     if let Some(highlighting) = highlighting_result {
-        body[rendered_key(
-            ResponseRenderer::Select,
-            "select.highlighting",
-            "highlighting",
-        )] = highlighting;
+        body[RenderedResponseField::SelectHighlighting.key()] = highlighting;
     }
 
     Ok(axum::Json(body).into_response())
@@ -1454,7 +1447,7 @@ async fn mlt(
         },
         "match": match_block,
     });
-    body[rendered_key(ResponseRenderer::Mlt, "mlt.response", "response")] = response_value;
+    body[RenderedResponseField::MltResponse.key()] = response_value;
 
     // Real Solr's `mlt.interestingTerms` value set is `none | list | details`
     // (default `none`, which omits the key entirely) — `"false"` is not a

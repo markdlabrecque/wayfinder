@@ -41,8 +41,7 @@ fn each_endpoint_cites_every_frozen_exchange_with_its_method_and_shape() {
 
     for endpoint in contract.endpoints {
         assert_eq!(
-            endpoint.trace,
-            expected[&endpoint.id],
+            endpoint.trace, expected[&endpoint.id],
             "endpoint `{}` must cite every frozen exchange with its method and normalized shape",
             endpoint.id
         );

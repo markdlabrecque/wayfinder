@@ -52,14 +52,12 @@ struct Occurrence {
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone)]
 struct Item {
     id: String,
-    covered: bool,
     trace: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 struct SemanticItem {
     id: String,
-    covered: bool,
     trace: Vec<String>,
     parameters: Vec<SemanticParameter>,
     body_variants: Vec<BodyVariant>,
@@ -82,7 +80,6 @@ struct BodyVariant {
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 struct ResponseItem {
     id: String,
-    covered: bool,
     trace: Vec<String>,
     consumer: Consumer,
 }
@@ -258,13 +255,13 @@ fn assert_bucket(
     evidence_kind: &str,
     expected_parameters: Option<&[SemanticItem]>,
     expected_consumers: Option<&[ResponseItem]>,
+    expected_uncovered: &[&str],
 ) -> (usize, usize) {
     let actual_items = actual
         .items
         .iter()
         .map(|item| Item {
             id: item.id.clone(),
-            covered: item.covered,
             trace: item.trace.clone(),
         })
         .collect::<Vec<_>>();
@@ -308,14 +305,13 @@ fn assert_bucket(
         }
     }
 
-    let covered = expected.iter().filter(|item| item.covered).count();
-    let uncovered = expected.len() - covered;
-    let mut uncovered_items = expected
+    let mut uncovered_items = expected_uncovered
         .iter()
-        .filter(|item| !item.covered)
-        .map(|item| item.id.clone())
+        .map(|id| (*id).to_string())
         .collect::<Vec<_>>();
     uncovered_items.sort();
+    let uncovered = uncovered_items.len();
+    let covered = expected.len() - uncovered;
     assert_eq!(actual.covered, covered, "{name} covered subtotal");
     assert_eq!(actual.uncovered, uncovered, "{name} uncovered subtotal");
     assert_eq!(actual.total, expected.len(), "{name} denominator subtotal");
@@ -486,7 +482,11 @@ fn frozen_capture_exhaustively_maps_all_urls_bodies_parameters_and_material_vari
         .find(|item| item.id == "update.json-command-add-batch")
         .expect("duplicate-add semantic");
     assert!(
-        !duplicate.covered,
+        wayfinder::coverage_report()["request_semantics"]["uncovered_items"]
+            .as_array()
+            .expect("coverage report uncovered semantic list")
+            .iter()
+            .any(|item| item == "update.json-command-add-batch"),
         "duplicate-key adds remain uncovered until the Value parse path is replaced"
     );
     assert_eq!(
@@ -697,7 +697,6 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         .iter()
         .map(|item| Item {
             id: item.id.clone(),
-            covered: item.covered,
             trace: item.trace.clone(),
         })
         .collect();
@@ -706,7 +705,6 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         .iter()
         .map(|item| Item {
             id: item.id.clone(),
-            covered: item.covered,
             trace: item.trace.clone(),
         })
         .collect();
@@ -717,6 +715,12 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         "route",
         None,
         None,
+        &[
+            "GET /solr/{core}/schema/fieldtypes",
+            "GET /solr/{core}/admin/luke",
+            "GET /solr/{core}/admin/mbeans",
+            "GET /solr/{core}/terms",
+        ],
     );
     let (sc, su) = assert_bucket(
         "request semantics",
@@ -725,6 +729,29 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         "strict-param",
         Some(&expected.request_semantics),
         None,
+        &[
+            "update.json-command-add-batch",
+            "request.omitHeader",
+            "request.json-nl.repeated-map-and-flat",
+            "request.timezone.utc",
+            "select.q.local-params-edismax",
+            "select.fl.wildcard-plus-score",
+            "select.highlight.wildcard-fields",
+            "select.highlight.require-field-match",
+            "select.highlight.merge-contiguous",
+            "select.facet.local-key",
+            "select.facet.per-field-missing",
+            "select.spellcheck.enable",
+            "select.spellcheck.query",
+            "select.spellcheck.dictionaries",
+            "select.spellcheck.collate",
+            "mlt.fl.wildcard-plus-score",
+            "mlt.filters",
+            "mlt.maxntp",
+            "mlt.match-include-and-offset",
+            "admin.mbeans.stats",
+            "terms.enumeration",
+        ],
     );
     let (rc, ru) = assert_bucket(
         "response fields",
@@ -733,6 +760,14 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         "rendered-response",
         None,
         Some(&expected.response_fields),
+        &[
+            "select.spellcheck.suggestions",
+            "select.spellcheck.collations",
+            "schema.fieldtypes.fieldTypes",
+            "admin.luke.index",
+            "admin.mbeans.solr-mbeans",
+            "terms.terms",
+        ],
     );
     let covered = ec + sc + rc;
     let total = covered + eu + su + ru;
@@ -740,4 +775,8 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     assert_eq!(report.overall.uncovered, total - covered);
     assert_eq!(report.overall.total, total);
     assert_eq!(report.overall.fraction, format!("{covered}/{total}"));
+    assert_eq!(
+        report.overall.fraction, "41/72",
+        "initial coverage fraction"
+    );
 }

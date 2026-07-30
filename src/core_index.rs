@@ -1674,12 +1674,9 @@ impl CoreIndex {
         if let Some(score) = score.filter(|_| fl.is_some_and(|fl| fl.iter().any(|f| f == "score")))
         {
             out.insert(
-                crate::coverage::rendered_key(
-                    crate::coverage::ResponseRenderer::Select,
-                    "select.response.docs.score",
-                    "score",
-                )
-                .to_string(),
+                crate::coverage::RenderedResponseField::SelectDocsScore
+                    .key()
+                    .to_string(),
                 json!(score),
             );
         }

@@ -10,13 +10,14 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    MLT_PARAMS, ROUTE_PATHS, SELECT_PARAMS, UPDATE_PARAMS,
+    MLT_PARAMS, ROUTES, SELECT_PARAMS, UPDATE_PARAMS,
     update_command_parser_preserves_duplicate_keys,
 };
 
 const CONTRACT: &str = include_str!("../coverage/search_api_coverage_contract.json");
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Trace {
     file: String,
     seq: u64,
@@ -25,12 +26,14 @@ pub(crate) struct Trace {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct ContractItem {
     id: String,
     trace: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct SemanticParameter {
     name: String,
     variant: String,
@@ -39,12 +42,14 @@ struct SemanticParameter {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct BodyVariant {
     kind: String,
     trace: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct SemanticItem {
     id: String,
     trace: Vec<String>,
@@ -53,12 +58,14 @@ struct SemanticItem {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct Consumer {
     source: String,
     symbol: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct ResponseItem {
     id: String,
     trace: Vec<String>,
@@ -66,18 +73,21 @@ struct ResponseItem {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CapturedParameter {
     name: String,
     occurrences: Vec<Occurrence>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Occurrence {
     value: String,
     trace: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Contract {
     traces: Vec<Trace>,
     captured_parameters: Vec<CapturedParameter>,
@@ -195,6 +205,18 @@ fn validate_contract(contract: &Contract) {
             );
         }
     }
+    for endpoint in &contract.endpoints {
+        let expected = contract
+            .traces
+            .iter()
+            .filter(|trace| format!("{} {}", trace.method, trace.endpoint) == endpoint.id)
+            .map(|trace| trace.file.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            endpoint.trace, expected,
+            "endpoint provenance contains every frozen exchange"
+        );
+    }
     for semantic in &contract.request_semantics {
         assert!(!semantic.parameters.is_empty() || !semantic.body_variants.is_empty());
         assert!(
@@ -227,14 +249,13 @@ fn validate_contract(contract: &Contract) {
     }
 }
 
-fn endpoint_path(id: &str) -> &str {
-    id.split_once(' ')
-        .expect("endpoint denominator id starts with an HTTP method")
-        .1
-}
-
 fn endpoint_covered(id: &str) -> bool {
-    ROUTE_PATHS.contains(&endpoint_path(id))
+    let (method, path) = id
+        .split_once(' ')
+        .expect("endpoint denominator id starts with an HTTP method");
+    ROUTES
+        .iter()
+        .any(|route| route.path == path && (route.accepts_method)(method))
 }
 
 fn contains_all(params: &[&str], needed: &[SemanticParameter]) -> bool {
@@ -403,66 +424,69 @@ fn semantic_covered(item: &SemanticItem) -> bool {
     contains_all(semantic_allowlist(&item.id), &item.parameters) && behavior.supported()
 }
 
-/// The typed rendering surface is called by the real response writers. This
-/// prevents a comment, dead helper, or a renderer belonging to another route
-/// from turning a client-consumed field green.
+/// Client-consumed fields emitted by real response writers. Each variant is
+/// used at its insertion site, so the coverage numerator cannot be made green
+/// by a separate, hand-maintained support list.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ResponseRenderer {
-    Select,
-    Mlt,
-    AdminInfo,
-    CoreAdmin,
+pub(crate) enum RenderedResponseField {
+    SelectNumFound,
+    SelectDocs,
+    SelectDocsScore,
+    SelectHighlighting,
+    SelectFacetCounts,
+    SelectFacetFields,
+    MltResponse,
+    AdminInfoSolrSpecVersion,
+    CoreAdminSchema,
 }
 
-impl ResponseRenderer {
-    fn renders(self, field: &str) -> bool {
+impl RenderedResponseField {
+    const ALL: &[Self] = &[
+        Self::SelectNumFound,
+        Self::SelectDocs,
+        Self::SelectDocsScore,
+        Self::SelectHighlighting,
+        Self::SelectFacetCounts,
+        Self::SelectFacetFields,
+        Self::MltResponse,
+        Self::AdminInfoSolrSpecVersion,
+        Self::CoreAdminSchema,
+    ];
+
+    pub(crate) const fn id(self) -> &'static str {
         match self {
-            Self::Select => matches!(
-                field,
-                "select.response.numFound"
-                    | "select.response.docs"
-                    | "select.response.docs.score"
-                    | "select.highlighting"
-                    | "select.facet_counts"
-                    | "select.facet_counts.facet_fields"
-            ),
-            Self::Mlt => field == "mlt.response",
-            Self::AdminInfo => field == "admin.info-system.lucene.solr-spec-version",
-            Self::CoreAdmin => field == "admin.system.core.schema",
+            Self::SelectNumFound => "select.response.numFound",
+            Self::SelectDocs => "select.response.docs",
+            Self::SelectDocsScore => "select.response.docs.score",
+            Self::SelectHighlighting => "select.highlighting",
+            Self::SelectFacetCounts => "select.facet_counts",
+            Self::SelectFacetFields => "select.facet_counts.facet_fields",
+            Self::MltResponse => "mlt.response",
+            Self::AdminInfoSolrSpecVersion => "admin.info-system.lucene.solr-spec-version",
+            Self::CoreAdminSchema => "admin.system.core.schema",
+        }
+    }
+
+    pub(crate) const fn key(self) -> &'static str {
+        match self {
+            Self::SelectNumFound => "numFound",
+            Self::SelectDocs => "docs",
+            Self::SelectDocsScore => "score",
+            Self::SelectHighlighting => "highlighting",
+            Self::SelectFacetCounts => "facet_counts",
+            Self::SelectFacetFields => "facet_fields",
+            Self::MltResponse => "response",
+            Self::AdminInfoSolrSpecVersion => "solr-spec-version",
+            Self::CoreAdminSchema => "schema",
         }
     }
 }
 
-/// Returns `key` only for a field rendered by `renderer`. It is deliberately
-/// used at the actual insertion sites, not only by coverage accounting.
-pub(crate) fn rendered_key(
-    renderer: ResponseRenderer,
-    field: &str,
-    key: &'static str,
-) -> &'static str {
-    assert!(renderer.renders(field), "renderer does not own {field}");
-    key
-}
-
-fn response_renderer(id: &str) -> Option<ResponseRenderer> {
-    match id {
-        "select.response.numFound"
-        | "select.response.docs"
-        | "select.response.docs.score"
-        | "select.highlighting"
-        | "select.facet_counts"
-        | "select.facet_counts.facet_fields" => Some(ResponseRenderer::Select),
-        "mlt.response" => Some(ResponseRenderer::Mlt),
-        "admin.info-system.lucene.solr-spec-version" => Some(ResponseRenderer::AdminInfo),
-        "admin.system.core.schema" => Some(ResponseRenderer::CoreAdmin),
-        "select.spellcheck.suggestions"
-        | "select.spellcheck.collations"
-        | "schema.fieldtypes.fieldTypes"
-        | "admin.luke.index"
-        | "admin.mbeans.solr-mbeans"
-        | "terms.terms" => None,
-        _ => panic!("unrecognised Search API response denominator item: {id}"),
-    }
+fn response_field(id: &str) -> Option<RenderedResponseField> {
+    RenderedResponseField::ALL
+        .iter()
+        .copied()
+        .find(|field| field.id() == id)
 }
 
 fn bucket(items: Vec<ReportedItem>) -> Bucket {
@@ -531,17 +555,17 @@ pub fn report() -> serde_json::Value {
             .response_fields
             .iter()
             .map(|item| {
-                let renderer = response_renderer(&item.id);
+                let field = response_field(&item.id);
                 ReportedItem {
                     id: item.id.clone(),
-                    covered: renderer.is_some_and(|renderer| renderer.renders(&item.id)),
+                    covered: field.is_some(),
                     trace: item.trace.clone(),
                     parameters: Vec::new(),
                     consumer: Some(item.consumer.clone()),
                     evidence: vec![Evidence {
                         kind: "rendered-response",
-                        source: renderer
-                            .map(|renderer| format!("src/lib.rs::{renderer:?} response writer"))
+                        source: field
+                            .map(|field| format!("src::RenderedResponseField::{field:?}"))
                             .unwrap_or_else(|| "no routed response renderer".to_string()),
                     }],
                 }
@@ -570,10 +594,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn renderer_surface_rejects_cross_endpoint_and_unsupported_fields() {
-        assert!(ResponseRenderer::Mlt.renders("mlt.response"));
-        assert!(!ResponseRenderer::Select.renders("mlt.response"));
-        assert!(!ResponseRenderer::Select.renders("select.spellcheck.suggestions"));
+    fn rendered_response_surface_excludes_unimplemented_fields() {
+        assert_eq!(
+            response_field("mlt.response"),
+            Some(RenderedResponseField::MltResponse)
+        );
+        assert_eq!(response_field("select.spellcheck.suggestions"), None);
     }
 
     #[test]
@@ -583,10 +609,9 @@ mod tests {
     }
 
     #[test]
-    fn report_does_not_read_contract_classifications() {
+    fn contract_rejects_manual_coverage_classifications() {
         let mut contract: serde_json::Value = serde_json::from_str(CONTRACT).unwrap();
         contract["request_semantics"][0]["covered"] = serde_json::json!(true);
-        let parsed: Contract = serde_json::from_value(contract).unwrap();
-        assert!(!semantic_covered(&parsed.request_semantics[0]));
+        assert!(serde_json::from_value::<Contract>(contract).is_err());
     }
 }

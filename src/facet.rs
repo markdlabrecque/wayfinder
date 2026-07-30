@@ -142,12 +142,9 @@ pub fn facet_counts(
     let mut counts = Map::new();
     counts.insert("facet_queries".to_string(), facet_queries);
     counts.insert(
-        crate::coverage::rendered_key(
-            crate::coverage::ResponseRenderer::Select,
-            "select.facet_counts.facet_fields",
-            "facet_fields",
-        )
-        .to_string(),
+        crate::coverage::RenderedResponseField::SelectFacetFields
+            .key()
+            .to_string(),
         facet_fields,
     );
     counts.insert("facet_ranges".to_string(), facet_ranges);
