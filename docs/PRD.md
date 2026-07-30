@@ -199,9 +199,21 @@ chosen. Nothing may be added here without the same two things.
    gated on `fl` requesting `score`), and ranking order matches — not that the float values
    themselves match. (issue #34)
 
+5. **`/admin/info/system` and `/admin/system` report a configured Solr version, not the
+   captured Solr's own `9.10.1`, and serve static `jvm`/`system` placeholders instead of host
+   introspection.** `admin_info_system.json` and `admin_system.json` are verbatim copies of the
+   captured envelopes; the differences are `lucene.solr-spec-version`/`-impl-version` (config
+   choice, default `"9.0.0"` — resolves open question 2 above) and `jvm.*`/`system.*` (real host
+   JVM/OS stats with no Wayfinder equivalent to introspect). `core.schema` is **not** a
+   divergence: it is compared exactly against `"drupal-4.4.0-solr-9.x-0"`, because
+   `search_api_solr`'s `SolrConnectorPluginBase.php` `explode('-', $schema)`s that value and
+   indexes into it (finding 78) — getting it wrong breaks the client, not just cosmetics.
+   (issue #59)
+
 Note that divergence 3 is a difference from the *configset* the reference fixtures were captured
 against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, and 4 are
-differences from Solr proper.
+differences from Solr proper. Divergence 5 is a deliberate config choice plus inherent host
+non-reproducibility, not a Solr-behaviour disagreement.
 
 ### How this is verified
 
@@ -499,6 +511,11 @@ Scoped to v1 features. Server TOML plus per-request params where Solr has them.
 - No heap tuning, by design. Tantivy is mmap-based; the OS page cache does the work Solr's
   heap sizing does. The absence is a feature and should be documented as one.
 
+**Admin (config only, no per-request equivalent):**
+- `reported_solr_version` — the `lucene.solr-spec-version` served by `/admin/info/system` and
+  `<core>/admin/system`, default `"9.0.0"` (issue #59, §2 ratified divergence 5, §10 open
+  question 2). Unclamped: an operator who overrides it owns the compatibility risk.
+
 ---
 
 ## 7. The tracer bullet (POC)
@@ -614,11 +631,12 @@ operational simplicity are where this project wins, and those are the primary go
 1. **Multi-core vs single-core-per-process.** Multi-core is more Solr-like; one process per
    core is simpler and better matches the operational-simplicity goal. Lean
    single-core-per-process unless something forces otherwise.
-2. **Which Solr version to report** from `/admin/system`. Answered by the v1.5 capture —
-   determined by which feature gates in `search_api_solr` are cheapest to satisfy, and by which
-   `search_api_solr` release the capture pins. Report the lowest version
-   whose feature set is fully implemented rather than claiming a high one and failing on
-   unsupported parameters.
+2. ~~**Which Solr version to report** from `/admin/system`.~~ **Resolved by issue #59:**
+   `[admin] reported_solr_version` defaults to `"9.0.0"` — the lowest version in the 9.x branch
+   the Search API capture's generated `schema.xml` already targets (finding 78), and every
+   `search_api_solr` `version_compare()` gate that unlocks a feature Wayfinder does not implement
+   sits at or below Solr 8.x, so no 9.x value invites an unsupported feature. See ratified
+   divergence 5 below.
 3. ~~**Unknown parameters: reject or ignore?**~~ **Resolved by the reference capture:** Solr
    returns `status: 0` and ignores them. Rejecting would 400 on requests real Solr serves,
    which breaks the compatibility claim — and Solr clients do routinely send extra params.

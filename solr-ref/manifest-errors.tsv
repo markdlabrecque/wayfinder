@@ -119,3 +119,4 @@ qwild_int	400	GET	facets/select?q=views:1*&wt=json		http://localhost:8983/solr
 qfuzzy_int	200	GET	facets/select?q=views:15~1&wt=json		http://localhost:8983/solr
 qrange_date_incl	200	GET	facets/select?q=created:[2020-01-02T00:00:00Z+TO+2020-01-03T00:00:00Z]&wt=json		http://localhost:8983/solr
 qrange_date_excl	200	GET	facets/select?q=created:{2020-01-02T00:00:00Z+TO+2020-01-05T00:00:00Z}&wt=json		http://localhost:8983/solr
+admin_info_system	200	GET	admin/info/system?wt=json&json.nl=flat	

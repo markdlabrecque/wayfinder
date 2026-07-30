@@ -27,6 +27,7 @@ pub struct ServerConfig {
     pub query: Query,
     pub resources: Resources,
     pub commit: Commit,
+    pub admin: Admin,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,6 +91,36 @@ pub struct Commit {
     /// (operator-config behaviour, not wire format), not a bug.
     pub autocommit_max_docs: Option<u64>,
     pub autocommit_max_time: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Admin {
+    /// The `lucene.solr-spec-version` value reported by `/admin/info/system`
+    /// and `<core>/admin/system` (issue #59). `search_api_solr`'s
+    /// `SolrConnector::getSolrVersion()` (finding 78) reads this field alone
+    /// to detect the Solr version, then regex-captures the leading
+    /// `major.minor.patch` and feeds it to the module's own
+    /// `version_compare()` gates.
+    ///
+    /// Default `"9.0.0"` per PRD open question 2 (§10): report the LOWEST
+    /// version whose feature set the module's `version_compare()` gates
+    /// would unlock that Wayfinder actually implements, never a higher one
+    /// that invites an unsupported feature (e.g. `payload_score`, gated at
+    /// major >= 6, is unimplemented regardless of version, but there is no
+    /// reason to report higher than the 9.x branch the capture's generated
+    /// `schema.xml` already targets — see issue #59's spec for the full
+    /// reasoning). This value is intentionally unclamped: an operator who
+    /// overrides it is trusted to know the compatibility risk.
+    pub reported_solr_version: String,
+}
+
+impl Default for Admin {
+    fn default() -> Self {
+        Admin {
+            reported_solr_version: "9.0.0".to_string(),
+        }
+    }
 }
 
 impl Default for Indexing {

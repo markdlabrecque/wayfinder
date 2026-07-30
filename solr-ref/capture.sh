@@ -1587,3 +1587,21 @@ cape edismax_mm_3               'select?q=alpha+beta+gamma&defType=edismax&qf=bo
 cape edismax_mm_conditional     'select?q=alpha+beta+gamma&defType=edismax&qf=body&mm=2%3C-1+3%3C80%25&fl=id&fq=id:(mmA+OR+mmB+OR+mmC+OR+mmD)&wt=json'
 echo "edismax core '$EDISMAX_CORE' left in place on '$EDISMAX_CONTAINER' (port 8994)"
 echo "  (docker rm -f $EDISMAX_CONTAINER to stop)"
+
+# --- admin system-info version handshake (issue #59) ------------------------
+# `search_api_solr`'s `SolrConnector::getSolrVersion()` (finding 78) reads
+# `lucene.solr-spec-version` off `<core>/admin/system`, falling back to
+# `/admin/info/system`. `admin_system`/`admin_info_system` fixtures are
+# manifest rows (`manifest.tsv`/`manifest-errors.tsv` respectively — the
+# former is core-relative, the latter isn't, per CLAUDE.md's manifest
+# contract), but they are deliberately NOT captured by `cap`/`capx` here: the
+# ground truth for `core.schema` is the Search API connector's own generated
+# schema (`drupal-4.4.0-solr-9.x-0`), captured separately against the
+# `search_api_capture` core in `solr-ref/search-api/capture.sh` and already
+# committed at `solr-ref/search-api/trace/00023.json`/`00026.json` (issue
+# #55). This script's `$CORE` (`content`) runs the tracer-bullet schema, not
+# the Drupal-generated one — a `cap`/`capx` call here would capture the
+# *wrong* core's schema name and silently overwrite the real ground truth in
+# `solr-ref/responses/admin_system.json`/`admin_info_system.json` on the next
+# re-run (the exact fixture-corruption hazard CLAUDE.md warns about). Those
+# two response files are verbatim copies of the trace files above instead.

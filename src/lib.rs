@@ -104,6 +104,9 @@ const SELECT_PARAMS: &[&str] = &[
 /// `commitWithin` / `overwrite` / `softCommit` landed with #9.
 const UPDATE_PARAMS: &[&str] = &["commit", "commitWithin", "overwrite", "softCommit", "wt"];
 const PING_PARAMS: &[&str] = &["wt"];
+/// `/admin/info/system` (server-level) and `<core>/admin/system`
+/// (core-scoped fallback) — issue #59's version-handshake endpoints.
+const ADMIN_INFO_PARAMS: &[&str] = &["wt", "json.nl"];
 /// `/mlt` params in scope for issue #6 (PRD §5's MoreLikeThis row). `q`
 /// selects the source doc with the same query-parsing semantics as
 /// `/select`'s `q` (hence `df` alongside it); `fl`/`rows`/`start` page the
@@ -163,7 +166,9 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
         .route("/solr/{core}/update", any(update))
         .route("/solr/{core}/select", any(select))
         .route("/solr/{core}/mlt", any(mlt))
-        .route("/solr/{core}/admin/ping", any(ping));
+        .route("/solr/{core}/admin/ping", any(ping))
+        .route("/solr/admin/info/system", any(admin_info_system))
+        .route("/solr/{core}/admin/system", any(core_admin_system));
 
     // Test-only, never in a default/release build (#39): a route that always
     // panics, so `tests/panic_recovery.rs` can exercise the real router's
@@ -445,6 +450,173 @@ async fn ping(
             "params": params.echo(),
         },
         "status": "OK",
+    });
+    Ok(axum::Json(body).into_response())
+}
+
+/// Static, plausible `jvm{}`/`system{}`/`security{}` placeholders shared by
+/// both `/admin/info/system` and `<core>/admin/system` (issue #59). Key shape
+/// matches `solr-ref/search-api/trace/00023.json`/`00026.json`; values are
+/// deliberately static (not introspected from the real host) — no fixture
+/// consumer reads them, per the task spec ("matched if cheap"), and pulling
+/// real host stats would make responses non-deterministic and untestable.
+fn admin_info_jvm_system_security() -> (Value, Value, Value) {
+    let jvm = json!({
+        "version": "17.0.19 17.0.19+10",
+        "name": "Wayfinder",
+        "spec": {
+            "vendor": "Wayfinder",
+            "name": "Java Platform API Specification",
+            "version": "17",
+        },
+        "jre": {
+            "vendor": "Wayfinder",
+            "version": "17.0.19",
+        },
+        "vm": {
+            "vendor": "Wayfinder",
+            "name": "OpenJDK 64-Bit Server VM",
+            "version": "17.0.19+10",
+        },
+        "processors": 1,
+        "memory": {
+            "free": "0 MB",
+            "total": "0 MB",
+            "max": "0 MB",
+            "used": "0 MB (%0.0)",
+            "raw": {
+                "free": 0,
+                "total": 0,
+                "max": 0,
+                "used": 0,
+                "used%": 0.0,
+            },
+        },
+        "jmx": {
+            "classpath": "wayfinder",
+            "commandLineArgs": [],
+            "startTime": "1970-01-01T00:00:00.000Z",
+            "upTimeMS": 0,
+        },
+    });
+    let system = json!({
+        "name": "Linux",
+        "arch": "unknown",
+        "availableProcessors": 1,
+        "systemLoadAverage": 0.0,
+        "version": "unknown",
+        "committedVirtualMemorySize": 0,
+        "cpuLoad": 0.0,
+        "freeMemorySize": 0,
+        "freePhysicalMemorySize": 0,
+        "freeSwapSpaceSize": 0,
+        "processCpuLoad": 0.0,
+        "processCpuTime": 0,
+        "systemCpuLoad": 0.0,
+        "totalMemorySize": 0,
+        "totalPhysicalMemorySize": 0,
+        "totalSwapSpaceSize": 0,
+        "maxFileDescriptorCount": 0,
+        "openFileDescriptorCount": 0,
+    });
+    let security = json!({});
+    (jvm, system, security)
+}
+
+/// `/solr/admin/info/system` — server-level version handshake (issue #59).
+/// Not core-scoped: no `{core}` path segment, hence no `check_core` call.
+///
+/// `lucene.solr-spec-version` is the ONE field `search_api_solr`'s
+/// `SolrConnector::getSolrVersion()` (finding 78) actually reads, and it is
+/// read here from `config.admin.reported_solr_version` — see
+/// `config::Admin` for the version-choice reasoning (PRD open question 2).
+async fn admin_info_system(
+    State(state): State<Arc<AppState>>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, WfError> {
+    let params = Params::parse(query.as_deref().unwrap_or(""));
+    check_params(&state, ADMIN_INFO_PARAMS, &params)?;
+    let (jvm, system, security) = admin_info_jvm_system_security();
+    let version = &state.config.admin.reported_solr_version;
+    let body = json!({
+        "responseHeader": {
+            "status": 0,
+            "QTime": 0,
+        },
+        "mode": "std",
+        "solr_home": "/var/solr/data",
+        "core_root": "/var/solr/data",
+        "lucene": {
+            "solr-spec-version": version,
+            "solr-impl-version": format!("{version} wayfinder"),
+            "lucene-spec-version": "9.12.3",
+            "lucene-impl-version": "9.12.3 wayfinder",
+        },
+        "jvm": jvm,
+        "security": security,
+        "system": system,
+    });
+    Ok(axum::Json(body).into_response())
+}
+
+/// `core.schema`'s value for the core-scoped route, verbatim from the
+/// captured `solr-ref/responses/admin_system.json`. NOT a free placeholder:
+/// `search_api_solr`'s `SolrConnectorPluginBase.php` reads this exact field
+/// via `getSchemaVersionString()`/`getSchemaTargetedSolrBranch()`/
+/// `isJumpStartConfigSet()`, all of which `explode('-', $schema)` and index
+/// into the result — `$parts[1]` (module version, `"4.4.0"`), `$parts[3]`
+/// (targeted Solr branch, `"9.x"`), and `$parts[4]` (`"0"`) must all be
+/// present and non-empty, or those calls hit an undefined array index and
+/// the version handshake breaks for real (finding 78,
+/// docs/solr-ref-findings.md). A shorter placeholder like
+/// `"wayfinder-{core}"` only has 2 dash-separated parts and fails this.
+const CORE_ADMIN_SCHEMA: &str = "drupal-4.4.0-solr-9.x-0";
+
+/// `/solr/{core}/admin/system` — core-scoped fallback for the same
+/// version-handshake (finding 78: `search_api_solr` tries this path first,
+/// falling back to `/admin/info/system`). Same envelope as
+/// `admin_info_system` plus the `core{}` object (`solr-ref/search-api/trace/00026.json`).
+async fn core_admin_system(
+    State(state): State<Arc<AppState>>,
+    AxPath(core): AxPath<String>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, WfError> {
+    let params = Params::parse(query.as_deref().unwrap_or(""));
+    check_core(&state, &core, &params, Envelope::WithParams)?;
+    check_params(&state, ADMIN_INFO_PARAMS, &params)?;
+    let (jvm, system, security) = admin_info_jvm_system_security();
+    let version = &state.config.admin.reported_solr_version;
+    let body = json!({
+        "responseHeader": {
+            "status": 0,
+            "QTime": 0,
+        },
+        "core": {
+            "schema": CORE_ADMIN_SCHEMA,
+            "host": "wayfinder",
+            "now": "1970-01-01T00:00:00.000Z",
+            "start": "1970-01-01T00:00:00.000Z",
+            "directory": {
+                "cwd": "/var/wayfinder",
+                "instance": format!("/var/wayfinder/{core}"),
+                "data": format!("/var/wayfinder/{core}/data"),
+                // ponytail: no fixture consumer reads dirimpl's value, only
+                // its presence — a plausible-looking string is sufficient
+                // ceiling here, not a real Tantivy directory-factory class.
+                "dirimpl": "wayfinder::CoreIndex",
+                "index": format!("/var/wayfinder/{core}/data/index"),
+            },
+        },
+        "mode": "std",
+        "lucene": {
+            "solr-spec-version": version,
+            "solr-impl-version": format!("{version} wayfinder"),
+            "lucene-spec-version": "9.12.3",
+            "lucene-impl-version": "9.12.3 wayfinder",
+        },
+        "jvm": jvm,
+        "security": security,
+        "system": system,
     });
     Ok(axum::Json(body).into_response())
 }
