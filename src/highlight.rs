@@ -9,7 +9,7 @@
 //! distinct fragments for a doc/field up to the `hl.snippets` cap this module
 //! resolves and hands it. Facts pinned by fixtures in
 //! `solr-ref/responses/hl_*.json` (`docs/solr-ref-findings.md` findings
-//! 51-54):
+//! 51-54 and 81):
 //!
 //! - **finding 51**: `highlighting` is a top-level object keyed by the
 //!   unique key. A doc that matched the base query through some field other
@@ -30,7 +30,23 @@
 //!   `hl.method=original` is explicit; otherwise this leaves Tantivy's own
 //!   150-char `SnippetGenerator` default alone. This is a documented
 //!   judgment call standing in for a real `hl.method=unified`
-//!   implementation, which the issue explicitly puts out of scope.
+//!   implementation, which the issue explicitly puts out of scope. Finding
+//!   54's scope limit is about *nonzero* `hl.fragsize` only -- the zero case
+//!   is finding 81 below and is decided before this split is consulted.
+//! - **finding 81**: `hl.fragsize=0` means "return the whole field,
+//!   unfragmented, as a single snippet" -- it is not "unset". It behaves that
+//!   way for *both* `hl.method` values, confirmed by
+//!   `solr-ref/responses/hl_fragsize_zero_whole_field.json` (default
+//!   `hl.method`, i.e. unified) and
+//!   `hl_fragsize_zero_whole_field_method_original.json`
+//!   (`hl.method=original`), which are byte-identical in their
+//!   `highlighting` block. So an explicit zero is special-cased here *ahead
+//!   of* the finding-54 original-vs-default split above, mapping to
+//!   `WHOLE_FIELD_MAX_CHARS` (a sentinel char budget no field can exceed) so
+//!   `SnippetGenerator::set_max_num_chars` never fragments. Absent or
+//!   unparseable `hl.fragsize` is unaffected and still falls back as before
+//!   (`DEFAULT_FRAGSIZE` under `hl.method=original`, Tantivy's own 150-char
+//!   default otherwise).
 
 use std::fmt;
 
@@ -39,7 +55,7 @@ use serde_json::{Map, Value};
 use tantivy::query::Query;
 use tantivy::{DocAddress, Score};
 
-use crate::core_index::CoreIndex;
+use crate::core_index::{CoreIndex, WHOLE_FIELD_MAX_CHARS};
 use crate::params::Params;
 use crate::schema::{ValueKind, WayfinderSchema};
 
@@ -98,20 +114,27 @@ pub fn highlighting(
         .filter(|&n: &usize| n > 0)
         .unwrap_or(DEFAULT_SNIPPETS);
 
-    // ponytail: only the `hl.method=original` vs. everything-else split
-    // (finding 54) -- not a real `hl.method=unified` fragmenter. The ceiling
-    // is exactly the module docs' finding-54 paragraph: `hl.fragsize` is
-    // applied verbatim under `hl.method=original`, and ignored entirely
-    // (falling back to Tantivy's own 150-char default) for every other
-    // `hl.method` value, including the unset default. A real `unified`
-    // implementation would need its own fragmenter, which the issue puts out
-    // of scope.
-    let max_chars = if params.get("hl.method") == Some("original") {
-        params
-            .get("hl.fragsize")
-            .and_then(|v| v.parse().ok())
-            .filter(|&n: &usize| n > 0)
-            .unwrap_or(DEFAULT_FRAGSIZE)
+    // Parsed once, because an explicit `0` and an absent/unparseable value
+    // are *different* answers here (finding 81) -- `Some(0)` means whole
+    // field, `None` means fall back.
+    let fragsize: Option<usize> = params.get("hl.fragsize").and_then(|v| v.parse().ok());
+
+    // ponytail: for a *nonzero* `hl.fragsize`, only the `hl.method=original`
+    // vs. everything-else split (finding 54) -- not a real
+    // `hl.method=unified` fragmenter. The ceiling is exactly the module docs'
+    // finding-54 paragraph: `hl.fragsize` is applied verbatim under
+    // `hl.method=original`, and ignored entirely (falling back to Tantivy's
+    // own 150-char default) for every other `hl.method` value, including the
+    // unset default. A real `unified` implementation would need its own
+    // fragmenter, which the issue puts out of scope.
+    let max_chars = if fragsize == Some(0) {
+        // finding 81: an explicit zero is whole-field for *both* `hl.method`
+        // values, so it is decided before the split below is consulted.
+        WHOLE_FIELD_MAX_CHARS
+    } else if params.get("hl.method") == Some("original") {
+        // `Some(0)` was already taken by the branch above, so this is
+        // "absent or unparseable -> Solr's default", not a zero filter.
+        fragsize.unwrap_or(DEFAULT_FRAGSIZE)
     } else {
         TANTIVY_DEFAULT_MAX_CHARS
     };

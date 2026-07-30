@@ -121,3 +121,6 @@ qrange_date_incl	200	GET	facets/select?q=created:[2020-01-02T00:00:00Z+TO+2020-0
 qrange_date_excl	200	GET	facets/select?q=created:{2020-01-02T00:00:00Z+TO+2020-01-05T00:00:00Z}&wt=json		http://localhost:8983/solr
 admin_info_system	200	GET	admin/info/system?wt=json&json.nl=flat	
 stats_version_max	200	GET	version99/select?q=*:*&rows=0&stats=true&stats.field=_version_&function=max(_version_)&wt=json		http://localhost:8999/solr
+hl_fragsize_zero_whole_field	200	GET	fragsize104/select?q=body:quick&hl=true&hl.fl=body&hl.fragsize=0&wt=json		http://localhost:8995/solr
+hl_fragsize_zero_whole_field_method_original	200	GET	fragsize104/select?q=body:quick&hl=true&hl.fl=body&hl.method=original&hl.fragsize=0&wt=json		http://localhost:8995/solr
+hl_fragsize_small_truncated	200	GET	fragsize104/select?q=body:quick&hl=true&hl.fl=body&hl.method=original&hl.fragsize=40&wt=json		http://localhost:8995/solr

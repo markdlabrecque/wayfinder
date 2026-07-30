@@ -1,0 +1,30 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "q":"body:quick",
+      "hl":"true",
+      "hl.fragsize":"40",
+      "hl.fl":"body",
+      "hl.method":"original",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"long1",
+      "body":"quick prototype notes from the engineering standup this morning. the team reviewed the roadmap for the next quarter and discussed several open risks around supply chain timing. afterwards everyone broke for lunch and reconvened at two in the afternoon to continue the planning session for the rest of the week.",
+      "_version_":1872173357256933376,
+      "_root_":"long1"
+    }]
+  },
+  "highlighting":{
+    "long1":{
+      "body":["<em>quick</em> prototype notes from"]
+    }
+  }
+}

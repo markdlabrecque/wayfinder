@@ -1313,3 +1313,42 @@ edismax-specific behaviour.
     indexed fast field while using this fixture to pin Solr's request and
     envelope behavior. Captured with `solr:9` (issue #99), container
     `wayfinder-solr-99`, port 8999.
+
+## Findings from the issue #104 `hl.fragsize=0` capture
+
+Claiming finding 81. Own container/corpus (`solr-ref/capture.sh`'s fragsize block, container
+`wayfinder-solr-104`, port 8995, core `fragsize104`, one ~310-char `text_en` `body` document) —
+the shared 5-doc corpus's `body` is four words long, too short for "whole field" and "one
+fragment" to be different answers at all.
+
+81. **`hl.fragsize=0` means "return the whole field, unfragmented, as a single snippet" — it is
+    not a synonym for "unset", and it holds for both `hl.method` values.**
+    `hl_fragsize_zero_whole_field.json` (default `hl.method`, i.e. unified) and
+    `hl_fragsize_zero_whole_field_method_original.json` (`hl.method=original`) are byte-identical
+    in their `highlighting` block: the entire ~310-char `body`, trailing "." included, with the
+    single `quick` match wrapped in `<em>`. This corrects the reading implied by the pre-#104
+    code, which filtered a parsed `0` out as if it were absent and so fell back to
+    `DEFAULT_FRAGSIZE` (100) under `hl.method=original` and to Tantivy's 150-char
+    `SnippetGenerator` default otherwise — both of which truncate. Wayfinder now decides the zero
+    case *before* finding 54's `hl.method=original`-vs-everything-else split, mapping it to
+    `core_index::WHOLE_FIELD_MAX_CHARS` (`usize::MAX`); finding 54's ponytail scope limit is
+    unchanged and continues to govern `hl.fragsize > 0` exactly as before. The fixtures pin one
+    detail that a `set_max_num_chars` sentinel alone does not deliver: the
+    snippet keeps text *outside* the first/last token boundary (Tantivy's fragment stops at the
+    last token's `offset_to`, dropping the field's final "."). Wayfinder additionally returns
+    exactly one snippet for `hl.fragsize=0` regardless of `hl.snippets` — but that is an
+    **inference, not a captured fact**: none of the three `capf` rows in this block sends
+    `hl.snippets` at all, so what real Solr does for `hl.fragsize=0&hl.snippets=3` is uncaptured.
+    It follows from "the whole field is the fragment" (there is no second fragment to return),
+    which is why it was implemented that way; confirming it needs another capture.
+
+    The same capture's control row `hl_fragsize_small_truncated.json`
+    (`hl.method=original&hl.fragsize=40`) is a **ratified divergence**, not a bug in the above:
+    Solr's fragment is `"<em>quick</em> prototype notes from"` (ends at offset 26) and
+    Wayfinder's is `"<em>quick</em> prototype notes from the"` (ends at 30). Both sides apply the
+    same boundary rule — first token whose end offset reaches `hl.fragsize` starts a new fragment,
+    and `engineering` ends at 42 — and differ only because Solr's `text_en` strips the English
+    stopword `the` (27..30) while Wayfinder's deliberately does not (PRD open question 5's
+    resolution: presets stem but do not strip stopwords). Recorded in
+    `tests/differential.rs`'s `ACCEPTED_DIVERGENCES` with a self-expiring guard that asserts the
+    stopword asymmetry still holds on both sides.

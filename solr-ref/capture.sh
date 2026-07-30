@@ -1639,3 +1639,43 @@ capv() {  # capv <name> <url-after-/solr/>
 capv stats_version_max "$VERSION_CORE/select?q=*:*&rows=0&stats=true&stats.field=_version_&function=max(_version_)&wt=json"
 echo "version-field core '$VERSION_CORE' left in place on '$VERSION_CONTAINER' (port 8999)"
 echo "  (docker rm -f $VERSION_CONTAINER to stop)"
+
+# --- hl.fragsize=0 whole-field highlighting (issue #104) --------------------
+# Appended block; own Solr 9 core and port. The shared corpus has no field
+# long enough to distinguish hl.fragsize=0 (Solr's "whole field, no
+# fragmenting" sentinel) from the default fragment width, so this indexes one
+# ~300-char doc solely to make that distinguishable.
+FRAGSIZE_CONTAINER=wayfinder-solr-104
+FRAGSIZE_SOLR=http://localhost:8995/solr
+FRAGSIZE_CORE=fragsize104
+if ! docker ps --format '{{.Names}}' | grep -qx "$FRAGSIZE_CONTAINER"; then
+  docker rm -f "$FRAGSIZE_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$FRAGSIZE_CONTAINER" -p 8995:8983 \
+    solr:9 solr-precreate "$FRAGSIZE_CORE" >/dev/null
+fi
+echo -n "waiting for fragsize solr"
+for _ in $(seq 60); do
+  if curl -sf "$FRAGSIZE_SOLR/$FRAGSIZE_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+  echo -n "."; sleep 1
+done
+curl -s "$FRAGSIZE_SOLR/$FRAGSIZE_CORE/schema" -H 'Content-Type: application/json' -d '{
+  "add-field": [
+    {"name":"body", "type":"text_en", "indexed":true, "stored":true}
+  ]
+}' >/dev/null
+curl -sf "$FRAGSIZE_SOLR/$FRAGSIZE_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+  {"id":"long1","body":"quick prototype notes from the engineering standup this morning. the team reviewed the roadmap for the next quarter and discussed several open risks around supply chain timing. afterwards everyone broke for lunch and reconvened at two in the afternoon to continue the planning session for the rest of the week."}
+]' >/dev/null
+capf() {  # capf <name> <url-after-/solr/>
+  local name=$1 suffix=$2
+  curl -sg "$FRAGSIZE_SOLR/$suffix" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$suffix" "" "$FRAGSIZE_SOLR" \
+    >> "$HERE/manifest-errors.tsv"
+  rm -f "$OUT/$name.status"
+}
+capf hl_fragsize_zero_whole_field "$FRAGSIZE_CORE/select?q=body:quick&hl=true&hl.fl=body&hl.fragsize=0&wt=json"
+capf hl_fragsize_zero_whole_field_method_original "$FRAGSIZE_CORE/select?q=body:quick&hl=true&hl.fl=body&hl.method=original&hl.fragsize=0&wt=json"
+capf hl_fragsize_small_truncated "$FRAGSIZE_CORE/select?q=body:quick&hl=true&hl.fl=body&hl.method=original&hl.fragsize=40&wt=json"
+echo "fragsize core '$FRAGSIZE_CORE' left in place on '$FRAGSIZE_CONTAINER' (port 8995)"
+echo "  (docker rm -f $FRAGSIZE_CONTAINER to stop)"

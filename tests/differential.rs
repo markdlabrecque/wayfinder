@@ -585,6 +585,52 @@ async fn version99_app() -> (Router, TempDir) {
     (app, dir)
 }
 
+/// The issue-#104 `hl.fragsize` capture uses a dedicated single-document core
+/// whose `body` is long enough that "whole field" and "fragmented" are
+/// visibly different answers — the shared 5-doc corpus's four-word `body` is
+/// not (see `tests/highlighting.rs`'s `long_field_app`).
+const FRAGSIZE_SCHEMA_TOML: &str = r#"
+[core]
+name = "fragsize104"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+"#;
+
+/// The document indexed here is byte-for-byte the one indexed into the live
+/// `solr:9` container the `fragsize104` fixtures were captured from, so the
+/// hermetic replay compares like with like.
+async fn fragsize_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), FRAGSIZE_SCHEMA_TOML).expect("app must build");
+    let (status, body) = common::request_full(
+        &app,
+        "POST",
+        "fragsize104/update?commit=true",
+        Some(
+            r#"[{"id":"long1","body":"quick prototype notes from the engineering standup this morning. the team reviewed the roadmap for the next quarter and discussed several open risks around supply chain timing. afterwards everyone broke for lunch and reconvened at two in the afternoon to continue the planning session for the rest of the week."}]"#,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the fragsize104 corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
 /// Ratified, **permanent** divergences from captured Solr behaviour — the
 /// opposite of `EXPECTED_DIVERGENCES` below, which is a self-expiring to-do
 /// list for unbuilt features. Every entry here cites the PRD/findings
@@ -632,7 +678,32 @@ const ACCEPTED_DIVERGENCES: &[(&str, &str)] = &[
          empty body in Solr; Wayfinder stays method-agnostic and serves its normal JSON 404 \
          there too — noted, not matched",
     ),
+    (
+        "hl_fragsize_small_truncated",
+        "PRD open question 5's resolution (PRD \"Field types\": presets stem but do not strip \
+         stopwords) applied to a fragment boundary: Solr's own `text_en` strips English \
+         stopwords, so with `hl.fragsize=40` its first fragment ends at `from` (offset 26) — \
+         the stopword `the` (27..30) is not a token there, and the next real token \
+         `engineering` ends at 42, past the 40-char boundary. Wayfinder keeps `the` as a real \
+         token, so the same boundary rule puts its fragment end at 30. Byte-exact on both \
+         sides and caused solely by the ratified analyzer difference, not by `hl.fragsize` \
+         handling: the whole-field (`hl.fragsize=0`) rows from the same capture match \
+         exactly (finding 81)",
+    ),
 ];
+
+/// The single `highlighting.long1.body[0]` snippet of a `fragsize104`
+/// response, markers stripped, for the `hl_fragsize_small_truncated` accepted
+/// divergence's guard. Missing/mistyped reads back as `""`, which that guard's
+/// assertions then reject rather than silently excusing.
+fn snippet_of(response: &Value) -> String {
+    response
+        .pointer("/highlighting/long1/body/0")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .replace("<em>", "")
+        .replace("</em>", "")
+}
 
 fn accepted_divergence_reason(name: &str) -> Option<&'static str> {
     ACCEPTED_DIVERGENCES
@@ -1691,8 +1762,9 @@ fn live_solr_matches_committed_query_set() {
 
 /// Selects the app for `entry` by its URL's leading core segment and
 /// returns `(app, request_url)`, where `request_url` has that segment
-/// rewritten to `content` for every core except `sortdebt`, `stats`, and
-/// `version99` (which keep their own names — see the module comment above).
+/// rewritten to `content` for every core except `sortdebt`, `stats`,
+/// `version99`, and `fragsize104` (which keep their own names — see the module
+/// comment above).
 /// An unrecognised segment is returned unrewritten against `content_app`.
 #[allow(clippy::too_many_arguments)] // one hermetic app per manifest-errors core
 fn app_and_request_url<'a>(
@@ -1705,6 +1777,7 @@ fn app_and_request_url<'a>(
     update9_app: &'a Router,
     stats_app: &'a Router,
     version99_app: &'a Router,
+    fragsize_app: &'a Router,
 ) -> (&'a Router, String) {
     match entry.url.split_once('/') {
         Some(("content", rest)) => (content_app, format!("content/{rest}")),
@@ -1715,6 +1788,7 @@ fn app_and_request_url<'a>(
         Some(("update9", _)) => (update9_app, entry.url.clone()),
         Some(("stats", _)) => (stats_app, entry.url.clone()),
         Some(("version99", _)) => (version99_app, entry.url.clone()),
+        Some(("fragsize104", _)) => (fragsize_app, entry.url.clone()),
         _ => (content_app, entry.url.clone()),
     }
 }
@@ -1751,6 +1825,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let (update9_app, _update9_dir) = update9_app().await;
     let (stats_app, _stats_dir) = stats_app().await;
     let (version99_app, _version99_dir) = version99_app().await;
+    let (fragsize_app, _fragsize_dir) = fragsize_app().await;
 
     let mut ran = 0usize;
     let mut diffed = 0usize;
@@ -1772,6 +1847,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
             &update9_app,
             &stats_app,
             &version99_app,
+            &fragsize_app,
         );
         // `update_select_commitwithin_visible` follows a `commitWithin=500`
         // row with no settle delay in this hermetic replay, unlike
@@ -1878,6 +1954,70 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
                             "{}: expected Wayfinder's method-agnostic JSON 404, got {} \
                              ({reason})",
                             entry.name, status
+                        ));
+                    }
+                }
+                "hl_fragsize_small_truncated" => {
+                    // Self-expiring guard: this entry is only excusable while
+                    // the *cause* still holds — the fixture's fragment stops
+                    // one stopword earlier than Wayfinder's because Solr's
+                    // `text_en` analyzed `the` away. Both halves are checked,
+                    // so the entry cannot rot into a blanket waiver on
+                    // `hl.fragsize` truncation generally.
+                    let expected_snippet = snippet_of(&fixture(&entry.name));
+                    let actual_snippet = snippet_of(&actual);
+                    let has_stopword =
+                        |s: &str| s.split_whitespace().any(|w| w.trim_matches(',') == "the");
+                    assert!(
+                        !has_stopword(&expected_snippet),
+                        "{}: Solr's fragment must still be the stopword-stripped one \
+                         ({expected_snippet:?}) for this accepted divergence to apply ({reason})",
+                        entry.name
+                    );
+                    assert!(
+                        has_stopword(&actual_snippet),
+                        "{}: Wayfinder's fragment must still carry the stopword \
+                         ({actual_snippet:?}) for this accepted divergence to apply — if \
+                         `text_en` now strips stopwords, remove this entry ({reason})",
+                        entry.name
+                    );
+                    if status.as_u16() != entry.status {
+                        failures.push(format!(
+                            "{}: HTTP status {} vs fixture status {} ({reason})",
+                            entry.name, status, entry.status
+                        ));
+                    }
+                    if actual_snippet == expected_snippet {
+                        failures.push(format!(
+                            "{}: Wayfinder matched the fixture's fragment — the documented \
+                             analyzer-driven divergence no longer holds, remove this \
+                             ACCEPTED_DIVERGENCES entry ({reason})",
+                            entry.name
+                        ));
+                    }
+                    // Unlike the entries above — where the fixture is non-JSON
+                    // or the status itself is the divergence, so a structural
+                    // diff would be meaningless — this row is an ordinary 200
+                    // JSON envelope that matches Solr *everywhere except* the
+                    // one analyzed fragment. So it is still diffed in full and
+                    // waived on exactly one path: a regression in `numFound`,
+                    // `response.docs`, or `responseHeader.params` on this row
+                    // must not ride in under the accepted-divergence label.
+                    const WAIVED_PATH: &str = "highlighting.long1.body[0]";
+                    let report = diff(
+                        &normalize(fixture(&entry.name)).value,
+                        &normalize(actual.clone()).value,
+                    );
+                    let unwaived: Vec<&Diff> = report
+                        .diffs
+                        .iter()
+                        .filter(|d| d.path != WAIVED_PATH)
+                        .collect();
+                    if !unwaived.is_empty() {
+                        failures.push(format!(
+                            "{}: this accepted divergence waives `{WAIVED_PATH}` only, but the \
+                             response also differs at {unwaived:?} ({reason})",
+                            entry.name
                         ));
                     }
                 }
