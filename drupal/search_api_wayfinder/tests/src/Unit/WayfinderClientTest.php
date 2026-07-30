@@ -193,4 +193,50 @@ class WayfinderClientTest extends TestCase {
     $this->assertArrayNotHasKey('commitWithin', $body['add']);
   }
 
+  /**
+   * M4 (issue #78): WayfinderClient needs a select()-shaped sibling for
+   * "GET {core}/mlt" (plan doc architecture table line 28: "GET
+   * /solr/{core}/mlt | q, df, fl, rows, start, mlt.*"). Success envelope
+   * shape ("match"/"response" keys, both numFound/docs) is ground truth from
+   * solr-ref/responses/mlt_baseline.json.
+   *
+   * @covers ::mlt
+   */
+  public function testMltReturnsDecodedBodyOn200(): void {
+    $body = (string) file_get_contents(__DIR__ . '/../../../../../solr-ref/responses/mlt_baseline.json');
+    $client = $this->clientWithResponses([new Response(200, [], $body)]);
+
+    $result = $client->mlt(['q' => 'id:"mlt1"', 'mlt.fl' => 'body,category']);
+
+    $this->assertSame('mlt1', $result['match']['docs'][0]['id']);
+  }
+
+  /**
+   * @covers ::mlt
+   */
+  public function testMltThrowsSearchApiExceptionWithErrorMsgOnNon200(): void {
+    $body = (string) file_get_contents(__DIR__ . '/../../../../../solr-ref/responses/err_bad_sort.json');
+    $client = $this->clientWithResponses([new Response(400, [], $body)]);
+
+    $this->expectException(SearchApiException::class);
+    $this->expectExceptionMessage('can not sort on a field w/o docValues unless it is indexed=true uninvertible=true and the type supports Uninversion: body');
+
+    $client->mlt(['q' => 'id:"mlt1"']);
+  }
+
+  /**
+   * @covers ::mlt
+   */
+  public function testMltRequestsTheMltEndpointNotSelect(): void {
+    $history = [];
+    $mock = new MockHandler([new Response(200, [], '{"match":{"numFound":0,"docs":[]},"response":{"numFound":0,"docs":[]}}')]);
+    $handlerStack = HandlerStack::create($mock);
+    $handlerStack->push(\GuzzleHttp\Middleware::history($history));
+    $client = new WayfinderClient(new Client(['handler' => $handlerStack]), 'http://localhost:8983/solr/mycore');
+
+    $client->mlt(['q' => 'id:"mlt1"', 'mlt.fl' => 'body']);
+
+    $this->assertSame('/solr/mycore/mlt', $history[0]['request']->getUri()->getPath());
+  }
+
 }

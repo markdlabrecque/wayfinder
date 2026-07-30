@@ -104,6 +104,53 @@ class ResponseParserTest extends TestCase {
   }
 
   /**
+   * Mocks an index whose fields FieldMapper can map (field id => type), for
+   * the highlighting reverse-mapping tests below: ResponseParser must turn
+   * Wayfinder's "highlighting" block -- keyed by *mapped* dynamic field name
+   * (e.g. "ts_body"), same as solr-ref/responses/hl_basic.json's shape -- back
+   * into Search API field ids, because
+   * \Drupal\search_api\Item\ItemInterface::getExtraData() documents
+   * "highlighted_fields" as "an array, keyed by field IDs" (confirmed by
+   * reading ItemInterface.php directly), and search_api_solr's own
+   * highlighting integration (which this module's locked decision 6 is
+   * pinned to) populates that same per-item, per-field-id shape.
+   */
+  private function mockQueryWithFields(array $typeByFieldId, string $indexId = 'my_index'): QueryInterface {
+    $index = $this->createMock(IndexInterface::class);
+    $index->method('id')->willReturn($indexId);
+
+    $fields = [];
+    $properties = [];
+    foreach ($typeByFieldId as $id => $type) {
+      $field = $this->createMock(FieldInterface::class);
+      $field->method('getFieldIdentifier')->willReturn($id);
+      $field->method('getType')->willReturn($type);
+      $field->method('getPropertyPath')->willReturn($id);
+      $field->method('getDatasourceId')->willReturn('entity:test');
+      $fields[$id] = $field;
+
+      $storage = $this->createMock(FieldStorageDefinitionInterface::class);
+      $storage->method('getCardinality')->willReturn(1);
+      $definition = $this->createMock(FieldDefinitionInterface::class);
+      $definition->method('isList')->willReturn(TRUE);
+      $definition->method('getFieldStorageDefinition')->willReturn($storage);
+      $properties[$id] = $definition;
+    }
+    $index->method('getFields')->willReturn($fields);
+    $index->method('getPropertyDefinitions')->willReturn($properties);
+    foreach ($fields as $field) {
+      $field->method('getIndex')->willReturn($index);
+    }
+
+    $query = $this->createMock(QueryInterface::class);
+    $query->method('getIndex')->willReturn($index);
+    $resultSet = new ResultSet($query);
+    $query->method('getResults')->willReturn($resultSet);
+
+    return $query;
+  }
+
+  /**
    * @covers ::parse
    */
   public function testParsePopulatesResultCount(): void {
@@ -353,6 +400,68 @@ class ResponseParserTest extends TestCase {
     $resultSet = (new ResponseParser())->parse($response, $this->mockQuery('my_index'));
 
     $this->assertFalse($resultSet->hasExtraData('search_api_facets'));
+  }
+
+  /**
+   * M4 (issue #78): a Wayfinder /select response's "highlighting" block
+   * (shape ground truth: solr-ref/responses/hl_basic.json --
+   * {docId: {fieldName: [snippet, ...]}}) must populate each matching item's
+   * "highlighted_fields" extra data, keyed back by Search API field id (not
+   * the raw mapped dynamic field name), per plan doc locked decision 6
+   * ("populating highlighted_fields extra data as search_api_solr does") and
+   * ItemInterface::getExtraData()'s documented shape.
+   *
+   * @covers ::parse
+   */
+  public function testParsePopulatesHighlightedFieldsExtraDataKeyedByFieldId(): void {
+    $query = $this->mockQueryWithFields(['body' => 'text', 'category' => 'string']);
+
+    $response = [
+      'response' => [
+        'numFound' => 1,
+        'start' => 0,
+        'docs' => [
+          ['id' => 'my_index-doc1', 'score' => 1.0],
+        ],
+      ],
+      'highlighting' => [
+        'my_index-doc1' => [
+          'ts_body' => ['the quick <em>fox</em>'],
+        ],
+      ],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $query);
+    $item = $resultSet->getResultItems()['doc1'];
+
+    $this->assertSame(['body' => ['the quick <em>fox</em>']], $item->getExtraData('highlighted_fields'));
+  }
+
+  /**
+   * Negative case: a plain (non-highlighted) response leaves items without
+   * any "highlighted_fields" extra data at all, rather than setting an empty
+   * array -- callers use hasExtraData() to decide whether to fall back to
+   * Search API's own core "highlight" processor (plan doc line 84-87).
+   *
+   * @covers ::parse
+   */
+  public function testParseSetsNoHighlightedFieldsExtraDataWhenResponseHasNoHighlightingBlock(): void {
+    $query = $this->mockQueryWithFields(['body' => 'text']);
+
+    $response = [
+      'response' => [
+        'numFound' => 1,
+        'start' => 0,
+        'docs' => [
+          ['id' => 'my_index-doc1', 'score' => 1.0],
+        ],
+      ],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $query);
+    $item = $resultSet->getResultItems()['doc1'];
+
+    $this->assertFalse($item->hasExtraData('highlighted_fields'));
   }
 
 }
