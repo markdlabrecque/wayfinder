@@ -77,6 +77,22 @@ pub struct Resources {
     // searcher pool ever exists, this is the knob; until then it is a
     // documented no-op rather than a lie about what it does.
     pub searcher_pool_size: usize,
+    /// Hard cap, in bytes, on an incoming request body (issue #64). Wired to
+    /// an `axum::extract::DefaultBodyLimit` layer in `src/lib.rs::build()`,
+    /// which otherwise defaults to axum's bare 2MB cap for every extractor
+    /// that buffers the body (`Bytes`, `Json`, ...) — too small for a
+    /// realistic bulk `/update`.
+    ///
+    /// Solr's own `requestParsers` caps (`formdataUploadLimitInKB`,
+    /// `multipartUploadLimitInKB`) govern form-urlencoded and multipart
+    /// uploads specifically, not the raw `application/json` body a bulk
+    /// `/update` actually sends, and the captured configset leaves them
+    /// unset (finding 79, `docs/solr-ref-findings.md`) — so this default
+    /// could not be verified hermetically against a real Solr max-request-size
+    /// setting. 10MB is a deliberate, round headroom figure over the largest
+    /// known captured fixture (~7KB in `solr-ref/responses/`), operator
+    /// overridable like every other resource knob here.
+    pub max_body_size: usize,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -151,6 +167,7 @@ impl Default for Resources {
             doc_store_compression: "lz4".to_string(),
             doc_store_blocksize: 16_384,
             searcher_pool_size: 1,
+            max_body_size: 10_000_000,
         }
     }
 }
@@ -238,6 +255,7 @@ mod tests {
         assert_eq!(config.query.time_allowed, None);
         assert_eq!(config.resources.doc_store_compression, "lz4");
         assert_eq!(config.resources.doc_store_blocksize, 16_384);
+        assert_eq!(config.resources.max_body_size, 10_000_000);
         assert_eq!(config.commit.autocommit_max_docs, None);
     }
 
