@@ -1,0 +1,110 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Drupal\search_api_wayfinder;
+
+use Drupal\search_api\SearchApiException;
+use GuzzleHttp\ClientInterface;
+use GuzzleHttp\Exception\GuzzleException;
+use GuzzleHttp\Exception\RequestException;
+
+/**
+ * Thin Guzzle wrapper for Wayfinder's Solr-wire-compatible core endpoints:
+ * select, update, and admin/ping.
+ *
+ * Converts non-200 Solr error envelopes ({"error":{"msg":..., "code":...}})
+ * into SearchApiException using the envelope's error.msg, per plan doc
+ * "Architecture" section.
+ */
+class WayfinderClient {
+
+  public function __construct(
+    private readonly ClientInterface $httpClient,
+    private readonly string $coreUrl,
+    private readonly ?float $timeout = NULL,
+  ) {}
+
+  /**
+   * GET {core}/select with the given params.
+   *
+   * @return array
+   *   The decoded JSON response body.
+   *
+   * @throws \Drupal\search_api\SearchApiException
+   */
+  public function select(array $params): array {
+    return $this->request('GET', 'select', ['query' => $params + ['wt' => 'json']]);
+  }
+
+  /**
+   * POST {core}/update with the given command body.
+   *
+   * @param array $command
+   *   The update command body (e.g. ["add" => ["doc" => [...]]]).
+   * @param array $queryParams
+   *   Extra /update query params, e.g. ['commitWithin' => 1000]. Wayfinder's
+   *   parse_update_commands only reads the "add"/"delete" body -- commitWithin
+   *   is read from the query string (UPDATE_PARAMS), not the body.
+   *
+   * @return array
+   *   The decoded JSON response body.
+   *
+   * @throws \Drupal\search_api\SearchApiException
+   */
+  public function update(array $command, array $queryParams = []): array {
+    return $this->request('POST', 'update', [
+      'query' => $queryParams + ['wt' => 'json'],
+      'json' => $command,
+    ]);
+  }
+
+  /**
+   * GET {core}/admin/ping.
+   *
+   * Never throws: connection errors and non-200 responses both yield FALSE.
+   */
+  public function ping(): bool {
+    try {
+      $response = $this->httpClient->request('GET', $this->coreUrl . '/admin/ping', [
+        'query' => ['wt' => 'json'],
+      ]);
+      return $response->getStatusCode() === 200;
+    }
+    catch (GuzzleException $e) {
+      return FALSE;
+    }
+  }
+
+  /**
+   * Performs a request against a core-relative endpoint and decodes the JSON
+   * body, converting non-200 error envelopes into SearchApiException.
+   */
+  private function request(string $method, string $endpoint, array $options): array {
+    if ($this->timeout !== NULL) {
+      $options += ['timeout' => $this->timeout, 'connect_timeout' => $this->timeout];
+    }
+
+    try {
+      $response = $this->httpClient->request($method, $this->coreUrl . '/' . $endpoint, $options);
+      $decoded = json_decode((string) $response->getBody(), TRUE);
+      return is_array($decoded) ? $decoded : [];
+    }
+    catch (RequestException $e) {
+      $response = $e->getResponse();
+      if ($response) {
+        $body = json_decode((string) $response->getBody(), TRUE);
+        $message = $body['error']['msg'] ?? $e->getMessage();
+        throw new SearchApiException($message, 0, $e);
+      }
+      throw new SearchApiException($e->getMessage(), 0, $e);
+    }
+    catch (GuzzleException $e) {
+      // Covers ConnectException (DNS failure, refused connection, timeout)
+      // and any other non-RequestException transport failure: these have no
+      // response to extract an error envelope from.
+      throw new SearchApiException($e->getMessage(), 0, $e);
+    }
+  }
+
+}

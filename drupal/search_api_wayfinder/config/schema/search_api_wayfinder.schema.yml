@@ -1,0 +1,25 @@
+search_api.backend.wayfinder:
+  type: mapping
+  label: 'Wayfinder'
+  mapping:
+    scheme:
+      type: string
+      label: 'HTTP protocol'
+    host:
+      type: string
+      label: 'Wayfinder host'
+    port:
+      type: integer
+      label: 'Wayfinder port'
+    path:
+      type: string
+      label: 'Base path'
+    core:
+      type: string
+      label: 'Wayfinder core'
+    timeout:
+      type: integer
+      label: 'Request timeout (seconds)'
+    commitWithin:
+      type: integer
+      label: 'commitWithin (ms)'
