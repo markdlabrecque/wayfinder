@@ -69,9 +69,10 @@ fn main() {
     let corpus_size = results.corpus_size;
     let doc = format!(
         "# Wayfinder vs Solr 9 -- benchmark results (issue #13)\n\n\
-         Measured against PRD §8 targets. {corpus_size}-doc corpus, generated deterministically \
-         by `bench/src/corpus.rs` (seed 42). See `bench/run.sh` for the exact measurement \
-         procedure and `bench/README.md` for how to reproduce, including the 2M-doc run.\n\n\
+         Measured against PRD §8 targets, on a corpus of {corpus_size} docs generated \
+         deterministically by `bench/src/corpus.rs` (seed 42). See `bench/run.sh` for the exact \
+         measurement procedure and `bench/README.md` for how to reproduce, including the 2M-doc \
+         run.\n\n\
          {table}\n\n\
          ## Notes\n\n\
          - **\"Resident memory, 2M docs under query load\" is only ever populated by a run \
