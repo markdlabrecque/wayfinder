@@ -18,7 +18,7 @@
 # see that file for an optional workflow_dispatch job that runs this script
 # on demand.
 #
-# Own isolated containers/ports (wf80-*, 18983/9080 -- see docker-compose.yml
+# Own isolated containers/ports (wf80-*, 18990/9080 -- see docker-compose.yml
 # comment for the full collision-avoidance rationale). Never touches
 # solr-ref/search-api/ (read-only reference) or its capture.sh/manifest.tsv.
 # Tears itself down at the end regardless of success/failure.
@@ -57,12 +57,18 @@ echo "--- building wayfinder image + starting wayfinder ---"
 docker compose up -d --build wayfinder
 
 echo -n "waiting for wayfinder ping"
+wayfinder_ready=0
 for _ in $(seq 60); do
-  if curl -sf "http://localhost:18983/solr/content/admin/ping?wt=json" >/dev/null 2>&1; then
-    echo " ok"; break
+  if curl -sf "http://localhost:18990/solr/content/admin/ping?wt=json" >/dev/null 2>&1; then
+    echo " ok"; wayfinder_ready=1; break
   fi
   echo -n "."; sleep 1
 done
+
+if [ "$wayfinder_ready" != "1" ]; then
+  echo "FAIL: wayfinder never became ready (ping did not succeed after 60 attempts)"
+  exit 1
+fi
 
 echo "--- drupal container up ---"
 docker compose up -d drupal
@@ -83,14 +89,18 @@ docker exec wf80-drupal bash -lc "
   composer require drush/drush:13.7.6 drupal/search_api:1.41.0 'wayfinder/search_api_wayfinder:dev-main' --no-interaction
 "
 
-echo "--- confirming search_api_solr is NOT a dependency (acceptance item) ---"
+echo "--- confirming search_api_solr / solarium are NOT dependencies (acceptance item) ---"
 docker exec wf80-drupal bash -lc "
   cd /opt/drupal
-  if composer why drupal/search_api_solr >/dev/null 2>&1; then
+  if composer show drupal/search_api_solr >/dev/null 2>&1; then
     echo 'FAIL: drupal/search_api_solr present in dependency tree'
     exit 1
   fi
-  echo 'confirmed: no drupal/search_api_solr in dependency tree'
+  if composer show solarium/solarium >/dev/null 2>&1; then
+    echo 'FAIL: solarium/solarium present in dependency tree'
+    exit 1
+  fi
+  echo 'confirmed: no drupal/search_api_solr or solarium/solarium in dependency tree'
 "
 
 echo "--- site install (sqlite) ---"
@@ -124,7 +134,21 @@ docker exec wf80-drupal bash -lc "
 # async *scheduled* hard commit, not immediate -- so the just-indexed fields
 # are not yet visible to /select without this. Force a synchronous commit
 # straight to the wayfinder container so the round trip isn't racing it.
-curl -sf "http://localhost:18983/solr/content/update?commit=true" -H 'Content-Type: application/json' -d '{}' >/dev/null
+curl -sf "http://localhost:18990/solr/content/update?commit=true" -H 'Content-Type: application/json' -d '{}' >/dev/null
+
+# Assert documents actually landed before handing off to run_queries.php,
+# so the "indexing succeeded" claim above is backed by real evidence, not
+# just this comment.
+num_found="$(curl -sf --get "http://localhost:18990/solr/content/select" \
+  --data-urlencode 'q=*:*' \
+  --data-urlencode 'fq=index_id:"wf80_index"' \
+  --data-urlencode 'rows=0' \
+  | jq -r '.response.numFound // 0')"
+if ! [ "$num_found" -ge 1 ] 2>/dev/null; then
+  echo "FAIL: expected indexed documents for index_id=wf80_index, found $num_found"
+  exit 1
+fi
+echo "confirmed: $num_found document(s) indexed for wf80_index"
 
 echo "--- real index+search round trip ---"
 docker exec wf80-drupal bash -lc "

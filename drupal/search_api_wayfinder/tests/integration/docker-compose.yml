@@ -3,8 +3,9 @@
 # collide with the canonical wayfinder-solr-ref stack (solr-ref/capture.sh,
 # port 8983), issue #55's wf55-* capture stack (ports 8996-8998), the
 # differential harness's live-Solr mode, or bench/run.sh's SOLR_HOST_PORT
-# (defaults to 18983 too -- do not run this harness at the same time as a
-# bench run). Torn down after the run, same pattern as those scripts.
+# (defaults to 18983 -- this harness uses 18990 instead so it can run
+# alongside a bench run without colliding). Torn down after the run, same
+# pattern as those scripts.
 #
 # Adapted from the old worktree's wf57-* stack
 # (/Users/mark/Projects/wayfinder-57-search-api-wayfinder/drupal/search_api_wayfinder/tests/integration/docker-compose.yml):
@@ -23,7 +24,7 @@ services:
       dockerfile: Dockerfile
     container_name: wf80-wayfinder
     ports:
-      - "18983:8983"
+      - "18990:8983"
     volumes:
       - ../../../../presets/search-api.toml:/schema.toml:ro
     command: ["/schema.toml", "/data", "0.0.0.0:8983"]
