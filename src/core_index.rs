@@ -3,6 +3,7 @@
 //! one of these per running `app()`).
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -1738,27 +1739,63 @@ impl CoreIndex {
         Ok(Value::Object(out))
     }
 
-    /// Generates up to one highlighted HTML snippet for `field_name` in the
-    /// doc at `addr`, against `query`'s terms in that field (Solr's
-    /// `hl`/`hl.fl`). Returns an empty `Vec` -- never a single empty-string
-    /// entry -- when the field carries no term overlap for this doc (finding
-    /// 51, `docs/solr-ref-findings.md`), or when the field is not stored
-    /// (silently, mirroring `render_doc`'s own omit-rather-than-null
-    /// treatment of a missing stored value -- unfixture-backed, the
-    /// conservative choice for a case no captured response exercises).
+    /// Generates up to `snippets_cap` distinct highlighted HTML snippets for
+    /// `field_name` in the doc at `addr`, against `query`'s terms in that
+    /// field (Solr's `hl`/`hl.fl`). `snippets_cap` is Solr's `hl.snippets`:
+    /// it caps and never pads (finding 52, `docs/solr-ref-findings.md`), so
+    /// a field with fewer matches than the cap simply returns fewer. It is a
+    /// parameter rather than the caller's `take()` because each snippet costs
+    /// a full `SnippetGenerator` pass over the field text (see the ponytail
+    /// below) -- extracting past what the request asked for is wasted work on
+    /// every highlighted doc. Returns an empty `Vec` -- never a single
+    /// empty-string entry -- when the field carries no term overlap for this
+    /// doc (finding 51), when the field is not stored (silently, mirroring
+    /// `render_doc`'s own omit-rather-than-null treatment of a missing stored
+    /// value -- unfixture-backed, the conservative choice for a case no
+    /// captured response exercises), or when `snippets_cap` is 0.
     ///
-    /// ponytail: Tantivy's public `SnippetGenerator` only exposes the single
+    /// Tantivy's public `SnippetGenerator` only ever hands back the single
     /// best-scoring fragment (`select_best_fragment_combination` is a private
-    /// fn, `tantivy-0.26.1/src/snippet/mod.rs`), so `hl.snippets > 1` is a cap
-    /// this can never actually fill past 1 -- at most one snippet comes back
-    /// regardless of how many times a term repeats in the field. No captured
-    /// fixture needs a second real snippet (`hl_snippets_two.json`'s query
-    /// has exactly one hit per doc per field), so this is left as the
-    /// ceiling rather than hand-rolling multi-fragment selection against a
-    /// private algorithm. Lifting it is tracked as issue #103; the captured
-    /// Search API traffic does send `hl.snippets=3`, so the coverage probe
-    /// `select.highlight.snippets` in `src/coverage.rs` honestly reports this
-    /// semantic as uncovered until #103 lands.
+    /// fn, `tantivy-0.26.1/src/snippet/mod.rs`), so more than one fragment is
+    /// obtained by mask-and-resnippet: take the best fragment, blank the
+    /// matched byte ranges it consumed out of a mutable copy of the field
+    /// text (with spaces, so every other byte offset -- and UTF-8 validity --
+    /// stays put), and re-run the generator over the remainder. Each pass
+    /// therefore retires at least one occurrence, which is what bounds the
+    /// loop; masked spans can never be re-matched, so no fragment repeats.
+    ///
+    /// ponytail: mask-and-resnippet is not a real multi-fragment scorer.
+    /// Four known gaps, all accepted because no captured fixture
+    /// discriminates them (`hl_snippets_two.json`'s query has exactly one hit
+    /// per doc per field):
+    ///
+    /// 1. Fragment *selection* is greedy, one Tantivy call per fragment, and
+    ///    ordering falls out of Tantivy's own tie-break (best score, then
+    ///    earliest offset) applied to a shrinking text -- not Solr's
+    ///    multi-fragment scoring or ordering, and with no minimum-gap-between-
+    ///    fragments notion at all. Occurrences closer together than
+    ///    `max_num_chars` land in one fragment and come back as a single
+    ///    multi-highlight snippet, where Solr might split them.
+    /// 2. Cost is one `SnippetGenerator` pass over the whole field text per
+    ///    snippet returned. `snippets_cap` bounds that, so the ordinary
+    ///    `hl.snippets=1` request costs exactly the single pass it did before
+    ///    multi-snippet support existed; only a request that asks for more
+    ///    pays for more. A cap-sized request over a long field is still
+    ///    O(cap * field bytes), which a real fragmenter would do in one pass.
+    /// 3. `MAX_SNIPPETS_PER_FIELD` is a defensive outer ceiling on that loop
+    ///    regardless of `snippets_cap`, so an `hl.snippets` above it silently
+    ///    caps there rather than at the true occurrence count.
+    /// 4. Divergence, not just a simplification: two *distinct* occurrences
+    ///    whose fragments happen to render byte-identically (repeated
+    ///    boilerplate, far enough apart to fragment separately) are collapsed
+    ///    into one entry here, where Solr returns both. Unfixture-backed --
+    ///    no captured response has a field with duplicate surroundings -- and
+    ///    de-duplicating was judged the more useful answer, but it is a real
+    ///    difference in returned snippet count, not a wash.
+    // Same call as `parse_edismax_query` above: these are Solr request
+    // parameters arriving one-per-`hl.*`-param, and bundling them into a
+    // struct would only move the arity somewhere else.
+    #[allow(clippy::too_many_arguments)]
     pub fn highlight_field(
         &self,
         query: &dyn Query,
@@ -1767,7 +1804,17 @@ impl CoreIndex {
         max_num_chars: usize,
         pre: &str,
         post: &str,
+        snippets_cap: usize,
     ) -> Result<Vec<String>> {
+        /// Defensive outer ceiling on the mask-and-resnippet loop, so a
+        /// pathological request (`hl.snippets=100000`) over a field repeating
+        /// the same term costs a bounded number of full-text
+        /// `SnippetGenerator` passes. Chosen well above any plausible
+        /// `hl.snippets` -- Solr's own default is 1, and the captured Search
+        /// API traffic asks for 3 -- so ordinary requests are bounded by
+        /// `snippets_cap`, never by this.
+        const MAX_SNIPPETS_PER_FIELD: usize = 100;
+
         let field = self
             .wf_schema
             .field(field_name)
@@ -1776,12 +1823,74 @@ impl CoreIndex {
         let mut generator = SnippetGenerator::create(&searcher, query, field)?;
         generator.set_max_num_chars(max_num_chars);
         let doc: TantivyDocument = searcher.doc(addr)?;
-        let mut snippet = generator.snippet_from_doc(&doc);
-        if snippet.is_empty() {
-            return Ok(Vec::new());
+
+        // The same text `SnippetGenerator::snippet_from_doc` would assemble
+        // for this field: every stored string value, space-joined and
+        // trimmed. Reproduced here (rather than calling `snippet_from_doc`)
+        // because masking needs to own the text across passes.
+        let mut text = String::new();
+        for value in doc.get_all(field) {
+            if let Some(s) = value.as_str() {
+                text.push(' ');
+                text.push_str(s);
+            }
         }
-        snippet.set_snippet_prefix_postfix(pre, post);
-        Ok(vec![snippet.to_html()])
+        let mut text = text.trim().to_string();
+
+        // `snippets_cap` is the real bound; the iteration count is capped
+        // separately because a de-duplicated pass (gap 4) consumes a pass
+        // without filling a slot, so passes are not one-to-one with snippets.
+        let wanted = snippets_cap.min(MAX_SNIPPETS_PER_FIELD);
+        let mut snippets: Vec<String> = Vec::new();
+        for _ in 0..MAX_SNIPPETS_PER_FIELD {
+            if snippets.len() >= wanted {
+                break;
+            }
+            let mut snippet = generator.snippet(&text);
+            if snippet.is_empty() {
+                break;
+            }
+            // `Snippet` exposes its highlights relative to the fragment, not
+            // to the field text, so the fragment has to be located again.
+            // It is a slice of `text` by construction, so `find` succeeds;
+            // bailing out instead of masking nothing keeps the loop
+            // guaranteed to terminate even if that ever stops holding.
+            let Some(base) = text.find(snippet.fragment()) else {
+                break;
+            };
+            let masked: Vec<Range<usize>> = snippet
+                .highlighted()
+                .iter()
+                .map(|r| base + r.start..base + r.end)
+                .collect();
+            snippet.set_snippet_prefix_postfix(pre, post);
+            let html = snippet.to_html();
+            // Masking already stops the *same* occurrence coming back twice,
+            // so this only fires for two genuinely different occurrences whose
+            // fragments render identically -- and dropping the second is the
+            // documented divergence from Solr in gap 4 above, which returns
+            // both. No corpus in the suite hits it (deleting this guard leaves
+            // every test green).
+            if !snippets.contains(&html) {
+                snippets.push(html);
+            }
+            let mut bytes = text.into_bytes();
+            for range in masked {
+                // Same-length ASCII blanking: the range is a token boundary,
+                // so overwriting it with spaces leaves the rest of the text
+                // byte-identical and still valid UTF-8. The range came from a
+                // fragment located inside this very text, so it is in bounds
+                // by construction -- skipping it silently would burn the
+                // remaining passes re-finding the same match.
+                bytes
+                    .get_mut(range)
+                    .expect("a highlight range from the located fragment lies inside the text")
+                    .fill(b' ');
+            }
+            text = String::from_utf8(bytes)
+                .context("masking a highlighted range produced invalid UTF-8")?;
+        }
+        Ok(snippets)
     }
 
     /// Builds the `/mlt` similarity query for `addr` — mines terms from
@@ -2272,6 +2381,8 @@ impl FacetOrderKey {
 /// dynamic-field keys (findings fact 6's ordering, extended).
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use tempfile::TempDir;
 
@@ -2640,5 +2751,222 @@ stored = true
         index
             .parse_query("*:* -lazy", "body")
             .expect("*:* -lazy must parse");
+    }
+
+    /// Indexes a single doc with the given `body`, commits, and returns the
+    /// `DocAddress` of the hit for a `body:<term>` query -- the shared setup
+    /// for the `highlight_field` multi-snippet tests below (issue #103).
+    fn indexed_hit_for_term(body: &str, term: &str) -> (TempDir, CoreIndex, DocAddress) {
+        let (dir, index) = open_test_index();
+        index
+            .add_documents(&[json!({"id": "doc1", "body": body})], true)
+            .expect("add_documents");
+        index.commit().expect("commit");
+        let query = index.parse_query(term, "body").expect("parse_query");
+        let hits = index
+            .search(query.as_ref(), &[], &[])
+            .expect("search should not fail");
+        let (_score, addr) = hits
+            .into_iter()
+            .next()
+            .expect("the indexed doc must match the term");
+        (dir, index, addr)
+    }
+
+    /// Same body text (with the term swapped to "widget") as
+    /// `HL_SNIPPETS_PROBE_DOCS` in `src/coverage.rs`, whose gaps between the
+    /// three term occurrences are already pinned by
+    /// `hl_snippets_probe_doc_gaps_exceed_a_snippet_window` to exceed
+    /// Tantivy's 150-char default snippet window. Reusing that exact spacing
+    /// here means a highlighter that produces one fragment per occurrence
+    /// (rather than merging occurrences into a shared window) must return
+    /// three genuinely separate, non-overlapping fragments for this body.
+    const THREE_WELL_SEPARATED_OCCURRENCES: &str = "widget prototype unveiled at the trade show. \
+        the weather in the valley stayed mild and overcast for most of the week without much \
+        wind at all. a second widget shipment arrived at the warehouse yesterday. meanwhile the \
+        local council debated a new bridge proposal for nearly three hours last tuesday evening. \
+        engineers are already testing a third widget revision in the lab. several farmers \
+        reported an unusually early harvest this year thanks to the warm and sunny spring \
+        season.";
+
+    /// `highlight_field`'s `snippets_cap` argument, set out of the way, for
+    /// the tests below that are about *extraction* rather than capping: they
+    /// want every fragment the primitive can find, and do their own
+    /// `take(cap)` afterwards. `MAX_SNIPPETS_PER_FIELD` still bounds the loop
+    /// internally, so this is "as many as exist", not an unbounded scan.
+    const UNCAPPED: usize = usize::MAX;
+
+    /// `CoreIndex::highlight_field` itself (issue #103): against a field with
+    /// three well-separated occurrences of the query term, it must be able to
+    /// surface more than Tantivy's single best-scoring fragment. Composes the
+    /// primitive's result with `.take(cap)`, exactly the way
+    /// `crate::highlight::highlighting` applies `hl.snippets` today, so this
+    /// pins the *extraction* behavior `highlight_field` owns rather than
+    /// re-testing the capping `take()` already does correctly.
+    ///
+    /// M < N: cap 2 over 3 real occurrences must yield exactly 2 snippets,
+    /// not the single-fragment ceiling this asserted before #103.
+    #[test]
+    fn highlight_field_extracts_up_to_cap_when_cap_is_below_match_count() {
+        let (_dir, index, addr) = indexed_hit_for_term(THREE_WELL_SEPARATED_OCCURRENCES, "widget");
+        let query = index.parse_query("widget", "body").expect("parse_query");
+
+        let all_snippets = index
+            .highlight_field(query.as_ref(), addr, "body", 150, "<em>", "</em>", UNCAPPED)
+            .expect("highlight_field");
+
+        let cap = 2;
+        let capped: Vec<&String> = all_snippets.iter().take(cap).collect();
+        assert_eq!(
+            capped.len(),
+            cap,
+            "issue #103: three well-separated occurrences of the query term must let \
+             highlight_field surface enough distinct fragments to fill a cap of {cap}; got \
+             {all_snippets:?}"
+        );
+        for snippet in &capped {
+            assert!(
+                snippet.contains("<em>widget</em>"),
+                "each returned snippet must wrap the matched term in the requested markers, got {snippet:?}"
+            );
+        }
+        assert_eq!(
+            capped.iter().collect::<HashSet<_>>().len(),
+            cap,
+            "the {cap} snippets filling the cap must be distinct fragments, not the same \
+             fragment repeated: {capped:?}"
+        );
+    }
+
+    /// M >= N: a cap of 5 over exactly 3 real occurrences must yield exactly
+    /// 3 snippets -- Solr's own `hl.snippets` never pads past what actually
+    /// exists in the field (finding 52, `src/highlight.rs` module docs), and
+    /// `highlight_field` must supply all 3 real fragments for the cap to have
+    /// anything to reflect.
+    #[test]
+    fn highlight_field_returns_every_match_when_cap_exceeds_match_count() {
+        let (_dir, index, addr) = indexed_hit_for_term(THREE_WELL_SEPARATED_OCCURRENCES, "widget");
+        let query = index.parse_query("widget", "body").expect("parse_query");
+
+        let all_snippets = index
+            .highlight_field(query.as_ref(), addr, "body", 150, "<em>", "</em>", UNCAPPED)
+            .expect("highlight_field");
+
+        let cap = 5;
+        let capped: Vec<&String> = all_snippets.iter().take(cap).collect();
+        assert_eq!(
+            capped.len(),
+            3,
+            "issue #103: three real occurrences of the query term, capped at {cap}, must \
+             yield exactly 3 snippets (min(cap, actual matches)), never fewer and never padded; \
+             got {all_snippets:?}"
+        );
+        for snippet in &capped {
+            assert!(
+                snippet.contains("<em>widget</em>"),
+                "each returned snippet must wrap the matched term in the requested markers, got {snippet:?}"
+            );
+        }
+        assert_eq!(
+            capped.iter().collect::<HashSet<_>>().len(),
+            3,
+            "all 3 snippets must be distinct fragments, not the same fragment repeated: {capped:?}"
+        );
+    }
+
+    /// Two occurrences of the query term close enough together (well inside
+    /// a single ~150-char snippet window) that a naive "extract best
+    /// fragment, then mask only the matched term's own byte range, then
+    /// re-extract" loop could plausibly re-select overlapping text around
+    /// the *other* occurrence, or emit the same fragment twice, or panic on
+    /// a byte range that no longer lines up with the (partially masked)
+    /// source text.
+    ///
+    /// This test does not assert a specific fragment count or boundary --
+    /// nothing in the spec pins exactly how adjacent occurrences must be
+    /// split -- but it does assert the safe/conservative contract the
+    /// implementor must satisfy either way: no panic, no two returned
+    /// fragments that are byte-for-byte identical, and no fragment so short
+    /// a human would not call it a real snippet (an arbitrary but generous
+    /// floor -- comfortably below what a masking bug that chopped a fragment
+    /// down to a few stray characters would produce, comfortably above an
+    /// empty or near-empty string).
+    #[test]
+    fn highlight_field_handles_adjacent_occurrences_without_duplicates_or_panics() {
+        let body = "the widget alpha and the widget beta sit right next to each other in the \
+            same storage crate on the loading dock this morning.";
+        let (_dir, index, addr) = indexed_hit_for_term(body, "widget");
+        let query = index.parse_query("widget", "body").expect("parse_query");
+
+        // The production entry point never panics on this input -- this is
+        // the actual assertion for the "no panic" half of the contract;
+        // `expect` below turns any `Err` (never a panic) into a clear
+        // failure message rather than an opaque one.
+        let snippets = index
+            .highlight_field(query.as_ref(), addr, "body", 150, "<em>", "</em>", UNCAPPED)
+            .expect("highlight_field must not error on adjacent occurrences of the same term");
+
+        assert!(
+            !snippets.is_empty(),
+            "a field that matched the query must return at least one snippet"
+        );
+        assert_eq!(
+            snippets.iter().collect::<HashSet<_>>().len(),
+            snippets.len(),
+            "no two returned snippets may be byte-for-byte identical: {snippets:?}"
+        );
+        const MIN_REAL_FRAGMENT_LEN: usize = 20;
+        for snippet in &snippets {
+            assert!(
+                snippet.len() >= MIN_REAL_FRAGMENT_LEN,
+                "a masking bug that truncated a fragment down to a stray few characters must \
+                 fail here: {snippet:?} is shorter than {MIN_REAL_FRAGMENT_LEN} bytes"
+            );
+            assert!(
+                snippet.contains("<em>widget</em>"),
+                "each returned snippet must still wrap a real match in the requested markers, \
+                 got {snippet:?}"
+            );
+        }
+    }
+
+    /// `snippets_cap` bounds *extraction*, not just the returned slice.
+    /// Every snippet past the first costs another full `SnippetGenerator`
+    /// pass over the field text, so an `hl.snippets=2` request must not pay
+    /// to find the third occurrence it will never show. Returning 2 (not 3)
+    /// for a body with three findable occurrences is the observable proxy for
+    /// "the loop stopped": a third snippet could only exist if a third pass
+    /// had run.
+    #[test]
+    fn highlight_field_stops_extracting_once_the_cap_is_filled() {
+        let (_dir, index, addr) = indexed_hit_for_term(THREE_WELL_SEPARATED_OCCURRENCES, "widget");
+        let query = index.parse_query("widget", "body").expect("parse_query");
+
+        let uncapped = index
+            .highlight_field(query.as_ref(), addr, "body", 150, "<em>", "</em>", UNCAPPED)
+            .expect("highlight_field");
+        assert_eq!(
+            uncapped.len(),
+            3,
+            "precondition: this body has three findable occurrences, so a cap below 3 is a \
+             cap that must actually bite; got {uncapped:?}"
+        );
+
+        for cap in [1, 2] {
+            let capped = index
+                .highlight_field(query.as_ref(), addr, "body", 150, "<em>", "</em>", cap)
+                .expect("highlight_field");
+            assert_eq!(
+                capped.len(),
+                cap,
+                "hl.snippets={cap} must stop extraction at {cap} snippets rather than \
+                 extracting all 3 and letting the caller truncate; got {capped:?}"
+            );
+            assert_eq!(
+                capped[..],
+                uncapped[..cap],
+                "capping early must yield the same leading snippets as extracting everything"
+            );
+        }
     }
 }
