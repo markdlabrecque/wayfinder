@@ -150,6 +150,28 @@ class DocumentBuilderTest extends TestCase {
   }
 
   /**
+   * search_api_solr 4.3.13 indexes a deterministic scalar sort copy for text.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandAddsDeterministicTextSortCopies(): void {
+    $item = $this->mockItem('node/7:en', 'entity:node', 'en', [
+      'title' => $this->mockField('title', 'text', [new TextValue('Single title')]),
+      'field_body' => $this->mockField(
+        'field_body',
+        'text',
+        [new TextValue('First paragraph'), new TextValue('Second paragraph')],
+        TRUE
+      ),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    $this->assertSame('Single title', $doc['sort_title']);
+    $this->assertSame('First paragraph', $doc['sort_field_body']);
+  }
+
+  /**
    * Regression test for issue #83, end-to-end through the
    * DocumentBuilder -> FieldMapper path: a multi-valued `text` field whose
    * values are TextValue objects (their real shape from Search API, per

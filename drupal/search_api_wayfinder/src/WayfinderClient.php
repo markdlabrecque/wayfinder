@@ -34,7 +34,8 @@ class WayfinderClient {
    * @throws \Drupal\search_api\SearchApiException
    */
   public function select(array $params): array {
-    return $this->request('GET', 'select', ['query' => $params + ['wt' => 'json']]);
+    $params['wt'] = 'json';
+    return $this->request('GET', 'select', ['query' => $this->encodeQuery($params)]);
   }
 
   /**
@@ -53,8 +54,9 @@ class WayfinderClient {
    * @throws \Drupal\search_api\SearchApiException
    */
   public function update(array $command, array $queryParams = []): array {
+    $queryParams['wt'] = 'json';
     return $this->request('POST', 'update', [
-      'query' => $queryParams + ['wt' => 'json'],
+      'query' => $this->encodeQuery($queryParams),
       'json' => $command,
     ]);
   }
@@ -67,13 +69,32 @@ class WayfinderClient {
   public function ping(): bool {
     try {
       $response = $this->httpClient->request('GET', $this->coreUrl . '/admin/ping', [
-        'query' => ['wt' => 'json'],
+        'query' => $this->encodeQuery(['wt' => 'json']),
       ]);
       return $response->getStatusCode() === 200;
     }
     catch (GuzzleException $e) {
       return FALSE;
     }
+  }
+
+  /**
+   * Encodes Solr query parameters without PHP's bracket notation for repeated
+   * values. Guzzle's array encoder turns fq values into fq[0], fq[1], which
+   * is not Solr-wire-compatible.
+   */
+  private function encodeQuery(array $params): string {
+    $encoded = [];
+    foreach ($params as $name => $value) {
+      $values = $name === 'fq' && is_array($value) ? $value : [$value];
+      foreach ($values as $item) {
+        if (!is_scalar($item) && $item !== NULL) {
+          throw new \InvalidArgumentException('Query parameters must be scalar values.');
+        }
+        $encoded[] = rawurlencode((string) $name) . '=' . rawurlencode((string) $item);
+      }
+    }
+    return implode('&', $encoded);
   }
 
   /**
