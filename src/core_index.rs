@@ -420,6 +420,29 @@ fn is_dynamic_container_field(field_name: &str) -> bool {
         })
 }
 
+/// What one `qf`/`pf` entry actually addresses in the Tantivy index: a
+/// declared `[[fields]]` handle, or — for a name that only matches a
+/// `[[dynamic_fields]]` pattern (issue #84) — a JSON sub-path of the
+/// catch-all container that dynamic rule writes into. Terms differ between
+/// the two (`Term::from_field_text` versus a JSON-path term), which is why
+/// this cannot just be a `Field`.
+#[derive(Clone, Debug)]
+enum FieldTarget {
+    Static(Field),
+    Dynamic { container: Field, path: String },
+}
+
+impl FieldTarget {
+    /// The Tantivy field the target's terms live in — itself for a static
+    /// field, the catch-all container for a dynamic one.
+    fn field(&self) -> Field {
+        match self {
+            FieldTarget::Static(field) => *field,
+            FieldTarget::Dynamic { container, .. } => *container,
+        }
+    }
+}
+
 pub struct CoreIndex {
     pub wf_schema: WayfinderSchema,
     index: Index,
@@ -966,12 +989,24 @@ impl CoreIndex {
         Ok(composed)
     }
 
-    /// `qf`/`pf`'s `field^boost` list, resolved to real schema `Field`
-    /// handles (dropping any name this core does not declare) — an empty
-    /// `spec` falls back to `default_field_name` at weight 1.0, matching
-    /// Solr's own behaviour when `qf` is absent (`df` alone drives the
-    /// query, just as it does for the plain parser).
-    fn resolve_field_weights(&self, spec: &str, default_field_name: &str) -> Vec<(Field, f32)> {
+    /// `qf`/`pf`'s `field^boost` list, resolved to query targets (dropping
+    /// any name this core neither declares nor matches with a
+    /// `[[dynamic_fields]]` pattern) — an empty `spec` falls back to
+    /// `default_field_name` at weight 1.0, matching Solr's own behaviour when
+    /// `qf` is absent (`df` alone drives the query, just as it does for the
+    /// plain parser).
+    ///
+    /// A name that only matches a dynamic rule (issue #84) resolves to the
+    /// catch-all container's JSON sub-path (`_dynamic[_text].<name>`) — the
+    /// same addressing `WayfinderSchema::resolved_fast_column` uses for fast
+    /// fields and `rewrite_dynamic_fields` splices into a query string —
+    /// rather than being silently dropped for want of a literal `Field`
+    /// handle.
+    fn resolve_field_weights(
+        &self,
+        spec: &str,
+        default_field_name: &str,
+    ) -> Vec<(FieldTarget, f32)> {
         let weights = if spec.trim().is_empty() {
             vec![(default_field_name.to_string(), 1.0)]
         } else {
@@ -979,8 +1014,42 @@ impl CoreIndex {
         };
         weights
             .into_iter()
-            .filter_map(|(name, boost)| self.wf_schema.field(&name).map(|field| (field, boost)))
+            .filter_map(|(name, boost)| self.field_target(&name).map(|target| (target, boost)))
             .collect()
+    }
+
+    /// The query target backing `name`, with the same static-before-dynamic
+    /// precedence as indexing (`is_static`/`match_dynamic`): a declared field
+    /// wins, otherwise the catch-all JSON container plus `name` as the path.
+    ///
+    /// ponytail: a dynamic name resolves to a *string*-typed JSON term, which
+    /// is exactly right for the `_dynamic_text` container (`qf`/`pf` are text
+    /// relevance params) but means a `qf` naming a non-text dynamic rule
+    /// (`*_i` in the `_dynamic` container, whose values index as typed JSON
+    /// numbers) contributes a clause that cannot match rather than a numeric
+    /// term. Tantivy's own numeric coercion for JSON paths
+    /// (`convert_to_fast_value_and_append_to_json_term`) is private to its
+    /// query parser, so matching that would mean reimplementing it.
+    ///
+    /// Note the failure mode this trades: before #84 such a name was dropped
+    /// outright, so a `qf` naming *only* a numeric dynamic field left
+    /// `qf_fields` empty and 400d with "names no field this core has". Now it
+    /// resolves, the list is non-empty, and the request 200s with
+    /// `numFound: 0` — a loud wrong answer became a quiet one for the numeric
+    /// case, which is the price of the text case (the one `qf`/`pf` exist
+    /// for) working at all. Raising this ceiling means encoding numeric JSON
+    /// terms here, not restoring the 400.
+    fn field_target(&self, name: &str) -> Option<FieldTarget> {
+        if let Some(field) = self.wf_schema.field(name) {
+            return Some(FieldTarget::Static(field));
+        }
+        let rule = self.wf_schema.match_dynamic(name)?;
+        let container_name = self.wf_schema.dynamic_target(rule);
+        let container = self.wf_schema.field(container_name)?;
+        Some(FieldTarget::Dynamic {
+            container,
+            path: name.to_string(),
+        })
     }
 
     /// One edismax clause's `qf`-wide query: `phrase_text` tokenized with
@@ -996,22 +1065,22 @@ impl CoreIndex {
     fn build_field_disjunction(
         &self,
         phrase_text: &str,
-        qf_fields: &[(Field, f32)],
+        qf_fields: &[(FieldTarget, f32)],
         tie: f32,
     ) -> Box<dyn Query> {
         let mut disjuncts: Vec<Box<dyn Query>> = Vec::with_capacity(qf_fields.len());
-        for (field, field_boost) in qf_fields {
-            let tokens = self.tokenize_for_field(*field, phrase_text);
+        for (target, field_boost) in qf_fields {
+            let tokens = self.tokenize_for_target(target, phrase_text);
             let base: Box<dyn Query> = match tokens.as_slice() {
                 [] => continue,
                 [only] => Box::new(TermQuery::new(
-                    Term::from_field_text(*field, only),
+                    self.term_for_target(target, only),
                     IndexRecordOption::WithFreqsAndPositions,
                 )),
                 _ => {
                     let terms: Vec<Term> = tokens
                         .iter()
-                        .map(|t| Term::from_field_text(*field, t))
+                        .map(|t| self.term_for_target(target, t))
                         .collect();
                     Box::new(PhraseQuery::new(terms))
                 }
@@ -1048,14 +1117,14 @@ impl CoreIndex {
             return None;
         }
         let mut disjuncts: Vec<Box<dyn Query>> = Vec::new();
-        for (field, field_boost) in &pf_fields {
-            let tokens = self.tokenize_for_field(*field, &joined);
+        for (target, field_boost) in &pf_fields {
+            let tokens = self.tokenize_for_target(target, &joined);
             if tokens.len() < 2 {
                 continue;
             }
             let terms: Vec<Term> = tokens
                 .iter()
-                .map(|t| Term::from_field_text(*field, t))
+                .map(|t| self.term_for_target(target, t))
                 .collect();
             let phrase: Box<dyn Query> = Box::new(PhraseQuery::new(terms));
             disjuncts.push(Box::new(BoostQuery::new(phrase, *field_boost)));
@@ -1069,23 +1138,56 @@ impl CoreIndex {
         }
     }
 
+    /// One analyzed token as an index term for `target`: a plain field term
+    /// for a declared field, or the JSON-path term shape Tantivy's own
+    /// `generate_literals_for_json_object` builds
+    /// (`Term::from_field_json_path` + `append_type_and_str`) for a dynamic
+    /// name inside a catch-all container — the same encoding the indexing
+    /// path produced via `add_object`, so the two match.
+    fn term_for_target(&self, target: &FieldTarget, token: &str) -> Term {
+        match target {
+            FieldTarget::Static(field) => Term::from_field_text(*field, token),
+            FieldTarget::Dynamic { container, path } => {
+                let schema = self.index.schema();
+                let expand_dots = match schema.get_field_entry(*container).field_type() {
+                    tantivy::schema::FieldType::JsonObject(opts) => opts.is_expand_dots_enabled(),
+                    _ => false,
+                };
+                let mut term = Term::from_field_json_path(*container, path, expand_dots);
+                term.append_type_and_str(token);
+                term
+            }
+        }
+    }
+
     /// Tokenizes free-standing `text` (not a stored doc value — a `q`/`pf`
-    /// clause's own literal text) with `field`'s own indexing analyzer, the
-    /// same tokenizer chain `mlt_query` mines stored values with. A
-    /// non-text field (or one with no configured tokenizer) falls back to
-    /// the raw text as a single "token" — edismax's `qf`/`pf` are only ever
-    /// pointed at text fields per this issue's scope, so this is a
-    /// defensive fallback, not a path any fixture exercises.
-    fn tokenize_for_field(&self, field: Field, text: &str) -> Vec<String> {
+    /// clause's own literal text) with `target`'s own indexing analyzer, the
+    /// same tokenizer chain `mlt_query` mines stored values with. For a
+    /// dynamic target that analyzer is the catch-all container's, not a
+    /// declared field's (see the `JsonObject` arm below). A non-text target
+    /// (or one with no configured tokenizer) falls back to the raw text as a
+    /// single "token" — edismax's `qf`/`pf` are only ever pointed at text
+    /// fields per this issue's scope, so this is a defensive fallback, not a
+    /// path any fixture exercises.
+    fn tokenize_for_target(&self, target: &FieldTarget, text: &str) -> Vec<String> {
         let schema = self.index.schema();
-        let field_entry = schema.get_field_entry(field);
-        let tantivy::schema::FieldType::Str(text_options) = field_entry.field_type() else {
-            return vec![text.to_string()];
+        let field_entry = schema.get_field_entry(target.field());
+        let tokenizer_name = match field_entry.field_type() {
+            tantivy::schema::FieldType::Str(text_options) => {
+                text_options.get_indexing_options().map(|o| o.tokenizer())
+            }
+            // A dynamic `qf`/`pf` name lives inside a catch-all JSON
+            // container, whose analyzer is declared on the container's own
+            // `JsonObjectOptions` (`_dynamic_text` = `text_en`, `_dynamic` =
+            // `raw`) — the same chain `generate_literals_for_json_object`
+            // uses when a dynamic name reaches Tantivy's parser via the
+            // query-text path.
+            tantivy::schema::FieldType::JsonObject(json_options) => json_options
+                .get_text_indexing_options()
+                .map(|o| o.tokenizer()),
+            _ => None,
         };
-        let Some(mut tokenizer) = text_options
-            .get_indexing_options()
-            .map(|o| o.tokenizer())
-            .and_then(|name| self.index.tokenizers().get(name))
+        let Some(mut tokenizer) = tokenizer_name.and_then(|name| self.index.tokenizers().get(name))
         else {
             return vec![text.to_string()];
         };
