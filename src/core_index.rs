@@ -1796,9 +1796,18 @@ impl CoreIndex {
     /// `facet.limit` are response-shaping concerns and live in `crate::facet`,
     /// which also needs an order-preserving sort key alongside the rendered
     /// term — see `FacetOrderKey`.
+    ///
+    /// `kind` is the caller-resolved `ValueKind` backing `field_name` (issue
+    /// #66: `field_name` may be a dynamic-only field's catch-all JSON column,
+    /// e.g. `_dynamic.ss_lang`, which carries no schema entry of its own to
+    /// look `value_kind` up from — so the caller resolves it via
+    /// `WayfinderSchema::resolved_value_kind` against the *original* field
+    /// name and passes the result in, rather than this fn re-deriving it from
+    /// `field_name` directly).
     pub fn term_facet(
         &self,
         field_name: &str,
+        kind: Option<ValueKind>,
         query: &dyn Query,
     ) -> Result<Vec<(String, FacetOrderKey, u64)>> {
         const AGG_NAME: &str = "wf_terms";
@@ -1843,8 +1852,6 @@ impl CoreIndex {
                 "could not facet on field `{field_name}`: unexpected aggregation result"
             ));
         };
-
-        let kind = self.wf_schema.value_kind(field_name);
 
         Ok(buckets
             .iter()
