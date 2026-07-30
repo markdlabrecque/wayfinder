@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use tantivy::Index;
 use tantivy::schema::FieldType;
 use tempfile::TempDir;
+use wayfinder::schema;
 
 /// Build an empty core whose user schema deliberately has no `_version_`
 /// declaration. The implementation must add the internal field itself.
@@ -64,6 +65,101 @@ fn version_field_is_internal_i64_fast_and_absent_from_schema_toml() {
         entry.field_type()
     );
     assert!(entry.is_fast(), "_version_ must be a fast field");
+}
+
+#[test]
+fn user_schema_declaration_of_version_field_is_a_normal_load_error() {
+    let toml = format!(
+        "{}\n[[fields]]\nname = \"_version_\"\ntype = \"long\"\nfast = true\n",
+        common::SCHEMA_TOML
+    );
+    let dir = TempDir::new().expect("temp dir");
+    let schema_path = dir.path().join("schema.toml");
+    std::fs::write(&schema_path, toml).expect("write schema.toml");
+
+    let result = std::panic::catch_unwind(|| schema::load(&schema_path));
+    let err = result
+        .expect("a user _version_ declaration must return an error, not panic")
+        .expect_err("_version_ must be reserved and cannot control the internal field");
+    assert!(
+        format!("{err:#}").contains("_version_"),
+        "the schema-load error must name the reserved field: {err:#}"
+    );
+}
+
+#[tokio::test]
+async fn version_field_is_stats_only_not_sortable_or_facetable() {
+    let (app, _dir) = version_app();
+
+    let (status, body) = common::get(
+        &app,
+        "select?q=*:*&rows=0&stats=true&stats.field=_version_&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "_version_ must remain available to the existing stats path: {body}"
+    );
+
+    let (status, body) = common::get(&app, "select?q=*:*&sort=_version_+asc&wt=json").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "_version_ sorting is out of scope: {body}"
+    );
+
+    let (status, body) = common::get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=_version_&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "_version_ faceting is out of scope: {body}"
+    );
+}
+
+/// Dynamic numeric fields are stored in JSON-path fast columns; stats is
+/// static-only and must not validate one then aggregate a wrong bare column.
+const DYNAMIC_STATS_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "id"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[dynamic_fields]]
+pattern = "*_i"
+type = "int"
+stored = true
+fast = true
+"#;
+
+#[tokio::test]
+async fn stats_on_a_fast_dynamic_numeric_field_remains_rejected() {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), DYNAMIC_STATS_SCHEMA_TOML).expect("app builds");
+    let (status, body) = common::post_docs(&app, &json!([{"id":"d1","count_i":1}])).await;
+    assert_eq!(status, StatusCode::OK, "test setup must index: {body}");
+
+    let (status, body) = common::get(
+        &app,
+        "select?q=*:*&rows=0&stats=true&stats.field=count_i&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "dynamic stats must not pass validation into a wrong bare column: {body}"
+    );
 }
 
 #[tokio::test]
