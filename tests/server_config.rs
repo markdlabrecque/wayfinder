@@ -203,6 +203,24 @@ async fn strict_params_allows_every_implemented_param() {
     );
 }
 
+/// `bf` (boost function) is a valid edismax param Wayfinder does not yet
+/// implement -- it must be accepted-and-ignored under `strict_params = true`
+/// (issue #108), not 400 as an unknown param.
+#[tokio::test]
+async fn strict_params_accepts_bf_as_implemented_but_ignored() {
+    let (app, _dir, _data) = indexed_app_with_config(Some("strict_params = true\n")).await;
+    let (status, body) = get(
+        &app,
+        "select?q=lazy&defType=edismax&qf=body&bf=recip(rating,1,1000,1000)&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "bf must be accepted under strict_params, got body: {body}"
+    );
+}
+
 #[tokio::test]
 async fn strict_params_still_accepts_the_commit_param_on_update() {
     let (app, _dir, _data) = indexed_app_with_config(Some("strict_params = true\n")).await;

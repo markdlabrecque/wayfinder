@@ -81,6 +81,10 @@ const SELECT_PARAMS: &[&str] = &[
     "tie",
     "boost",
     "bq",
+    // Accepted-and-ignored (issue #108): edismax's boost-function param.
+    // Wayfinder does not apply it yet, but a request using it must not 400
+    // under strict_params, since Solr accepts it.
+    "bf",
     "fl",
     "rows",
     "start",
