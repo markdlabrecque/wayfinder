@@ -754,13 +754,11 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
         // Every captured exchange sends `hl.snippets=3` (contract entry
         // `select.highlight.snippets`, variant "three"), so that is what this
         // probe asks for, against the `hl-snippets-gizmo` doc whose `body`
-        // holds three well-separated "gizmo" hits. It reports `false` today:
-        // `CoreIndex::highlight_field` is capped at Tantivy's single
-        // best-scoring fragment, so `hl.snippets > 1` is a structural no-op
-        // (issue #103). That `false` is the honest answer -- do not swap this
-        // back to `hl.snippets=1`, which any implementation passes whether or
-        // not the cap means anything. When #103 lands this flips to `true` on
-        // its own.
+        // holds three well-separated "gizmo" hits. Do not swap this back to
+        // `hl.snippets=1`, which any implementation passes whether or not the
+        // cap means anything: only a doc with more than one possible fragment
+        // discriminates a real cap from a single-fragment ceiling (issue #103,
+        // `CoreIndex::highlight_field`'s mask-and-resnippet loop).
         "select.highlight.snippets" => {
             probe
                 .response("select?q=gizmo&hl=true&hl.fl=body&hl.snippets=3")
@@ -1251,21 +1249,16 @@ mod tests {
     /// that a real multi-fragment highlighter would return three distinct,
     /// non-overlapping windows rather than merging them into one.
     ///
-    /// The `hl.snippets=3` assertion below locks in a *known ceiling*, not the
-    /// desired behavior: `CoreIndex::highlight_field` can only ever return
-    /// Tantivy's single best-scoring fragment
+    /// Why 3 and not 1: before issue #103, `CoreIndex::highlight_field` could
+    /// only ever return Tantivy's single best-scoring fragment
     /// (`select_best_fragment_combination` is private in
-    /// `tantivy-0.26.1/src/snippet/mod.rs`), so `hl.snippets > 1` is a
-    /// structural no-op today. Lifting that is issue #103
-    /// ("hl.snippets > 1 is a structural no-op (single-fragment ceiling in
-    /// highlight_field)").
-    ///
-    /// This is written as an assertion on current behavior rather than an
-    /// `#[ignore]` on purpose, per the "deliberate skips must expire" rule: it
-    /// fails the moment #103 lands, naming itself as the thing to update
-    /// (`1` becomes `3`) instead of quietly staying green on a stale premise.
-    /// It equally catches the opposite regression -- a change that starts
-    /// emitting a *different* number of snippets without anyone deciding to.
+    /// `tantivy-0.26.1/src/snippet/mod.rs`), so `hl.snippets > 1` was a
+    /// structural no-op. #103 lifted that by looping the single-fragment
+    /// extraction against a progressively masked remainder of the source
+    /// text, so `hl.snippets=3` against a doc with three well-separated
+    /// occurrences of the query term returns all three. This equally catches
+    /// the opposite regression -- a change that starts emitting some *other*
+    /// number of snippets without anyone deciding to.
     #[tokio::test]
     async fn snippets_cap_is_distinguishable_from_default() {
         let probe = ProbeApp::new().await;
@@ -1294,9 +1287,10 @@ mod tests {
             .expect("hl.snippets=3 highlighting/hl-snippets-gizmo/body array");
         assert_eq!(
             three_snippets.len(),
-            1,
-            "issue #103: hl.snippets=3 still yields the single-fragment ceiling, \
-             identical to hl.snippets=1; update this to 3 when #103 lands. Got {three_snippets:?}"
+            3,
+            "issue #103: hl.snippets=3 against a doc with three well-separated occurrences of \
+             the query term must return all three snippets, not the pre-#103 single-fragment \
+             ceiling. Got {three_snippets:?}"
         );
     }
 

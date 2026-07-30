@@ -5,8 +5,9 @@
 //! Wire semantics live here, the same way `crate::facet` holds Solr's facet
 //! semantics on top of `CoreIndex::term_facet`/`count`: which fields
 //! highlight, how many snippets, and the exact envelope shape.
-//! `CoreIndex::highlight_field` is the Tantivy-facing primitive (one
-//! `SnippetGenerator` call per doc/field). Facts pinned by fixtures in
+//! `CoreIndex::highlight_field` is the Tantivy-facing primitive: it extracts
+//! distinct fragments for a doc/field up to the `hl.snippets` cap this module
+//! resolves and hands it. Facts pinned by fixtures in
 //! `solr-ref/responses/hl_*.json` (`docs/solr-ref-findings.md` findings
 //! 51-54):
 //!
@@ -132,11 +133,24 @@ pub fn highlighting(
         let key = doc_key(index, addr, unique_key)?;
         let mut per_field = Map::new();
         for field_name in &fields {
-            let snippets = index.highlight_field(query, addr, field_name, max_chars, pre, post)?;
+            let snippets = index.highlight_field(
+                query,
+                addr,
+                field_name,
+                max_chars,
+                pre,
+                post,
+                snippets_cap,
+            )?;
             if snippets.is_empty() {
                 // finding 51: absent from the per-field map, not `[]`.
                 continue;
             }
+            // `highlight_field` already stops extracting at `snippets_cap` --
+            // it has to, since every extra snippet costs another pass over the
+            // field text. This `take` is the belt to that braces: capping is
+            // finding 52's wire contract, and it stays enforced here rather
+            // than relying on the primitive having got it right.
             let capped: Vec<Value> = snippets
                 .into_iter()
                 .take(snippets_cap)
