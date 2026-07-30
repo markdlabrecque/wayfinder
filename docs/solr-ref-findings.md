@@ -1369,3 +1369,22 @@ fragment" to be different answers at all.
     `UserInputAst::Boost`'s weight entirely (the same weight the plain, non-edismax `parse_query`
     path already honors via `build_ast`'s own `UserInputAst::Boost` arm), so `q=rocket^5` had no
     scoring effect at all under edismax.
+
+## Finding from issue #110 (`boost=<function-query>`)
+
+83. **`boost` is a function-query parameter in real Solr, not a plain float — real Solr 500s on
+    `boost=recip(rord(title),1,1000,1000)` against `title` here only because that field lacks
+    `docValues`, an unrelated schema-config error, not evidence about the function-query
+    machinery itself.** Confirmed by a one-off capture (500, `IllegalStateException: unexpected
+    docvalues type NONE for field 'title'`) that Solr does attempt to *evaluate* a function-query
+    `boost`, unlike Wayfinder, which implements no function-query evaluator at all (PRD v1 scope
+    explicitly excludes "full function-query syntax", same exclusion as `bf` — finding 75). No
+    capture demonstrates a clean 200 for a function-query `boost` Wayfinder could compare itself
+    against, since every function needing a real field hits this schema's lack of `docValues`.
+    Given the `bf` precedent (issue #108) and PRD scope, the decision this issue asked for is:
+    accept-and-ignore, not implement or reject. `params.get("boost").and_then(|s|
+    s.parse().ok())` already produces exactly that (`.ok()` turns an unparseable non-numeric
+    value into `None`, applying no boost) — this issue's fix is a comment making that
+    intentional rather than incidental, plus a test
+    (`non_numeric_boost_is_ignored_like_any_unsupported_function_query_not_rejected`) locking the
+    behavior in alongside the existing `bf` one.

@@ -976,6 +976,15 @@ async fn select(
                     .into_iter()
                     .map(str::to_string)
                     .collect();
+                // `boost` is documented as a function query in real Solr (a
+                // plain number like `boost=2` is just its simplest constant
+                // function), but Wayfinder has no function-query evaluator
+                // (PRD v1 scope explicitly excludes it, same as `bf` --
+                // issue #108/finding 75). A non-numeric `boost` value (e.g.
+                // `recip(rord(date),1,1000,1000)`) therefore fails `.parse()`
+                // and falls back to `None` here -- accepted and silently
+                // ignored, not rejected, matching the same unknown-value
+                // leniency `bf` gets rather than a 400 (issue #110).
                 let boost: Option<f32> = params.get("boost").and_then(|s| s.parse().ok());
                 state
                     .index
