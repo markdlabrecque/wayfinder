@@ -91,6 +91,21 @@ wait_for_ping() { # url -> echoes cold-start ms on stdout
   return 1
 }
 
+check_schema_add_field_response() { # status body -> non-zero + body on stderr unless a clean 2xx
+  local status=$1 body=$2
+  if [[ "$status" != 2* ]]; then
+    echo "$body" >&2
+    return 1
+  fi
+  # Solr's schema API can return HTTP 200 with an "errors" body on a
+  # rejected add-field, so a 2xx status alone isn't sufficient.
+  if echo "$body" | grep -q '"errors"'; then
+    echo "$body" >&2
+    return 1
+  fi
+  return 0
+}
+
 run_query_load() { # base_url core out_latency_file -> prints max RSS sample seen (mem_sampler_pid mem_out)
   local base=$1 core=$2 outfile=$3
   : > "$outfile"
@@ -144,11 +159,16 @@ wait "$WF_PID" 2>/dev/null || true
 # --- Solr ----------------------------------------------------------------
 echo "== starting solr =="
 docker rm -f "$SOLR_CONTAINER" >/dev/null 2>&1 || true
+# NOTE: SOLR_COLD_MS (via wait_for_ping below) starts timing only after this
+# `docker run -d` returns, so container-create time is excluded from the
+# reported cold-start number -- see issue #62.
 docker run -d --name "$SOLR_CONTAINER" -p "$SOLR_HOST_PORT:8983" solr:9 solr-precreate "$SOLR_CORE" >/dev/null
 SOLR_COLD_MS=$(wait_for_ping "$SOLR_URL/$SOLR_CORE/admin/ping?wt=json")
 echo "solr cold start: ${SOLR_COLD_MS}ms"
 
-SCHEMA_RESP=$(curl -sSf "$SOLR_URL/$SOLR_CORE/schema" -H 'Content-Type: application/json' -d '{
+SCHEMA_BODY_FILE="$WORK/schema_resp.json"
+SCHEMA_STATUS=$(curl -sS -o "$SCHEMA_BODY_FILE" -w '%{http_code}' \
+  "$SOLR_URL/$SOLR_CORE/schema" -H 'Content-Type: application/json' -d '{
   "add-field": [
     {"name":"title",    "type":"text_en", "indexed":true, "stored":true},
     {"name":"body",     "type":"text_en", "indexed":true, "stored":true},
@@ -156,10 +176,9 @@ SCHEMA_RESP=$(curl -sSf "$SOLR_URL/$SOLR_CORE/schema" -H 'Content-Type: applicat
      "docValues":true, "multiValued":true}
   ]
 }')
-# curl -f catches non-2xx HTTP responses; Solr's schema API can also return
-# 200 with an "errors" body on a rejected add-field, so check that too.
-if echo "$SCHEMA_RESP" | grep -q '"errors"'; then
-  echo "solr schema add-field failed: $SCHEMA_RESP" >&2
+SCHEMA_BODY="$(cat "$SCHEMA_BODY_FILE")"
+if ! check_schema_add_field_response "$SCHEMA_STATUS" "$SCHEMA_BODY"; then
+  echo "solr schema add-field failed (status $SCHEMA_STATUS)" >&2
   exit 1
 fi
 
@@ -170,14 +189,24 @@ sleep 1
 solr_mem_mb() {
   # docker's MemUsage field has no space between the number and its unit
   # (e.g. "2.10GiB", not "2.10 GiB"), so splitting on whitespace never
-  # isolates the unit -- match it against the raw token instead.
+  # isolates the unit -- match it against the raw token instead. Units are
+  # matched longest/most-specific-suffix first (TiB/GiB/MiB/KiB before the
+  # bare "B") so e.g. "KiB" doesn't fall through to the plain-bytes branch.
+  # An unrecognized unit fails loudly rather than silently defaulting to
+  # MiB scaling (issue #62).
   docker stats --no-stream --format '{{.MemUsage}}' "$SOLR_CONTAINER" \
     | awk -F'/' '{print $1}' \
     | awk '{
         s=$1;
-        if (s ~ /GiB/) { gsub(/GiB/, "", s); v = s * 1024; }
-        else if (s ~ /KiB/) { gsub(/KiB/, "", s); v = s / 1024; }
-        else { gsub(/MiB/, "", s); v = s; }
+        if (s ~ /^[0-9.]+TiB$/) { gsub(/TiB/, "", s); v = s * 1024 * 1024; }
+        else if (s ~ /^[0-9.]+GiB$/) { gsub(/GiB/, "", s); v = s * 1024; }
+        else if (s ~ /^[0-9.]+MiB$/) { gsub(/MiB/, "", s); v = s; }
+        else if (s ~ /^[0-9.]+KiB$/) { gsub(/KiB/, "", s); v = s / 1024; }
+        else if (s ~ /^[0-9.]+B$/) { gsub(/B/, "", s); v = s / 1048576; }
+        else {
+          print "solr_mem_mb: unrecognized memory unit in \x27" s "\x27" > "/dev/stderr";
+          exit 1;
+        }
         printf "%.2f", v
       }'
 }
