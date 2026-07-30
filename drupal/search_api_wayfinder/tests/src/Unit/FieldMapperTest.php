@@ -12,6 +12,7 @@ use Drupal\Core\TypedData\DataDefinitionInterface;
 use Drupal\Core\TypedData\DataReferenceDefinitionInterface;
 use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Item\FieldInterface;
+use Drupal\search_api\Plugin\search_api\data_type\value\TextValue;
 use Drupal\search_api_wayfinder\FieldMapper;
 use PHPUnit\Framework\TestCase;
 
@@ -267,6 +268,57 @@ class FieldMapperTest extends TestCase {
       'integer bare' => ['integer', 42, 42],
       'decimal bare' => ['decimal', 3.14, 3.14],
     ];
+  }
+
+  /**
+   * Regression test for issue #83: real Search API hands `text`-type field
+   * values as \Drupal\search_api\Plugin\search_api\data_type\value\TextValue
+   * objects (see TextDataType::getValue()), not plain PHP strings -- the
+   * `formatValue()` default branch returning $value untouched means
+   * json_encode() of the returned TextValue serializes to '{}' (all
+   * properties are `protected`, class is not JsonSerializable), which is
+   * exactly the malformed body that broke real indexing in the #80
+   * integration harness ("field tm_body expects a string value, got {}").
+   *
+   * Using the real TextValue class here (not a mock): its constructor takes
+   * only a plain string and it has no other collaborators, so it is
+   * constructible under bare PHPUnit with no Drupal bootstrap, and using the
+   * real class (rather than a hand-rolled stub) pins the assertion to the
+   * actual __toString()/toText() contract rather than to what a mock author
+   * assumed that contract does.
+   *
+   * @covers ::formatValue
+   */
+  public function testFormatValueCastsTextValueObjectToPlainString(): void {
+    $mapper = new FieldMapper();
+    $value = new TextValue('Some fulltext body');
+
+    $result = $mapper->formatValue($value, 'text');
+
+    $this->assertIsString($result, 'formatValue() must return a plain string for text-type TextValue input, not the object itself.');
+    $this->assertSame('Some fulltext body', $result);
+    // Guard against a superficial fix that stringifies to the wrong thing
+    // (e.g. a cast that hits get_object_vars() or similar) -- '{}' is the
+    // exact malformed shape json_encode() produces for a bare TextValue.
+    $this->assertNotSame('{}', $result);
+  }
+
+  /**
+   * A TextValue's rendered text can itself change after tokenization
+   * (toText() re-joins from tokens if any are set, per TextValue::toText());
+   * formatValue() must reflect whatever __toString() currently produces, not
+   * just the value the object was constructed with.
+   *
+   * @covers ::formatValue
+   */
+  public function testFormatValueUsesTextValueCurrentStringRepresentation(): void {
+    $mapper = new FieldMapper();
+    $value = new TextValue('original text');
+    $value->setText('mutated text');
+
+    $result = $mapper->formatValue($value, 'text');
+
+    $this->assertSame('mutated text', $result);
   }
 
 }

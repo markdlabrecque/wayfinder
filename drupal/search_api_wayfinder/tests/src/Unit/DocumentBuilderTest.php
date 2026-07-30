@@ -9,6 +9,7 @@ use Drupal\Core\Field\FieldStorageDefinitionInterface;
 use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Item\FieldInterface;
 use Drupal\search_api\Item\ItemInterface;
+use Drupal\search_api\Plugin\search_api\data_type\value\TextValue;
 use Drupal\search_api_wayfinder\DocumentBuilder;
 use Drupal\search_api_wayfinder\FieldMapper;
 use PHPUnit\Framework\TestCase;
@@ -75,8 +76,13 @@ class DocumentBuilderTest extends TestCase {
    * @covers ::buildAddCommand
    */
   public function testBuildAddCommandShapeAndStaticFields(): void {
+    // Regression for issue #83: real Search API hands `text`-type field
+    // values as TextValue objects (TextDataType::getValue()), never plain
+    // PHP strings -- a mock that passes a bare string here (as this test
+    // did before #83) can't see FieldMapper::formatValue() failing to
+    // stringify the object, because a plain string is already a string.
     $item = $this->mockItem('node/1:en', 'entity:node', 'en', [
-      'title' => $this->mockField('title', 'text', ['Hello world']),
+      'title' => $this->mockField('title', 'text', [new TextValue('Hello world')]),
     ]);
 
     $builder = new DocumentBuilder(new FieldMapper());
@@ -141,6 +147,35 @@ class DocumentBuilderTest extends TestCase {
 
     $this->assertSame('true', $doc['bs_field_active']);
     $this->assertSame('1970-01-01T00:00:00Z', $doc['ds_field_created']);
+  }
+
+  /**
+   * Regression test for issue #83, end-to-end through the
+   * DocumentBuilder -> FieldMapper path: a multi-valued `text` field whose
+   * values are TextValue objects (their real shape from Search API, per
+   * TextDataType::getValue()) must produce a doc array of plain strings that
+   * json_encode()s to a JSON array of strings -- not '{}' objects, which is
+   * the malformed body Wayfinder's /update parser rejected in the #80
+   * integration harness ("field tm_body expects a string value, got {}").
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandTextValueFieldSerializesToPlainStringsInJson(): void {
+    $item = $this->mockItem('node/6:en', 'entity:node', 'en', [
+      'field_body' => $this->mockField(
+        'field_body',
+        'text',
+        [new TextValue('First paragraph'), new TextValue('Second paragraph')],
+        TRUE
+      ),
+    ]);
+    $builder = new DocumentBuilder(new FieldMapper());
+    $doc = $builder->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    $this->assertSame(['First paragraph', 'Second paragraph'], $doc['tm_field_body']);
+
+    $encoded = json_decode(json_encode($doc), TRUE);
+    $this->assertSame(['First paragraph', 'Second paragraph'], $encoded['tm_field_body']);
   }
 
 }
