@@ -11,7 +11,12 @@
 //! `crate::highlight`, issue #4). Deliberately out of scope here (PRD §7):
 //! edismax, MLT. Multi-core: out of scope too — `app()` serves exactly one
 //! core, matching PRD open question 1's "single-core-per-process" lean.
+//!
+//! Alongside the Solr wire API, `GET /ui` serves the admin UI's core page
+//! (issue #94, PRD §5 v2.5) — Wayfinder's own surface, not Solr's, rendered
+//! from the same in-process core state. See `crate::admin_ui`.
 
+mod admin_ui;
 mod collector;
 mod config;
 mod core_index;
@@ -32,8 +37,8 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Path as AxPath, RawQuery, State};
 use axum::http::{Method, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::any;
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{any, get};
 use serde_json::{Map, Value, json};
 use tantivy::Score;
 use tantivy::query::{EmptyQuery, Occur, Query, QueryClone};
@@ -172,7 +177,13 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
         .route("/solr/{core}/mlt", any(mlt))
         .route("/solr/{core}/admin/ping", any(ping))
         .route("/solr/admin/info/system", any(admin_info_system))
-        .route("/solr/{core}/admin/system", any(core_admin_system));
+        .route("/solr/{core}/admin/system", any(core_admin_system))
+        // Admin UI (issue #94, PRD §5 v2.5). Outside `/solr/*` on purpose:
+        // this is Wayfinder's own surface, not part of the Solr wire API, so
+        // it can never shadow a path a Solr client expects. `get`, not `any`
+        // — the method-agnostic routing above exists to match Solr's request
+        // handlers, and that reason does not apply here.
+        .route("/ui", get(core_ui));
 
     // Test-only, never in a default/release build (#39): a route that always
     // panics, so `tests/panic_recovery.rs` can exercise the real router's
@@ -221,6 +232,34 @@ fn handle_panic(err: Box<dyn std::any::Any + Send + 'static>) -> Response {
     WfError::internal("wayfinder::PanicError", details)
         .envelope(Envelope::Bare)
         .into_response()
+}
+
+/// `GET /ui` — the admin UI's core page (issue #94, PRD §5 v2.5).
+///
+/// Read-only and idempotent: it takes a searcher for the doc count and stats
+/// the data dir for the size, and writes nothing. No params, no core segment
+/// in the path — this process serves exactly one core (see the module doc),
+/// so there is nothing to select between and nothing to add to
+/// `SELECT_PARAMS`.
+///
+/// A template render failure is a bug in a compile-time-checked template, not
+/// a client error, so it surfaces as a plain 500 rather than a Solr JSON
+/// error envelope — the envelope is the wire API's contract, and this route
+/// is deliberately outside it.
+async fn core_ui(State(state): State<Arc<AppState>>) -> Response {
+    let html = admin_ui::render_core_page(
+        &state.core_name,
+        state.index.doc_count(),
+        state.index.disk_size_bytes(),
+    );
+    match html {
+        Ok(body) => Html(body).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to render the admin UI: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 /// Verifies the request's `{core}` path segment matches the core this app

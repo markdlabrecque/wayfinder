@@ -3,7 +3,7 @@
 //! one of these per running `app()`).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -104,6 +104,28 @@ fn mlt_idf(doc_freq: u64, doc_count: u64) -> Score {
     // would otherwise follow.
     let x = ((doc_count - doc_freq) as Score + 0.5) / (doc_freq as Score + 0.5);
     (1.0 + x).ln()
+}
+
+/// Recursively sums the size of every regular file under `dir`.
+///
+/// Unreadable entries are skipped rather than propagated: this backs a
+/// display-only figure (see `CoreIndex::disk_size_bytes`), and a transient
+/// stat failure on one segment file mid-merge must not turn the admin page
+/// into a 500.
+fn dir_size_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            total = total.saturating_add(dir_size_bytes(&entry.path()));
+        } else if meta.is_file() {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    total
 }
 
 /// Renders one stored Tantivy value as the JSON Solr would return for it.
@@ -445,6 +467,11 @@ impl FieldTarget {
 
 pub struct CoreIndex {
     pub wf_schema: WayfinderSchema,
+    /// The directory this core's segments live in. Kept so read-only
+    /// introspection (the admin UI's on-disk size, issue #94) can measure the
+    /// same directory the writer/reader are using, rather than re-deriving it
+    /// from a Tantivy `Directory` that does not expose a path.
+    data_dir: PathBuf,
     index: Index,
     state: Arc<CommitState>,
     reader: IndexReader,
@@ -523,6 +550,7 @@ impl CoreIndex {
 
         Ok(CoreIndex {
             wf_schema,
+            data_dir: data_dir.to_path_buf(),
             index,
             state,
             reader,
@@ -1868,6 +1896,29 @@ impl CoreIndex {
         Ok(self.reader.searcher().search(query, &Count)?)
     }
 
+    /// Live document count as of the last commit — the same searcher the
+    /// query pipeline reads from, so the admin UI (issue #94) cannot drift
+    /// from what `/select` reports. Deleted/overwritten docs are excluded:
+    /// `Searcher::num_docs` sums each segment's alive docs.
+    ///
+    /// Read-only: taking a searcher neither commits nor reloads.
+    pub fn doc_count(&self) -> u64 {
+        self.reader.searcher().num_docs()
+    }
+
+    /// Total bytes of this core's index directory.
+    ///
+    /// ponytail: a plain recursive `std::fs` walk of the data dir, summing
+    /// file lengths. Ceiling: it is O(files) per call with no caching, counts
+    /// apparent (not allocated) size, follows nothing but the directory tree,
+    /// and silently skips entries it cannot stat — good enough for one admin
+    /// page on a single-core process, not for a metrics endpoint polled at
+    /// high frequency. The index-stats milestone (PRD §5, v2.5) is where a
+    /// real accounting would live.
+    pub fn disk_size_bytes(&self) -> u64 {
+        dir_size_bytes(&self.data_dir)
+    }
+
     /// Every term in a **string** field's term dictionary, with how many of
     /// `query`'s matches carry it — Solr's `facet.field`.
     ///
@@ -2317,6 +2368,217 @@ stored = true
             vec!["id", "body", "score", "extra_s"],
             "`score` must sit immediately after the schema-declared stored \
              fields and before any dynamic-field keys"
+        );
+    }
+
+    /// An independent, deliberately different implementation of the directory
+    /// walk `dir_size_bytes` performs: iterative with an explicit stack rather
+    /// than recursive, and `unwrap`ing where the real one skips. Used as the
+    /// oracle for the size tests below so a bug in `dir_size_bytes` cannot be
+    /// masked by the test computing its expectation with the same code.
+    fn walk_size_oracle(dir: &Path) -> u64 {
+        let mut stack = vec![dir.to_path_buf()];
+        let mut total = 0u64;
+        while let Some(path) = stack.pop() {
+            for entry in std::fs::read_dir(&path).expect("oracle reads a readable dir") {
+                let entry = entry.expect("oracle reads a readable entry");
+                // `DirEntry::metadata` does not traverse symlinks, so a link
+                // is neither a file nor a dir here — the oracle ignores it for
+                // the same reason the real walk does.
+                let meta = entry.metadata().expect("oracle stats a readable entry");
+                if meta.is_dir() {
+                    stack.push(entry.path());
+                } else if meta.is_file() {
+                    total += meta.len();
+                }
+            }
+        }
+        total
+    }
+
+    /// The recursive walk must descend into subdirectories and sum every
+    /// level, not just the top one. Nested two deep with a different-sized
+    /// file at each level, so a walk that stops early produces a *different*
+    /// non-zero number rather than accidentally matching.
+    #[test]
+    fn dir_size_bytes_sums_nested_subdirectories() {
+        let dir = TempDir::new().expect("create temp dir");
+        let root = dir.path();
+        std::fs::write(root.join("top.bin"), vec![b'a'; 100]).expect("write top.bin");
+        let mid = root.join("mid");
+        std::fs::create_dir(&mid).expect("create mid");
+        std::fs::write(mid.join("mid.bin"), vec![b'b'; 2000]).expect("write mid.bin");
+        let deep = mid.join("deep");
+        std::fs::create_dir(&deep).expect("create deep");
+        std::fs::write(deep.join("deep.bin"), vec![b'c'; 30_000]).expect("write deep.bin");
+
+        assert_eq!(
+            dir_size_bytes(root),
+            32_100,
+            "every level of the tree must contribute its files' lengths"
+        );
+        assert_eq!(
+            dir_size_bytes(root),
+            walk_size_oracle(root),
+            "the recursive walk must agree with an independent iterative walk"
+        );
+    }
+
+    /// A single file of known length contributes exactly that many bytes —
+    /// apparent size, no block rounding, no per-entry overhead.
+    #[test]
+    fn dir_size_bytes_counts_a_file_of_known_length_exactly() {
+        let dir = TempDir::new().expect("create temp dir");
+        let root = dir.path();
+        assert_eq!(
+            dir_size_bytes(root),
+            0,
+            "an empty directory is zero bytes, not an error"
+        );
+
+        std::fs::write(root.join("known.bin"), vec![0u8; 4096]).expect("write known.bin");
+        assert_eq!(
+            dir_size_bytes(root),
+            4096,
+            "one 4096-byte file must total exactly 4096"
+        );
+
+        std::fs::write(root.join("second.bin"), vec![0u8; 7]).expect("write second.bin");
+        assert_eq!(
+            dir_size_bytes(root),
+            4103,
+            "a second file adds exactly its own length"
+        );
+    }
+
+    /// A directory that cannot be read — because it does not exist, because
+    /// the path is a file, or because the process lacks permission — yields 0
+    /// rather than panicking or propagating. The admin page is display-only
+    /// (see `dir_size_bytes`'s doc comment); a stat failure must not 500 it.
+    #[test]
+    fn dir_size_bytes_returns_zero_for_an_unreadable_directory() {
+        let dir = TempDir::new().expect("create temp dir");
+        let root = dir.path();
+
+        assert_eq!(
+            dir_size_bytes(&root.join("no-such-dir")),
+            0,
+            "a nonexistent directory must be 0, not a panic"
+        );
+
+        let file = root.join("not-a-dir");
+        std::fs::write(&file, vec![0u8; 512]).expect("write not-a-dir");
+        assert_eq!(
+            dir_size_bytes(&file),
+            0,
+            "a path that is a file, not a directory, must be 0, not a panic"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = root.join("locked");
+            std::fs::create_dir(&locked).expect("create locked");
+            std::fs::write(locked.join("hidden.bin"), vec![0u8; 1234]).expect("write hidden.bin");
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+                .expect("chmod 000");
+
+            let observed = dir_size_bytes(&locked);
+            let readable_anyway = std::fs::read_dir(&locked).is_ok();
+
+            // Restore before asserting, so a failure still leaves `TempDir`
+            // able to clean up after itself.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+                .expect("restore mode");
+
+            // A process running as root can read a 0o000 directory regardless,
+            // in which case there is no permission failure to assert on.
+            if !readable_anyway {
+                assert_eq!(
+                    observed, 0,
+                    "an unreadable directory must be 0, not a panic"
+                );
+            }
+        }
+    }
+
+    /// Symlinks must not inflate the total: `DirEntry::metadata` reports the
+    /// link itself (not its target), so a link is neither a file nor a
+    /// directory to the walk. A link to a file must not add the target's
+    /// length a second time, and a link to a directory must not be descended
+    /// into (which would double-count, and could loop forever on a cycle).
+    #[cfg(unix)]
+    #[test]
+    fn dir_size_bytes_does_not_double_count_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().expect("create temp dir");
+        let root = dir.path();
+        let real_file = root.join("real.bin");
+        std::fs::write(&real_file, vec![0u8; 900]).expect("write real.bin");
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).expect("create sub");
+        std::fs::write(sub.join("inner.bin"), vec![0u8; 100]).expect("write inner.bin");
+
+        let baseline = dir_size_bytes(root);
+        assert_eq!(baseline, 1000, "the real files total 1000 bytes");
+
+        symlink(&real_file, root.join("link-to-file")).expect("symlink to file");
+        symlink(&sub, root.join("link-to-dir")).expect("symlink to dir");
+        // A self-referential link: descending into links would recurse forever.
+        symlink(root, sub.join("link-to-root")).expect("symlink to root");
+
+        assert_eq!(
+            dir_size_bytes(root),
+            baseline,
+            "symlinks must contribute nothing — the target is already counted \
+             through its real path, and links are never descended into"
+        );
+    }
+
+    /// `CoreIndex::disk_size_bytes` must measure the core's real data dir:
+    /// non-zero once a commit has written segments, and equal to an
+    /// independent walk of that same directory. This is the test that goes red
+    /// if `disk_size_bytes` is mutated to return a constant.
+    #[test]
+    fn disk_size_bytes_measures_the_core_data_dir() {
+        let (dir, index) = open_test_index();
+        let data_dir = dir.path().join("data");
+
+        index
+            .add_documents(
+                &[json!({"id": "doc1", "body": "the quick brown fox jumps over the lazy dog"})],
+                true,
+            )
+            .expect("add_documents");
+        index.commit().expect("commit");
+
+        let expected = walk_size_oracle(&data_dir);
+        assert!(
+            expected > 0,
+            "a committed core must have written something to {}",
+            data_dir.display()
+        );
+        assert_eq!(
+            index.disk_size_bytes(),
+            expected,
+            "disk_size_bytes must report the real on-disk total for the core's data dir"
+        );
+        assert!(
+            index.disk_size_bytes() > 0,
+            "a committed core must not report a zero on-disk size"
+        );
+
+        // A file added under the data dir (including one nested a level down,
+        // as Tantivy's own layout can be) is picked up on the next call — the
+        // figure is measured per call, not captured once at open time.
+        let nested = data_dir.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested");
+        std::fs::write(nested.join("padding.bin"), vec![0u8; 50_000]).expect("write padding.bin");
+        assert_eq!(
+            index.disk_size_bytes(),
+            expected + 50_000,
+            "disk_size_bytes must re-walk the tree, including subdirectories"
         );
     }
 
