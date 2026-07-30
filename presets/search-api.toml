@@ -161,6 +161,23 @@ multi_valued = true
 stored = true
 fast = true
 
+# single-valued decimal (search_api_wayfinder's FieldMapper "ft" prefix for
+# Search API's "decimal" type -- distinct from search_api_solr's own fs_/fm_
+# float convention above, but the same underlying Wayfinder "float" type)
+[[dynamic_fields]]
+pattern = "fts_*"
+type = "float"
+stored = true
+fast = true
+
+# multi-valued decimal
+[[dynamic_fields]]
+pattern = "ftm_*"
+type = "float"
+multi_valued = true
+stored = true
+fast = true
+
 # single-valued double
 [[dynamic_fields]]
 pattern = "ps_*"

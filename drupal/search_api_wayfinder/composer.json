@@ -1,0 +1,38 @@
+{
+    "name": "wayfinder/search_api_wayfinder",
+    "description": "Search API backend plugin targeting the Wayfinder Solr-wire-compatible server.",
+    "type": "drupal-module",
+    "license": "GPL-2.0-or-later",
+    "repositories": [
+        {
+            "type": "composer",
+            "url": "https://packages.drupal.org/8"
+        }
+    ],
+    "require": {
+        "php": ">=8.1",
+        "drupal/search_api": "^1.35"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^9.6 || ^10 || ^11"
+    },
+    "autoload": {
+        "psr-4": {
+            "Drupal\\search_api_wayfinder\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "_comment": "Drupal\\search_api\\ below is a test-harness-only shim, not a runtime dependency declaration. search_api ships no composer autoload of its own (Drupal core's module classloader resolves it at runtime instead), so this unit-test sandbox needs Composer to find it at its vendor/ path. A real site running composer/installers relocates it to web/modules/contrib/..., where this hardcoded vendor/ path would not resolve -- hence autoload-dev, not autoload. Guzzle is a genuine runtime dependency (via Drupal core's http_client service) so it does not need a shim; it resolves normally through vendor/.",
+        "psr-4": {
+            "Drupal\\Tests\\search_api_wayfinder\\Unit\\": "tests/src/Unit/",
+            "Drupal\\search_api\\": "vendor/drupal/search_api/src/"
+        }
+    },
+    "config": {
+        "allow-plugins": {
+            "composer/installers": true,
+            "drupal/core-composer-scaffold": false,
+            "symfony/runtime": false
+        }
+    }
+}
