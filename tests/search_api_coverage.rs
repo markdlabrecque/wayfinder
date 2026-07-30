@@ -9,14 +9,17 @@
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 const CONTRACT: &str = include_str!("../coverage/search_api_coverage_contract.json");
+const SOURCE_EVIDENCE: &str =
+    include_str!("../coverage/search_api_solr_4.4.0_source_evidence.json");
 const TRACE_DIR: &str = "solr-ref/search-api/trace";
 const TRACE_MANIFEST: &str = "solr-ref/search-api/manifest.tsv";
 
@@ -69,6 +72,7 @@ struct SemanticParameter {
     variant: String,
     values: Vec<String>,
     trace: Vec<String>,
+    occurrences: Vec<Occurrence>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -88,6 +92,51 @@ struct ResponseItem {
 struct Consumer {
     source: String,
     symbol: String,
+    evidence: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SourceEvidence {
+    upstream: Upstream,
+    snapshot_root: String,
+    files: Vec<SourceFile>,
+    citations: Vec<Citation>,
+    exclusions: Vec<Exclusion>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Upstream {
+    project: String,
+    tag: String,
+    archive_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SourceFile {
+    path: String,
+    sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Citation {
+    id: String,
+    source_path: String,
+    symbol: String,
+    line_start: usize,
+    line_end: usize,
+    source_sha256: String,
+    excerpt_sha256: String,
+    consumes: Vec<String>,
+    excerpt: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Exclusion {
+    id: String,
+    reason: String,
+    evidence: String,
+    required_expressions: Vec<String>,
+    forbidden_expressions: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -226,6 +275,55 @@ fn response_has(trace: &Trace, pointer: &str) -> bool {
     response.pointer(pointer).is_some()
 }
 
+fn source_file_paths(root: &Path) -> BTreeSet<String> {
+    fn collect(root: &Path, directory: &Path, files: &mut BTreeSet<String>) {
+        for entry in std::fs::read_dir(directory)
+            .unwrap_or_else(|e| panic!("read source snapshot {}: {e}", directory.display()))
+        {
+            let entry = entry.expect("read source snapshot entry");
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|e| panic!("read source snapshot type {}: {e}", path.display()));
+            if file_type.is_dir() {
+                collect(root, &path, files);
+            } else if file_type.is_file() {
+                files.insert(
+                    path.strip_prefix(root)
+                        .expect("source snapshot entry under snapshot root")
+                        .to_str()
+                        .expect("source snapshot path is UTF-8")
+                        .replace('\\', "/"),
+                );
+            } else {
+                panic!(
+                    "source snapshot must contain only regular files and directories: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    let mut files = BTreeSet::new();
+    collect(root, root, &mut files);
+    files
+}
+
+fn source_excerpt(source: &str, line_start: usize, line_end: usize) -> String {
+    assert!(line_start > 0 && line_start <= line_end);
+    let excerpt = source
+        .split_inclusive('\n')
+        .skip(line_start - 1)
+        .take(line_end - line_start + 1)
+        .collect::<String>();
+    assert_eq!(
+        excerpt.lines().count(),
+        line_end - line_start + 1,
+        "source range must be present in the immutable snapshot"
+    );
+    excerpt
+}
+
 fn expected_parameter_map(
     contract: &Contract,
 ) -> BTreeMap<String, BTreeMap<String, BTreeSet<String>>> {
@@ -246,6 +344,25 @@ fn expected_parameter_map(
             (parameter.name.clone(), values)
         })
         .collect()
+}
+
+fn semantic_parameter_map(
+    contract: &Contract,
+) -> BTreeMap<String, BTreeMap<String, BTreeSet<String>>> {
+    let mut mapped = BTreeMap::new();
+    for semantic in &contract.request_semantics {
+        for parameter in &semantic.parameters {
+            for occurrence in &parameter.occurrences {
+                let traces = mapped
+                    .entry(parameter.name.clone())
+                    .or_insert_with(BTreeMap::new)
+                    .entry(occurrence.value.clone())
+                    .or_insert_with(BTreeSet::new);
+                traces.extend(occurrence.trace.iter().cloned());
+            }
+        }
+    }
+    mapped
 }
 
 fn assert_bucket(
@@ -405,6 +522,11 @@ async fn frozen_capture_exhaustively_maps_all_urls_bodies_parameters_and_materia
         observed.keys().map(String::as_str).collect::<BTreeSet<_>>(),
         "every captured parameter name must map to one or more semantic denominator items"
     );
+    assert_eq!(
+        semantic_parameter_map(&contract),
+        observed,
+        "every captured parameter value and trace occurrence must be represented by a semantic class"
+    );
     for semantic in &contract.request_semantics {
         assert!(
             !semantic.parameters.is_empty() || !semantic.body_variants.is_empty(),
@@ -426,6 +548,43 @@ async fn frozen_capture_exhaustively_maps_all_urls_bodies_parameters_and_materia
                 semantic.id,
                 parameter.variant
             );
+            assert_eq!(
+                parameter.values.iter().collect::<BTreeSet<_>>(),
+                parameter
+                    .occurrences
+                    .iter()
+                    .map(|occurrence| &occurrence.value)
+                    .collect::<BTreeSet<_>>(),
+                "semantic `{}` must retain per-value occurrence provenance for {}",
+                semantic.id,
+                parameter.name,
+            );
+            assert_eq!(
+                parameter.trace.iter().collect::<BTreeSet<_>>(),
+                parameter
+                    .occurrences
+                    .iter()
+                    .flat_map(|occurrence| occurrence.trace.iter())
+                    .collect::<BTreeSet<_>>(),
+                "semantic `{}` must retain exact trace provenance for {}",
+                semantic.id,
+                parameter.name,
+            );
+            for occurrence in &parameter.occurrences {
+                let traces = occurrences.get(&occurrence.value).unwrap_or_else(|| {
+                    panic!(
+                        "semantic `{}` cites absent value {:?} for parameter {}",
+                        semantic.id, occurrence.value, parameter.name
+                    )
+                });
+                assert!(
+                    occurrence.trace.iter().all(|trace| traces.contains(trace)),
+                    "semantic `{}` cites absent occurrence for {}/{}",
+                    semantic.id,
+                    parameter.name,
+                    occurrence.value,
+                );
+            }
             for value in &parameter.values {
                 let traces = occurrences.get(value).unwrap_or_else(|| {
                     panic!(
@@ -473,7 +632,10 @@ async fn frozen_capture_exhaustively_maps_all_urls_bodies_parameters_and_materia
     }
 
     for required in [
-        "select.q.local-params-edismax",
+        "select.q.local-params-edismax.and",
+        "select.q.local-params-edismax.or",
+        "select.q.local-params-edismax.single-term",
+        "select.q.match-all",
         "select.rows.zero",
         "select.highlight.require-field-match",
         "select.highlight.merge-contiguous",
@@ -560,14 +722,12 @@ fn response_denominator_has_precise_search_api_solr_client_consumption_citations
     // denominator fields. The remaining 15 each carry a source+method citation.
     assert_eq!(contract.response_fields.len(), 15);
     for field in &contract.response_fields {
-        assert!(
-            field
-                .consumer
-                .source
-                .starts_with("vendor/drupal/search_api_solr/src/")
+        assert_eq!(
+            field.consumer.source,
+            "coverage/search_api_solr_4.4.0_source_evidence.json"
         );
-        assert!(field.consumer.source.ends_with(".php"));
         assert!(field.consumer.symbol.contains("::"));
+        assert!(!field.consumer.evidence.is_empty());
         assert!(
             !field.trace.is_empty(),
             "{} needs trace provenance",
@@ -627,6 +787,195 @@ fn response_denominator_has_precise_search_api_solr_client_consumption_citations
             }),
             "{id} must be emitted by a cited frozen response"
         );
+    }
+}
+
+#[test]
+fn client_consumption_snapshot_is_hash_pinned_complete_and_auditable() {
+    let contract = contract();
+    let evidence: SourceEvidence =
+        serde_json::from_str(SOURCE_EVIDENCE).expect("valid Search API Solr source evidence");
+    assert_eq!(
+        evidence.upstream.project,
+        "https://git.drupalcode.org/project/search_api_solr"
+    );
+    assert_eq!(evidence.upstream.tag, "4.4.0");
+    assert_eq!(
+        evidence.upstream.archive_sha256,
+        "5cfcb17d7a325a01eb04f09ca12b6f0d3012ebe0fcfea431ee04a592507c0bce"
+    );
+    let is_sha256 =
+        |digest: &str| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let sha256 = |text: &str| format!("{:x}", Sha256::digest(text));
+    assert!(is_sha256(&evidence.upstream.archive_sha256));
+    let snapshot_relative = Path::new(&evidence.snapshot_root);
+    assert!(
+        snapshot_relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_))),
+        "source snapshot root must be a relative normal path"
+    );
+    let snapshot_root = root().join(snapshot_relative);
+    let expected_source_hashes = BTreeMap::from([
+        (
+            "src/Plugin/search_api/backend/SearchApiSolrBackend.php",
+            "587ccd8f3fadb606b6968bc589fd6312e02c4a95e2ee502b380ca6a7241cd21d",
+        ),
+        (
+            "src/SolrConnector/SolrConnectorPluginBase.php",
+            "b55ec67468adda7f70061aa8151861c7f9a7c63e680b6c48c6a7379aa9617df0",
+        ),
+        (
+            "src/SolrSpellcheckBackendTrait.php",
+            "0238f9e32ecfbe3da160e1a58ad56adade38f3ed8cd27adfc1268cd6c5e53771",
+        ),
+    ]);
+    assert_eq!(
+        evidence
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.sha256.as_str()))
+            .collect::<BTreeMap<_, _>>(),
+        expected_source_hashes,
+        "the immutable source snapshot must remain pinned to Search API Solr 4.4.0"
+    );
+    let expected_files = evidence
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(expected_files.len(), evidence.files.len());
+    assert_eq!(source_file_paths(&snapshot_root), expected_files);
+    let mut source_text = BTreeMap::new();
+    for file in &evidence.files {
+        assert!(file.path.starts_with("src/"));
+        assert!(is_sha256(&file.sha256));
+        assert!(
+            Path::new(&file.path)
+                .components()
+                .all(|component| matches!(component, Component::Normal(_))),
+            "source file path must be a relative normal path"
+        );
+        let source_path = snapshot_root.join(&file.path);
+        let source = std::fs::read_to_string(&source_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", source_path.display()));
+        assert_eq!(sha256(&source), file.sha256, "hash for {}", file.path);
+        source_text.insert(file.path.clone(), source);
+    }
+    assert_eq!(
+        evidence
+            .citations
+            .iter()
+            .map(|citation| citation.id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        evidence.citations.len(),
+        "citation IDs must be unique"
+    );
+    for citation in &evidence.citations {
+        assert!(citation.source_path.starts_with("src/"));
+        assert!(citation.line_start <= citation.line_end);
+        assert!(is_sha256(&citation.source_sha256));
+        assert!(is_sha256(&citation.excerpt_sha256));
+        let source = source_text
+            .get(&citation.source_path)
+            .unwrap_or_else(|| panic!("missing snapshot source {}", citation.source_path));
+        assert_eq!(sha256(source), citation.source_sha256);
+        assert_eq!(
+            citation.excerpt,
+            source_excerpt(source, citation.line_start, citation.line_end),
+            "{} must be an exact source range",
+            citation.id
+        );
+        assert_eq!(sha256(&citation.excerpt), citation.excerpt_sha256);
+        assert!(!citation.excerpt.is_empty());
+    }
+
+    let consumed = contract
+        .response_fields
+        .iter()
+        .map(|field| field.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let cited = evidence
+        .citations
+        .iter()
+        .flat_map(|citation| citation.consumes.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        cited, consumed,
+        "every denominator field has one source citation"
+    );
+    for field in &contract.response_fields {
+        let citation = evidence
+            .citations
+            .iter()
+            .find(|citation| citation.id == field.consumer.evidence)
+            .unwrap_or_else(|| panic!("missing evidence {}", field.consumer.evidence));
+        assert_eq!(citation.symbol, field.consumer.symbol);
+        assert!(citation.consumes.contains(&field.id));
+    }
+    for (citation, needle) in [
+        ("backend.extract-results", "getNumFound"),
+        ("backend.highlighting", "['highlighting']"),
+        ("backend.extract-facets", "getFacetSet"),
+        ("spellcheck.suggestions", "COMPONENT_SPELLCHECK"),
+        ("backend.search-spellcheck-collation", "getCollation"),
+        ("connector.solr-version", "solr-spec-version"),
+        ("connector.schema-version", "['core']['schema']"),
+        ("backend.schema-field-types", "schema/"),
+        ("backend.view-settings-luke", "['index']['numDocs']"),
+        ("connector.stats-summary", "['solr-mbeans']"),
+        ("backend.autocomplete-terms", "COMPONENT_TERMS"),
+    ] {
+        assert!(
+            evidence
+                .citations
+                .iter()
+                .find(|entry| entry.id == citation)
+                .expect("required source excerpt")
+                .excerpt
+                .contains(needle),
+            "{citation} must retain the client-consumption expression"
+        );
+    }
+    let expected_exclusions = BTreeSet::from([
+        "update.responseHeader.status",
+        "select.response.start",
+        "select.response.maxScore",
+        "select.response.numFoundExact",
+    ]);
+    assert_eq!(
+        evidence
+            .exclusions
+            .iter()
+            .map(|exclusion| exclusion.id.as_str())
+            .collect::<BTreeSet<_>>(),
+        expected_exclusions,
+        "every emitted-only exclusion needs source-audited evidence"
+    );
+    for exclusion in &evidence.exclusions {
+        assert!(!exclusion.reason.is_empty());
+        assert!(!exclusion.required_expressions.is_empty());
+        assert!(!exclusion.forbidden_expressions.is_empty());
+        let citation = evidence
+            .citations
+            .iter()
+            .find(|citation| citation.id == exclusion.evidence)
+            .unwrap_or_else(|| panic!("missing exclusion evidence {}", exclusion.evidence));
+        for expression in &exclusion.required_expressions {
+            assert!(
+                citation.excerpt.contains(expression),
+                "{} must retain required expression {expression:?}",
+                exclusion.id
+            );
+        }
+        for expression in &exclusion.forbidden_expressions {
+            assert!(
+                !citation.excerpt.contains(expression),
+                "{} must not consume excluded expression {expression:?}",
+                exclusion.id
+            );
+        }
     }
 }
 
@@ -794,27 +1143,29 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         Some(&expected.request_semantics),
         None,
         &[
-            "update.json-command-add-batch",
-            "request.omitHeader",
+            "admin.mbeans.stats",
+            "mlt.filters",
+            "mlt.fl.wildcard-plus-score",
+            "mlt.match-include-and-offset",
+            "mlt.maxntp",
             "request.json-nl.flat",
             "request.json-nl.repeated-map-and-flat",
+            "request.omitHeader",
             "request.timezone.utc",
-            "select.q.local-params-edismax",
-            "select.highlight.wildcard-fields",
-            "select.highlight.require-field-match",
-            "select.highlight.merge-contiguous",
             "select.facet.local-key",
             "select.facet.per-field-missing",
+            "select.highlight.merge-contiguous",
+            "select.highlight.require-field-match",
+            "select.highlight.wildcard-fields",
+            "select.q.local-params-edismax.and",
+            "select.q.local-params-edismax.or",
+            "select.q.local-params-edismax.single-term",
+            "select.spellcheck.collate",
+            "select.spellcheck.dictionaries",
             "select.spellcheck.enable",
             "select.spellcheck.query",
-            "select.spellcheck.dictionaries",
-            "select.spellcheck.collate",
-            "mlt.fl.wildcard-plus-score",
-            "mlt.filters",
-            "mlt.maxntp",
-            "mlt.match-include-and-offset",
-            "admin.mbeans.stats",
             "terms.enumeration",
+            "update.json-command-add-batch",
         ],
     );
     let (rc, ru) = assert_bucket(
@@ -840,7 +1191,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     assert_eq!(report.overall.total, total);
     assert_eq!(report.overall.fraction, format!("{covered}/{total}"));
     assert_eq!(
-        report.overall.fraction, "41/72",
+        report.overall.fraction, "42/75",
         "initial coverage fraction"
     );
 }

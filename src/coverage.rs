@@ -6,8 +6,7 @@
 //! or reads a contract `covered` value.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Body;
@@ -44,6 +43,7 @@ struct SemanticParameter {
     variant: String,
     values: Vec<String>,
     trace: Vec<String>,
+    occurrences: Vec<Occurrence>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -67,6 +67,7 @@ struct SemanticItem {
 struct Consumer {
     source: String,
     symbol: String,
+    evidence: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -84,7 +85,7 @@ struct CapturedParameter {
     occurrences: Vec<Occurrence>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Occurrence {
     value: String,
@@ -173,7 +174,7 @@ fn validate_contract(contract: &Contract) {
     );
     assert_eq!(
         contract.request_semantics.len(),
-        48,
+        51,
         "coverage contract has every semantic variant"
     );
     assert_eq!(
@@ -222,6 +223,22 @@ fn validate_contract(contract: &Contract) {
             "endpoint provenance contains every frozen exchange"
         );
     }
+    let captured_occurrences = contract
+        .captured_parameters
+        .iter()
+        .flat_map(|parameter| {
+            parameter.occurrences.iter().flat_map(move |occurrence| {
+                occurrence.trace.iter().map(move |trace| {
+                    (
+                        parameter.name.as_str(),
+                        occurrence.value.as_str(),
+                        trace.as_str(),
+                    )
+                })
+            })
+        })
+        .collect::<HashSet<_>>();
+    let mut semantic_occurrences = HashSet::new();
     for semantic in &contract.request_semantics {
         assert!(!semantic.parameters.is_empty() || !semantic.body_variants.is_empty());
         assert!(
@@ -236,7 +253,45 @@ fn validate_contract(contract: &Contract) {
                 .iter()
                 .all(|parameter| parameter_names.contains(parameter.name.as_str()))
         );
+        for parameter in &semantic.parameters {
+            assert_eq!(
+                parameter.values.iter().collect::<HashSet<_>>(),
+                parameter
+                    .occurrences
+                    .iter()
+                    .map(|occurrence| &occurrence.value)
+                    .collect::<HashSet<_>>(),
+                "semantic parameter retains per-value occurrence provenance"
+            );
+            assert_eq!(
+                parameter.trace.iter().collect::<HashSet<_>>(),
+                parameter
+                    .occurrences
+                    .iter()
+                    .flat_map(|occurrence| occurrence.trace.iter())
+                    .collect::<HashSet<_>>(),
+                "semantic parameter retains exact trace provenance"
+            );
+            for occurrence in &parameter.occurrences {
+                for trace in &occurrence.trace {
+                    let triple = (
+                        parameter.name.as_str(),
+                        occurrence.value.as_str(),
+                        trace.as_str(),
+                    );
+                    assert!(
+                        captured_occurrences.contains(&triple),
+                        "semantic occurrence is captured"
+                    );
+                    semantic_occurrences.insert(triple);
+                }
+            }
+        }
     }
+    assert_eq!(
+        semantic_occurrences, captured_occurrences,
+        "every captured parameter occurrence belongs to a semantic class"
+    );
     for field in &contract.response_fields {
         assert!(
             field
@@ -244,13 +299,12 @@ fn validate_contract(contract: &Contract) {
                 .iter()
                 .all(|trace| trace_names.contains(trace.as_str()))
         );
-        assert!(
-            field
-                .consumer
-                .source
-                .starts_with("vendor/drupal/search_api_solr/src/")
+        assert_eq!(
+            field.consumer.source,
+            "coverage/search_api_solr_4.4.0_source_evidence.json"
         );
         assert!(field.consumer.symbol.contains("::"));
+        assert!(!field.consumer.evidence.is_empty());
     }
 }
 
@@ -272,25 +326,17 @@ struct ProbeApp {
 }
 
 struct ProbeWorkspace {
-    root: PathBuf,
+    root: tempfile::TempDir,
 }
 
 impl ProbeWorkspace {
     fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "wayfinder-coverage-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed),
-        ));
-        std::fs::create_dir_all(&root).expect("create hermetic coverage workspace");
-        Self { root }
-    }
-}
-
-impl Drop for ProbeWorkspace {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
+        Self {
+            root: tempfile::Builder::new()
+                .prefix("wayfinder-coverage-")
+                .tempdir()
+                .expect("create hermetic coverage workspace"),
+        }
     }
 }
 
@@ -341,15 +387,36 @@ fast = true
 const PROBE_DOCS: &str = r#"[
   {"id":"doc1","body":"quick brown fox rocket","category":["animals","classic"],"rating":3,"created":"2024-01-02T00:00:00Z","featured":"true"},
   {"id":"doc2","body":"quick fox rocket","category":["garden"],"rating":1,"created":"2024-01-01T00:00:00Z","featured":"false"},
-  {"id":"doc3","body":"slow turtle","category":["misc"],"rating":5,"created":"2024-01-03T00:00:00Z","featured":"true"}
+  {"id":"doc3","body":"slow turtle","category":["misc"],"rating":5,"created":"2024-01-03T00:00:00Z","featured":"true"},
+  {"id":"facet","body":"facet probe","category":["a","b","c","d","e","f","g","h","i","j","k"],"rating":0,"created":"2024-01-04T00:00:00Z","featured":"z"},
+  {"id":"mlt1","body":"the chef prepared a delicious pasta dish with fresh tomatoes and basil","category":["cooking","italian"],"rating":10,"created":"2024-02-01T00:00:00Z","featured":"m"},
+  {"id":"mlt2","body":"fresh basil and ripe tomatoes make a wonderful pasta sauce","category":["cooking","italian"],"rating":11,"created":"2024-02-02T00:00:00Z","featured":"m"},
+  {"id":"mlt3","body":"grilling chicken with garlic and rosemary is a classic dinner","category":["cooking","grilling"],"rating":12,"created":"2024-02-03T00:00:00Z","featured":"m"},
+  {"id":"mlt4","body":"roasted vegetables with olive oil and garlic taste amazing","category":["cooking","vegetarian"],"rating":13,"created":"2024-02-04T00:00:00Z","featured":"m"},
+  {"id":"mlt5","body":"baking bread requires yeast flour water and patience","category":["cooking","baking"],"rating":14,"created":"2024-02-05T00:00:00Z","featured":"m"},
+  {"id":"mlt6","body":"planting tomatoes and basil in the garden this spring","category":["gardening"],"rating":15,"created":"2024-02-06T00:00:00Z","featured":"m"},
+  {"id":"mlt7","body":"the garden needs watering every morning during summer heat","category":["gardening"],"rating":16,"created":"2024-02-07T00:00:00Z","featured":"m"},
+  {"id":"mlt8","body":"pruning rose bushes keeps the garden looking tidy","category":["gardening"],"rating":17,"created":"2024-02-08T00:00:00Z","featured":"m"},
+  {"id":"mlt9","body":"composting kitchen scraps enriches garden soil naturally","category":["gardening"],"rating":18,"created":"2024-02-09T00:00:00Z","featured":"m"},
+  {"id":"mlt10","body":"growing herbs like basil and rosemary indoors year round","category":["gardening","cooking"],"rating":19,"created":"2024-02-10T00:00:00Z","featured":"m"},
+  {"id":"mlt11","body":"astronomers observed a bright comet streaking across the night sky","category":["astronomy"],"rating":20,"created":"2024-02-11T00:00:00Z","featured":"m"},
+  {"id":"mlt12","body":"the telescope revealed distant galaxies and bright stars","category":["astronomy"],"rating":21,"created":"2024-02-12T00:00:00Z","featured":"m"},
+  {"id":"mlt13","body":"a lunar eclipse darkened the night sky for hours","category":["astronomy"],"rating":22,"created":"2024-02-13T00:00:00Z","featured":"m"},
+  {"id":"mlt14","body":"scientists study the orbit of planets around distant stars","category":["astronomy"],"rating":23,"created":"2024-02-14T00:00:00Z","featured":"m"},
+  {"id":"mlt15","body":"the night sky was clear enough to see the milky way","category":["astronomy"],"rating":24,"created":"2024-02-15T00:00:00Z","featured":"m"},
+  {"id":"mlt16","body":"hiking through the mountains offers stunning views of the valley","category":["outdoors"],"rating":25,"created":"2024-02-16T00:00:00Z","featured":"m"},
+  {"id":"mlt17","body":"camping near the lake was peaceful and quiet at night","category":["outdoors"],"rating":26,"created":"2024-02-17T00:00:00Z","featured":"m"},
+  {"id":"mlt18","body":"the river flows quietly through the quiet forest valley","category":["outdoors"],"rating":27,"created":"2024-02-18T00:00:00Z","featured":"m"},
+  {"id":"mlt19","body":"a short trip to buy office supplies and paper clips","category":["misc"],"rating":28,"created":"2024-02-19T00:00:00Z","featured":"m"},
+  {"id":"mlt20","body":"nothing here relates to any other document in this corpus","category":["misc"],"rating":29,"created":"2024-02-20T00:00:00Z","featured":"m"}
 ]"#;
 
 impl ProbeApp {
     async fn new() -> Self {
         let workspace = ProbeWorkspace::new();
-        let schema = workspace.root.join("schema.toml");
-        let config = workspace.root.join("wayfinder.toml");
-        let data = workspace.root.join("data");
+        let schema = workspace.root.path().join("schema.toml");
+        let config = workspace.root.path().join("wayfinder.toml");
+        let data = workspace.root.path().join("data");
         std::fs::write(&schema, PROBE_SCHEMA).expect("write coverage probe schema");
         std::fs::write(&config, "strict_params = true\n").expect("write coverage probe config");
         std::fs::create_dir_all(&data).expect("create coverage probe data directory");
@@ -412,16 +479,50 @@ impl ProbeApp {
         self.request(Method::GET, path, None).await.0 == StatusCode::OK
     }
 
-    async fn has(&self, path: &str, pointer: &str) -> bool {
+    async fn response(&self, path: &str) -> Option<Value> {
         let (status, body) = self.request(Method::GET, path, None).await;
-        status == StatusCode::OK && body.pointer(pointer).is_some()
+        (status == StatusCode::OK).then_some(body)
+    }
+
+    async fn has(&self, path: &str, pointer: &str) -> bool {
+        self.response(path)
+            .await
+            .is_some_and(|body| body.pointer(pointer).is_some())
     }
 
     async fn number(&self, path: &str, pointer: &str) -> Option<u64> {
-        let (status, body) = self.request(Method::GET, path, None).await;
-        (status == StatusCode::OK)
-            .then(|| body.pointer(pointer).and_then(Value::as_u64))
-            .flatten()
+        self.response(path)
+            .await
+            .and_then(|body| body.pointer(pointer).and_then(Value::as_u64))
+    }
+
+    async fn response_ids(&self, path: &str) -> Option<Vec<String>> {
+        self.response(path).await.and_then(|body| {
+            body.pointer("/response/docs")?
+                .as_array()?
+                .iter()
+                .map(|doc| doc.get("id")?.as_str().map(str::to_owned))
+                .collect()
+        })
+    }
+
+    async fn response_docs(&self, path: &str) -> Option<Vec<Value>> {
+        self.response(path)
+            .await
+            .and_then(|body| body.pointer("/response/docs")?.as_array().cloned())
+    }
+
+    async fn wait_for_num_found(&self, path: &str, expected: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if self.number(path, "/response/numFound").await == Some(expected) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
     }
 }
 
@@ -436,18 +537,36 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
                 .request(Method::POST, "content/update?commit=true", Some(duplicate))
                 .await;
             status == StatusCode::OK
-                && probe.number("select?q=id:first", "/response/numFound").await == Some(1)
-                && probe.number("select?q=id:second", "/response/numFound").await == Some(1)
+                && probe
+                    .number("select?q=id:first", "/response/numFound")
+                    .await
+                    == Some(1)
+                && probe
+                    .number("select?q=id:second", "/response/numFound")
+                    .await
+                    == Some(1)
         }
         "update.commitWithin" => {
-            probe
-                .request(Method::POST, "content/update?commitWithin=1", Some("[]"))
-                .await
-                .0
-                == StatusCode::OK
+            let (status, _) = probe
+                .request(
+                    Method::POST,
+                    "content/update?commitWithin=1000",
+                    Some(r#"[{"id":"coverage-commitwithin","body":"delayed visibility"}]"#),
+                )
+                .await;
+            status == StatusCode::OK
+                && probe
+                    .number("select?q=id:coverage-commitwithin", "/response/numFound")
+                    .await
+                    == Some(0)
+                && probe
+                    .wait_for_num_found("select?q=id:coverage-commitwithin", 1)
+                    .await
         }
         "request.omitHeader" => {
-            let (status, body) = probe.request(Method::GET, "select?q=*:*&omitHeader=true", None).await;
+            let (status, body) = probe
+                .request(Method::GET, "select?q=*:*&omitHeader=true", None)
+                .await;
             status == StatusCode::OK && body.get("responseHeader").is_none()
         }
         "request.wt.json" => probe.has("select?q=*:*&wt=json", "/response").await,
@@ -468,33 +587,151 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
             let core_admin = probe.ok("content/admin/system?json.nl=flat").await;
             update && select && mlt && admin_info && core_admin
         }
-        "request.json-nl.repeated-map-and-flat" => probe
-            .ok("content/admin/mbeans?json.nl=flat&json.nl=map")
-            .await,
-        "request.timezone.utc" => probe.ok("select?q=*:*&TZ=UTC").await
-            && probe.ok("mlt?q=id:doc1&mlt.fl=body&TZ=UTC").await,
-        "select.q.plain-query" => probe.number("select?q=quick", "/response/numFound").await == Some(2),
-        "select.q.local-params-edismax" => probe
-            .number("select?q=%7B!edismax%7Dquick", "/response/numFound")
+        "request.json-nl.repeated-map-and-flat" => {
+            probe
+                .ok("content/admin/mbeans?json.nl=flat&json.nl=map")
+                .await
+        }
+        "request.timezone.utc" => {
+            probe.ok("select?q=*:*&TZ=UTC").await
+                && probe.ok("mlt?q=id:doc1&mlt.fl=body&TZ=UTC").await
+        }
+        "select.q.plain-query" => {
+            probe.number("select?q=quick", "/response/numFound").await == Some(2)
+        }
+        "select.q.local-params-edismax.and" => {
+            probe
+                .number(
+                    "select?q=%7B!edismax%7Dquick%2Brocket",
+                    "/response/numFound",
+                )
+                .await
+                == Some(2)
+        }
+        "select.q.local-params-edismax.or" => {
+            probe
+                .number(
+                    "select?q=%7B!edismax%7Dquick%20rocket",
+                    "/response/numFound",
+                )
+                .await
+                == Some(2)
+        }
+        "select.q.local-params-edismax.single-term" => {
+            probe
+                .number("select?q=%7B!edismax%7Dquick", "/response/numFound")
+                .await
+                == Some(2)
+        }
+        "select.q.match-all" => probe
+            .number("select?q=*:*&rows=100", "/response/numFound")
             .await
-            == Some(2),
-        "select.pagination.start-and-rows" => probe.has("select?q=*:*&start=0&rows=1", "/response/docs/0").await,
-        "select.rows.zero" => probe.number("select?q=*:*&rows=0", "/response/numFound").await == Some(4)
-            && !probe.has("select?q=*:*&rows=0", "/response/docs/0").await,
-        "select.fl.wildcard-plus-score" => probe.has("select?q=quick&fl=*,score", "/response/docs/0/score").await,
-        "select.fq.string" => probe.number("select?q=*:*&fq=category:animals", "/response/numFound").await == Some(1),
-        "select.fq.range" => probe.number("select?q=*:*&fq=rating:%5B3%20TO%20*%5D", "/response/numFound").await == Some(2),
-        "select.fq.boolean" => probe.number("select?q=*:*&fq=featured:true", "/response/numFound").await == Some(2),
-        "select.fq.multi-value-or" => probe.number("select?q=*:*&fq=(category:animals%20category:garden)", "/response/numFound").await == Some(2),
-        "select.sort.integer" => probe.has("select?q=*:*&sort=rating%20desc", "/response/docs/0").await,
-        "select.sort.string" => probe.has("select?q=*:*&sort=category%20asc", "/response/docs/0").await,
-        "select.sort.date" => probe.has("select?q=*:*&sort=created%20asc", "/response/docs/0").await,
-        "select.highlight.enabled" => probe.has("select?q=quick&hl=true&hl.fl=body", "/highlighting/doc1").await,
-        "select.highlight.wildcard-fields" => probe.has("select?q=quick&hl=true&hl.fl=*", "/highlighting/doc1/body").await,
-        "select.highlight.require-field-match" => probe.ok("select?q=quick&hl.requireFieldMatch=false").await,
-        "select.highlight.snippets" => probe.has("select?q=quick&hl=true&hl.fl=body&hl.snippets=1", "/highlighting/doc1/body/0").await,
-        "select.highlight.fragsize" => probe.has("select?q=quick&hl=true&hl.fl=body&hl.fragsize=0", "/highlighting/doc1/body/0").await,
-        "select.highlight.merge-contiguous" => probe.ok("select?q=quick&hl.mergeContiguous=false").await,
+            .is_some_and(|count| count >= 24),
+        "select.pagination.start-and-rows" => {
+            let first_page = probe.response_ids("select?q=*:*&start=0&rows=10").await;
+            let second_page = probe.response_ids("select?q=*:*&start=1&rows=1").await;
+            probe
+                .number("select?q=*:*&start=0&rows=10", "/response/numFound")
+                .await
+                .is_some_and(|count| count >= 24)
+                && first_page.as_ref().is_some_and(|ids| ids.len() == 10)
+                && second_page.as_ref().is_some_and(|ids| ids.len() == 1)
+                && first_page
+                    .zip(second_page)
+                    .is_some_and(|(first, second)| first[1] == second[0])
+        }
+        "select.rows.zero" => {
+            probe
+                .number("select?q=*:*&rows=0", "/response/numFound")
+                .await
+                .is_some_and(|count| count >= 24)
+                && probe.response_ids("select?q=*:*&rows=0").await == Some(Vec::new())
+        }
+        "select.fl.wildcard-plus-score" => {
+            probe
+                .has("select?q=quick&fl=*,score", "/response/docs/0/score")
+                .await
+        }
+        "select.fq.string" => {
+            probe
+                .number("select?q=*:*&fq=category:animals", "/response/numFound")
+                .await
+                == Some(1)
+        }
+        "select.fq.range" => {
+            probe
+                .number(
+                    "select?q=body:quick&fq=rating:%5B3%20TO%20*%5D",
+                    "/response/numFound",
+                )
+                .await
+                == Some(1)
+        }
+        "select.fq.boolean" => {
+            probe
+                .number("select?q=*:*&fq=featured:true", "/response/numFound")
+                .await
+                == Some(2)
+        }
+        "select.fq.multi-value-or" => {
+            probe
+                .number(
+                    "select?q=*:*&fq=(category:animals%20category:garden)",
+                    "/response/numFound",
+                )
+                .await
+                == Some(2)
+        }
+        "select.sort.integer" => {
+            probe
+                .response_ids("select?q=body:quick&sort=rating%20desc")
+                .await
+                == Some(vec!["doc1".to_string(), "doc2".to_string()])
+        }
+        "select.sort.string" => {
+            probe
+                .response_ids("select?q=body:quick&sort=category%20asc")
+                .await
+                == Some(vec!["doc1".to_string(), "doc2".to_string()])
+        }
+        "select.sort.date" => {
+            probe
+                .response_ids("select?q=body:quick&sort=created%20asc")
+                .await
+                == Some(vec!["doc2".to_string(), "doc1".to_string()])
+        }
+        "select.highlight.enabled" => {
+            probe
+                .has("select?q=quick&hl=true&hl.fl=body", "/highlighting/doc1")
+                .await
+        }
+        "select.highlight.wildcard-fields" => {
+            probe
+                .has("select?q=quick&hl=true&hl.fl=*", "/highlighting/doc1/body")
+                .await
+        }
+        "select.highlight.require-field-match" => {
+            probe.ok("select?q=quick&hl.requireFieldMatch=false").await
+        }
+        "select.highlight.snippets" => {
+            probe
+                .has(
+                    "select?q=quick&hl=true&hl.fl=body&hl.snippets=1",
+                    "/highlighting/doc1/body/0",
+                )
+                .await
+        }
+        "select.highlight.fragsize" => {
+            probe
+                .has(
+                    "select?q=quick&hl=true&hl.fl=body&hl.fragsize=0",
+                    "/highlighting/doc1/body/0",
+                )
+                .await
+        }
+        "select.highlight.merge-contiguous" => {
+            probe.ok("select?q=quick&hl.mergeContiguous=false").await
+        }
         "select.highlight.custom-markers" => {
             let (status, body) = probe
                 .request(
@@ -509,27 +746,206 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
                     .and_then(Value::as_str)
                     .is_some_and(|snippet| snippet.contains("[OPEN]"))
         }
-        "select.facet.field" => probe.has("select?q=*:*&facet=true&facet.field=category", "/facet_counts/facet_fields/category").await,
-        "select.facet.local-key" => probe.has("select?q=*:*&facet=true&facet.field=%7B!key=kind%7Dcategory", "/facet_counts/facet_fields/kind").await,
-        "select.facet.per-field-missing" => probe.has("select?q=*:*&facet=true&facet.field=category&f.category.facet.missing=true", "/facet_counts/facet_fields").await,
-        "select.facet.sort-limit-mincount" => probe.has("select?q=*:*&facet=true&facet.field=category&facet.sort=count&facet.limit=1&facet.mincount=1", "/facet_counts/facet_fields/category").await,
-        "select.facet.global-missing" => probe.has("select?q=*:*&facet=true&facet.field=category&facet.missing=false", "/facet_counts/facet_fields").await,
-        "select.spellcheck.enable" => probe.has("select?q=quick&spellcheck=true", "/spellcheck").await,
-        "select.spellcheck.query" => probe.has("select?q=quick&spellcheck=true&spellcheck.q=qwick", "/spellcheck/suggestions").await,
-        "select.spellcheck.dictionaries" => probe.has("select?q=quick&spellcheck=true&spellcheck.dictionary=en", "/spellcheck/suggestions").await,
-        "select.spellcheck.collate" => probe.has("select?q=quick&spellcheck=true&spellcheck.collate=true", "/spellcheck/collations").await,
-        "mlt.base-lookup" => probe.has("mlt?q=id:doc1&mlt.fl=body&mlt.mintf=1&mlt.mindf=1", "/response").await,
-        "mlt.pagination.start-and-rows" => probe.has("mlt?q=id:doc1&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&start=0&rows=1", "/response/docs").await,
-        "mlt.fl.wildcard-plus-score" => probe.has("mlt?q=id:doc1&mlt.fl=body&fl=*,score", "/response/docs/0/score").await,
-        "mlt.filters" => probe.ok("mlt?q=id:doc1&mlt.fl=body&fq=category:animals").await,
-        "mlt.mintf" => probe.has("mlt?q=id:doc1&mlt.fl=body&mlt.mintf=1&mlt.mindf=1", "/response/docs").await,
-        "mlt.mindf" => probe.has("mlt?q=id:doc1&mlt.fl=body&mlt.mintf=1&mlt.mindf=1", "/response/docs").await,
-        "mlt.maxqt" => probe.has("mlt?q=id:doc1&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxqt=1", "/response/docs").await,
-        "mlt.maxntp" => probe.ok("mlt?q=id:doc1&mlt.fl=body&mlt.maxntp=2000").await,
-        "mlt.boost" => probe.has("mlt?q=id:doc1&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.boost=true", "/response/docs").await,
-        "mlt.match-include-and-offset" => probe.ok("mlt?q=id:doc1&mlt.fl=body&mlt.match.include=false&mlt.match.offset=0").await,
+        "select.facet.field" => {
+            probe
+                .has(
+                    "select?q=*:*&facet=true&facet.field=category",
+                    "/facet_counts/facet_fields/category",
+                )
+                .await
+        }
+        "select.facet.local-key" => {
+            probe
+                .has(
+                    "select?q=*:*&facet=true&facet.field=%7B!key=kind%7Dcategory",
+                    "/facet_counts/facet_fields/kind",
+                )
+                .await
+        }
+        "select.facet.per-field-missing" => {
+            probe
+                .has(
+                    "select?q=*:*&facet=true&facet.field=category&f.category.facet.missing=true",
+                    "/facet_counts/facet_fields",
+                )
+                .await
+        }
+        "select.facet.sort-limit-mincount" => {
+            let sorted_limited = probe
+                .response(
+                    "select?q=*:*&facet=true&facet.field=category&facet.sort=count&facet.limit=3&facet.mincount=1",
+                )
+                .await
+                .and_then(|body| body.pointer("/facet_counts/facet_fields/category").cloned());
+            let mincount_filtered = probe
+                .response(
+                    "select?q=*:*&facet=true&facet.field=category&facet.sort=count&facet.limit=5&facet.mincount=4",
+                )
+                .await
+                .and_then(|body| body.pointer("/facet_counts/facet_fields/category").cloned());
+            sorted_limited
+                == Some(serde_json::json!([
+                    "cooking",
+                    6,
+                    "astronomy",
+                    5,
+                    "gardening",
+                    5
+                ]))
+                && mincount_filtered
+                    == Some(serde_json::json!([
+                        "cooking",
+                        6,
+                        "astronomy",
+                        5,
+                        "gardening",
+                        5
+                    ]))
+        }
+        "select.facet.global-missing" => probe
+            .response("select?q=id:facet&facet=true&facet.field=category&facet.missing=false")
+            .await
+            .and_then(|body| body.pointer("/facet_counts/facet_fields/category").cloned())
+            .is_some_and(|buckets| {
+                buckets.as_array().is_some_and(|items| {
+                    items.len() % 2 == 0 && items.iter().step_by(2).all(|key| !key.is_null())
+                })
+            }),
+        "select.spellcheck.enable" => {
+            probe
+                .has("select?q=quick&spellcheck=true", "/spellcheck")
+                .await
+        }
+        "select.spellcheck.query" => {
+            probe
+                .has(
+                    "select?q=quick&spellcheck=true&spellcheck.q=qwick",
+                    "/spellcheck/suggestions",
+                )
+                .await
+        }
+        "select.spellcheck.dictionaries" => {
+            probe
+                .has(
+                    "select?q=quick&spellcheck=true&spellcheck.dictionary=en",
+                    "/spellcheck/suggestions",
+                )
+                .await
+        }
+        "select.spellcheck.collate" => {
+            probe
+                .has(
+                    "select?q=quick&spellcheck=true&spellcheck.collate=true",
+                    "/spellcheck/collations",
+                )
+                .await
+        }
+        "mlt.base-lookup" => probe
+            .response("mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1")
+            .await
+            .is_some_and(|body| body.pointer("/response").is_some_and(Value::is_object)),
+        "mlt.pagination.start-and-rows" => {
+            let first_page = probe
+                .response_ids(
+                    "mlt?q=id:mlt11&mlt.fl=body&fl=id&mlt.mintf=1&mlt.mindf=1&start=0&rows=10",
+                )
+                .await;
+            let second_page = probe
+                .response_ids(
+                    "mlt?q=id:mlt11&mlt.fl=body&fl=id&mlt.mintf=1&mlt.mindf=1&start=1&rows=1",
+                )
+                .await;
+            first_page
+                .zip(second_page)
+                .is_some_and(|(first, second)| first.len() > 1 && second == vec![first[1].clone()])
+        }
+        "mlt.fl.wildcard-plus-score" => {
+            probe
+                .has(
+                    "mlt?q=id:mlt11&mlt.fl=body&fl=*,score",
+                    "/response/docs/0/score",
+                )
+                .await
+        }
+        "mlt.filters" => {
+            probe
+                .ok("mlt?q=id:mlt11&mlt.fl=body&fq=category:animals")
+                .await
+        }
+        "mlt.mintf" => {
+            let loose = probe
+                .number(
+                    "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1",
+                    "/response/numFound",
+                )
+                .await;
+            let strict = probe
+                .number(
+                    "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=2&mlt.mindf=1",
+                    "/response/numFound",
+                )
+                .await;
+            loose.is_some_and(|count| count > 0) && strict == Some(0)
+        }
+        "mlt.mindf" => {
+            let loose = probe
+                .number(
+                    "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1",
+                    "/response/numFound",
+                )
+                .await;
+            let strict = probe
+                .number(
+                    "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=5",
+                    "/response/numFound",
+                )
+                .await;
+            loose.is_some_and(|count| count > 0) && strict == Some(0)
+        }
+        "mlt.maxqt" => {
+            let uncapped = probe
+                .number(
+                    "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxqt=100",
+                    "/response/numFound",
+                )
+                .await;
+            let capped = probe
+                .number(
+                    "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxqt=2",
+                    "/response/numFound",
+                )
+                .await;
+            uncapped.is_some_and(|count| count > 0) && capped == Some(0)
+        }
+        "mlt.maxntp" => probe.ok("mlt?q=id:mlt11&mlt.fl=body&mlt.maxntp=2000").await,
+        "mlt.boost" => {
+            let unboosted = probe
+                .response_docs(
+                    "mlt?q=id:mlt1&mlt.fl=body&fl=id,score&mlt.mintf=1&mlt.mindf=1&mlt.boost=false",
+                )
+                .await;
+            let boosted = probe
+                .response_docs(
+                    "mlt?q=id:mlt1&mlt.fl=body&fl=id,score&mlt.mintf=1&mlt.mindf=1&mlt.boost=true",
+                )
+                .await;
+            unboosted
+                .zip(boosted)
+                .is_some_and(|(plain, weighted)| !plain.is_empty() && plain != weighted)
+        }
+        "mlt.match-include-and-offset" => {
+            probe
+                .ok("mlt?q=id:doc1&mlt.fl=body&mlt.match.include=false&mlt.match.offset=0")
+                .await
+        }
         "mlt.interesting-terms-none" => {
-            let (status, body) = probe.request(Method::GET, "mlt?q=id:doc1&mlt.fl=body&mlt.interestingTerms=none", None).await;
+            let (status, body) = probe
+                .request(
+                    Method::GET,
+                    "mlt?q=id:doc1&mlt.fl=body&mlt.interestingTerms=none",
+                    None,
+                )
+                .await;
             status == StatusCode::OK && body.get("interestingTerms").is_none()
         }
         "admin.mbeans.stats" => probe.ok("content/admin/mbeans?stats=true").await,
@@ -540,57 +956,107 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
 
 async fn response_field_covered(probe: &ProbeApp, id: &str) -> bool {
     match id {
-        "select.response.numFound" => probe.has("select?q=*:*", "/response/numFound").await,
-        "select.response.docs" => probe.has("select?q=*:*", "/response/docs").await,
-        "select.response.docs.score" => {
-            probe
-                .has("select?q=quick&fl=id,score", "/response/docs/0/score")
-                .await
-        }
-        "select.highlighting" => {
-            probe
-                .has("select?q=quick&hl=true&hl.fl=body", "/highlighting")
-                .await
-        }
-        "select.facet_counts" => {
-            probe
-                .has(
-                    "select?q=*:*&facet=true&facet.field=category",
-                    "/facet_counts",
-                )
-                .await
-        }
-        "select.facet_counts.facet_fields" => {
-            probe
-                .has(
-                    "select?q=*:*&facet=true&facet.field=category",
-                    "/facet_counts/facet_fields",
-                )
-                .await
-        }
-        "select.spellcheck.suggestions" => {
-            probe
-                .has("select?q=quick&spellcheck=true", "/spellcheck/suggestions")
-                .await
-        }
-        "select.spellcheck.collations" => {
-            probe
-                .has("select?q=quick&spellcheck=true", "/spellcheck/collations")
-                .await
-        }
-        "mlt.response" => probe.has("mlt?q=id:doc1&mlt.fl=body", "/response").await,
-        "admin.info-system.lucene.solr-spec-version" => {
-            probe
-                .has("/solr/admin/info/system", "/lucene/solr-spec-version")
-                .await
-        }
-        "admin.system.core.schema" => probe.has("content/admin/system", "/core/schema").await,
-        "schema.fieldtypes.fieldTypes" => {
-            probe.has("content/schema/fieldtypes", "/fieldTypes").await
-        }
-        "admin.luke.index" => probe.has("content/admin/luke", "/index").await,
-        "admin.mbeans.solr-mbeans" => probe.has("content/admin/mbeans", "/solr-mbeans").await,
-        "terms.terms" => probe.has("content/terms?terms=true", "/terms").await,
+        "select.response.numFound" => probe
+            .number("select?q=*:*", "/response/numFound")
+            .await
+            .is_some_and(|count| count >= 24),
+        "select.response.docs" => probe
+            .response_docs("select?q=*:*&rows=10")
+            .await
+            .is_some_and(|docs| {
+                docs.len() == 10
+                    && docs
+                        .iter()
+                        .all(|doc| doc.is_object() && doc.get("id").is_some_and(Value::is_string))
+            }),
+        "select.response.docs.score" => probe
+            .response_docs("select?q=body:quick&fl=id,score")
+            .await
+            .is_some_and(|docs| {
+                docs.len() == 2
+                    && docs.iter().all(|doc| {
+                        doc.get("id").is_some_and(Value::is_string)
+                            && doc.get("score").is_some_and(Value::is_number)
+                    })
+            }),
+        "select.highlighting" => probe
+            .response("select?q=quick&hl=true&hl.fl=body")
+            .await
+            .and_then(|body| body.pointer("/highlighting/doc1/body/0").cloned())
+            .is_some_and(|snippet| snippet.as_str().is_some_and(|text| !text.is_empty())),
+        "select.facet_counts" => probe
+            .response("select?q=id:facet&facet=true&facet.field=category")
+            .await
+            .and_then(|body| body.get("facet_counts").cloned())
+            .is_some_and(|counts| {
+                counts.is_object()
+                    && counts.get("facet_fields").is_some_and(Value::is_object)
+                    && counts.get("facet_queries").is_some_and(Value::is_object)
+            }),
+        "select.facet_counts.facet_fields" => probe
+            .response("select?q=id:facet&facet=true&facet.field=category")
+            .await
+            .and_then(|body| body.pointer("/facet_counts/facet_fields/category").cloned())
+            .is_some_and(|buckets| {
+                buckets.as_array().is_some_and(|items| {
+                    items.len() >= 2
+                        && items.len() % 2 == 0
+                        && items.iter().step_by(2).all(Value::is_string)
+                        && items.iter().skip(1).step_by(2).all(Value::is_u64)
+                })
+            }),
+        "select.spellcheck.suggestions" => probe
+            .response("select?q=quick&spellcheck=true")
+            .await
+            .and_then(|body| body.pointer("/spellcheck/suggestions").cloned())
+            .is_some_and(|value| value.is_object()),
+        "select.spellcheck.collations" => probe
+            .response("select?q=quick&spellcheck=true")
+            .await
+            .and_then(|body| body.pointer("/spellcheck/collations").cloned())
+            .is_some_and(|value| value.is_array()),
+        "mlt.response" => probe
+            .response("mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1")
+            .await
+            .and_then(|body| body.get("response").cloned())
+            .is_some_and(|response| {
+                response.get("numFound").is_some_and(Value::is_u64)
+                    && response.get("docs").is_some_and(Value::is_array)
+            }),
+        "admin.info-system.lucene.solr-spec-version" => probe
+            .response("/solr/admin/info/system")
+            .await
+            .and_then(|body| body.pointer("/lucene/solr-spec-version").cloned())
+            .is_some_and(|version| {
+                version
+                    .as_str()
+                    .is_some_and(|text| text.split('.').count() == 3)
+            }),
+        "admin.system.core.schema" => probe
+            .response("content/admin/system")
+            .await
+            .and_then(|body| body.pointer("/core/schema").cloned())
+            .is_some_and(|value| value.is_string()),
+        "schema.fieldtypes.fieldTypes" => probe
+            .response("content/schema/fieldtypes")
+            .await
+            .and_then(|body| body.get("fieldTypes").cloned())
+            .is_some_and(|value| value.is_array()),
+        "admin.luke.index" => probe
+            .response("content/admin/luke")
+            .await
+            .and_then(|body| body.get("index").cloned())
+            .is_some_and(|value| value.is_object()),
+        "admin.mbeans.solr-mbeans" => probe
+            .response("content/admin/mbeans")
+            .await
+            .and_then(|body| body.get("solr-mbeans").cloned())
+            .is_some_and(|value| value.is_object()),
+        "terms.terms" => probe
+            .response("content/terms?terms=true")
+            .await
+            .and_then(|body| body.get("terms").cloned())
+            .is_some_and(|value| value.is_object()),
         _ => panic!("unrecognised Search API response denominator item: {id}"),
     }
 }
