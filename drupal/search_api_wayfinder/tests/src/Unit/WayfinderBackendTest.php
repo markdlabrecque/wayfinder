@@ -6,23 +6,42 @@ namespace Drupal\Tests\search_api_wayfinder\Unit;
 
 use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\Field\FieldStorageDefinitionInterface;
+use Drupal\Core\Messenger\MessengerInterface;
+use Drupal\Core\StringTranslation\TranslatableMarkup;
+use Drupal\Core\StringTranslation\TranslationInterface;
 use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Item\FieldInterface;
 use Drupal\search_api\Query\ConditionGroup;
 use Drupal\search_api\Query\QueryInterface;
 use Drupal\search_api\Query\ResultSet;
+use Drupal\search_api\Utility\FieldsHelper;
 use Drupal\search_api_wayfinder\Plugin\search_api\backend\WayfinderBackend;
 use Drupal\search_api_wayfinder\WayfinderClient;
+use GuzzleHttp\Client;
+use GuzzleHttp\Exception\ConnectException;
+use GuzzleHttp\Handler\MockHandler;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Psr7\Request;
+use GuzzleHttp\Psr7\Response;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
- * Tests WayfinderBackend's feature flags and the /select vs /mlt routing
- * decision in search() (M4, issue #78).
+ * Tests WayfinderBackend's feature flags, the /select vs /mlt routing
+ * decision in search() (M4, issue #78), and viewSettings() (M5, issue #79).
  *
- * getClient() builds a real WayfinderClient from Guzzle config, so these
- * tests use a minimal subclass that substitutes a mocked WayfinderClient
- * instead of touching HTTP at all -- WayfinderBackend's own HTTP behaviour is
- * WayfinderClientTest's job, not this class's.
+ * getClient() builds a real WayfinderClient from Guzzle config, so the
+ * search()/routing tests use a minimal subclass that substitutes a mocked
+ * WayfinderClient instead of touching HTTP at all -- WayfinderBackend's own
+ * HTTP behaviour is WayfinderClientTest's job, not this class's. The
+ * viewSettings() tests below instead build a real backend via its DI
+ * factory with a mocked http_client, since viewSettings() calls
+ * {core}/admin/system directly through getClient()'s Guzzle client.
+ *
+ * The version string's location in the admin/system response
+ * (lucene.solr-spec-version = "9.10.1") is ground truth from
+ * solr-ref/responses/admin_system.json -- read the fixture, per the plan
+ * doc's "Premises to verify before implementing" item (c).
  *
  * @coversDefaultClass \Drupal\search_api_wayfinder\Plugin\search_api\backend\WayfinderBackend
  * @group search_api_wayfinder
@@ -214,6 +233,185 @@ class WayfinderBackendTest extends TestCase {
 
     $backend = $this->backendWithClient($client, ['highlight' => TRUE]);
     $backend->search($query);
+  }
+
+  /**
+   * Builds a WayfinderBackend via its DI factory, with a mocked http_client
+   * that serves the given response for any request (matching the
+   * MockHandler/HandlerStack pattern already used in WayfinderClientTest).
+   *
+   * A Throwable may be queued instead of a Response to simulate a transport
+   * failure; MockHandler accepts either.
+   */
+  private function createBackend(Response|\Throwable $adminSystemResponse, array $configuration = []): WayfinderBackend {
+    $mock = new MockHandler([$adminSystemResponse]);
+    $handlerStack = HandlerStack::create($mock);
+    $httpClient = new Client(['handler' => $handlerStack]);
+
+    $stringTranslation = $this->createMock(TranslationInterface::class);
+    $stringTranslation->method('translate')
+      ->willReturnCallback(fn (string $string, array $args = []) => strtr($string, $args));
+    // TranslatableMarkup::render() -- what casting a row's 'label' to string
+    // goes through -- calls translateString(), not translate(). Without this
+    // stub every label stringifies to '' and a label assertion would pass
+    // vacuously.
+    $stringTranslation->method('translateString')
+      ->willReturnCallback(fn (TranslatableMarkup $translated) => $translated->getUntranslatedString());
+
+    $container = $this->createMock(ContainerInterface::class);
+    $container->method('get')->willReturnMap([
+      ['http_client', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE, $httpClient],
+      ['search_api.fields_helper', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE, $this->createMock(FieldsHelper::class)],
+      ['messenger', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE, $this->createMock(MessengerInterface::class)],
+      ['string_translation', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE, $stringTranslation],
+    ]);
+
+    $configuration += [
+      'scheme' => 'http',
+      'host' => 'localhost',
+      'port' => 8983,
+      'path' => '/solr',
+      'core' => 'mycore',
+      'timeout' => 5,
+      'commitWithin' => 1000,
+    ];
+
+    /** @var \Drupal\search_api_wayfinder\Plugin\search_api\backend\WayfinderBackend $backend */
+    $backend = WayfinderBackend::create($container, $configuration, 'wayfinder', ['id' => 'wayfinder']);
+    return $backend;
+  }
+
+  /**
+   * @covers ::viewSettings
+   */
+  public function testViewSettingsIncludesVersionStringFromAdminSystem(): void {
+    $body = (string) file_get_contents(__DIR__ . '/../../../../../solr-ref/responses/admin_system.json');
+    $backend = $this->createBackend(new Response(200, [], $body));
+
+    $settings = $backend->viewSettings();
+
+    $versionRows = array_values(array_filter(
+      $settings,
+      fn (array $row) => (string) $row['label'] === 'Wayfinder version'
+    ));
+
+    $this->assertCount(
+      1,
+      $versionRows,
+      'viewSettings() should include exactly one "Wayfinder version" row, sourced from admin/system (solr-ref/responses/admin_system.json: lucene.solr-spec-version).'
+    );
+    // Exact match, not a substring check: the fixture's sibling
+    // lucene.solr-impl-version is "9.10.1 c135e6335c... - gerlowskija - ..."
+    // and so *contains* "9.10.1" too. A real Wayfinder server emits
+    // solr-impl-version as "{version} wayfinder" (src/lib.rs), so a substring
+    // assertion would pass while the admin panel rendered "9.0.0 wayfinder".
+    $this->assertSame(
+      '9.10.1',
+      $versionRows[0]['info'],
+      'The version row must carry lucene.solr-spec-version verbatim, not lucene.solr-impl-version.'
+    );
+  }
+
+  /**
+   * @covers ::viewSettings
+   */
+  public function testViewSettingsStillIncludesServerUrl(): void {
+    $body = (string) file_get_contents(__DIR__ . '/../../../../../solr-ref/responses/admin_system.json');
+    $backend = $this->createBackend(new Response(200, [], $body), ['core' => 'mycore']);
+
+    $settings = $backend->viewSettings();
+
+    $urlRows = array_filter(
+      $settings,
+      fn (array $row) => str_contains((string) $row['info'], 'http://localhost:8983/solr/mycore')
+    );
+
+    $this->assertNotEmpty($urlRows, 'viewSettings() should still include the server core URL alongside the version handshake.');
+  }
+
+  /**
+   * The admin/system handshake is an informational panel, not a critical
+   * path: a failing call must degrade to the server-URL row rather than
+   * throwing an exception out of the server's View page.
+   *
+   * Both WayfinderClient::request() failure arms are covered -- a non-200
+   * error envelope (RequestException, which carries a response) and a
+   * transport failure (ConnectException, which does not) -- since each
+   * reaches the catch in viewSettings() by a different route.
+   *
+   * @dataProvider adminSystemFailureProvider
+   * @covers ::viewSettings
+   */
+  public function testViewSettingsDegradesGracefullyWhenAdminSystemFails(Response|\Throwable $failure): void {
+    $backend = $this->createBackend($failure, ['core' => 'mycore']);
+
+    $settings = $backend->viewSettings();
+
+    $urlRows = array_filter(
+      $settings,
+      fn (array $row) => str_contains((string) $row['info'], 'http://localhost:8983/solr/mycore')
+    );
+    $this->assertNotEmpty($urlRows, 'A failed admin/system handshake must still leave the server URL row in place.');
+
+    $versionRows = array_filter(
+      $settings,
+      fn (array $row) => (string) $row['label'] === 'Wayfinder version'
+    );
+    $this->assertSame([], $versionRows, 'A failed admin/system handshake must not produce a version row.');
+  }
+
+  /**
+   * @return array<string, array{0: \GuzzleHttp\Psr7\Response|\Throwable}>
+   */
+  public static function adminSystemFailureProvider(): array {
+    return [
+      'error envelope' => [new Response(500, [], '{"error":{"msg":"boom","code":500}}')],
+      'bare non-200' => [new Response(404, [], 'not found')],
+      'transport failure' => [
+        new ConnectException(
+          'Connection refused',
+          new Request('GET', 'http://localhost:8983/solr/mycore/admin/system')
+        ),
+      ],
+    ];
+  }
+
+  /**
+   * A 200 response that does not carry lucene.solr-spec-version appends no
+   * version row, rather than an empty or "null"-rendering one.
+   *
+   * @dataProvider adminSystemWithoutVersionProvider
+   * @covers ::viewSettings
+   */
+  public function testViewSettingsOmitsVersionRowWhenResponseLacksVersion(string $body): void {
+    $backend = $this->createBackend(new Response(200, [], $body), ['core' => 'mycore']);
+
+    $settings = $backend->viewSettings();
+
+    $versionRows = array_filter(
+      $settings,
+      fn (array $row) => (string) $row['label'] === 'Wayfinder version'
+    );
+    $this->assertSame([], $versionRows, 'No version row should be appended when the response carries no usable version string.');
+
+    $urlRows = array_filter(
+      $settings,
+      fn (array $row) => str_contains((string) $row['info'], 'http://localhost:8983/solr/mycore')
+    );
+    $this->assertNotEmpty($urlRows, 'The server URL row must survive a version-less admin/system response.');
+  }
+
+  /**
+   * @return array<string, array{0: string}>
+   */
+  public static function adminSystemWithoutVersionProvider(): array {
+    return [
+      'no lucene block' => ['{"responseHeader":{"status":0}}'],
+      'lucene block without solr-spec-version' => ['{"lucene":{"lucene-spec-version":"9.12.3"}}'],
+      'empty version string' => ['{"lucene":{"solr-spec-version":""}}'],
+      'non-string version' => ['{"lucene":{"solr-spec-version":{"nested":"object"}}}'],
+      'empty body' => [''],
+    ];
   }
 
 }

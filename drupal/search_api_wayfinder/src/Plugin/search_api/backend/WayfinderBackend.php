@@ -11,6 +11,7 @@ use Drupal\search_api\Attribute\SearchApiBackend;
 use Drupal\search_api\Backend\BackendPluginBase;
 use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Query\QueryInterface;
+use Drupal\search_api\SearchApiException;
 use Drupal\search_api_wayfinder\DocumentBuilder;
 use Drupal\search_api_wayfinder\FieldMapper;
 use Drupal\search_api_wayfinder\QueryBuilder;
@@ -186,13 +187,48 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
    * {@inheritdoc}
    */
   public function viewSettings() {
-    $config = $this->getConfiguration();
-    return [
+    $info = [
       [
         'label' => $this->t('Server URL'),
         'info' => $this->getCoreUrl(),
       ],
     ];
+
+    // ponytail: an admin/system handshake that fails (unreachable server,
+    // error envelope, unexpected body) drops the version row silently rather
+    // than reporting the failure. This is an informational admin panel, and
+    // the server's reachability is already reported by isAvailable()/ping();
+    // surfacing the transport error here as well needs a place to put it that
+    // does not read as a second, contradictory availability verdict.
+    //
+    // ponytail: this is also a second *blocking* HTTP request on the server's
+    // View page, on top of isAvailable()'s ping -- against an unreachable
+    // server the page waits out the configured timeout twice. Collapsing the
+    // two into one probe means reworking isAvailable()'s contract, which is
+    // Search API core's, not ours.
+    //
+    // Only SearchApiException is caught: that is the single failure mode
+    // WayfinderClient::request() raises here (its encodeQuery() can throw
+    // InvalidArgumentException, but not for adminSystem()'s static params).
+    // Catching \Throwable would also swallow a genuine Error/TypeError bug.
+    try {
+      $system = $this->getClient()->adminSystem();
+    }
+    catch (SearchApiException $e) {
+      return $info;
+    }
+
+    // Version lives at lucene.solr-spec-version -- ground truth
+    // solr-ref/responses/admin_system.json.
+    $version = $system['lucene']['solr-spec-version'] ?? NULL;
+    if (is_string($version) && $version !== '') {
+      $info[] = [
+        'label' => $this->t('Wayfinder version'),
+        'info' => $version,
+      ];
+    }
+
+    return $info;
   }
 
   /**

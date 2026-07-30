@@ -13,10 +13,10 @@
 #
 #   WAYFINDER_INTEGRATION=1 bash drupal/search_api_wayfinder/tests/integration/run.sh
 #
-# Requires Docker with network access. Not hooked into
-# .github/workflows/ci.yml as a default job (M5/#79 owns full CI polish);
-# see that file for an optional workflow_dispatch job that runs this script
-# on demand.
+# Requires Docker with network access. Deliberately not a default job in
+# .github/workflows/ci.yml (M5/#79 decided it stays manual, since Docker +
+# network breaks the hermetic-gate contract the PHP unit job upholds); see
+# that file for the workflow_dispatch job that runs this script on demand.
 #
 # Own isolated containers/ports (wf80-*, 18990/9080 -- see docker-compose.yml
 # comment for the full collision-avoidance rationale). Never touches
@@ -31,8 +31,11 @@
 # registers its own backend plugin directly (`drush pml`/`drush php:eval`
 # check below asserts the "wayfinder" *backend* is discoverable, not a
 # connector), and the admin/info/system probe from the old script is
-# dropped (issue #59 merged the version-handshake endpoint; WayfinderBackend
-# does not call it as of M1, so there is nothing to probe here yet).
+# dropped. As of M5/#79 WayfinderBackend::viewSettings() does call
+# {core}/admin/system for the version handshake (issue #59's endpoint), but
+# it is covered hermetically by WayfinderBackendTest against the captured
+# solr-ref/responses/admin_system.json fixture, so this harness still has no
+# reason to probe it live.
 
 if [ "${WAYFINDER_INTEGRATION:-0}" != "1" ]; then
   echo "skipping search_api_wayfinder integration harness (set WAYFINDER_INTEGRATION=1 to run)"
