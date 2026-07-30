@@ -977,6 +977,50 @@ async fn unsupported_bf_param_is_ignored_like_any_unknown_param() {
     }
 }
 
+#[tokio::test]
+async fn non_numeric_boost_is_ignored_like_any_unsupported_function_query_not_rejected() {
+    // Real Solr's `boost` is always a function query (`boost=2` just happens
+    // to be its simplest constant form); Wayfinder has no function-query
+    // evaluator (PRD v1 scope, same exclusion as `bf` -- issue #108/finding
+    // 75), so a non-numeric `boost` value must fail to parse and be ignored,
+    // not 400 (issue #110): same "unsupported param is silently a no-op"
+    // contract as `bf` above, applied to `boost` instead of `bf`.
+    let (app, _dir) = edismax_app().await;
+    let (status_without, without) = get(
+        &app,
+        "select?q=rocket&defType=edismax&qf=title+body&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json",
+    )
+    .await;
+    let (status_with, with) = get(
+        &app,
+        "select?q=rocket&defType=edismax&qf=title+body&boost=recip(rord(id),1,2,3)&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json",
+    )
+    .await;
+    assert_eq!(status_without, StatusCode::OK);
+    assert_eq!(
+        status_with,
+        StatusCode::OK,
+        "a non-numeric `boost` must not 400, same as any other unsupported param (finding 8)"
+    );
+    let scores_without = scores_by_id(&without);
+    let scores_with = scores_by_id(&with);
+    assert_eq!(
+        scores_without.len(),
+        scores_with.len(),
+        "an ignored function-query `boost` must not change which docs match"
+    );
+    for (id, score_without) in &scores_without {
+        let score_with = scores_with.get(id).unwrap_or_else(|| {
+            panic!("doc {id} missing once function-query `boost` is added: {scores_with:?}")
+        });
+        assert!(
+            (score_with - score_without).abs() <= score_tolerance(),
+            "an ignored function-query `boost` must not change doc {id}'s score: \
+             without={score_without}, with={score_with}"
+        );
+    }
+}
+
 // --- a captured Solr fact this file assumes, made explicit -----------------
 
 #[tokio::test]
