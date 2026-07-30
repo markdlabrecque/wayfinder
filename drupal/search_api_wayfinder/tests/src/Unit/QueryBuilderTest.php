@@ -4,7 +4,8 @@ declare(strict_types=1);
 
 namespace Drupal\Tests\search_api_wayfinder\Unit;
 
-use Drupal\Core\TypedData\DataDefinitionInterface;
+use Drupal\Core\Field\FieldDefinitionInterface;
+use Drupal\Core\Field\FieldStorageDefinitionInterface;
 use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Item\FieldInterface;
 use Drupal\search_api\Query\QueryInterface;
@@ -68,8 +69,18 @@ class QueryBuilderTest extends TestCase {
 
     $properties = [];
     foreach (array_keys($fields) as $id) {
-      $definition = $this->createMock(DataDefinitionInterface::class);
-      $definition->method('isList')->willReturn($this->multiValuedById[$id] ?? FALSE);
+      // Realistic shape (issue #81): a content-entity field is
+      // list-by-construction (isList() unconditionally TRUE) -- the actual
+      // single/multi signal is field-storage cardinality, not isList().
+      $multiValued = $this->multiValuedById[$id] ?? FALSE;
+      $storage = $this->createMock(FieldStorageDefinitionInterface::class);
+      $storage->method('getCardinality')->willReturn(
+        $multiValued ? FieldStorageDefinitionInterface::CARDINALITY_UNLIMITED : 1
+      );
+
+      $definition = $this->createMock(FieldDefinitionInterface::class);
+      $definition->method('isList')->willReturn(TRUE);
+      $definition->method('getFieldStorageDefinition')->willReturn($storage);
       $properties[$id] = $definition;
     }
     $index->method('getPropertyDefinitions')->willReturn($properties);
