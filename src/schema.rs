@@ -34,6 +34,10 @@ pub const DYNAMIC_FIELD: &str = "_dynamic";
 /// string values, and a `*_s` string pattern must not be stemmed like a
 /// `*_txt` one.
 pub const DYNAMIC_TEXT_FIELD: &str = "_dynamic_text";
+/// Internal version assigned by `CoreIndex` immediately before insertion. It
+/// deliberately has no `[[fields]]` entry: user schema configuration never
+/// controls this fast field.
+pub const VERSION_FIELD: &str = "_version_";
 
 /// The ISO-639-1 code -> Tantivy stemmer language table. PRD open question 5:
 /// ship every language Tantivy's stemmer set gives cheaply, which is all of
@@ -193,6 +197,10 @@ impl WayfinderSchema {
     /// The `[[dynamic_fields]]` rule matching `name`, longest pattern first
     /// (Solr's rule). Pattern-only: callers must check `is_static` first.
     pub fn match_dynamic(&self, name: &str) -> Option<&DynamicFieldConfig> {
+        if name == VERSION_FIELD {
+            return None;
+        }
+
         self.dynamic_fields
             .iter()
             .filter(|d| glob_matches(&d.pattern, name))
@@ -511,10 +519,23 @@ pub fn load(path: &Path) -> Result<WayfinderSchema> {
 /// As `load`, but from the TOML text directly.
 pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     let parsed: SchemaFile = toml::from_str(raw)?;
+    if parsed
+        .fields
+        .iter()
+        .any(|field| field.name == VERSION_FIELD)
+    {
+        bail!("field `{VERSION_FIELD}` is reserved for Wayfinder's internal version field");
+    }
     let tokenizers = build_tokenizers(&parsed.field_types)?;
 
     let mut builder = Schema::builder();
     let mut field_handles = HashMap::new();
+
+    // `_version_` is a Wayfinder-owned field, never a schema.toml field. It
+    // is not stored, so default select responses cannot expose it. Keep it
+    // out of `field_handles`: all normal resolver paths remain user-schema
+    // only; `stats::check_statable` is its deliberate narrow exception.
+    builder.add_i64_field(VERSION_FIELD, numeric_options(false, true));
 
     for fc in &parsed.fields {
         let resolved = resolve_type(&fc.type_, &parsed.field_types)
@@ -602,7 +623,11 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
 
     for copy in &parsed.copy_fields {
         for (role, name) in [("source", &copy.source), ("dest", &copy.dest)] {
-            if !field_handles.contains_key(name) {
+            if !parsed
+                .fields
+                .iter()
+                .any(|field| field.name.as_str() == name)
+            {
                 bail!("copy_fields {role} `{name}` is not a declared field");
             }
         }
@@ -670,7 +695,11 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
             parsed.core.unique_key,
         );
     }
-    if !field_handles.contains_key(&parsed.core.default_field) {
+    if !parsed
+        .fields
+        .iter()
+        .any(|field| field.name == parsed.core.default_field)
+    {
         bail!(
             "core.default_field `{}` is not a declared field",
             parsed.core.default_field

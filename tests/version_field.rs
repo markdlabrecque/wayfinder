@@ -87,6 +87,110 @@ fn user_schema_declaration_of_version_field_is_a_normal_load_error() {
     );
 }
 
+/// This rule deliberately collides with the reserved name. Dynamic schema
+/// resolution must not let a user redefine or expose the internal field.
+const VERSION_DYNAMIC_COLLISION_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "id"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[dynamic_fields]]
+pattern = "_version_"
+type = "long"
+stored = true
+fast = true
+"#;
+
+/// A catch-all dynamic rule must not offer a bypass that the exact rule above
+/// does not: `_version_` remains reserved before dynamic resolution.
+const VERSION_WILDCARD_DYNAMIC_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "id"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[dynamic_fields]]
+pattern = "*"
+type = "long"
+stored = true
+fast = true
+"#;
+
+#[tokio::test]
+async fn dynamic_version_rule_cannot_override_internal_access_controls() {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), VERSION_DYNAMIC_COLLISION_SCHEMA_TOML)
+        .expect("a dynamic rule must not prevent constructing the core");
+
+    let (status, body) = common::post_docs(&app, &json!([{"id":"forged","_version_":1}])).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a dynamic rule must not allow user input for reserved _version_: {body}"
+    );
+
+    let (status, body) = common::post_docs(&app, &json!([{"id":"real"}])).await;
+    assert_eq!(status, StatusCode::OK, "test setup must index: {body}");
+
+    let (status, body) = common::get(
+        &app,
+        "select?q=*:*&rows=0&stats=true&stats.field=_version_&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "stats is the sole authorized _version_ access path: {body}"
+    );
+
+    let (status, body) = common::get(&app, "select?q=*:*&sort=_version_+asc&wt=json").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a dynamic rule must not make _version_ sortable: {body}"
+    );
+
+    let (status, body) = common::get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=_version_&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a dynamic rule must not make _version_ facetable: {body}"
+    );
+}
+
+#[tokio::test]
+async fn wildcard_dynamic_rule_cannot_bypass_reserved_version_input_rejection() {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), VERSION_WILDCARD_DYNAMIC_SCHEMA_TOML)
+        .expect("a wildcard dynamic rule must not prevent constructing the core");
+
+    let (status, body) = common::post_docs(&app, &json!([{"id":"forged","_version_":1}])).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a wildcard dynamic rule must not allow user input for reserved _version_: {body}"
+    );
+}
+
 #[tokio::test]
 async fn version_field_is_stats_only_not_sortable_or_facetable() {
     let (app, _dir) = version_app();
