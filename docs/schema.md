@@ -143,3 +143,11 @@ Tantivy schema** and is refused like a field change:
 [[dynamic_fields]] went from 0 rule(s) to 1; the existing index has no catch-all field to hold
 their values — reindex into a fresh data directory
 ```
+
+## Presets
+
+`presets/search-api.toml` ships the Drupal `search_api_solr` module's field-naming convention
+(prefixes like `ss_`, `sm_`, `tm_X3b_en_`, `its_`, `ds_`, `bs_`) as a ready-made schema, so a
+Drupal site can point at Wayfinder with `wayfinder presets/search-api.toml <data-dir>` and no
+per-site schema authoring. See the file's own header comment for the couple of documented
+divergences (no native boolean type; `sort_*` stands in for Solr's collation type).

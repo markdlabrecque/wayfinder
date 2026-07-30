@@ -1,0 +1,220 @@
+# Wayfinder schema preset: Drupal `search_api_solr` module.
+#
+# Expresses the field-naming convention the `search_api_solr` module (pinned
+# 4.4.0) uses to talk to Solr, as Wayfinder `[[fields]]` + `[[dynamic_fields]]`
+# rules, so any Drupal site indexes into Wayfinder with zero per-site schema
+# authoring. Derived from the captured ground-truth configset at
+# `solr-ref/search-api/configset/schema.xml` (issue #55), not from guesswork
+# about the module's conventions.
+#
+# `default_field` below is inert for this preset: search_api_solr always sends
+# an explicit `qf`/`df` per query in real traffic, so no particular value is
+# load-bearing here. It just has to be a valid field name.
+#
+# One genuine divergence from the captured Solr schema: Wayfinder has no
+# boolean field type. Solr's `boolean`/`booleans` (`bs_*`/`bm_*`) are mapped to
+# Wayfinder's `string` type here instead. Captured Drupal traffic already sends
+# boolean values as JSON strings (`"true"`/`"false"`) on input, so that side
+# matches; the divergence is one-directional, on output: Wayfinder returns
+# `"true"`/`"false"` as a JSON string where Solr returns a native JSON boolean.
+#
+# A second, distinct divergence: `sort_*` maps to Wayfinder's `string` type as
+# a stand-in for Solr's `collated_en`/`collated_und` field type, since
+# Wayfinder has no collation type.
+#
+# This preset covers the prefixes real captured Drupal traffic actually uses
+# (verified against `solr-ref/search-api/trace/*.json`), not the full
+# configset's exhaustive prefix list -- spatial types, `random_*`, `access_*`,
+# `xs_`/`xm_` binary, `hs_`/`hts_` hierarchy, etc. are out of scope. Don't
+# mistake this for a complete `schema.xml` transliteration.
+
+[core]
+name = "content"
+unique_key = "id"
+default_field = "id"
+
+# --- static fields: exact names the module always sends ---------------------
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+fast = true
+required = true
+
+[[fields]]
+name = "index_id"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "hash"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "site"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "timestamp"
+type = "date"
+stored = true
+fast = true
+
+[[fields]]
+name = "boost_document"
+type = "float"
+stored = true
+fast = true
+
+# --- dynamic fields: one rule per search_api_solr prefix convention --------
+
+# single-valued, not analyzed
+[[dynamic_fields]]
+pattern = "ss_*"
+type = "string"
+stored = true
+fast = true
+
+# multi-valued, not analyzed
+[[dynamic_fields]]
+pattern = "sm_*"
+type = "string"
+multi_valued = true
+stored = true
+fast = true
+
+# single-valued full text, general tokenizer
+[[dynamic_fields]]
+pattern = "ts_*"
+type = "text_general"
+stored = true
+
+# multi-valued full text, general tokenizer
+[[dynamic_fields]]
+pattern = "tm_*"
+type = "text_general"
+multi_valued = true
+stored = true
+
+# single-valued full text, English stemmed (search_api_solr encodes the
+# language-code separator ";" as "X3b" in the field name)
+[[dynamic_fields]]
+pattern = "ts_X3b_en_*"
+type = "text_en"
+stored = true
+
+# multi-valued full text, English stemmed
+[[dynamic_fields]]
+pattern = "tm_X3b_en_*"
+type = "text_en"
+multi_valued = true
+stored = true
+
+# single-valued int
+[[dynamic_fields]]
+pattern = "is_*"
+type = "int"
+stored = true
+fast = true
+
+# multi-valued int
+[[dynamic_fields]]
+pattern = "im_*"
+type = "int"
+multi_valued = true
+stored = true
+fast = true
+
+# single-valued long
+[[dynamic_fields]]
+pattern = "its_*"
+type = "long"
+stored = true
+fast = true
+
+# multi-valued long
+[[dynamic_fields]]
+pattern = "itm_*"
+type = "long"
+multi_valued = true
+stored = true
+fast = true
+
+# single-valued float
+[[dynamic_fields]]
+pattern = "fs_*"
+type = "float"
+stored = true
+fast = true
+
+# multi-valued float
+[[dynamic_fields]]
+pattern = "fm_*"
+type = "float"
+multi_valued = true
+stored = true
+fast = true
+
+# single-valued double
+[[dynamic_fields]]
+pattern = "ps_*"
+type = "double"
+stored = true
+fast = true
+
+# multi-valued double
+[[dynamic_fields]]
+pattern = "pm_*"
+type = "double"
+multi_valued = true
+stored = true
+fast = true
+
+# single-valued date
+[[dynamic_fields]]
+pattern = "ds_*"
+type = "date"
+stored = true
+fast = true
+
+# multi-valued date
+[[dynamic_fields]]
+pattern = "dm_*"
+type = "date"
+multi_valued = true
+stored = true
+fast = true
+
+# single-valued boolean -> string (Wayfinder has no boolean type; see header)
+[[dynamic_fields]]
+pattern = "bs_*"
+type = "string"
+stored = true
+fast = true
+
+# multi-valued boolean -> string
+[[dynamic_fields]]
+pattern = "bm_*"
+type = "string"
+multi_valued = true
+stored = true
+fast = true
+
+# spellcheck suggestion text, general tokenizer, always multi-valued
+[[dynamic_fields]]
+pattern = "spellcheck_*"
+type = "text_general"
+multi_valued = true
+stored = true
+
+# dedicated single-valued sort field, not analyzed
+[[dynamic_fields]]
+pattern = "sort_*"
+type = "string"
+fast = true
