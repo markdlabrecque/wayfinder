@@ -1,0 +1,40 @@
+# Integration verification stack for issue #80 (search_api_wayfinder, part of
+# #57 M1 follow-up). Own isolated container names/ports -- never reuse or
+# collide with the canonical wayfinder-solr-ref stack (solr-ref/capture.sh,
+# port 8983), issue #55's wf55-* capture stack (ports 8996-8998), the
+# differential harness's live-Solr mode, or bench/run.sh's SOLR_HOST_PORT
+# (defaults to 18983 too -- do not run this harness at the same time as a
+# bench run). Torn down after the run, same pattern as those scripts.
+#
+# Adapted from the old worktree's wf57-* stack
+# (/Users/mark/Projects/wayfinder-57-search-api-wayfinder/drupal/search_api_wayfinder/tests/integration/docker-compose.yml):
+# same shape (build Wayfinder from repo Dockerfile, run a Drupal image beside
+# it, bind-mount the module source into the Drupal container as a Composer
+# path repo). What changed: the schema mounted into the wayfinder container
+# is now the repo's `presets/search-api.toml` (the real, maintained preset;
+# per issue #80 it points at `presets/search-api.toml`, two directories above
+# `drupal/search_api_wayfinder`, four `../` up from here) instead of a
+# harness-local schema.toml -- the harness must prove the round trip against
+# the actual preset it's supposed to validate, not a hand-tuned copy of it.
+services:
+  wayfinder:
+    build:
+      context: ../../../..
+      dockerfile: Dockerfile
+    container_name: wf80-wayfinder
+    ports:
+      - "18983:8983"
+    volumes:
+      - ../../../../presets/search-api.toml:/schema.toml:ro
+    command: ["/schema.toml", "/data", "0.0.0.0:8983"]
+
+  drupal:
+    image: drupal:11-php8.3-apache
+    container_name: wf80-drupal
+    depends_on:
+      - wayfinder
+    ports:
+      - "9080:80"
+    volumes:
+      - ./drupal-site:/opt/drupal
+      - ../../:/opt/module-src:ro
