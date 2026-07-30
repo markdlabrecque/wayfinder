@@ -15,6 +15,18 @@
 // doc, "search_api_facets" contrib module) once QueryBuilder emits
 // `facet.field` and ResponseParser parses `facet_counts`.
 //
+// KNOWN BLOCKER (#84): this currently fails, but not because of anything in
+// search_api_wayfinder. Indexing succeeds; the search step 400s because
+// Wayfinder core's edismax `qf`/`pf` resolution (CoreIndex::
+// resolve_field_weights, src/core_index.rs) only resolves statically
+// declared fields, never a `[[dynamic_fields]]` pattern match like
+// `ts_title` -- unlike the `q` text path, which does rewrite dynamic names
+// via rewrite_dynamic_fields(). Since search_api_solr's field-naming
+// convention (and this repo's own presets/search-api.toml) is entirely
+// dynamic-field-based, `defType=edismax` against real Drupal `qf` values is
+// unusable until #84 lands. Re-run this harness once #84 closes; it should
+// go green with no changes needed here.
+//
 // This script is the harness's actual "red" assertion for issue #80: it
 // exits non-zero (and prints a ROUNDTRIP: FAIL line) unless the node
 // created by create_content.php comes back from a real Wayfinder core

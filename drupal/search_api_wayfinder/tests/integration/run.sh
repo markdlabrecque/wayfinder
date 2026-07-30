@@ -120,6 +120,12 @@ docker exec wf80-drupal bash -lc "
   vendor/bin/drush search-api:index wf80_index || vendor/bin/drush sapi-i wf80_index
 "
 
+# WayfinderBackend sends commitWithin=1000ms (setup_server_index.php), an
+# async *scheduled* hard commit, not immediate -- so the just-indexed fields
+# are not yet visible to /select without this. Force a synchronous commit
+# straight to the wayfinder container so the round trip isn't racing it.
+curl -sf "http://localhost:18983/solr/content/update?commit=true" -H 'Content-Type: application/json' -d '{}' >/dev/null
+
 echo "--- real index+search round trip ---"
 docker exec wf80-drupal bash -lc "
   cd /opt/drupal
