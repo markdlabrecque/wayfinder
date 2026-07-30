@@ -20,6 +20,7 @@ mod admin_ui;
 mod collector;
 mod config;
 mod core_index;
+mod coverage;
 pub mod edismax;
 mod error;
 mod facet;
@@ -30,6 +31,7 @@ pub mod schema;
 mod stats;
 
 pub use config::ServerConfig;
+pub use coverage::report as coverage_report;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -121,6 +123,49 @@ const ADMIN_INFO_PARAMS: &[&str] = &["wt", "json.nl"];
 /// similar-docs result set exactly as `/select` does. Out of scope, per the
 /// task spec: `mlt=true` as a `/select` search component, and content-stream
 /// MLT.
+/// Route behavior shared by the real Axum router and coverage report. A route
+/// cannot be reported as covered unless this table wires it and accepts the
+/// captured method.
+struct RouteSpec {
+    path: &'static str,
+    accepts_method: fn(&str) -> bool,
+}
+
+fn any_method(_: &str) -> bool {
+    true
+}
+
+fn update_method(method: &str) -> bool {
+    matches!(method, "POST" | "GET")
+}
+
+macro_rules! search_api_routes {
+    ($apply:ident) => {
+        $apply! {
+            ("/solr/{core}/update", update, update_method),
+            ("/solr/{core}/select", select, any_method),
+            ("/solr/{core}/mlt", mlt, any_method),
+            ("/solr/{core}/admin/ping", ping, any_method),
+            ("/solr/admin/info/system", admin_info_system, any_method),
+            ("/solr/{core}/admin/system", core_admin_system, any_method),
+        }
+    };
+}
+
+macro_rules! route_specs {
+    ($(($path:literal, $handler:ident, $accepts_method:ident)),+ $(,)?) => {
+        &[$(RouteSpec { path: $path, accepts_method: $accepts_method }),+]
+    };
+}
+
+macro_rules! wire_routes {
+    ($(($path:literal, $handler:ident, $accepts_method:ident)),+ $(,)?) => {
+        Router::new()$(.route($path, any($handler)))+
+    };
+}
+
+const ROUTES: &[RouteSpec] = search_api_routes!(route_specs);
+
 const MLT_PARAMS: &[&str] = &[
     "q",
     "df",
@@ -174,18 +219,14 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
     // so a 405 from the router would be a divergence. `/update` does reject
     // some methods (`err_update_put.json`), which it does itself, with Solr's
     // envelope for it.
-    let router = Router::new()
-        .route("/solr/{core}/update", any(update))
-        .route("/solr/{core}/select", any(select))
-        .route("/solr/{core}/mlt", any(mlt))
-        .route("/solr/{core}/admin/ping", any(ping))
-        .route("/solr/admin/info/system", any(admin_info_system))
-        .route("/solr/{core}/admin/system", any(core_admin_system))
+    let router = search_api_routes!(wire_routes)
         // Admin UI (issue #94, PRD §5 v2.5). Outside `/solr/*` on purpose:
         // this is Wayfinder's own surface, not part of the Solr wire API, so
-        // it can never shadow a path a Solr client expects. `get`, not `any`
-        // — the method-agnostic routing above exists to match Solr's request
-        // handlers, and that reason does not apply here.
+        // it can never shadow a path a Solr client expects — deliberately
+        // not part of `search_api_routes!`, which drives the coverage
+        // denominator's route surface. `get`, not `any` — the
+        // method-agnostic routing the macro uses exists to match Solr's
+        // request handlers, and that reason does not apply here.
         .route("/ui", get(core_ui));
 
     // Test-only, never in a default/release build (#39): a route that always
@@ -299,7 +340,7 @@ fn check_core(
 /// (`missing content stream`) or committing if only asked to, both handled in
 /// `update` itself, not here.
 fn check_update_method(method: &Method) -> Result<(), WfError> {
-    if method != Method::POST && method != Method::GET {
+    if !update_method(method.as_str()) {
         return Err(WfError::bad_request(
             "wayfinder::UnsupportedMethod",
             format!("Unsupported method: {method} for request /update"),
@@ -595,6 +636,14 @@ async fn admin_info_system(
     check_params(&state, ADMIN_INFO_PARAMS, &params)?;
     let (jvm, system, security) = admin_info_jvm_system_security();
     let version = &state.config.admin.reported_solr_version;
+    let mut lucene = Map::new();
+    lucene.insert("solr-spec-version".to_string(), json!(version));
+    lucene.insert(
+        "solr-impl-version".to_string(),
+        json!(format!("{version} wayfinder")),
+    );
+    lucene.insert("lucene-spec-version".to_string(), json!("9.12.3"));
+    lucene.insert("lucene-impl-version".to_string(), json!("9.12.3 wayfinder"));
     let body = json!({
         "responseHeader": {
             "status": 0,
@@ -603,12 +652,7 @@ async fn admin_info_system(
         "mode": "std",
         "solr_home": "/var/solr/data",
         "core_root": "/var/solr/data",
-        "lucene": {
-            "solr-spec-version": version,
-            "solr-impl-version": format!("{version} wayfinder"),
-            "lucene-spec-version": "9.12.3",
-            "lucene-impl-version": "9.12.3 wayfinder",
-        },
+        "lucene": lucene,
         "jvm": jvm,
         "security": security,
         "system": system,
@@ -643,17 +687,14 @@ async fn core_admin_system(
     check_params(&state, ADMIN_INFO_PARAMS, &params)?;
     let (jvm, system, security) = admin_info_jvm_system_security();
     let version = &state.config.admin.reported_solr_version;
-    let body = json!({
-        "responseHeader": {
-            "status": 0,
-            "QTime": 0,
-        },
-        "core": {
-            "schema": CORE_ADMIN_SCHEMA,
-            "host": "wayfinder",
-            "now": "1970-01-01T00:00:00.000Z",
-            "start": "1970-01-01T00:00:00.000Z",
-            "directory": {
+    let mut core_response = Map::new();
+    core_response.insert("schema".to_string(), json!(CORE_ADMIN_SCHEMA));
+    core_response.insert("host".to_string(), json!("wayfinder"));
+    core_response.insert("now".to_string(), json!("1970-01-01T00:00:00.000Z"));
+    core_response.insert("start".to_string(), json!("1970-01-01T00:00:00.000Z"));
+    core_response.insert(
+        "directory".to_string(),
+        json!({
                 "cwd": "/var/wayfinder",
                 "instance": format!("/var/wayfinder/{core}"),
                 "data": format!("/var/wayfinder/{core}/data"),
@@ -662,8 +703,14 @@ async fn core_admin_system(
                 // ceiling here, not a real Tantivy directory-factory class.
                 "dirimpl": "wayfinder::CoreIndex",
                 "index": format!("/var/wayfinder/{core}/data/index"),
-            },
+        }),
+    );
+    let body = json!({
+        "responseHeader": {
+            "status": 0,
+            "QTime": 0,
         },
+        "core": core_response,
         "mode": "std",
         "lucene": {
             "solr-spec-version": version,
@@ -1358,8 +1405,8 @@ async fn mlt(
             "QTime": 0,
         },
         "match": match_block,
-        "response": response_value,
     });
+    body["response"] = response_value;
 
     // Real Solr's `mlt.interestingTerms` value set is `none | list | details`
     // (default `none`, which omits the key entirely) — `"false"` is not a

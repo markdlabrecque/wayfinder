@@ -139,18 +139,15 @@ pub fn facet_counts(
         .map_err(|e| anyhow::Error::new(PreQueryFacetError(e)))?;
     let facet_queries = facet_queries(index, params, default_field, base)?;
     let (facet_fields, warnings) = facet_fields(index, config, params, base, nl)?;
-    Ok((
-        json!({
-            "facet_queries": facet_queries,
-            "facet_fields": facet_fields,
-            "facet_ranges": facet_ranges,
-            // Out of scope (PRD §5 leaves them for later): the keys are present
-            // and empty because Solr always emits all five (findings fact 3).
-            "facet_intervals": {},
-            "facet_heatmaps": {},
-        }),
-        warnings,
-    ))
+    let mut counts = Map::new();
+    counts.insert("facet_queries".to_string(), facet_queries);
+    counts.insert("facet_fields".to_string(), facet_fields);
+    counts.insert("facet_ranges".to_string(), facet_ranges);
+    // Out of scope (PRD §5 leaves them for later): the keys are present and
+    // empty because Solr always emits all five (findings fact 3).
+    counts.insert("facet_intervals".to_string(), json!({}));
+    counts.insert("facet_heatmaps".to_string(), json!({}));
+    Ok((Value::Object(counts), warnings))
 }
 
 /// Clones `base` and adds `extra` as another `Must` clause.

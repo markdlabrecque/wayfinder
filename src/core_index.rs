@@ -1755,7 +1755,10 @@ impl CoreIndex {
     /// fixture needs a second real snippet (`hl_snippets_two.json`'s query
     /// has exactly one hit per doc per field), so this is left as the
     /// ceiling rather than hand-rolling multi-fragment selection against a
-    /// private algorithm.
+    /// private algorithm. Lifting it is tracked as issue #103; the captured
+    /// Search API traffic does send `hl.snippets=3`, so the coverage probe
+    /// `select.highlight.snippets` in `src/coverage.rs` honestly reports this
+    /// semantic as uncovered until #103 lands.
     pub fn highlight_field(
         &self,
         query: &dyn Query,

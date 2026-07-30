@@ -11,8 +11,22 @@ use std::path::{Path, PathBuf};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
+    let first = args.next();
+    if first.as_deref() == Some("coverage") {
+        if args.next().as_deref() != Some("--format") || args.next().as_deref() != Some("json") {
+            return Err(anyhow::anyhow!("usage: wayfinder coverage --format json"));
+        }
+        if args.next().is_some() {
+            return Err(anyhow::anyhow!("usage: wayfinder coverage --format json"));
+        }
+        println!(
+            "{}",
+            serde_json::to_string(&wayfinder::coverage_report().await)?
+        );
+        return Ok(());
+    }
     let schema_path =
-        PathBuf::from(args.next().ok_or_else(|| {
+        PathBuf::from(first.ok_or_else(|| {
             anyhow::anyhow!("usage: wayfinder <schema.toml> <data-dir> [bind-addr]")
         })?);
     let data_dir =
