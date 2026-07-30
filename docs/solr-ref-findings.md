@@ -1300,3 +1300,16 @@ edismax-specific behaviour.
     behind `WAYFINDER_DIFF_SOLR=1`, not run here), Wayfinder's `resources.max_body_size` default
     (see `src/config.rs`) is a deliberate round headroom figure over the largest known fixture, not
     a value derived from a verified Solr default.
+
+80. **Solr 9 accepts `stats=true&stats.field=_version_&function=max(_version_)` as
+    search_api_solr's watermark request shape.** A dedicated three-document
+    `version99` core captured `stats_version_max.json`: the response is HTTP
+    200, echoes both `stats.field` and `function`, and returns the normal
+    `stats.stats_fields._version_` metrics with `count:3`, `missing:0`, and a
+    `max` equal to the newest auto-assigned version. `function=max(_version_)`
+    does not create a second stats entry; `_version_` remains the sole key.
+    Its numeric values are update-log/time-derived and therefore intentionally
+    fixture-variable; the hermetic test derives its expected maximum from the
+    indexed fast field while using this fixture to pin Solr's request and
+    envelope behavior. Captured with `solr:9` (issue #99), container
+    `wayfinder-solr-99`, port 8999.

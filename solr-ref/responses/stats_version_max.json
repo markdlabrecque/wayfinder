@@ -1,0 +1,34 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"*:*",
+      "stats":"true",
+      "function":"max(_version_)",
+      "rows":"0",
+      "wt":"json",
+      "stats.field":"_version_"
+    }
+  },
+  "response":{
+    "numFound":3,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "stats":{
+    "stats_fields":{
+      "_version_":{
+        "min":1.87216438227055411E18,
+        "max":1.87216438229257421E18,
+        "count":3,
+        "missing":0,
+        "sum":5.6164931468557025E18,
+        "sumOfSquares":1.0514998422892358E37,
+        "mean":1.87216438228523418E18,
+        "stddev":2.8054608899043205E10
+      }
+    }
+  }
+}

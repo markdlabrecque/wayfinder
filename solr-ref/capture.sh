@@ -1605,3 +1605,37 @@ echo "  (docker rm -f $EDISMAX_CONTAINER to stop)"
 # `solr-ref/responses/admin_system.json`/`admin_info_system.json` on the next
 # re-run (the exact fixture-corruption hazard CLAUDE.md warns about). Those
 # two response files are verbatim copies of the trace files above instead.
+
+# --- internal _version_ stats watermark (issue #99) -------------------------
+# Appended block; own Solr 9 core and port. `_version_` is supplied by Solr's
+# default schema, not configured here. The function parameter is intentionally
+# included because search_api_solr sends this exact watermark request shape.
+VERSION_CONTAINER=wayfinder-solr-99
+VERSION_SOLR=http://localhost:8999/solr
+VERSION_CORE=version99
+if ! docker ps --format '{{.Names}}' | grep -qx "$VERSION_CONTAINER"; then
+  docker rm -f "$VERSION_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$VERSION_CONTAINER" -p 8999:8983 \
+    solr:9 solr-precreate "$VERSION_CORE" >/dev/null
+fi
+echo -n "waiting for version-field solr"
+for _ in $(seq 60); do
+  if curl -sf "$VERSION_SOLR/$VERSION_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+  echo -n "."; sleep 1
+done
+curl -sf "$VERSION_SOLR/$VERSION_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+  {"id":"v1"}, {"id":"v2"}, {"id":"v3"}
+]' >/dev/null
+# `function=max(_version_)` is accepted and echoed by Solr 9; the stats block
+# remains keyed by stats.field and exposes its normal metrics, including max.
+capv() {  # capv <name> <url-after-/solr/>
+  local name=$1 suffix=$2
+  curl -sg "$VERSION_SOLR/$suffix" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$suffix" "" "$VERSION_SOLR" \
+    >> "$HERE/manifest-errors.tsv"
+  rm -f "$OUT/$name.status"
+}
+capv stats_version_max "$VERSION_CORE/select?q=*:*&rows=0&stats=true&stats.field=_version_&function=max(_version_)&wt=json"
+echo "version-field core '$VERSION_CORE' left in place on '$VERSION_CONTAINER' (port 8999)"
+echo "  (docker rm -f $VERSION_CONTAINER to stop)"
