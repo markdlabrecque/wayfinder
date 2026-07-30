@@ -4,16 +4,19 @@ declare(strict_types=1);
 
 namespace Drupal\search_api_wayfinder;
 
+use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Item\Item;
 use Drupal\search_api\Query\QueryInterface;
 use Drupal\search_api\Query\ResultSet;
 
 /**
- * Parses a Wayfinder /select JSON response into a populated ResultSet.
+ * Parses a Wayfinder /select or /mlt JSON response into a populated ResultSet.
  *
  * Envelope shape (response.numFound/start/docs[] with id + score) is ground
- * truth from solr-ref/responses/edismax_score_baseline.json. No facets or
- * highlighting parsing in M1 (plan doc milestone table: M3/M4).
+ * truth from solr-ref/responses/edismax_score_baseline.json; /mlt uses the
+ * same "response" block for its similar documents (mlt_baseline.json), so one
+ * parser serves both. Facet counts and highlighting snippets are read off the
+ * sibling "facet_counts"/"highlighting" blocks when present.
  */
 class ResponseParser {
 
@@ -40,6 +43,15 @@ class ResponseParser {
     $indexId = $index->id();
     $prefix = $indexId . '-';
 
+    // Only pay for the reverse field-name lookup when the response actually
+    // carries highlighting; NULL means "highlighting was not requested", and
+    // items must then be left without the extra data entirely (callers use
+    // hasExtraData() to fall back to Search API's own highlight processor).
+    $highlighting = isset($response['highlighting']) && is_array($response['highlighting'])
+      ? $response['highlighting']
+      : NULL;
+    $fieldIdByName = $highlighting === NULL ? [] : $this->fieldIdsByFieldName($index);
+
     $items = [];
     foreach ($body['docs'] ?? [] as $doc) {
       $docId = (string) ($doc['id'] ?? '');
@@ -47,6 +59,13 @@ class ResponseParser {
 
       $item = new Item($index, $itemId);
       $item->setScore((float) ($doc['score'] ?? 1.0));
+
+      if ($highlighting !== NULL) {
+        $snippets = $this->highlightedFields($highlighting[$docId] ?? [], $fieldIdByName);
+        if ($snippets !== []) {
+          $item->setExtraData('highlighted_fields', $snippets);
+        }
+      }
 
       $items[$itemId] = $item;
     }
@@ -124,6 +143,53 @@ class ResponseParser {
     }
 
     return $facets;
+  }
+
+  /**
+   * Translates one document's highlighting entry into the per-item
+   * "highlighted_fields" extra-data shape.
+   *
+   * The response block is keyed by the *mapped* dynamic field name
+   * ('ts_body'), the same name QueryBuilder emitted in hl.fl -- shape ground
+   * truth solr-ref/responses/hl_basic.json, {docId: {fieldName: [snippet,
+   * ...]}} -- whereas ItemInterface::getExtraData() documents
+   * "highlighted_fields" as "an array, keyed by field IDs". So map back.
+   *
+   * Field names with no Search API field behind them (Wayfinder-internal
+   * fields, or fields dropped from the index since the query ran) are
+   * skipped rather than leaked through under their raw dynamic name.
+   *
+   * @param array<string, mixed> $entry
+   * @param array<string, string> $fieldIdByName
+   *
+   * @return array<string, array<int, string>>
+   */
+  private function highlightedFields(array $entry, array $fieldIdByName): array {
+    $highlighted = [];
+    foreach ($entry as $fieldName => $snippets) {
+      if (!isset($fieldIdByName[$fieldName]) || !is_array($snippets)) {
+        continue;
+      }
+      $highlighted[$fieldIdByName[$fieldName]] = array_values(array_map('strval', $snippets));
+    }
+    return $highlighted;
+  }
+
+  /**
+   * Builds the reverse lookup from Wayfinder dynamic field name back to
+   * Search API field id, using the same FieldMapper mapping QueryBuilder
+   * used on the way out.
+   *
+   * @return array<string, string>
+   */
+  private function fieldIdsByFieldName(IndexInterface $index): array {
+    $map = [];
+    foreach ($index->getFields() as $fieldId => $field) {
+      $fieldId = (string) $fieldId;
+      $fieldName = $this->fieldMapper->fieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
+      $map[$fieldName] = $fieldId;
+    }
+    return $map;
   }
 
 }

@@ -23,3 +23,6 @@ search_api.backend.wayfinder:
     commitWithin:
       type: integer
       label: 'commitWithin (ms)'
+    highlight:
+      type: boolean
+      label: 'Retrieve result highlighting from the server'

@@ -25,8 +25,9 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
  * Thin glue only: config form, feature flags, and delegation to the plain
  * translation classes (QueryBuilder, DocumentBuilder, ResponseParser,
  * FieldMapper) and WayfinderClient's HTTP transport. Per plan doc
- * "Architecture" section and M1 scope: plain fulltext search, indexing, and
- * ping only -- no facets/MLT/highlighting/filters/sorts yet.
+ * "Architecture" section: fulltext search with filters/sorts/facets,
+ * More Like This routing, optional server-side highlighting, indexing, and
+ * ping.
  */
 #[SearchApiBackend(
   id: 'wayfinder',
@@ -62,6 +63,11 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
       'core' => '',
       'timeout' => 5,
       'commitWithin' => 1000,
+      // Server-side highlighting is opt-in per plan doc locked decision 6:
+      // sites that prefer Search API's own algorithmic "highlight" processor
+      // need nothing from the backend, and shouldn't pay for hl on every
+      // query.
+      'highlight' => FALSE,
     ];
   }
 
@@ -105,6 +111,12 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
       '#title' => $this->t('Request timeout (seconds)'),
       '#default_value' => $config['timeout'],
     ];
+    $form['highlight'] = [
+      '#type' => 'checkbox',
+      '#title' => $this->t('Retrieve result highlighting from the server'),
+      '#description' => $this->t('Ask Wayfinder for highlighted snippets and expose them as each result item\'s "highlighted_fields" data. Leave off to use Search API\'s own Highlight processor instead.'),
+      '#default_value' => $config['highlight'] ?? FALSE,
+    ];
 
     return $form;
   }
@@ -134,7 +146,7 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
    */
   public function submitConfigurationForm(array &$form, FormStateInterface $form_state) {
     $values = $form_state->getValues();
-    foreach (['scheme', 'host', 'port', 'path', 'core', 'timeout'] as $key) {
+    foreach (['scheme', 'host', 'port', 'path', 'core', 'timeout', 'highlight'] as $key) {
       if (array_key_exists($key, $values)) {
         $this->configuration[$key] = $values[$key];
       }
@@ -145,10 +157,10 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
    * {@inheritdoc}
    */
   public function getSupportedFeatures() {
-    // ponytail: MLT lands in M4 (plan doc milestone table) -- don't advertise
-    // support the backend doesn't implement yet. Facet support is AND-only:
-    // OR facets need {!ex}/{!tag}, which Wayfinder does not support.
-    return ['search_api_facets'];
+    // Facet support is AND-only: OR facets need {!ex}/{!tag}, which Wayfinder
+    // does not support, so 'search_api_facets_operator_or' stays unadvertised
+    // (plan doc locked decision 4).
+    return ['search_api_facets', 'search_api_mlt'];
   }
 
   /**
@@ -224,8 +236,22 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
    * {@inheritdoc}
    */
   public function search(QueryInterface $query): void {
-    $params = (new QueryBuilder())->build($query);
-    $response = $this->getClient()->select($params);
+    $queryBuilder = new QueryBuilder();
+    $client = $this->getClient();
+
+    // A More Like This query names a seed document rather than search keys,
+    // and Wayfinder answers it on its own endpoint (plan doc architecture
+    // table): route by the option, not by the keys.
+    if ($query->getOption('search_api_mlt')) {
+      $response = $client->mlt($queryBuilder->buildMlt($query));
+    }
+    else {
+      // Highlighting is a backend-level setting, not a query option -- see
+      // QueryBuilder::build()'s $highlighting argument.
+      $highlight = !empty($this->configuration['highlight']);
+      $response = $client->select($queryBuilder->build($query, $highlight));
+    }
+
     (new ResponseParser())->parse($response, $query);
   }
 

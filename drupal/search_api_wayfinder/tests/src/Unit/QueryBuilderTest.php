@@ -693,4 +693,160 @@ class QueryBuilderTest extends TestCase {
     $this->assertSame('its_weight', $params['facet.field']);
   }
 
+  /**
+   * M4 (issue #78): the "search_api_mlt" query option, per plan doc line
+   * 170-171 ("route to GET /mlt with q=id:"{index_id}-{item_id}" and
+   * mlt.fl from the option's fields (mapped)") and the option's real shape,
+   * confirmed against \Drupal\search_api\Plugin\views\argument\
+   * SearchApiMoreLikeThis::query() (the only place core sets it):
+   * ['id' => <search api item id>, 'fields' => <array of field ids>].
+   * Document id composite format ("{index_id}-{item_id}") is locked decision
+   * 2, and is exactly what DocumentBuilder::buildAddCommand() emits, so the
+   * MLT seed lookup must query the same composite id, quoted because item
+   * ids routinely contain ':' (e.g. "entity:node/1:en" per
+   * ResponseParserTest) which would otherwise break the Lucene query.
+   *
+   * mlt.fl is comma-joined (not space-joined like qf) to match the captured
+   * fixture convention (solr-ref/responses/mlt_baseline.json manifest entry:
+   * "mlt.fl=body,category").
+   *
+   * @covers ::buildMlt
+   */
+  public function testBuildMltRoutesByCompositeIdAndMapsConfiguredFields(): void {
+    $index = $this->mockIndex(['title', 'body'], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+      'body' => $this->mockIndexField('body', 'text', TRUE),
+    ], 'my_index');
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], [
+      'search_api_mlt' => [
+        'id' => 'entity:node/1:en',
+        'fields' => ['title', 'body'],
+      ],
+    ]);
+
+    $params = (new QueryBuilder())->buildMlt($query);
+
+    $this->assertSame('id:"my_index-entity:node/1:en"', $params['q']);
+    $this->assertSame('ts_title,tm_body', $params['mlt.fl']);
+  }
+
+  /**
+   * @covers ::buildMlt
+   */
+  public function testBuildMltAppliesTheSamePagingOptionsAsSelect(): void {
+    $index = $this->mockIndex([], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+    ], 'my_index');
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], [
+      'search_api_mlt' => ['id' => 'entity:node/2:en', 'fields' => ['title']],
+      'offset' => 5,
+      'limit' => 10,
+    ]);
+
+    $params = (new QueryBuilder())->buildMlt($query);
+
+    $this->assertSame(5, $params['start']);
+    $this->assertSame(10, $params['rows']);
+  }
+
+  /**
+   * Reviewer round 1, must-fix 2: the seed item id is datasource-derived, not
+   * constrained to machine names, so an id carrying '"' or '\' must not be
+   * able to break out of the quoted phrase and inject query syntax. The
+   * escaping is FieldMapper::filterValue()'s, the same one every other value
+   * path in QueryBuilder uses.
+   *
+   * @covers ::buildMlt
+   */
+  public function testBuildMltEscapesQuotesAndBackslashesInTheSeedItemId(): void {
+    $index = $this->mockIndex([], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+    ], 'my_index');
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], [
+      'search_api_mlt' => ['id' => 'evil" OR id:[* TO *] back\\slash', 'fields' => ['title']],
+    ]);
+
+    $params = (new QueryBuilder())->buildMlt($query);
+
+    $this->assertSame('id:"my_index-evil\\" OR id:[* TO *] back\\\\slash"', $params['q']);
+  }
+
+  /**
+   * Reviewer round 1, must-fix 3: the missing-seed-id guard is a validation
+   * check, and this repo's working agreement requires those to be covered
+   * (mutation-tested) rather than trusted. Without it a malformed option
+   * silently produces id:"my_index-" and an empty result set.
+   *
+   * @covers ::buildMlt
+   */
+  public function testBuildMltRejectsAnMltOptionWithoutASeedItemId(): void {
+    $index = $this->mockIndex([], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+    ], 'my_index');
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], [
+      'search_api_mlt' => ['fields' => ['title']],
+    ]);
+
+    $this->expectException(\InvalidArgumentException::class);
+    (new QueryBuilder())->buildMlt($query);
+  }
+
+  /**
+   * M4 (issue #78): highlighting is "optional-but-in-scope" (plan doc line
+   * 84-87) -- unlike Search API core's own algorithmic "highlight" processor
+   * ("needs nothing from the backend", same paragraph: confirmed against
+   * vendor/drupal/search_api's Highlight processor, which has no
+   * preprocessSearchQuery() and never touches QueryInterface at all).
+   *
+   * Correction (orchestrator review, confirmed against
+   * Highlight.php:342 -- postprocessSearchResults() only ever *reads*
+   * $item->getExtraData('highlighted_fields', []) to skip fields the backend
+   * already populated; it never inspects any query option): the trigger this
+   * test-writer originally modelled as a query option was wrong. The plan
+   * doc's "as search_api_solr does" is the real precedent, and
+   * search_api_solr's own convention is a **backend-level config setting**,
+   * not a per-query option -- the backend either always requests hl (per its
+   * own configuration) or never does, independent of the query object. So
+   * QueryBuilder::build() takes the highlight flag as an explicit second
+   * argument (the backend's job is to read its own config and pass it in),
+   * not something read off $query->getOption().
+   *
+   * hl.fl reuses the same mapped fulltext field set as qf (comma-joined, to
+   * match the captured hl.fl fixture convention -- see
+   * solr-ref/responses/hl_multi_field_comma.json manifest entry:
+   * "hl.fl=body,category").
+   *
+   * @covers ::build
+   */
+  public function testBuildAddsHlParamsWhenHighlightingIsRequested(): void {
+    $index = $this->mockIndex(['title', 'body'], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+      'body' => $this->mockIndexField('body', 'text', TRUE),
+    ]);
+    $query = $this->mockQuery('rocket', NULL, $index);
+
+    $params = (new QueryBuilder())->build($query, TRUE);
+
+    $this->assertSame('true', $params['hl']);
+    $this->assertSame('ts_title,tm_body', $params['hl.fl']);
+  }
+
+  /**
+   * Negative case (and default): highlighting off means no hl params at all,
+   * so a plain search doesn't pay for highlighting nobody configured.
+   *
+   * @covers ::build
+   */
+  public function testBuildOmitsHlParamsWhenHighlightingIsNotRequested(): void {
+    $index = $this->mockIndex(['title'], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+    ]);
+    $query = $this->mockQuery('rocket', NULL, $index);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertArrayNotHasKey('hl', $params);
+    $this->assertArrayNotHasKey('hl.fl', $params);
+  }
+
 }
