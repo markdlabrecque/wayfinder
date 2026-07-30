@@ -25,9 +25,19 @@ class QueryBuilder {
   /**
    * Builds the /select param array for the given query.
    *
+   * @param bool $highlighting
+   *   Whether to request highlighting. This is an explicit argument rather
+   *   than something read off the query: Search API core's own "highlight"
+   *   processor never touches the query object (it only reads back the
+   *   "highlighted_fields" extra data a backend already populated), so there
+   *   is no per-query hook to key off. search_api_solr's convention -- which
+   *   plan doc locked decision 6 pins this module to -- is a backend-level
+   *   config setting, so the backend reads its own configuration and passes
+   *   the flag in.
+   *
    * @return array<string, string|int|array<int, string>>
    */
-  public function build(QueryInterface $query): array {
+  public function build(QueryInterface $query, bool $highlighting = FALSE): array {
     $index = $query->getIndex();
     $params = [];
 
@@ -57,10 +67,71 @@ class QueryBuilder {
 
     $params += $this->buildFacets($query, $index);
 
+    if ($highlighting) {
+      $params += $this->buildHighlighting($query, $index);
+    }
+
     $sort = $this->buildSort($query, $index);
     if ($sort !== '') {
       $params['sort'] = $sort;
     }
+
+    $params += $this->buildPaging($query);
+
+    return $params;
+  }
+
+  /**
+   * Builds the /mlt param array for the given query.
+   *
+   * The 'search_api_mlt' option's shape is
+   * ['id' => <search api item id>, 'fields' => <array of SA field ids>] --
+   * that is what \Drupal\search_api\Plugin\views\argument\
+   * SearchApiMoreLikeThis::query() sets, the only place core writes it.
+   *
+   * The seed document is looked up by the same '{index_id}-{item_id}'
+   * composite id DocumentBuilder indexes under (locked decision 2), phrase-
+   * quoted and escaped through FieldMapper::filterValue() like every other
+   * value this class emits: item ids are datasource-derived, not
+   * machine-name-constrained, so one containing '"' or '\' would otherwise
+   * break out of the quoted phrase.
+   *
+   * mlt.fl is comma-joined, not space-joined like qf -- Solr's captured
+   * convention (solr-ref/responses/mlt_baseline.json: 'mlt.fl=body,category').
+   *
+   * ponytail: an MLT query is NOT scoped to this index. build() adds
+   * fq=index_id:"..." for that, but Wayfinder's /mlt accepts no fq at all --
+   * MLT_PARAMS (src/lib.rs) is q, df, fl, rows, start, wt and the mlt.*
+   * family only, and the handler never reads fq, so sending one would be
+   * silently dropped (or 400 under strict_params) rather than scoping
+   * anything. On a core holding more than one index, MLT can therefore return
+   * documents from a sibling index. The upgrade is server-side -- teach /mlt
+   * to honour fq, with its own captured fixture -- not a client-side fake.
+   *
+   * @return array<string, string|int|array<int, string>>
+   */
+  public function buildMlt(QueryInterface $query): array {
+    $index = $query->getIndex();
+    $option = $query->getOption('search_api_mlt');
+    if (!is_array($option) || !isset($option['id'])) {
+      throw new \InvalidArgumentException('The search_api_mlt option must provide a seed item id.');
+    }
+
+    $params = [
+      'q' => 'id:' . $this->fieldMapper->filterValue($index->id() . '-' . $option['id'], 'string'),
+      'mlt.fl' => implode(',', $this->mapFieldNames((array) ($option['fields'] ?? []), $index)),
+    ];
+
+    return $params + $this->buildPaging($query);
+  }
+
+  /**
+   * Builds the start/rows params from the query's offset/limit options.
+   *
+   * @return array<string, int>
+   */
+  private function buildPaging(QueryInterface $query): array {
+    $params = [];
 
     $offset = $query->getOption('offset');
     if ($offset !== NULL) {
@@ -78,6 +149,56 @@ class QueryBuilder {
     }
 
     return $params;
+  }
+
+  /**
+   * Builds the hl/hl.fl params over the same fulltext field set as qf.
+   *
+   * hl.fl is comma-joined, matching the captured fixture convention
+   * (solr-ref/responses/hl_multi_field_comma.json: 'hl.fl=body,category').
+   *
+   * @return array<string, string>
+   */
+  private function buildHighlighting(QueryInterface $query, IndexInterface $index): array {
+    return [
+      'hl' => 'true',
+      'hl.fl' => implode(',', $this->mapFieldNames($this->fulltextFieldIds($query, $index), $index)),
+    ];
+  }
+
+  /**
+   * Maps Search API field ids to their Wayfinder dynamic field names,
+   * skipping ids that are not part of the index.
+   *
+   * @param array<int|string, string> $fieldIds
+   *
+   * @return array<int, string>
+   */
+  private function mapFieldNames(array $fieldIds, IndexInterface $index): array {
+    $names = [];
+    foreach ($fieldIds as $fieldId) {
+      $field = $index->getField($fieldId);
+      if (!$field) {
+        continue;
+      }
+      $names[] = $this->fieldMapper->fieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
+    }
+    return $names;
+  }
+
+  /**
+   * Resolves the query's fulltext fields against the index's, preserving the
+   * index's field order.
+   *
+   * @return array<int|string, string>
+   */
+  private function fulltextFieldIds(QueryInterface $query, IndexInterface $index): array {
+    $queryFulltextFields = $query->getFulltextFields();
+    $indexFulltextFields = $index->getFulltextFields();
+
+    return $queryFulltextFields === NULL
+      ? $indexFulltextFields
+      : array_intersect($indexFulltextFields, $queryFulltextFields);
   }
 
   /**
@@ -389,16 +510,9 @@ class QueryBuilder {
    * Builds the qf param: fulltext fields (query intersect index), mapped
    * names, with '^boost' suffixes.
    */
-  private function buildQf(QueryInterface $query, $index): string {
-    $queryFulltextFields = $query->getFulltextFields();
-    $indexFulltextFields = $index->getFulltextFields();
-
-    $fieldIds = $queryFulltextFields === NULL
-      ? $indexFulltextFields
-      : array_intersect($indexFulltextFields, $queryFulltextFields);
-
+  private function buildQf(QueryInterface $query, IndexInterface $index): string {
     $qf = [];
-    foreach ($fieldIds as $fieldId) {
+    foreach ($this->fulltextFieldIds($query, $index) as $fieldId) {
       $field = $index->getField($fieldId);
       if (!$field) {
         continue;

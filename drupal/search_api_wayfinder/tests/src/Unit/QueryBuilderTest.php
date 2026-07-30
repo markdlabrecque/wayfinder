@@ -750,6 +750,48 @@ class QueryBuilderTest extends TestCase {
   }
 
   /**
+   * Reviewer round 1, must-fix 2: the seed item id is datasource-derived, not
+   * constrained to machine names, so an id carrying '"' or '\' must not be
+   * able to break out of the quoted phrase and inject query syntax. The
+   * escaping is FieldMapper::filterValue()'s, the same one every other value
+   * path in QueryBuilder uses.
+   *
+   * @covers ::buildMlt
+   */
+  public function testBuildMltEscapesQuotesAndBackslashesInTheSeedItemId(): void {
+    $index = $this->mockIndex([], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+    ], 'my_index');
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], [
+      'search_api_mlt' => ['id' => 'evil" OR id:[* TO *] back\\slash', 'fields' => ['title']],
+    ]);
+
+    $params = (new QueryBuilder())->buildMlt($query);
+
+    $this->assertSame('id:"my_index-evil\\" OR id:[* TO *] back\\\\slash"', $params['q']);
+  }
+
+  /**
+   * Reviewer round 1, must-fix 3: the missing-seed-id guard is a validation
+   * check, and this repo's working agreement requires those to be covered
+   * (mutation-tested) rather than trusted. Without it a malformed option
+   * silently produces id:"my_index-" and an empty result set.
+   *
+   * @covers ::buildMlt
+   */
+  public function testBuildMltRejectsAnMltOptionWithoutASeedItemId(): void {
+    $index = $this->mockIndex([], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+    ], 'my_index');
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], [
+      'search_api_mlt' => ['fields' => ['title']],
+    ]);
+
+    $this->expectException(\InvalidArgumentException::class);
+    (new QueryBuilder())->buildMlt($query);
+  }
+
+  /**
    * M4 (issue #78): highlighting is "optional-but-in-scope" (plan doc line
    * 84-87) -- unlike Search API core's own algorithmic "highlight" processor
    * ("needs nothing from the backend", same paragraph: confirmed against

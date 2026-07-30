@@ -11,7 +11,7 @@ use GuzzleHttp\Exception\RequestException;
 
 /**
  * Thin Guzzle wrapper for Wayfinder's Solr-wire-compatible core endpoints:
- * select, update, and admin/ping.
+ * select, mlt, update, and admin/ping.
  *
  * Converts non-200 Solr error envelopes ({"error":{"msg":..., "code":...}})
  * into SearchApiException using the envelope's error.msg, per plan doc
@@ -36,6 +36,24 @@ class WayfinderClient {
   public function select(array $params): array {
     $params['wt'] = 'json';
     return $this->request('GET', 'select', ['query' => $this->encodeQuery($params)]);
+  }
+
+  /**
+   * GET {core}/mlt with the given params.
+   *
+   * Same transport and error handling as select(); only the endpoint differs.
+   * The success envelope carries both a "match" block (the seed document) and
+   * a "response" block (the similar documents) -- ground truth
+   * solr-ref/responses/mlt_baseline.json.
+   *
+   * @return array
+   *   The decoded JSON response body.
+   *
+   * @throws \Drupal\search_api\SearchApiException
+   */
+  public function mlt(array $params): array {
+    $params['wt'] = 'json';
+    return $this->request('GET', 'mlt', ['query' => $this->encodeQuery($params)]);
   }
 
   /**
