@@ -22,13 +22,33 @@ jobs:
       - run: cargo clippy --manifest-path bench/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path bench/Cargo.toml
 
+  # search_api_wayfinder PHP unit suite (issue #57 M5/#79). Hermetic -- no
+  # network and no Docker at test time, the same gate contract as `cargo
+  # test`. Runs on every push/pull_request, unlike the Docker-based
+  # integration harness below.
+  search-api-wayfinder-unit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: drupal/search_api_wayfinder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          # composer.json requires php >=8.1; 8.3 is what the module's
+          # Drupal target (core_version_requirement ^10.3 || ^11) runs on.
+          php-version: '8.3'
+          tools: composer
+      - run: composer install --no-interaction --no-progress
+      - run: vendor/bin/phpunit
+
   # search_api_wayfinder integration harness (issue #80, part of #57). Manual
   # only -- gated behind WAYFINDER_INTEGRATION=1 the same way
   # tests/differential.rs's live-Solr mode is gated behind
-  # WAYFINDER_DIFF_SOLR=1, and NOT added to the `on:` triggers above, so it
-  # never runs on push/pull_request. Trigger by hand from the Actions tab
-  # (workflow_dispatch) once this harness is green locally; M5 (#79) owns
-  # deciding whether it graduates to an automatic job.
+  # WAYFINDER_DIFF_SOLR=1, so it never runs on push/pull_request. Trigger by
+  # hand from the Actions tab (workflow_dispatch). M5 (#79) decided it stays
+  # manual: it needs Docker and network, which breaks the hermetic-gate
+  # contract the unit job above upholds.
   search-api-wayfinder-integration:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest

@@ -11,7 +11,7 @@ use GuzzleHttp\Exception\RequestException;
 
 /**
  * Thin Guzzle wrapper for Wayfinder's Solr-wire-compatible core endpoints:
- * select, mlt, update, and admin/ping.
+ * select, mlt, update, admin/system, and admin/ping.
  *
  * Converts non-200 Solr error envelopes ({"error":{"msg":..., "code":...}})
  * into SearchApiException using the envelope's error.msg, per plan doc
@@ -77,6 +77,23 @@ class WayfinderClient {
       'query' => $this->encodeQuery($queryParams),
       'json' => $command,
     ]);
+  }
+
+  /**
+   * GET {core}/admin/system.
+   *
+   * Same transport and error handling as select(); only the endpoint differs.
+   * The success envelope carries the version handshake under
+   * lucene.solr-spec-version -- ground truth
+   * solr-ref/responses/admin_system.json.
+   *
+   * @return array
+   *   The decoded JSON response body.
+   *
+   * @throws \Drupal\search_api\SearchApiException
+   */
+  public function adminSystem(): array {
+    return $this->request('GET', 'admin/system', ['query' => $this->encodeQuery(['wt' => 'json'])]);
   }
 
   /**
