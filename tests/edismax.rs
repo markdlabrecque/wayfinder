@@ -752,6 +752,72 @@ async fn bq_strictly_raises_the_score_of_matching_docs() {
     }
 }
 
+// --- in-query term boost: `q=rocket^5` (issue #109) ------------------------
+
+#[tokio::test]
+async fn in_query_term_boost_multiplies_that_terms_score_contribution() {
+    let (app, _dir) = edismax_app().await;
+    let (_, base) = get(
+        &app,
+        "select?q=rocket&defType=edismax&qf=title+body&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json",
+    )
+    .await;
+    let (_, boosted) = get(
+        &app,
+        "select?q=rocket^5&defType=edismax&qf=title+body&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json",
+    )
+    .await;
+    let base_scores = scores_by_id(&base);
+    let boosted_scores = scores_by_id(&boosted);
+    for (id, base_score) in &base_scores {
+        let boosted_score = boosted_scores
+            .get(id)
+            .unwrap_or_else(|| panic!("q=rocket^5 response missing doc {id}: {boosted_scores:?}"));
+        assert!(
+            (boosted_score - 5.0 * base_score).abs() <= score_tolerance(),
+            "q=rocket^5 must exactly multiply this term's own score contribution by 5, same as \
+             real Solr (captured fixture `edismax_term_boost`): doc {id}, base={base_score}, \
+             boosted={boosted_score}, expected ~{}",
+            5.0 * base_score
+        );
+    }
+}
+
+#[tokio::test]
+async fn in_query_term_boost_scopes_to_its_own_leaf_not_the_whole_query() {
+    let (app, _dir) = edismax_app().await;
+    let (_, base) = get(
+        &app,
+        "select?q=rocket+mission&defType=edismax&qf=title+body&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json",
+    )
+    .await;
+    let (_, boosted) = get(
+        &app,
+        "select?q=rocket^5+mission&defType=edismax&qf=title+body&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json",
+    )
+    .await;
+    let base_scores = scores_by_id(&base);
+    let boosted_scores = scores_by_id(&boosted);
+    assert!(
+        (boosted_scores["eB"] - 5.0 * base_scores["eB"]).abs() <= score_tolerance(),
+        "eB matches only \"rocket\" (never \"mission\"), so `rocket^5 mission` must scale its \
+         score by exactly 5, same as the single-term case: base={}, boosted={}, expected ~{}",
+        base_scores["eB"],
+        boosted_scores["eB"],
+        5.0 * base_scores["eB"]
+    );
+    assert!(
+        boosted_scores["eC"] < 5.0 * base_scores["eC"],
+        "eC matches both \"rocket\" and \"mission\"; boosting only the \"rocket\" leaf must \
+         leave the \"mission\" leaf's contribution unscaled, so the total must land strictly \
+         below a naive whole-query 5x (which would prove the boost leaked past its own leaf): \
+         base={}, boosted={}, naive 5x would be {}",
+        base_scores["eC"],
+        boosted_scores["eC"],
+        5.0 * base_scores["eC"]
+    );
+}
+
 // --- q grammar: quoted phrases, `+`/`-` operators (finding 74) -------------
 
 #[tokio::test]

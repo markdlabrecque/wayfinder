@@ -1575,6 +1575,13 @@ cape edismax_tie_1              'select?q=rocket&defType=edismax&qf=title+body&t
 cape edismax_score_baseline     'select?q=rocket&defType=edismax&qf=title+body&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json'
 cape edismax_boost_multiplicative 'select?q=rocket&defType=edismax&qf=title+body&boost=2&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json'
 cape edismax_bq_additive        'select?q=rocket&defType=edismax&qf=title+body&bq=title:mission^5&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json'
+# in-query term boost (issue #109): `rocket^5` inside `q` itself, distinct
+# from `boost=`/`bq=`. Confirmed against real Solr (one-off container,
+# manually re-derived from this block's schema/docs -- not re-run through
+# this script, per the fixture-corruption warning in CLAUDE.md) that it is
+# an exact 5x multiplier on that leaf's own score contribution: every eA-eD
+# score here is exactly 5x `edismax_score_baseline`'s.
+cape edismax_term_boost         'select?q=rocket^5&defType=edismax&qf=title+body&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json'
 # q grammar: quoted phrase, `+`/`-` operators
 cape edismax_quoted_phrase      'select?q=%22quick+fox%22&defType=edismax&qf=body&fl=id&fq=id:(pA+OR+pB)&wt=json'
 cape edismax_operators_exclude  'select?q=rocket+-mission&defType=edismax&qf=title+body&fl=id&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json'

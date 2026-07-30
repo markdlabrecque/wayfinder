@@ -1352,3 +1352,20 @@ fragment" to be different answers at all.
     resolution: presets stem but do not strip stopwords). Recorded in
     `tests/differential.rs`'s `ACCEPTED_DIVERGENCES` with a self-expiring guard that asserts the
     stopword asymmetry still holds on both sides.
+
+## Finding from the issue #109 in-query term boost capture
+
+82. **`q=rocket^5` under `defType=edismax` is an exact multiplier on that term's own score
+    contribution, scoped to the leaf it decorates — not a whole-query multiplier like `boost=`.**
+    Captured against the existing edismax corpus (`wayfinder-solr-7`'s `eA`-`eD` docs, one-off
+    re-derivation, not re-run through `capture.sh`): every `eA`-`eD` score in
+    `edismax_term_boost.json` (`q=rocket^5`) is exactly 5x `edismax_score_baseline.json`'s
+    (`q=rocket`) — `eC`: 0.43481556 -> 2.174078, `eB`: 0.35816115 -> 1.7908058, `eD`:
+    0.23778328 -> 1.1889164, `eA`: 0.17657174 -> 0.8828587. A second capture (`q=rocket^5
+    mission`, not committed as a fixture since it only confirms scoping, not a new fact) showed
+    `eB` (matching only `rocket`) scaled by the same exact 5x while `eC`/`eD` (matching both
+    terms) did not scale uniformly, confirming the boost applies to the `rocket` leaf alone and
+    not the composed query. Before this fix, `flatten_edismax_clauses` discarded
+    `UserInputAst::Boost`'s weight entirely (the same weight the plain, non-edismax `parse_query`
+    path already honors via `build_ast`'s own `UserInputAst::Boost` arm), so `q=rocket^5` had no
+    scoring effect at all under edismax.
