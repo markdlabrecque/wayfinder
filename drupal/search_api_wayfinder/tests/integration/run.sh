@@ -50,6 +50,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
+chmod -R u+w drupal-site 2>/dev/null || true
 rm -rf drupal-site
 mkdir -p drupal-site
 
