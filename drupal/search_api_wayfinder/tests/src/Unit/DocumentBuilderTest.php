@@ -4,7 +4,8 @@ declare(strict_types=1);
 
 namespace Drupal\Tests\search_api_wayfinder\Unit;
 
-use Drupal\Core\TypedData\DataDefinitionInterface;
+use Drupal\Core\Field\FieldDefinitionInterface;
+use Drupal\Core\Field\FieldStorageDefinitionInterface;
 use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Item\FieldInterface;
 use Drupal\search_api\Item\ItemInterface;
@@ -40,9 +41,19 @@ class DocumentBuilderTest extends TestCase {
 
     // FieldMapper::isMultiValued() reads cardinality from the index's own
     // property-path definitions, not from how many values this item happens
-    // to carry -- see FieldMapper's doc comment.
-    $definition = $this->createMock(DataDefinitionInterface::class);
-    $definition->method('isList')->willReturn($multiValued);
+    // to carry -- see FieldMapper's doc comment. The mock shape here is
+    // deliberately realistic (issue #81): a real content-entity field is
+    // list-by-construction (isList() unconditionally TRUE, matching
+    // BaseFieldDefinition/FieldConfigBase in core) -- the single/multi
+    // signal actually lives in field-storage cardinality, not isList().
+    $storage = $this->createMock(FieldStorageDefinitionInterface::class);
+    $storage->method('getCardinality')->willReturn(
+      $multiValued ? FieldStorageDefinitionInterface::CARDINALITY_UNLIMITED : 1
+    );
+
+    $definition = $this->createMock(FieldDefinitionInterface::class);
+    $definition->method('isList')->willReturn(TRUE);
+    $definition->method('getFieldStorageDefinition')->willReturn($storage);
 
     $index = $this->createMock(IndexInterface::class);
     $index->method('getPropertyDefinitions')->willReturn([$id => $definition]);

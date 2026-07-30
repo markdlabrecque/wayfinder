@@ -4,7 +4,12 @@ declare(strict_types=1);
 
 namespace Drupal\search_api_wayfinder;
 
+use Drupal\Core\Field\FieldDefinitionInterface;
+use Drupal\Core\Field\FieldStorageDefinitionInterface;
 use Drupal\Core\TypedData\ComplexDataDefinitionInterface;
+use Drupal\Core\TypedData\DataDefinitionInterface;
+use Drupal\Core\TypedData\DataReferenceDefinitionInterface;
+use Drupal\Core\TypedData\ListDataDefinitionInterface;
 use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Item\FieldInterface;
 use Drupal\search_api\SearchApiException;
@@ -76,9 +81,28 @@ class FieldMapper {
    * getPropertyPathCardinality() (locked decision 1: copying method-level
    * logic from search_api_solr is allowed, both modules are
    * GPL-2.0-or-later): walk the field's property path segment by segment
-   * through the index's property definitions, since the "is this a list"
-   * flag usually lives on an intermediate property in the path, not
-   * necessarily the leaf.
+   * through the index's property definitions.
+   *
+   * `isList()` alone is not a reliable signal: real content-entity field
+   * definitions (`FieldDefinitionInterface`, e.g. `BaseFieldDefinition`,
+   * `FieldConfigBase`) are lists by construction and return TRUE
+   * unconditionally, regardless of the field's actual cardinality. Where a
+   * path segment is a `FieldDefinitionInterface`, the real signal is its
+   * field-storage cardinality (`getFieldStorageDefinition()->getCardinality()`):
+   * `1` is single-valued, anything else (`-1` unlimited, or `> 1`) is
+   * multi-valued. Only fall back to the generic `isList()` check for
+   * property types that aren't field definitions (e.g. plain nested
+   * TypedData properties), where the list level may still live on an
+   * intermediate property rather than the leaf.
+   *
+   * A path segment must still be unwrapped (list-item / reference-target)
+   * before descending into its nested properties -- mirroring
+   * search_api_solr's `FieldsHelper::getInnerProperty()` -- because
+   * `FieldDefinitionInterface` extends `ListDataDefinitionInterface`, not
+   * `ComplexDataDefinitionInterface`: without unwrapping, the walk can never
+   * reach a second path segment (e.g. `field_ref:entity:field_tags`), which
+   * silently drops all but the first value for any such field once mapped
+   * to a wrongly-single-valued dynamic field.
    */
   public function isMultiValued(FieldInterface $field): bool {
     try {
@@ -88,27 +112,36 @@ class FieldMapper {
       return FALSE;
     }
 
-    return $this->propertyPathIsList($field->getPropertyPath(), $properties);
+    return $this->propertyPathIsMultiValued($field->getPropertyPath(), $properties);
   }
 
   /**
    * Walks a colon-separated property path through nested property
    * definitions, returning TRUE as soon as any segment (intermediate or
-   * leaf) is a list-typed property.
+   * leaf) resolves as multi-valued.
    *
    * @param array<string, \Drupal\Core\TypedData\DataDefinitionInterface> $properties
    *   Property definitions to start walking from, keyed by property name.
    */
-  private function propertyPathIsList(string $propertyPath, array $properties): bool {
+  private function propertyPathIsMultiValued(string $propertyPath, array $properties): bool {
     foreach (explode(IndexInterface::PROPERTY_PATH_SEPARATOR, $propertyPath) as $name) {
       if (!isset($properties[$name])) {
         return FALSE;
       }
 
       $definition = $properties[$name];
-      if ($definition->isList()) {
+
+      if ($definition instanceof FieldDefinitionInterface) {
+        $storage = $definition->getFieldStorageDefinition();
+        if ($storage instanceof FieldStorageDefinitionInterface && $storage->getCardinality() !== 1) {
+          return TRUE;
+        }
+      }
+      elseif ($definition->isList()) {
         return TRUE;
       }
+
+      $definition = $this->unwrapProperty($definition);
 
       if ($definition instanceof ComplexDataDefinitionInterface) {
         $properties = $definition->getPropertyDefinitions();
@@ -119,6 +152,27 @@ class FieldMapper {
     }
 
     return FALSE;
+  }
+
+  /**
+   * Unwraps a property definition to the shape its nested properties (if
+   * any) actually live on, mirroring search_api_solr's
+   * `FieldsHelper::getInnerProperty()`: a list definition (including a
+   * `FieldDefinitionInterface`, which is one) unwraps to its item
+   * definition, and a data-reference definition (e.g. an entity-reference
+   * field's target) unwraps to its target definition. Without this, a
+   * `FieldDefinitionInterface` -- which is never itself
+   * `ComplexDataDefinitionInterface` -- looks like a dead end and the
+   * property-path walk can never descend past it.
+   */
+  private function unwrapProperty(DataDefinitionInterface $property): ?DataDefinitionInterface {
+    while ($property instanceof ListDataDefinitionInterface) {
+      $property = $property->getItemDefinition();
+    }
+    while ($property instanceof DataReferenceDefinitionInterface) {
+      $property = $property->getTargetDefinition();
+    }
+    return $property;
   }
 
 }
