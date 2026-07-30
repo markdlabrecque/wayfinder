@@ -46,6 +46,40 @@ use crate::schema::{self, ValueKind, WayfinderSchema};
 /// for exactly that many and no more.
 const MAX_FACET_TERMS: u32 = DEFAULT_BUCKET_LIMIT;
 
+/// `highlight_field`'s sentinel `max_num_chars` meaning "do not fragment at
+/// all -- return the whole field as one snippet". Solr's `hl.fragsize=0`
+/// (`docs/solr-ref-findings.md` finding 81, resolved in `crate::highlight`)
+/// is the only thing that produces it.
+///
+/// `usize::MAX` is safe to hand to `SnippetGenerator::set_max_num_chars`:
+/// Tantivy only ever compares it against a text-offset difference
+/// (`(next.offset_to - fragment.start_offset) > max_num_chars` in
+/// `tantivy-0.26.1/src/snippet/mod.rs::search_fragments`), so nothing is
+/// allocated or sized by it and the split simply never fires.
+pub(crate) const WHOLE_FIELD_MAX_CHARS: usize = usize::MAX;
+
+/// The same minimal HTML entity encoding `tantivy::snippet::Snippet::to_html`
+/// applies to the non-highlighted parts of a fragment
+/// (`htmlescape::encode_minimal`, whose `MINIMAL_ENTITIES` table is exactly
+/// these five characters). Reimplemented rather than depended on directly so
+/// the whole-field path in `highlight_field` -- which has to encode the
+/// leading/trailing text Tantivy's token-bounded fragment leaves out -- encodes
+/// it identically to the fragment Tantivy encoded itself.
+fn encode_minimal(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("&quot;"),
+            '&' => out.push_str("&amp;"),
+            '\'' => out.push_str("&#x27;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Seeds each core's in-process `_version_` source from wall-clock time. A
 /// restart therefore starts later than ordinary pre-restart writes without
 /// persisting write-side version semantics; unusually fast restart/write
@@ -1836,6 +1870,56 @@ impl CoreIndex {
             }
         }
         let mut text = text.trim().to_string();
+
+        // Whole-field mode (Solr's `hl.fragsize=0`, finding 81): the entire
+        // field, unfragmented, as one snippet -- so the mask-and-resnippet
+        // loop below is not entered. `WHOLE_FIELD_MAX_CHARS` already makes
+        // Tantivy build a single fragment candidate spanning every token, so
+        // one pass carries every matching occurrence's range. What it does
+        // *not* carry is text outside the first/last token boundary: the
+        // fragment stops at the last token's `offset_to`, dropping a field's
+        // trailing "." (real Solr keeps it --
+        // `solr-ref/responses/hl_fragsize_zero_whole_field*` end in one). So
+        // the fragment's own HTML is re-seated inside the untouched field
+        // text, with the leading/trailing remainder encoded the same way
+        // `Snippet::to_html` encoded the rest.
+        //
+        // ponytail: returning exactly one snippet here -- ignoring
+        // `snippets_cap` rather than bounding anything with it -- is an
+        // *inference*, not a captured fact. It follows from "the whole field
+        // is the fragment", so there is no second fragment to return, but none
+        // of the three issue-#104 fixtures sends `hl.snippets`, so real Solr's
+        // answer to `hl.fragsize=0&hl.snippets=3` is uncaptured (finding 81
+        // records this same caveat). Revisit if that combination is ever
+        // captured.
+        if max_num_chars == WHOLE_FIELD_MAX_CHARS {
+            let mut snippet = generator.snippet(&text);
+            if snippet.is_empty() {
+                return Ok(Vec::new());
+            }
+            // A slice of `text` by construction (same reasoning as the loop
+            // below), so `find` succeeds; returning no snippet rather than
+            // panicking keeps a future Tantivy change from taking the process
+            // down.
+            let Some(base) = text.find(snippet.fragment()) else {
+                return Ok(Vec::new());
+            };
+            let end = base + snippet.fragment().len();
+            snippet.set_snippet_prefix_postfix(pre, post);
+            // `base` is 0 for every input reachable today -- the fragment
+            // splitter never fires under this sentinel, so the single
+            // candidate starts at the first token, and `text` is already
+            // trimmed, so the head slice is always empty. It is still handled
+            // rather than assumed away because the tail is *not* always empty
+            // (that trailing "." is the whole reason this branch exists), so
+            // the fragment is not the full text in general -- kept symmetric
+            // with the tail in case a future Tantivy version ever produces a
+            // non-zero `base` here.
+            let mut html = encode_minimal(&text[..base]);
+            html.push_str(&snippet.to_html());
+            html.push_str(&encode_minimal(&text[end..]));
+            return Ok(vec![html]);
+        }
 
         // `snippets_cap` is the real bound; the iteration count is capped
         // separately because a de-duplicated pass (gap 4) consumes a pass

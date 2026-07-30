@@ -427,6 +427,31 @@ const HL_SNIPPETS_PROBE_DOCS: &str = r#"[
   {"id":"hl-snippets-gizmo","body":"gizmo prototype unveiled at the trade show. the weather in the valley stayed mild and overcast for most of the week without much wind at all. a second gizmo shipment arrived at the warehouse yesterday. meanwhile the local council debated a new bridge proposal for nearly three hours last tuesday evening. engineers are already testing a third gizmo revision in the lab. several farmers reported an unusually early harvest this year thanks to the warm and sunny spring season."}
 ]"#;
 
+/// Seeded alongside `PROBE_DOCS`/`HL_SNIPPETS_PROBE_DOCS`, again as its own
+/// batch: this doc exists only so the `hl.fragsize=0` half of the
+/// `select.highlight.fragsize` probe can tell "the whole field came back
+/// unfragmented" apart from "a fragment happened to come back", which needs a
+/// field long enough that a fragmenting highlighter and a whole-field
+/// highlighter produce visibly different output. `doc1`'s `body` ("quick
+/// brown fox rocket") is short enough that both strategies return the same
+/// four words, so it cannot discriminate.
+///
+/// `body` is otherwise the same ~310-char paragraph captured against real
+/// Solr 9 in `solr-ref/responses/hl_fragsize_zero_whole_field.json` /
+/// `hl_fragsize_zero_whole_field_method_original.json` (issue #104): real
+/// Solr's `hl.fragsize=0` returns this entire field as one highlighted
+/// snippet, for both the default `hl.method` (unified) and
+/// `hl.method=original`. The leading term is swapped from "quick" to
+/// "wexford" (unique across `PROBE_DOCS`/`HL_SNIPPETS_PROBE_DOCS`) so seeding
+/// this doc into the shared probe corpus doesn't change `numFound` for the
+/// several other `"quick"`-keyed probes (`select.q.plain-query`,
+/// `select.sort.*`, the edismax probes) that assert an exact count of 2 --
+/// the fixture-backed assertion of the literal captured text lives in
+/// `tests/highlighting.rs` against its own isolated single-doc app instead.
+const HL_FRAGSIZE_PROBE_DOCS: &str = r#"[
+  {"id":"hl-fragsize-long","body":"wexford prototype notes from the engineering standup this morning. the team reviewed the roadmap for the next quarter and discussed several open risks around supply chain timing. afterwards everyone broke for lunch and reconvened at two in the afternoon to continue the planning session for the rest of the week."}
+]"#;
+
 impl ProbeApp {
     async fn new() -> Self {
         let workspace = ProbeWorkspace::new();
@@ -457,6 +482,18 @@ impl ProbeApp {
             status,
             StatusCode::OK,
             "seed coverage probe hl.snippets corpus: {body}"
+        );
+        let (status, body) = probe
+            .request(
+                Method::POST,
+                "content/update?commit=true",
+                Some(HL_FRAGSIZE_PROBE_DOCS),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "seed coverage probe hl.fragsize corpus: {body}"
         );
         probe
     }
@@ -773,23 +810,38 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
         // Two requests, because the captured shape and the discriminating
         // shape are not the same request. `hl.fragsize=0` with no `hl.method`
         // is what the captured traffic sends (contract variant
-        // "zero-whole-field"), and no fixture pins what Solr returns for it,
-        // so that half stays a presence check -- tracked as issue #104 (needs
-        // a long-field capture.sh fixture to make whole-field-vs-fragmented
-        // observable). Truncation is only observable
-        // under `hl.method=original` (finding 54, `src/highlight.rs` module
-        // docs; fixture `hl_fragsize_truncated.json`), so the second half
-        // asks for a 10-char budget over `doc1`'s "quick brown fox rocket"
-        // and requires the snippet to actually come back shorter than the
-        // untruncated field -- otherwise an implementation that dropped
-        // `hl.fragsize` on the floor entirely would still score this covered.
+        // "zero-whole-field"), and fixtures `hl_fragsize_zero_whole_field.json`
+        // / `hl_fragsize_zero_whole_field_method_original.json` (issue #104)
+        // now pin exactly what real Solr returns for it: the entire field,
+        // unfragmented, as a single snippet -- for both the default
+        // `hl.method` and `hl.method=original`. So that half asserts the
+        // returned snippet equals `HL_FRAGSIZE_PROBE_DOCS`'s whole seeded
+        // body (with the match wrapped in `<em>`), not just that some
+        // snippet came back. Truncation is only observable under
+        // `hl.method=original` with a nonzero budget (finding 54,
+        // `src/highlight.rs` module docs; fixture
+        // `hl_fragsize_truncated.json`), so the second half asks for a
+        // 10-char budget over `doc1`'s "quick brown fox rocket" and requires
+        // the snippet to actually come back shorter than the untruncated
+        // field -- otherwise an implementation that dropped `hl.fragsize` on
+        // the floor entirely would still score this covered.
         "select.highlight.fragsize" => {
-            let captured_shape = probe
-                .has(
-                    "select?q=quick&hl=true&hl.fl=body&hl.fragsize=0",
-                    "/highlighting/doc1/body/0",
-                )
-                .await;
+            let expected_whole_field = concat!(
+                "<em>wexford</em> prototype notes from the engineering standup this morning. ",
+                "the team reviewed the roadmap for the next quarter and discussed several ",
+                "open risks around supply chain timing. afterwards everyone broke for lunch ",
+                "and reconvened at two in the afternoon to continue the planning session for ",
+                "the rest of the week."
+            );
+            let whole_field = probe
+                .response("select?q=wexford&hl=true&hl.fl=body&hl.fragsize=0")
+                .await
+                .and_then(|body| {
+                    body.pointer("/highlighting/hl-fragsize-long/body/0")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .is_some_and(|snippet| snippet == expected_whole_field);
             let truncated = probe
                 .response("select?q=quick&hl=true&hl.fl=body&hl.method=original&hl.fragsize=10")
                 .await
@@ -801,7 +853,7 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
                 .is_some_and(|snippet| {
                     snippet.contains("<em>quick</em>") && !snippet.contains("rocket")
                 });
-            captured_shape && truncated
+            whole_field && truncated
         }
         "select.highlight.merge-contiguous" => {
             probe.ok("select?q=quick&hl.mergeContiguous=false").await
@@ -1291,6 +1343,57 @@ mod tests {
             "issue #103: hl.snippets=3 against a doc with three well-separated occurrences of \
              the query term must return all three snippets, not the pre-#103 single-fragment \
              ceiling. Got {three_snippets:?}"
+        );
+    }
+
+    /// Issue #104: `hl.fragsize=0` must return the *entire* field as one
+    /// unfragmented snippet (fixtures `hl_fragsize_zero_whole_field.json` /
+    /// `hl_fragsize_zero_whole_field_method_original.json`), not a fragment
+    /// truncated to some default budget. This calls `semantic_covered`
+    /// directly (rather than only through `report()`) so the assertion names
+    /// exactly which contract entry regressed, and exercises both `hl.method`
+    /// paths this probe's `"select.highlight.fragsize"` arm now checks:
+    /// default (`hl.method` unset, i.e. `unified`) is asserted here via the
+    /// arm itself, and `hl.method=original` is asserted directly below
+    /// against the same expectation.
+    #[tokio::test]
+    async fn fragsize_zero_returns_whole_field_not_a_fragment() {
+        let probe = ProbeApp::new().await;
+
+        assert!(
+            semantic_covered(&probe, "select.highlight.fragsize").await,
+            "select.highlight.fragsize probe must observe hl.fragsize=0 returning the whole \
+             field (issue #104), not merely a presence check"
+        );
+
+        let expected_whole_field = concat!(
+            "<em>wexford</em> prototype notes from the engineering standup this morning. ",
+            "the team reviewed the roadmap for the next quarter and discussed several ",
+            "open risks around supply chain timing. afterwards everyone broke for lunch ",
+            "and reconvened at two in the afternoon to continue the planning session for ",
+            "the rest of the week."
+        );
+
+        let unified = probe
+            .response("select?q=wexford&hl=true&hl.fl=body&hl.fragsize=0")
+            .await
+            .expect("hl.fragsize=0 select response");
+        assert_eq!(
+            unified.pointer("/highlighting/hl-fragsize-long/body/0"),
+            Some(&Value::String(expected_whole_field.to_string())),
+            "default hl.method with hl.fragsize=0 must return the whole field unfragmented, \
+             got {unified:?}"
+        );
+
+        let original = probe
+            .response("select?q=wexford&hl=true&hl.fl=body&hl.method=original&hl.fragsize=0")
+            .await
+            .expect("hl.method=original&hl.fragsize=0 select response");
+        assert_eq!(
+            original.pointer("/highlighting/hl-fragsize-long/body/0"),
+            Some(&Value::String(expected_whole_field.to_string())),
+            "hl.method=original with hl.fragsize=0 must return the whole field unfragmented, \
+             not fall back to DEFAULT_FRAGSIZE, got {original:?}"
         );
     }
 

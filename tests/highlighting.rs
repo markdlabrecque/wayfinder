@@ -92,6 +92,62 @@ async fn hl_fragsize_truncated_matches_fixture() {
     assert_matches_fixture(body, "hl_fragsize_truncated");
 }
 
+/// The shared 5-doc corpus (`common::corpus()`) is too short to distinguish
+/// "whole field" from "barely truncated" -- `doc1`'s `body` is only four
+/// words, so any highlighter returns essentially the same text whether it
+/// fragments or not. These two tests build an isolated single-doc app
+/// against a ~310-char body long enough to make that distinction observable,
+/// matching a dedicated Solr 9 capture (issue #104): `hl.fragsize=0` returns
+/// the *entire* field as one unfragmented snippet, for both the default
+/// `hl.method` (unified) and `hl.method=original`.
+async fn long_field_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), common::SCHEMA_TOML).expect("app must build");
+    let docs = json!([{
+        "id": "long1",
+        "body": "quick prototype notes from the engineering standup this morning. the team \
+                 reviewed the roadmap for the next quarter and discussed several open risks \
+                 around supply chain timing. afterwards everyone broke for lunch and \
+                 reconvened at two in the afternoon to continue the planning session for the \
+                 rest of the week."
+    }]);
+    let (status, body) = post_docs(&app, &docs).await;
+    assert_eq!(status, StatusCode::OK, "indexing must succeed, got {body}");
+    (app, dir)
+}
+
+/// Default `hl.method` (unified) with `hl.fragsize=0` returns the whole field
+/// as a single unfragmented snippet, per real Solr 9 (issue #104). Wayfinder
+/// currently falls back to Tantivy's 150-char default fragment instead.
+#[tokio::test]
+async fn hl_fragsize_zero_whole_field_matches_fixture() {
+    let (app, _dir) = long_field_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=body:quick&hl=true&hl.fl=body&hl.fragsize=0&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "hl_fragsize_zero_whole_field");
+}
+
+/// `hl.method=original` with `hl.fragsize=0` also returns the whole field
+/// unfragmented -- byte-identical to the default-method case above, per real
+/// Solr 9 (issue #104). Wayfinder currently treats `hl.fragsize=0` as unset
+/// under `hl.method=original` and falls back to `DEFAULT_FRAGSIZE` (100
+/// chars), truncating instead.
+#[tokio::test]
+async fn hl_fragsize_zero_whole_field_method_original_matches_fixture() {
+    let (app, _dir) = long_field_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=body:quick&hl=true&hl.fl=body&hl.method=original&hl.fragsize=0&wt=json",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_matches_fixture(body, "hl_fragsize_zero_whole_field_method_original");
+}
+
 #[tokio::test]
 async fn hl_multi_field_comma_matches_fixture() {
     let (app, _dir) = indexed_app().await;

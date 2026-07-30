@@ -1192,6 +1192,11 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     assert_eq!(report.overall.fraction, format!("{covered}/{total}"));
     // 41/75 -> 42/75 when issue #103 landed real multi-snippet extraction and
     // `select.highlight.snippets` started passing its `hl.snippets=3` probe.
+    // Issue #104 sharpened `select.highlight.fragsize`'s probe from a
+    // presence-only check to asserting the real captured whole-field text for
+    // `hl.fragsize=0`, and taught `src/highlight.rs` to produce it (finding
+    // 81) in the same change -- so the entry stays covered and the fraction
+    // stays 42/75.
     assert_eq!(
         report.overall.fraction, "42/75",
         "initial coverage fraction"
