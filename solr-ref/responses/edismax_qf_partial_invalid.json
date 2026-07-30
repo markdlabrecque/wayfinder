@@ -1,0 +1,18 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":10,
+    "params":{
+      "q":"rocket",
+      "defType":"edismax",
+      "qf":"title nosuchfield",
+      "fl":"id",
+      "wt":"json"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"org.apache.solr.search.SyntaxError: Query Field 'nosuchfield' is not a valid field name",
+    "code":400
+  }
+}

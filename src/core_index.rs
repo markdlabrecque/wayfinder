@@ -1002,6 +1002,25 @@ impl CoreIndex {
             QueryError::Internal(format!("unknown default field `{default_field_name}`"))
         })?;
 
+        // Real Solr 400s if *any* named `qf` field is undefined, even when
+        // other fields in the same `qf` are valid (issue #111) -- unlike
+        // `pf`'s own unknown-field leniency (finding 8), which this does not
+        // touch. Checked up front against the raw parsed names rather than
+        // relying on `resolve_field_weights`'s drop-unknown filtering, which
+        // exists for `pf` and for `qf`'s empty-spec default-field fallback.
+        // Must use `field_target` (static-before-dynamic), not a raw
+        // `wf_schema.field` lookup -- a `qf` naming only a dynamic field
+        // (issue #84) is valid and must not 400 here.
+        if !qf.trim().is_empty() {
+            for (name, _) in edismax::parse_field_weights(qf) {
+                if self.field_target(&name).is_none() {
+                    return Err(QueryError::Syntax(format!(
+                        "edismax `qf` names an undefined field: `{name}`"
+                    )));
+                }
+            }
+        }
+
         let qf_fields = self.resolve_field_weights(qf, default_field_name);
         if qf_fields.is_empty() {
             return Err(QueryError::Syntax(format!(

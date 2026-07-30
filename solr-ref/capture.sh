@@ -1582,6 +1582,18 @@ cape edismax_bq_additive        'select?q=rocket&defType=edismax&qf=title+body&b
 # an exact 5x multiplier on that leaf's own score contribution: every eA-eD
 # score here is exactly 5x `edismax_score_baseline`'s.
 cape edismax_term_boost         'select?q=rocket^5&defType=edismax&qf=title+body&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json'
+# qf naming one undefined field among otherwise-valid ones (issue #111):
+# confirmed against real Solr (one-off container, same schema as this block
+# -- not re-run through this script) that it 400s on the undefined name
+# alone, even though `title` in the same `qf` is valid. Deliberately not a
+# `cape` call / manifest.tsv row: it's an error envelope, and the generic
+# hermetic sweep (`hermetic_edismax_manifest_entries_match_committed_fixtures`)
+# compares `error.msg`/`error.metadata` verbatim, which would always fail
+# (Solr's Java exception text vs Wayfinder's own) -- same narrow, non-verbatim
+# contract as `tests/error_shapes.rs`. Captured and checked directly by
+# `qf_naming_one_undefined_field_among_valid_ones_400s` instead. Fixture:
+# solr-ref/responses/edismax_qf_partial_invalid.json
+# curl -sg "$EDISMAX_SOLR/$EDISMAX_CORE/select?q=rocket&defType=edismax&qf=title+nosuchfield&fl=id&wt=json"
 # q grammar: quoted phrase, `+`/`-` operators
 cape edismax_quoted_phrase      'select?q=%22quick+fox%22&defType=edismax&qf=body&fl=id&fq=id:(pA+OR+pB)&wt=json'
 cape edismax_operators_exclude  'select?q=rocket+-mission&defType=edismax&qf=title+body&fl=id&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json'
