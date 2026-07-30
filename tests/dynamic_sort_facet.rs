@@ -484,7 +484,11 @@ async fn sort_across_segments_with_and_without_the_dynamic_column_handles_missin
         "the segment-2 docs must sort last (as 0) descending too, got {body}"
     );
 
-    // String: missing-last in *both* directions.
+    // String: missing-last in *both* directions. The `ss_lang`-specific pin
+    // lives in `sort_across_segments_missing_string_field_sorts_last_with_secondary_tiebreak`
+    // below, not here — see that test's doc comment for why this shared-batch
+    // shape can't tell a real `None`-for-missing from a mistyped placeholder
+    // that happens to fall through to the DocAddress tiebreak by accident.
     let (status, body) = get(&app, "select?q=*:*&sort=ss_lang+asc&wt=json").await;
     assert_eq!(status, StatusCode::OK, "got {body}");
     let got = ids(&body);
@@ -511,6 +515,65 @@ async fn sort_across_segments_with_and_without_the_dynamic_column_handles_missin
         std::collections::BTreeSet::from_iter(got[3..].iter().cloned()),
         std::collections::BTreeSet::from(["d4".to_string(), "d5".to_string()]),
         "the segment-2 docs must sort last descending too (missing is never reordered by direction), got {body}"
+    );
+}
+
+// --- 6b. multi-segment, string field: pin missing-last against a mistyped
+// placeholder, not just a lucky DocAddress tiebreak -------------------------
+//
+// Mutation testing on 6 found that replacing `SegmentSortColumn`'s `Absent`
+// computation with an unconditional `Absent(Some(SortValue::I64(0)))` still
+// leaves the whole suite green: for a string clause, that swaps the correct
+// `None` (missing-last) for a mistyped `Some(SortValue::I64(0))`, but
+// `SortValue::cmp_value`'s mixed-variant fallback arm (`_ => Ordering::Equal`)
+// treats `Str` vs `I64` as tied, so the comparator falls through to the
+// `DocAddress` tiebreak — which happens to reproduce 6's expected order by
+// accident, because the ids there were assigned in the same order as the
+// segments.
+//
+// This test breaks that coincidence on purpose: the key-less batch (whose
+// docs must sort last on `ss_lang`) is committed *first*, with ids ("a", "z")
+// that sort *before* the keyed batch's ids ("m", "n") alphabetically — so a
+// bare `DocAddress` or id tiebreak would rank them wrong. A secondary
+// `id asc` sort clause makes the tiebreak explicit and deterministic: under
+// the real (correct) `None`-for-missing behaviour, "a"/"z" only ever compare
+// via the `(Some, None)`/`(None, Some)` arms, which are unconditionally
+// missing-last regardless of id — so the expected order is `m, n, a, z`. Under
+// the mutation described above, "a"/"z" instead compare as tied on `ss_lang`
+// against "m"/"n" (mixed-variant fallback), so the secondary `id asc` clause
+// decides the whole order alphabetically: `a, m, n, z` — which does not match
+// `m, n, a, z`, and the test fails.
+
+#[tokio::test]
+async fn sort_across_segments_missing_string_field_sorts_last_with_secondary_tiebreak() {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), DYNAMIC_SORT_FACET_SCHEMA_TOML)
+        .expect("app must build");
+
+    // Segment 1: neither doc carries `ss_lang` at all — no column for it in
+    // this segment. Ids chosen to sort *before* segment 2's ids, so an
+    // accidental DocAddress/id-only tiebreak would put these first, not last.
+    let (status, body) = post_docs(&app, &json!([{"id": "a"}, {"id": "z"}])).await;
+    assert_eq!(status, StatusCode::OK, "batch 1 must index, got {body}");
+
+    // Segment 2: both docs carry `ss_lang`.
+    let (status, body) = post_docs(
+        &app,
+        &json!([
+            {"id": "m", "ss_lang": "de"},
+            {"id": "n", "ss_lang": "fr"},
+        ]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "batch 2 must index, got {body}");
+
+    let (status, body) = get(&app, "select?q=*:*&sort=ss_lang+asc,id+asc&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        ids(&body),
+        vec!["m", "n", "a", "z"],
+        "docs with a real ss_lang (de, fr) must sort ahead of the missing pair \
+         regardless of the secondary id sort, got {body}"
     );
 }
 

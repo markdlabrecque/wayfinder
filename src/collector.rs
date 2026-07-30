@@ -57,8 +57,8 @@ pub struct SortClause {
     /// schema instead (`check_sort` resolves it via
     /// `WayfinderSchema::value_kind`, which already folds in any custom
     /// `[[field_types]]` — those only ever resolve to `Text`, so there is no
-    /// numeric/date custom-type case this can miss). Note `Absent` is
-    /// unreachable in practice under Tantivy 0.26 — see its doc comment.
+    /// numeric/date custom-type case this can miss). See `Absent`'s doc
+    /// comment for when that arm is actually reached.
     pub value_kind: Option<ValueKind>,
 }
 

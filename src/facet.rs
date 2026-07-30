@@ -688,7 +688,7 @@ fn check_facetable(schema: &WayfinderSchema, field_name: &str, allow_dynamic: bo
         schema.field_config(field_name).map(|f| f.fast)
     };
     match fast {
-        None if !allow_dynamic && schema.resolved_fast(field_name).is_some() => {
+        None if !allow_dynamic && schema.resolved_fast(field_name) == Some(true) => {
             // ponytail: `facet.range` only resolves statically-declared
             // fields (see the module doc above `check_facetable`) because it
             // needs the field's physical `Field` handle for
