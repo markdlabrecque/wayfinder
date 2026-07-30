@@ -8,6 +8,7 @@ use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\Field\FieldStorageDefinitionInterface;
 use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Item\FieldInterface;
+use Drupal\search_api\Query\ConditionGroup;
 use Drupal\search_api\Query\QueryInterface;
 use Drupal\search_api_wayfinder\QueryBuilder;
 use PHPUnit\Framework\TestCase;
@@ -92,11 +93,16 @@ class QueryBuilderTest extends TestCase {
     return $index;
   }
 
-  private function mockQuery($keys, ?array $queryFulltextFields, IndexInterface $index): QueryInterface {
+  private function mockQuery($keys, ?array $queryFulltextFields, IndexInterface $index, ?ConditionGroup $conditions = NULL, array $sorts = [], array $options = []): QueryInterface {
     $query = $this->createMock(QueryInterface::class);
     $query->method('getKeys')->willReturn($keys);
     $query->method('getFulltextFields')->willReturn($queryFulltextFields);
     $query->method('getIndex')->willReturn($index);
+    $query->method('getConditionGroup')->willReturn($conditions ?? new ConditionGroup());
+    $query->method('getSorts')->willReturn($sorts);
+    $query->method('getOption')->willReturnCallback(
+      static fn (string $name, $default = NULL) => $options[$name] ?? $default
+    );
     return $query;
   }
 
@@ -251,8 +257,217 @@ class QueryBuilderTest extends TestCase {
   }
 
   /**
+   * M2 uses Search API's real ConditionGroup objects, not a test-only shape.
+   * A top-level AND emits one fq for each member; nested OR remains a single,
+   * parenthesised fq. The mandatory index filter remains the first fq.
+   *
    * @covers ::build
    */
+  public function testNestedConditionGroupsKeepOneFqPerTopLevelMember(): void {
+    $index = $this->mockIndex([], [
+      'status' => $this->mockIndexField('status', 'string', FALSE),
+      'weight' => $this->mockIndexField('weight', 'integer', FALSE),
+      'created' => $this->mockIndexField('created', 'date', FALSE),
+    ]);
+    $or = (new ConditionGroup('OR'))
+      ->addCondition('weight', 10, '>=')
+      ->addCondition('created', 0, '<');
+    $conditions = (new ConditionGroup('AND'))
+      ->addCondition('status', 'published')
+      ->addConditionGroup($or);
+
+    $params = (new QueryBuilder())->build($this->mockQuery(NULL, NULL, $index, $conditions));
+
+    $this->assertSame([
+      'index_id:"my_index"',
+      'ss_status:"published"',
+      '(its_weight:[10 TO *] OR ds_created:[* TO 1970-01-01T00:00:00Z})',
+    ], $params['fq']);
+  }
+
+  /**
+   * @covers ::build
+   * @dataProvider filterOperatorProvider
+   */
+  public function testFilterOperatorsUseSolrWireSemantics(string $operator, $value, string $expected): void {
+    $index = $this->mockIndex([], ['value' => $this->mockIndexField('value', 'integer', FALSE)]);
+    $conditions = (new ConditionGroup())->addCondition('value', $value, $operator);
+
+    $params = (new QueryBuilder())->build($this->mockQuery(NULL, NULL, $index, $conditions));
+
+    $this->assertSame($expected, $params['fq'][1]);
+  }
+
+  public static function filterOperatorProvider(): array {
+    return [
+      'equals' => ['=', 10, 'its_value:10'],
+      'not equals' => ['<>', 10, '(*:* -its_value:10)'],
+      'less than' => ['<', 10, 'its_value:[* TO 10}'],
+      'less than or equal' => ['<=', 10, 'its_value:[* TO 10]'],
+      'greater than' => ['>', 10, 'its_value:{10 TO *]'],
+      'greater than or equal' => ['>=', 10, 'its_value:[10 TO *]'],
+      'between' => ['BETWEEN', [10, 20], 'its_value:[10 TO 20]'],
+      'not between' => ['NOT BETWEEN', [10, 20], '(*:* -its_value:[10 TO 20])'],
+      'in' => ['IN', [10, 20], 'its_value:(10 20)'],
+      'not in' => ['NOT IN', [10, 20], '(*:* -its_value:(10 20))'],
+      'equals null means missing' => ['=', NULL, '-its_value:[* TO *]'],
+      'not equals null means present' => ['<>', NULL, 'its_value:[* TO *]'],
+    ];
+  }
+
+  /**
+   * search_api_solr 4.3.13 rejects empty IN arrays rather than silently
+   * broadening them; M2 preserves that validation contract.
+   *
+   * @covers ::build
+   */
+  public function testEmptyInIsRejected(): void {
+    $index = $this->mockIndex([], ['value' => $this->mockIndexField('value', 'integer', FALSE)]);
+    $conditions = (new ConditionGroup())->addCondition('value', [], 'IN');
+
+    $this->expectException(\InvalidArgumentException::class);
+    $this->expectExceptionMessage('empty array is not allowed');
+    (new QueryBuilder())->build($this->mockQuery(NULL, NULL, $index, $conditions));
+  }
+
+  /**
+   * @covers ::build
+   */
+  public function testFilterValuesUsePinnedUpstreamPhraseEscapingAndTypeFormatting(): void {
+    $index = $this->mockIndex([], [
+      'text' => $this->mockIndexField('text', 'text', FALSE),
+      'date' => $this->mockIndexField('date', 'date', FALSE),
+      'boolean' => $this->mockIndexField('boolean', 'boolean', FALSE),
+      'integer' => $this->mockIndexField('integer', 'integer', FALSE),
+      'decimal' => $this->mockIndexField('decimal', 'decimal', FALSE),
+    ]);
+    $special = "space + - && || ! ( ) { } [ ] ^ \" ~ * ? : \\ / OR *:*";
+    $conditions = (new ConditionGroup())
+      ->addCondition('text', $special)
+      ->addCondition('date', 0)
+      ->addCondition('boolean', TRUE)
+      ->addCondition('integer', 42)
+      ->addCondition('decimal', 3.14);
+
+    $params = (new QueryBuilder())->build($this->mockQuery(NULL, NULL, $index, $conditions));
+
+    $this->assertSame([
+      'index_id:"my_index"',
+      'ts_text:"space + - && || ! ( ) { } [ ] ^ \\" ~ * ? : \\\\ / OR *:*"',
+      'ds_date:1970-01-01T00:00:00Z',
+      'bs_boolean:"true"',
+      'its_integer:42',
+      'fts_decimal:3.14',
+    ], $params['fq']);
+  }
+
+  /**
+   * @covers ::build
+   */
+  public function testSortsAndPagingUseWayfinderSelectParameters(): void {
+    $index = $this->mockIndex([], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+      'weight' => $this->mockIndexField('weight', 'integer', FALSE),
+    ]);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [
+      'search_api_relevance' => 'DESC',
+      'search_api_id' => 'ASC',
+      'title' => 'ASC',
+      'weight' => 'DESC',
+    ], ['offset' => 20, 'limit' => 10]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('score desc,id asc,sort_title asc,its_weight desc', $params['sort']);
+    $this->assertSame(20, $params['start']);
+    $this->assertSame(10, $params['rows']);
+  }
+
+  /**
+   * @covers ::build
+   */
+  public function testUnlimitedLimitMapsToTheLargestPositiveRowCount(): void {
+    $index = $this->mockIndex([], []);
+
+    $params = (new QueryBuilder())->build($this->mockQuery(NULL, NULL, $index, NULL, [], ['limit' => -1]));
+
+    $this->assertSame(PHP_INT_MAX, $params['rows']);
+  }
+
+  /**
+   * @covers ::build
+   */
+  public function testSortsUseActualCardinalityAndSearchApiPseudoFields(): void {
+    $index = $this->mockIndex([], [
+      'tags' => $this->mockIndexField('tags', 'string', TRUE),
+    ]);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [
+      'tags' => 'ASC',
+      'search_api_datasource' => 'DESC',
+      'search_api_language' => 'ASC',
+    ]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('sm_tags asc,ss_search_api_datasource desc,ss_search_api_language asc', $params['sort']);
+  }
+
+  /**
+   * search_api_solr 4.3.13 flattenKeys() preserves grouping before negation.
+   *
+   * @covers ::build
+   */
+  public function testNestedOrAndNegatedTwoTermGroupsKeepTheirSemantics(): void {
+    $index = $this->mockIndex(['title'], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+    ]);
+    $keys = [
+      '#conjunction' => 'AND',
+      0 => 'quick',
+      1 => [
+        '#conjunction' => 'OR',
+        0 => 'cat',
+        1 => 'dog',
+      ],
+      2 => [
+        '#conjunction' => 'AND',
+        '#negation' => TRUE,
+        0 => 'banned',
+        1 => 'forbidden',
+      ],
+    ];
+
+    $params = (new QueryBuilder())->build($this->mockQuery($keys, NULL, $index));
+
+    $this->assertSame('quick (cat OR dog) -(banned forbidden)', $params['q']);
+  }
+
+  /**
+   * search_api_solr 4.3.13 stops at NULL in mixed IN and loses later arms.
+   * Wayfinder deliberately preserves both arms for this issue's conditions.
+   *
+   * @covers ::build
+   * @dataProvider nullAndSingleRangeOperatorProvider
+   */
+  public function testPinnedUpstreamNullWildcardAndSingleRangeOperators(string $operator, $value, string $expected): void {
+    $index = $this->mockIndex([], ['value' => $this->mockIndexField('value', 'integer', FALSE)]);
+    $conditions = (new ConditionGroup())->addCondition('value', $value, $operator);
+
+    $params = (new QueryBuilder())->build($this->mockQuery(NULL, NULL, $index, $conditions));
+
+    $this->assertSame($expected, $params['fq'][1]);
+  }
+
+  public static function nullAndSingleRangeOperatorProvider(): array {
+    return [
+      'in null and value' => ['IN', [NULL, 10], '(its_value:10 OR -its_value:[* TO *])'],
+      'not in null and value' => ['NOT IN', [NULL, 10], '(its_value:[* TO *] -its_value:(10))'],
+      'literal wildcard exists' => ['=', '*', 'its_value:*'],
+      'one element between' => ['BETWEEN', [10], 'its_value:10'],
+      'one element not between' => ['NOT BETWEEN', [10], '(*:* -its_value:10)'],
+    ];
+  }
+
   public function testSpecialCharactersInKeysAreEscaped(): void {
     // M1's one untrusted-input path: a raw search term must not be able to
     // inject a field query or break Tantivy's query grammar via an

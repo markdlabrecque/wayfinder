@@ -156,6 +156,23 @@ class WayfinderClientTest extends TestCase {
   }
 
   /**
+   * @covers ::select
+   */
+  public function testSelectSerializesMultipleFilterQueriesAsRepeatedFqParameters(): void {
+    $history = [];
+    $mock = new MockHandler([new Response(200, [], '{"response":{"numFound":0,"docs":[]}}')]);
+    $handlerStack = HandlerStack::create($mock);
+    $handlerStack->push(\GuzzleHttp\Middleware::history($history));
+    $client = new WayfinderClient(new Client(['handler' => $handlerStack]), 'http://localhost:8983/solr/mycore');
+
+    $client->select(['q' => '*:*', 'fq' => ['index_id:"my_index"', 'ss_status:"published"']]);
+
+    $query = $history[0]['request']->getUri()->getQuery();
+    $this->assertSame('q=%2A%3A%2A&fq=index_id%3A%22my_index%22&fq=ss_status%3A%22published%22&wt=json', $query);
+    $this->assertStringNotContainsString('fq%5B', $query);
+  }
+
+  /**
    * @covers ::update
    */
   public function testUpdatePassesCommitWithinAsQueryParamNotBodyKey(): void {

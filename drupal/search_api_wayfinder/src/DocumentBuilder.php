@@ -59,6 +59,14 @@ class DocumentBuilder {
       $name = $this->fieldMapper->fieldName($field->getFieldIdentifier(), $type, $multiValued);
 
       $doc[$name] = $multiValued ? array_values($formatted) : ($formatted[0] ?? NULL);
+
+      if ($type === 'text') {
+        // ponytail: multi-valued text sorts use the first Search API value.
+        // Wayfinder has native min/max selection only for the actual mapped
+        // fast field; a collation-aware multi-value text selector needs a
+        // dedicated schema/type design before this can be broadened.
+        $doc[$this->fieldMapper->sortFieldName($field->getFieldIdentifier(), $type, $multiValued)] = $formatted[0] ?? NULL;
+      }
     }
 
     return [

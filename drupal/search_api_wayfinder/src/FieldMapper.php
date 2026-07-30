@@ -79,6 +79,35 @@ class FieldMapper {
   }
 
   /**
+   * Formats one filter value for Lucene syntax.
+   *
+   * search_api_solr 4.3.13 treats text, string, and boolean filters as
+   * phrases. Inside those phrases only a literal backslash or double quote is
+   * escaped; the other Lucene punctuation is ordinary phrase content. Numeric
+   * and date values remain bare after their normal Search API formatting.
+   */
+  public function filterValue($value, string $type): string {
+    $formatted = $this->formatValue($value, $type);
+    if (in_array($type, ['text', 'string', 'boolean'], TRUE)) {
+      return '"' . str_replace(['\\', '"'], ['\\\\', '\\"'], (string) $formatted) . '"';
+    }
+    return (string) $formatted;
+  }
+
+  /**
+   * Maps a Search API field to the field used by Wayfinder sorting.
+   *
+   * Text fields sort through their dedicated sort_* dynamic field; every
+   * other type sorts on the actual mapped field, preserving cardinality so
+   * Wayfinder can use its native multi-value min/max selection.
+   */
+  public function sortFieldName(string $fieldId, string $type, bool $multiValued): string {
+    return $type === 'text'
+      ? 'sort_' . $fieldId
+      : $this->fieldName($fieldId, $type, $multiValued);
+  }
+
+  /**
    * Determines whether a field is multi-valued, from the index's own
    * property-path cardinality -- NOT from how many values happen to be set
    * on one particular item, so the same field always maps to the same

@@ -5,22 +5,16 @@ declare(strict_types=1);
 namespace Drupal\search_api_wayfinder;
 
 use Drupal\search_api\IndexInterface;
+use Drupal\search_api\Query\ConditionGroupInterface;
+use Drupal\search_api\Query\ConditionInterface;
 use Drupal\search_api\Query\QueryInterface;
 
 /**
  * Translates a Search API QueryInterface into Wayfinder /select params.
  *
- * M1 scope only: plain fulltext keys -> q/qf/defType, plus the index_id fq
- * that is core multi-index-per-core wiring (locked decision 2), not a
- * user-authored filter. No condition groups, sorts, facets, or MLT yet --
- * those land in M2+ per the plan doc's milestone table.
- *
- * The keys -> q flattening is a Wayfinder-shaped adaptation of
- * search_api_solr's Utility::flattenKeys(): conjunction/negation/phrase
- * handling copied, but the per-term-per-field embedding
- * ("{!edismax qf='...'}") is dropped because Wayfinder's SELECT_PARAMS
- * exposes q/qf/defType as independent top-level params, not Solarium-style
- * inline local params.
+ * Fulltext keys become q/qf/defType. The index filter is core
+ * multi-index-per-core wiring; Search API condition groups, sorts, and paging
+ * are translated to the corresponding Solr-wire select parameters.
  */
 class QueryBuilder {
 
@@ -31,7 +25,7 @@ class QueryBuilder {
   /**
    * Builds the /select param array for the given query.
    *
-   * @return array<string, string>
+   * @return array<string, string|int|array<int, string>>
    */
   public function build(QueryInterface $query): array {
     $index = $query->getIndex();
@@ -47,7 +41,39 @@ class QueryBuilder {
       $params['qf'] = $this->buildQf($query, $index);
     }
 
-    $params['fq'] = 'index_id:"' . $index->id() . '"';
+    $filters = ['index_id:"' . $index->id() . '"'];
+    $conditions = $query->getConditionGroup();
+    if (!$conditions->isEmpty()) {
+      if ($conditions->getConjunction() === 'AND') {
+        foreach ($conditions->getConditions() as $condition) {
+          $filters[] = $this->buildConditionMember($condition, $index, $condition instanceof ConditionGroupInterface);
+        }
+      }
+      else {
+        $filters[] = $this->buildConditionGroup($conditions, $index, FALSE);
+      }
+    }
+    $params['fq'] = count($filters) === 1 ? $filters[0] : $filters;
+
+    $sort = $this->buildSort($query, $index);
+    if ($sort !== '') {
+      $params['sort'] = $sort;
+    }
+
+    $offset = $query->getOption('offset');
+    if ($offset !== NULL) {
+      $params['start'] = (int) $offset;
+    }
+    $limit = $query->getOption('limit');
+    // Search API reserves -1 as its unlimited-results sentinel. Wayfinder
+    // clamps oversized positive rows to its configured rows_limit, so send a
+    // parseable maximum rather than omitting rows and falling back to 10.
+    if ((int) $limit === -1) {
+      $params['rows'] = PHP_INT_MAX;
+    }
+    elseif ($limit !== NULL) {
+      $params['rows'] = (int) $limit;
+    }
 
     return $params;
   }
@@ -60,7 +86,7 @@ class QueryBuilder {
    *   Either a single term string, or a nested parsed-keys array with
    *   '#conjunction' ('AND'/'OR') and optional '#negation' (bool) keys.
    */
-  private function flattenKeys($keys): string {
+  private function flattenKeys($keys, bool $nested = FALSE): string {
     if (is_string($keys)) {
       return $this->escapeTerm($keys);
     }
@@ -73,42 +99,218 @@ class QueryBuilder {
       if ($key === '#conjunction' || $key === '#negation') {
         continue;
       }
-      $flattened = $this->flattenKeys($value);
-      if ($flattened === '') {
-        continue;
+      $flattened = $this->flattenKeys($value, TRUE);
+      if ($flattened !== '') {
+        $parts[] = $flattened;
       }
-      $parts[] = $flattened;
     }
 
-    $glue = $conjunction === 'OR' ? ' OR ' : ' ';
-    $combined = implode($glue, $parts);
-
-    if ($negated) {
-      return '-' . $combined;
+    $combined = implode($conjunction === 'OR' ? ' OR ' : ' ', $parts);
+    // Nested groups and any multi-term negation need a grouping boundary: a
+    // bare "-a b" negates only a, whereas "-(a b)" negates the whole group.
+    $grouped = $nested && count($parts) > 1;
+    if ($negated && count($parts) > 1) {
+      return '-(' . $combined . ')';
     }
-
-    return $combined;
+    return $grouped ? '(' . $combined . ')' : ($negated ? '-' . $combined : $combined);
   }
 
   /**
    * Escapes Lucene/Solr special characters in a single fulltext term, then
    * quotes it as a phrase if it contains whitespace.
-   *
-   * This is fulltext-*keys* escaping only (the one untrusted-input path M1
-   * ships): a raw user search term must not be able to inject field queries
-   * (':'), grouping ('(', ')'), or unbalanced quotes into Wayfinder's `q`.
-   * Filter-value escaping is separate, out-of-scope M2 work (condition
-   * groups aren't implemented yet). Copied from Solr's
-   * ClientUtils::escapeQueryChars() char set, as search_api_solr does.
    */
   private function escapeTerm(string $term): string {
     $special = ['\\', '+', '-', '&&', '||', '!', '(', ')', '{', '}', '[', ']', '^', '"', '~', '*', '?', ':', '/'];
     $escaped = str_replace($special, array_map(fn ($char) => '\\' . $char, $special), $term);
 
-    if (preg_match('/\s/', $escaped)) {
-      return '"' . $escaped . '"';
+    return preg_match('/\s/', $escaped) ? '"' . $escaped . '"' : $escaped;
+  }
+
+  /**
+   * Translates one condition or nested group.
+   */
+  private function buildConditionMember($condition, IndexInterface $index, bool $nested): string {
+    if ($condition instanceof ConditionInterface) {
+      return $this->buildCondition($condition, $index);
     }
-    return $escaped;
+    if ($condition instanceof ConditionGroupInterface) {
+      return $this->buildConditionGroup($condition, $index, $nested);
+    }
+    throw new \InvalidArgumentException('Unsupported Search API condition member.');
+  }
+
+  /**
+   * Recursively translates a Search API condition group.
+   */
+  private function buildConditionGroup(ConditionGroupInterface $group, IndexInterface $index, bool $parenthesize): string {
+    $parts = [];
+    foreach ($group->getConditions() as $condition) {
+      $parts[] = $this->buildConditionMember($condition, $index, $condition instanceof ConditionGroupInterface);
+    }
+    $query = implode($group->getConjunction() === 'OR' ? ' OR ' : ' AND ', $parts);
+    return $parenthesize ? '(' . $query . ')' : $query;
+  }
+
+  /**
+   * Translates one Search API condition to a Lucene query string.
+   */
+  private function buildCondition(ConditionInterface $condition, IndexInterface $index): string {
+    $fieldId = $condition->getField();
+    if (!is_string($fieldId) || $fieldId === '' || !($field = $index->getField($fieldId))) {
+      throw new \InvalidArgumentException('Condition field is missing or is not part of the index.');
+    }
+
+    $fieldName = $this->fieldMapper->fieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
+    $operator = strtoupper(trim((string) $condition->getOperator()));
+    $value = $condition->getValue();
+
+    if (in_array($operator, ['BETWEEN', 'NOT BETWEEN'], TRUE)) {
+      if (!is_array($value) || $value === [] || count($value) > 2) {
+        throw new \InvalidArgumentException('BETWEEN requires an array of one or two values.');
+      }
+      $values = array_values($value);
+      if (count($values) === 1) {
+        // search_api_solr 4.3.13 normalizes a one-member range to its scalar
+        // counterpart rather than emitting an invalid Lucene range.
+        $operator = $operator === 'BETWEEN' ? '=' : '<>';
+        $value = $values[0];
+      }
+    }
+
+    if ($value === NULL) {
+      return match ($operator) {
+        '=' => '-' . $fieldName . ':[* TO *]',
+        '<>' => $fieldName . ':[* TO *]',
+        default => throw new \InvalidArgumentException('NULL is supported only with = and <> conditions.'),
+      };
+    }
+
+    if ($value === '*' && !in_array($operator, ['=', 'BETWEEN', 'NOT BETWEEN'], TRUE)) {
+      throw new \InvalidArgumentException('Unsupported operator for wildcard searches.');
+    }
+
+    return match ($operator) {
+      '=' => $fieldName . ':' . ($value === '*' ? '*' : $this->fieldMapper->filterValue($value, $field->getType())),
+      '<>' => '(*:* -' . $fieldName . ':' . $this->fieldMapper->filterValue($value, $field->getType()) . ')',
+      '<' => $fieldName . ':[* TO ' . $this->fieldMapper->filterValue($value, $field->getType()) . '}',
+      '<=' => $fieldName . ':[* TO ' . $this->fieldMapper->filterValue($value, $field->getType()) . ']',
+      '>' => $fieldName . ':{' . $this->fieldMapper->filterValue($value, $field->getType()) . ' TO *]',
+      '>=' => $fieldName . ':[' . $this->fieldMapper->filterValue($value, $field->getType()) . ' TO *]',
+      'BETWEEN' => $fieldName . ':[' . $this->rangeValues($value, $field->getType()) . ']',
+      'NOT BETWEEN' => '(*:* -' . $fieldName . ':[' . $this->rangeValues($value, $field->getType()) . '])',
+      'IN' => $this->inQuery($fieldName, $value, $field->getType()),
+      'NOT IN' => $this->notInQuery($fieldName, $value, $field->getType()),
+      default => throw new \InvalidArgumentException(sprintf('Unsupported condition operator "%s".', $condition->getOperator())),
+    };
+  }
+
+  /**
+   * Formats two range endpoints, treating NULL and literal * as unbounded.
+   */
+  private function rangeValues(array $value, string $type): string {
+    if (count($value) !== 2) {
+      throw new \InvalidArgumentException('BETWEEN requires an array of exactly two values.');
+    }
+    $values = array_values($value);
+    return $this->rangeEndpoint($values[0], $type) . ' TO ' . $this->rangeEndpoint($values[1], $type);
+  }
+
+  /**
+   * Formats a range endpoint using search_api_solr's NULL/* wildcard rule.
+   */
+  private function rangeEndpoint($value, string $type): string {
+    return $value === NULL || $value === '*' ? '*' : $this->fieldMapper->filterValue($value, $type);
+  }
+
+  /**
+   * Builds an IN query, where NULL adds a missing-field alternative.
+   */
+  private function inQuery(string $fieldName, $value, string $type): string {
+    $values = $this->listValues($value);
+    $hasNull = in_array(NULL, $values, TRUE);
+    $values = array_values(array_filter($values, static fn ($item) => $item !== NULL));
+    if ($values === []) {
+      return '(*:* -' . $fieldName . ':[* TO *])';
+    }
+
+    $parts = $this->formatListValues($values, $type);
+    $valueQuery = count($values) === 1
+      ? $fieldName . ':' . $parts
+      : $fieldName . ':(' . $parts . ')';
+    return $hasNull
+      ? '(' . $valueQuery . ' OR -' . $fieldName . ':[* TO *])'
+      : $valueQuery;
+  }
+
+  /**
+   * Builds a NOT IN query, where NULL requires a present field.
+   */
+  private function notInQuery(string $fieldName, $value, string $type): string {
+    $values = $this->listValues($value);
+    $hasNull = in_array(NULL, $values, TRUE);
+    $values = array_values(array_filter($values, static fn ($item) => $item !== NULL));
+    if ($values === []) {
+      return $hasNull ? '(' . $fieldName . ':[* TO *])' : '(*:* -' . $fieldName . ':())';
+    }
+    $parts = $this->formatListValues($values, $type);
+    return $hasNull
+      ? '(' . $fieldName . ':[* TO *] -' . $fieldName . ':(' . $parts . '))'
+      : '(*:* -' . $fieldName . ':(' . $parts . '))';
+  }
+
+  /**
+   * Validates a non-empty IN/NOT IN array.
+   *
+   * search_api_solr 4.3.13's createFilterQuery() rejects empty arrays and
+   * handles NULL members before phrase escaping.
+   */
+  private function listValues($value): array {
+    if (!is_array($value) || $value === []) {
+      throw new \InvalidArgumentException('An empty array is not allowed for IN conditions.');
+    }
+    if (in_array('*', $value, TRUE)) {
+      throw new \InvalidArgumentException('Unsupported operator for wildcard searches.');
+    }
+    return array_values($value);
+  }
+
+  /**
+   * Formats list members after NULL handling and rejects literal * for IN.
+   */
+  private function formatListValues(array $values, string $type): string {
+    if (in_array('*', $values, TRUE)) {
+      throw new \InvalidArgumentException('Unsupported operator for wildcard searches.');
+    }
+    return implode(' ', array_map(fn ($item) => $this->fieldMapper->filterValue($item, $type), $values));
+  }
+
+  /**
+   * Builds Solr's comma-separated sort parameter.
+   */
+  private function buildSort(QueryInterface $query, IndexInterface $index): string {
+    $sorts = [];
+    foreach ($query->getSorts() as $fieldId => $direction) {
+      $fieldName = match ($fieldId) {
+        'search_api_relevance' => 'score',
+        'search_api_id' => 'id',
+        'search_api_datasource' => 'ss_search_api_datasource',
+        'search_api_language' => 'ss_search_api_language',
+        default => $this->sortFieldName($fieldId, $index),
+      };
+      $sorts[] = $fieldName . ' ' . (strtolower(trim((string) $direction)) === 'desc' ? 'desc' : 'asc');
+    }
+    return implode(',', $sorts);
+  }
+
+  /**
+   * Maps a Search API sort field to its Wayfinder field name.
+   */
+  private function sortFieldName(string $fieldId, IndexInterface $index): string {
+    $field = $index->getField($fieldId);
+    if (!$field) {
+      throw new \InvalidArgumentException('Sort field is not part of the index.');
+    }
+    return $this->fieldMapper->sortFieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
   }
 
   /**
