@@ -19,7 +19,10 @@ async fn main() -> anyhow::Result<()> {
         if args.next().is_some() {
             return Err(anyhow::anyhow!("usage: wayfinder coverage --format json"));
         }
-        println!("{}", serde_json::to_string(&wayfinder::coverage_report())?);
+        println!(
+            "{}",
+            serde_json::to_string(&wayfinder::coverage_report().await)?
+        );
         return Ok(());
     }
     let schema_path =

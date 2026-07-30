@@ -48,7 +48,6 @@ use tower_http::catch_panic::CatchPanicLayer;
 
 use collector::{SortClause, SortKey};
 use core_index::CoreIndex;
-use coverage::RenderedResponseField;
 use error::{Envelope, WfError};
 use params::Params;
 
@@ -110,14 +109,7 @@ const SELECT_PARAMS: &[&str] = &[
     "wt",
 ];
 /// `commitWithin` / `overwrite` / `softCommit` landed with #9.
-const UPDATE_PARAMS: &[&str] = &[
-    "commit",
-    "commitWithin",
-    "overwrite",
-    "softCommit",
-    "wt",
-    "json.nl",
-];
+const UPDATE_PARAMS: &[&str] = &["commit", "commitWithin", "overwrite", "softCommit", "wt"];
 const PING_PARAMS: &[&str] = &["wt"];
 /// `/admin/info/system` (server-level) and `<core>/admin/system`
 /// (core-scoped fallback) — issue #59's version-handshake endpoints.
@@ -642,12 +634,7 @@ async fn admin_info_system(
     let (jvm, system, security) = admin_info_jvm_system_security();
     let version = &state.config.admin.reported_solr_version;
     let mut lucene = Map::new();
-    lucene.insert(
-        RenderedResponseField::AdminInfoSolrSpecVersion
-            .key()
-            .to_string(),
-        json!(version),
-    );
+    lucene.insert("solr-spec-version".to_string(), json!(version));
     lucene.insert(
         "solr-impl-version".to_string(),
         json!(format!("{version} wayfinder")),
@@ -698,10 +685,7 @@ async fn core_admin_system(
     let (jvm, system, security) = admin_info_jvm_system_security();
     let version = &state.config.admin.reported_solr_version;
     let mut core_response = Map::new();
-    core_response.insert(
-        RenderedResponseField::CoreAdminSchema.key().to_string(),
-        json!(CORE_ADMIN_SCHEMA),
-    );
+    core_response.insert("schema".to_string(), json!(CORE_ADMIN_SCHEMA));
     core_response.insert("host".to_string(), json!("wayfinder"));
     core_response.insert("now".to_string(), json!("1970-01-01T00:00:00.000Z"));
     core_response.insert("start".to_string(), json!("1970-01-01T00:00:00.000Z"));
@@ -751,29 +735,6 @@ struct UpdateCommands {
     commit: bool,
 }
 
-/// Parser representation used by the live `/update` command path. Keeping it
-/// explicit lets coverage report duplicate-key semantics from the actual
-/// parser, rather than from a hand-maintained classification.
-enum UpdateCommandParser {
-    SerdeValue,
-}
-
-impl UpdateCommandParser {
-    fn parse(self, body: &[u8]) -> Result<Value, String> {
-        serde_json::from_slice(body).map_err(|e| format!("invalid JSON body: {e}"))
-    }
-
-    const fn preserves_duplicate_keys(self) -> bool {
-        match self {
-            Self::SerdeValue => false,
-        }
-    }
-}
-
-pub(crate) const fn update_command_parser_preserves_duplicate_keys() -> bool {
-    UpdateCommandParser::SerdeValue.preserves_duplicate_keys()
-}
-
 /// Parses a `/update` POST body into add/delete/commit commands (finding 46).
 /// Two shapes: the pre-#9 bare JSON array of docs (all adds, unchanged), and
 /// Solr's command-object form — `{"add":{"doc":{...}}, "delete":{"id":...} |
@@ -788,7 +749,8 @@ pub(crate) const fn update_command_parser_preserves_duplicate_keys() -> bool {
 /// unobserved — no fixture repeats a command key), so that shape is out of
 /// scope per the task spec.
 fn parse_update_commands(body: &[u8]) -> Result<UpdateCommands, String> {
-    let value = UpdateCommandParser::SerdeValue.parse(body)?;
+    let value: Value =
+        serde_json::from_slice(body).map_err(|e| format!("invalid JSON body: {e}"))?;
     let mut commands = UpdateCommands::default();
     match value {
         Value::Array(docs) => commands.add_docs = docs,
@@ -1096,10 +1058,7 @@ async fn select(
     // this `response` block alongside `error` — it has to exist already so it
     // can be attached to that error below.
     let mut response = Map::new();
-    response.insert(
-        RenderedResponseField::SelectNumFound.key().to_string(),
-        json!(num_found),
-    );
+    response.insert("numFound".to_string(), json!(num_found));
     response.insert("start".to_string(), json!(start));
     if wants_score {
         // ponytail: computed as the max score across the *whole*
@@ -1126,10 +1085,7 @@ async fn select(
         }
     }
     response.insert("numFoundExact".to_string(), json!(true));
-    response.insert(
-        RenderedResponseField::SelectDocs.key().to_string(),
-        json!(docs),
-    );
+    response.insert("docs".to_string(), json!(docs));
 
     // Facet and stats counts are both aggregated over a *real* query (`q` AND
     // every `fq`), not over `hits`: Solr enumerates the field's whole term
@@ -1261,14 +1217,14 @@ async fn select(
     });
 
     if let Some((facet_counts, _)) = facet_result {
-        body[RenderedResponseField::SelectFacetCounts.key()] = facet_counts;
+        body["facet_counts"] = facet_counts;
     }
     if let Some(stats) = stats_result {
         body["stats"] = stats;
     }
 
     if let Some(highlighting) = highlighting_result {
-        body[RenderedResponseField::SelectHighlighting.key()] = highlighting;
+        body["highlighting"] = highlighting;
     }
 
     Ok(axum::Json(body).into_response())
@@ -1447,7 +1403,7 @@ async fn mlt(
         },
         "match": match_block,
     });
-    body[RenderedResponseField::MltResponse.key()] = response_value;
+    body["response"] = response_value;
 
     // Real Solr's `mlt.interestingTerms` value set is `none | list | details`
     // (default `none`, which omits the key entirely) — `"false"` is not a

@@ -327,8 +327,8 @@ fn assert_bucket(
     (covered, uncovered)
 }
 
-#[test]
-fn frozen_capture_exhaustively_maps_all_urls_bodies_parameters_and_material_variants() {
+#[tokio::test]
+async fn frozen_capture_exhaustively_maps_all_urls_bodies_parameters_and_material_variants() {
     let contract = contract();
     assert_eq!(contract.traces.len(), 28, "#55 froze exactly 28 exchanges");
 
@@ -440,7 +440,36 @@ fn frozen_capture_exhaustively_maps_all_urls_bodies_parameters_and_material_vari
                     parameter.name,
                 );
             }
+            for trace in &parameter.trace {
+                assert!(
+                    parameter
+                        .values
+                        .iter()
+                        .any(|value| occurrences[value].contains(trace)),
+                    "semantic `{}` cites {}/{} without one of its variant values",
+                    semantic.id,
+                    parameter.name,
+                    trace,
+                );
+            }
         }
+        let semantic_trace = semantic
+            .parameters
+            .iter()
+            .flat_map(|parameter| parameter.trace.iter())
+            .chain(
+                semantic
+                    .body_variants
+                    .iter()
+                    .flat_map(|variant| variant.trace.iter()),
+            )
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            semantic.trace.iter().collect::<BTreeSet<_>>(),
+            semantic_trace,
+            "semantic `{}` must cite every parameter/body occurrence it describes",
+            semantic.id,
+        );
     }
 
     for required in [
@@ -482,7 +511,7 @@ fn frozen_capture_exhaustively_maps_all_urls_bodies_parameters_and_material_vari
         .find(|item| item.id == "update.json-command-add-batch")
         .expect("duplicate-add semantic");
     assert!(
-        wayfinder::coverage_report()["request_semantics"]["uncovered_items"]
+        wayfinder::coverage_report().await["request_semantics"]["uncovered_items"]
             .as_array()
             .expect("coverage report uncovered semantic list")
             .iter()
@@ -492,6 +521,33 @@ fn frozen_capture_exhaustively_maps_all_urls_bodies_parameters_and_material_vari
     assert_eq!(
         duplicate.body_variants[0].kind,
         "json-object-duplicate-add-key"
+    );
+}
+
+#[test]
+fn json_nl_flat_semantic_has_complete_flat_value_provenance() {
+    let contract = contract();
+    let flat_occurrence = contract
+        .captured_parameters
+        .iter()
+        .find(|parameter| parameter.name == "json.nl")
+        .and_then(|parameter| {
+            parameter
+                .occurrences
+                .iter()
+                .find(|occurrence| occurrence.value == "flat")
+        })
+        .expect("captured json.nl=flat occurrence");
+    let semantic = contract
+        .request_semantics
+        .iter()
+        .find(|semantic| semantic.id == "request.json-nl.flat")
+        .expect("json.nl flat semantic");
+    assert_eq!(semantic.trace, flat_occurrence.trace);
+    assert_eq!(semantic.parameters[0].trace, flat_occurrence.trace);
+    assert!(
+        semantic.trace.iter().any(|trace| trace == "00022.json"),
+        "the MLT json.nl=flat exchange must be evaluated"
     );
 }
 
@@ -614,6 +670,14 @@ async fn classification_guards_exercise_real_router_strict_param_and_renderer_be
     );
 
     let (status, body) =
+        common::request_full(&app, "POST", "content/update?json.nl=flat", Some("[]")).await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::BAD_REQUEST,
+        "update must preserve its strict-parameter surface: {body}"
+    );
+
+    let (status, body) =
         common::request_full(&app, "GET", "content/terms?terms=true&terms.fl=body", None).await;
     assert_eq!(
         status,
@@ -726,16 +790,16 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         "request semantics",
         report.request_semantics,
         semantic_items,
-        "strict-param",
+        "runtime-probe",
         Some(&expected.request_semantics),
         None,
         &[
             "update.json-command-add-batch",
             "request.omitHeader",
+            "request.json-nl.flat",
             "request.json-nl.repeated-map-and-flat",
             "request.timezone.utc",
             "select.q.local-params-edismax",
-            "select.fl.wildcard-plus-score",
             "select.highlight.wildcard-fields",
             "select.highlight.require-field-match",
             "select.highlight.merge-contiguous",
@@ -757,7 +821,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         "response fields",
         report.response_fields,
         response_items,
-        "rendered-response",
+        "runtime-probe",
         None,
         Some(&expected.response_fields),
         &[

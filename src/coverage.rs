@@ -6,13 +6,18 @@
 //! or reads a contract `covered` value.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode};
+use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tower::ServiceExt;
 
-use crate::{
-    MLT_PARAMS, ROUTES, SELECT_PARAMS, UPDATE_PARAMS,
-    update_command_parser_preserves_duplicate_keys,
-};
+use crate::ROUTES;
 
 const CONTRACT: &str = include_str!("../coverage/search_api_coverage_contract.json");
 
@@ -258,235 +263,336 @@ fn endpoint_covered(id: &str) -> bool {
         .any(|route| route.path == path && (route.accepts_method)(method))
 }
 
-fn contains_all(params: &[&str], needed: &[SemanticParameter]) -> bool {
-    needed
-        .iter()
-        .all(|parameter| params.contains(&parameter.name.as_str()))
+/// A hermetic, strict-parameter app used only by the coverage command. The
+/// report asks the same routed handlers that serve requests; it does not carry
+/// a second Boolean capability inventory.
+struct ProbeApp {
+    app: Router,
+    _workspace: ProbeWorkspace,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SemanticBehavior {
-    DuplicateAddBatch,
-    CommitWithin,
-    JsonWireFormat,
-    JsonNlFlat,
-    RepeatedJsonNl,
-    PlainQuery,
-    LocalParamsEdismax,
-    Pagination,
-    WildcardFields,
-    FilterQuery,
-    Sort,
-    Highlight,
-    HighlightWildcard,
-    HighlightMarkers,
-    Facet,
-    FacetLocalKey,
-    PerFieldFacetMissing,
-    Spellcheck,
-    MltLookup,
-    MltTuning,
-    MltFilters,
-    MltInterestingTerms,
-    Unimplemented,
+struct ProbeWorkspace {
+    root: PathBuf,
 }
 
-impl SemanticBehavior {
-    fn supported(self) -> bool {
-        match self {
-            Self::DuplicateAddBatch => update_command_parser_preserves_duplicate_keys(),
-            Self::CommitWithin
-            | Self::JsonWireFormat
-            | Self::JsonNlFlat
-            | Self::PlainQuery
-            | Self::Pagination
-            | Self::FilterQuery
-            | Self::Sort
-            | Self::Highlight
-            | Self::HighlightMarkers
-            | Self::Facet
-            | Self::MltLookup
-            | Self::MltTuning
-            | Self::MltInterestingTerms => true,
-            Self::RepeatedJsonNl
-            | Self::LocalParamsEdismax
-            | Self::WildcardFields
-            | Self::HighlightWildcard
-            | Self::FacetLocalKey
-            | Self::PerFieldFacetMissing
-            | Self::Spellcheck
-            | Self::MltFilters
-            | Self::Unimplemented => false,
-        }
-    }
-
-    fn source(self) -> &'static str {
-        match self {
-            Self::DuplicateAddBatch => "src/lib.rs::UpdateCommandParser",
-            Self::CommitWithin => "src/lib.rs::update -> CoreIndex::schedule_commit",
-            Self::JsonWireFormat | Self::JsonNlFlat | Self::RepeatedJsonNl => {
-                "src/lib.rs parameter allowlists + response writers"
-            }
-            Self::PlainQuery | Self::FilterQuery => "src/lib.rs::select -> CoreIndex::parse_query",
-            Self::LocalParamsEdismax => "src/lib.rs::select local-param parser",
-            Self::Pagination => "src/lib.rs::select/mlt pagination",
-            Self::WildcardFields => "src/core_index.rs::render_doc wildcard projection",
-            Self::Sort => "src/lib.rs::check_sort",
-            Self::Highlight | Self::HighlightMarkers | Self::HighlightWildcard => {
-                "src/highlight.rs::highlighting"
-            }
-            Self::Facet | Self::FacetLocalKey | Self::PerFieldFacetMissing => {
-                "src/facet.rs::facet_counts"
-            }
-            Self::Spellcheck => "src/lib.rs::select spellcheck renderer",
-            Self::MltLookup | Self::MltTuning | Self::MltFilters | Self::MltInterestingTerms => {
-                "src/lib.rs::mlt -> CoreIndex::mlt_query"
-            }
-            Self::Unimplemented => "unrouted or unsupported protocol behavior",
-        }
+impl ProbeWorkspace {
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "wayfinder-coverage-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir_all(&root).expect("create hermetic coverage workspace");
+        Self { root }
     }
 }
 
-/// Maps a denominator label to a concrete behavior, rather than treating a
-/// parameter name as evidence that every variant of that name is supported.
-fn semantic_behavior(id: &str) -> SemanticBehavior {
+impl Drop for ProbeWorkspace {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+const PROBE_SCHEMA: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "category"
+type = "string"
+stored = true
+fast = true
+multi_valued = true
+
+[[fields]]
+name = "rating"
+type = "int"
+stored = true
+fast = true
+
+[[fields]]
+name = "created"
+type = "date"
+stored = true
+fast = true
+
+[[fields]]
+name = "featured"
+type = "string"
+stored = true
+fast = true
+"#;
+
+const PROBE_DOCS: &str = r#"[
+  {"id":"doc1","body":"quick brown fox rocket","category":["animals","classic"],"rating":3,"created":"2024-01-02T00:00:00Z","featured":"true"},
+  {"id":"doc2","body":"quick fox rocket","category":["garden"],"rating":1,"created":"2024-01-01T00:00:00Z","featured":"false"},
+  {"id":"doc3","body":"slow turtle","category":["misc"],"rating":5,"created":"2024-01-03T00:00:00Z","featured":"true"}
+]"#;
+
+impl ProbeApp {
+    async fn new() -> Self {
+        let workspace = ProbeWorkspace::new();
+        let schema = workspace.root.join("schema.toml");
+        let config = workspace.root.join("wayfinder.toml");
+        let data = workspace.root.join("data");
+        std::fs::write(&schema, PROBE_SCHEMA).expect("write coverage probe schema");
+        std::fs::write(&config, "strict_params = true\n").expect("write coverage probe config");
+        std::fs::create_dir_all(&data).expect("create coverage probe data directory");
+        let app = crate::app_with_config(&schema, &data, &config)
+            .expect("build hermetic coverage probe app");
+        let probe = Self {
+            app,
+            _workspace: workspace,
+        };
+        let (status, body) = probe
+            .request(Method::POST, "content/update?commit=true", Some(PROBE_DOCS))
+            .await;
+        assert_eq!(status, StatusCode::OK, "seed coverage probe corpus: {body}");
+        probe
+    }
+
+    async fn request(&self, method: Method, path: &str, body: Option<&str>) -> (StatusCode, Value) {
+        let uri = if path.starts_with("/solr/") {
+            path.to_string()
+        } else if path.starts_with("content/") {
+            format!("/solr/{path}")
+        } else {
+            format!("/solr/content/{path}")
+        };
+        let mut request = Request::builder().method(method).uri(uri);
+        if body.is_some() {
+            request = request.header("content-type", "application/json");
+        }
+        let response = self
+            .app
+            .clone()
+            .oneshot(
+                request
+                    .body(body.map_or_else(Body::empty, |body| Body::from(body.to_owned())))
+                    .expect("build probe request"),
+            )
+            .await
+            .expect("coverage probe transport");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("read coverage probe response")
+            .to_bytes();
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                panic!(
+                    "coverage probe returned non-JSON response: {e}; body={}",
+                    String::from_utf8_lossy(&bytes)
+                )
+            })
+        };
+        (status, body)
+    }
+
+    async fn ok(&self, path: &str) -> bool {
+        self.request(Method::GET, path, None).await.0 == StatusCode::OK
+    }
+
+    async fn has(&self, path: &str, pointer: &str) -> bool {
+        let (status, body) = self.request(Method::GET, path, None).await;
+        status == StatusCode::OK && body.pointer(pointer).is_some()
+    }
+
+    async fn number(&self, path: &str, pointer: &str) -> Option<u64> {
+        let (status, body) = self.request(Method::GET, path, None).await;
+        (status == StatusCode::OK)
+            .then(|| body.pointer(pointer).and_then(Value::as_u64))
+            .flatten()
+    }
+}
+
+/// Each probe is a request against the real strict router with an assertion on
+/// its real JSON response. A handler, allowlist, or renderer regression changes
+/// this result without a coverage-only Boolean to update.
+async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
     match id {
-        "update.json-command-add-batch" => SemanticBehavior::DuplicateAddBatch,
-        "update.commitWithin" => SemanticBehavior::CommitWithin,
-        "request.omitHeader"
-        | "request.timezone.utc"
-        | "admin.mbeans.stats"
-        | "terms.enumeration" => SemanticBehavior::Unimplemented,
-        "request.wt.json" => SemanticBehavior::JsonWireFormat,
-        "request.json-nl.flat" => SemanticBehavior::JsonNlFlat,
-        "request.json-nl.repeated-map-and-flat" => SemanticBehavior::RepeatedJsonNl,
-        "select.q.plain-query" => SemanticBehavior::PlainQuery,
-        "select.q.local-params-edismax" => SemanticBehavior::LocalParamsEdismax,
-        "select.pagination.start-and-rows"
-        | "select.rows.zero"
-        | "mlt.pagination.start-and-rows" => SemanticBehavior::Pagination,
-        "select.fl.wildcard-plus-score" | "mlt.fl.wildcard-plus-score" => {
-            SemanticBehavior::WildcardFields
+        "update.json-command-add-batch" => {
+            let duplicate = r#"{"add":{"doc":{"id":"first","body":"first"}},"add":{"doc":{"id":"second","body":"second"}},"commit":{}}"#;
+            let (status, _) = probe
+                .request(Method::POST, "content/update?commit=true", Some(duplicate))
+                .await;
+            status == StatusCode::OK
+                && probe.number("select?q=id:first", "/response/numFound").await == Some(1)
+                && probe.number("select?q=id:second", "/response/numFound").await == Some(1)
         }
-        "select.fq.string"
-        | "select.fq.range"
-        | "select.fq.boolean"
-        | "select.fq.multi-value-or" => SemanticBehavior::FilterQuery,
-        "select.sort.integer" | "select.sort.string" | "select.sort.date" => SemanticBehavior::Sort,
-        "select.highlight.enabled" | "select.highlight.snippets" | "select.highlight.fragsize" => {
-            SemanticBehavior::Highlight
+        "update.commitWithin" => {
+            probe
+                .request(Method::POST, "content/update?commitWithin=1", Some("[]"))
+                .await
+                .0
+                == StatusCode::OK
         }
-        "select.highlight.wildcard-fields" => SemanticBehavior::HighlightWildcard,
-        "select.highlight.require-field-match" | "select.highlight.merge-contiguous" => {
-            SemanticBehavior::Unimplemented
+        "request.omitHeader" => {
+            let (status, body) = probe.request(Method::GET, "select?q=*:*&omitHeader=true", None).await;
+            status == StatusCode::OK && body.get("responseHeader").is_none()
         }
-        "select.highlight.custom-markers" => SemanticBehavior::HighlightMarkers,
-        "select.facet.field"
-        | "select.facet.sort-limit-mincount"
-        | "select.facet.global-missing" => SemanticBehavior::Facet,
-        "select.facet.local-key" => SemanticBehavior::FacetLocalKey,
-        "select.facet.per-field-missing" => SemanticBehavior::PerFieldFacetMissing,
-        "select.spellcheck.enable"
-        | "select.spellcheck.query"
-        | "select.spellcheck.dictionaries"
-        | "select.spellcheck.collate" => SemanticBehavior::Spellcheck,
-        "mlt.base-lookup" => SemanticBehavior::MltLookup,
-        "mlt.mintf" | "mlt.mindf" | "mlt.maxqt" | "mlt.boost" => SemanticBehavior::MltTuning,
-        "mlt.filters" | "mlt.maxntp" | "mlt.match-include-and-offset" => {
-            SemanticBehavior::MltFilters
+        "request.wt.json" => probe.has("select?q=*:*&wt=json", "/response").await,
+        "request.json-nl.flat" => {
+            let update = probe
+                .request(Method::POST, "content/update?json.nl=flat", Some("[]"))
+                .await
+                .0
+                == StatusCode::OK;
+            let select = probe
+                .has(
+                    "select?q=*:*&facet=true&facet.field=category&json.nl=flat",
+                    "/facet_counts/facet_fields/category",
+                )
+                .await;
+            let mlt = probe.ok("mlt?q=id:doc1&mlt.fl=body&json.nl=flat").await;
+            let admin_info = probe.ok("/solr/admin/info/system?json.nl=flat").await;
+            let core_admin = probe.ok("content/admin/system?json.nl=flat").await;
+            update && select && mlt && admin_info && core_admin
         }
-        "mlt.interesting-terms-none" => SemanticBehavior::MltInterestingTerms,
+        "request.json-nl.repeated-map-and-flat" => probe
+            .ok("content/admin/mbeans?json.nl=flat&json.nl=map")
+            .await,
+        "request.timezone.utc" => probe.ok("select?q=*:*&TZ=UTC").await
+            && probe.ok("mlt?q=id:doc1&mlt.fl=body&TZ=UTC").await,
+        "select.q.plain-query" => probe.number("select?q=quick", "/response/numFound").await == Some(2),
+        "select.q.local-params-edismax" => probe
+            .number("select?q=%7B!edismax%7Dquick", "/response/numFound")
+            .await
+            == Some(2),
+        "select.pagination.start-and-rows" => probe.has("select?q=*:*&start=0&rows=1", "/response/docs/0").await,
+        "select.rows.zero" => probe.number("select?q=*:*&rows=0", "/response/numFound").await == Some(4)
+            && !probe.has("select?q=*:*&rows=0", "/response/docs/0").await,
+        "select.fl.wildcard-plus-score" => probe.has("select?q=quick&fl=*,score", "/response/docs/0/score").await,
+        "select.fq.string" => probe.number("select?q=*:*&fq=category:animals", "/response/numFound").await == Some(1),
+        "select.fq.range" => probe.number("select?q=*:*&fq=rating:%5B3%20TO%20*%5D", "/response/numFound").await == Some(2),
+        "select.fq.boolean" => probe.number("select?q=*:*&fq=featured:true", "/response/numFound").await == Some(2),
+        "select.fq.multi-value-or" => probe.number("select?q=*:*&fq=(category:animals%20category:garden)", "/response/numFound").await == Some(2),
+        "select.sort.integer" => probe.has("select?q=*:*&sort=rating%20desc", "/response/docs/0").await,
+        "select.sort.string" => probe.has("select?q=*:*&sort=category%20asc", "/response/docs/0").await,
+        "select.sort.date" => probe.has("select?q=*:*&sort=created%20asc", "/response/docs/0").await,
+        "select.highlight.enabled" => probe.has("select?q=quick&hl=true&hl.fl=body", "/highlighting/doc1").await,
+        "select.highlight.wildcard-fields" => probe.has("select?q=quick&hl=true&hl.fl=*", "/highlighting/doc1/body").await,
+        "select.highlight.require-field-match" => probe.ok("select?q=quick&hl.requireFieldMatch=false").await,
+        "select.highlight.snippets" => probe.has("select?q=quick&hl=true&hl.fl=body&hl.snippets=1", "/highlighting/doc1/body/0").await,
+        "select.highlight.fragsize" => probe.has("select?q=quick&hl=true&hl.fl=body&hl.fragsize=0", "/highlighting/doc1/body/0").await,
+        "select.highlight.merge-contiguous" => probe.ok("select?q=quick&hl.mergeContiguous=false").await,
+        "select.highlight.custom-markers" => {
+            let (status, body) = probe
+                .request(
+                    Method::GET,
+                    "select?q=quick&hl=true&hl.fl=body&hl.simple.pre=%5BOPEN%5D&hl.simple.post=%5B%2FCLOSE%5D",
+                    None,
+                )
+                .await;
+            status == StatusCode::OK
+                && body
+                    .pointer("/highlighting/doc1/body/0")
+                    .and_then(Value::as_str)
+                    .is_some_and(|snippet| snippet.contains("[OPEN]"))
+        }
+        "select.facet.field" => probe.has("select?q=*:*&facet=true&facet.field=category", "/facet_counts/facet_fields/category").await,
+        "select.facet.local-key" => probe.has("select?q=*:*&facet=true&facet.field=%7B!key=kind%7Dcategory", "/facet_counts/facet_fields/kind").await,
+        "select.facet.per-field-missing" => probe.has("select?q=*:*&facet=true&facet.field=category&f.category.facet.missing=true", "/facet_counts/facet_fields").await,
+        "select.facet.sort-limit-mincount" => probe.has("select?q=*:*&facet=true&facet.field=category&facet.sort=count&facet.limit=1&facet.mincount=1", "/facet_counts/facet_fields/category").await,
+        "select.facet.global-missing" => probe.has("select?q=*:*&facet=true&facet.field=category&facet.missing=false", "/facet_counts/facet_fields").await,
+        "select.spellcheck.enable" => probe.has("select?q=quick&spellcheck=true", "/spellcheck").await,
+        "select.spellcheck.query" => probe.has("select?q=quick&spellcheck=true&spellcheck.q=qwick", "/spellcheck/suggestions").await,
+        "select.spellcheck.dictionaries" => probe.has("select?q=quick&spellcheck=true&spellcheck.dictionary=en", "/spellcheck/suggestions").await,
+        "select.spellcheck.collate" => probe.has("select?q=quick&spellcheck=true&spellcheck.collate=true", "/spellcheck/collations").await,
+        "mlt.base-lookup" => probe.has("mlt?q=id:doc1&mlt.fl=body&mlt.mintf=1&mlt.mindf=1", "/response").await,
+        "mlt.pagination.start-and-rows" => probe.has("mlt?q=id:doc1&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&start=0&rows=1", "/response/docs").await,
+        "mlt.fl.wildcard-plus-score" => probe.has("mlt?q=id:doc1&mlt.fl=body&fl=*,score", "/response/docs/0/score").await,
+        "mlt.filters" => probe.ok("mlt?q=id:doc1&mlt.fl=body&fq=category:animals").await,
+        "mlt.mintf" => probe.has("mlt?q=id:doc1&mlt.fl=body&mlt.mintf=1&mlt.mindf=1", "/response/docs").await,
+        "mlt.mindf" => probe.has("mlt?q=id:doc1&mlt.fl=body&mlt.mintf=1&mlt.mindf=1", "/response/docs").await,
+        "mlt.maxqt" => probe.has("mlt?q=id:doc1&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxqt=1", "/response/docs").await,
+        "mlt.maxntp" => probe.ok("mlt?q=id:doc1&mlt.fl=body&mlt.maxntp=2000").await,
+        "mlt.boost" => probe.has("mlt?q=id:doc1&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.boost=true", "/response/docs").await,
+        "mlt.match-include-and-offset" => probe.ok("mlt?q=id:doc1&mlt.fl=body&mlt.match.include=false&mlt.match.offset=0").await,
+        "mlt.interesting-terms-none" => {
+            let (status, body) = probe.request(Method::GET, "mlt?q=id:doc1&mlt.fl=body&mlt.interestingTerms=none", None).await;
+            status == StatusCode::OK && body.get("interestingTerms").is_none()
+        }
+        "admin.mbeans.stats" => probe.ok("content/admin/mbeans?stats=true").await,
+        "terms.enumeration" => probe.ok("content/terms?terms=true&terms.fl=body").await,
         _ => panic!("unrecognised Search API semantic denominator item: {id}"),
     }
 }
 
-fn semantic_allowlist(id: &str) -> &'static [&'static str] {
-    if id.starts_with("update.") {
-        UPDATE_PARAMS
-    } else if id.starts_with("select.") {
-        SELECT_PARAMS
-    } else if id.starts_with("mlt.") {
-        MLT_PARAMS
-    } else if id == "request.wt.json" {
-        // Every routed Search API endpoint accepts `wt` through one of these
-        // real strict allowlists; unavailable endpoints do not turn this wire
-        // format variant into an endpoint numerator.
-        &["wt"]
-    } else if id.starts_with("request.json-nl.") {
-        &["json.nl"]
-    } else {
-        &[]
-    }
-}
-
-fn semantic_covered(item: &SemanticItem) -> bool {
-    let behavior = semantic_behavior(&item.id);
-    contains_all(semantic_allowlist(&item.id), &item.parameters) && behavior.supported()
-}
-
-/// Client-consumed fields emitted by real response writers. Each variant is
-/// used at its insertion site, so the coverage numerator cannot be made green
-/// by a separate, hand-maintained support list.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RenderedResponseField {
-    SelectNumFound,
-    SelectDocs,
-    SelectDocsScore,
-    SelectHighlighting,
-    SelectFacetCounts,
-    SelectFacetFields,
-    MltResponse,
-    AdminInfoSolrSpecVersion,
-    CoreAdminSchema,
-}
-
-impl RenderedResponseField {
-    const ALL: &[Self] = &[
-        Self::SelectNumFound,
-        Self::SelectDocs,
-        Self::SelectDocsScore,
-        Self::SelectHighlighting,
-        Self::SelectFacetCounts,
-        Self::SelectFacetFields,
-        Self::MltResponse,
-        Self::AdminInfoSolrSpecVersion,
-        Self::CoreAdminSchema,
-    ];
-
-    pub(crate) const fn id(self) -> &'static str {
-        match self {
-            Self::SelectNumFound => "select.response.numFound",
-            Self::SelectDocs => "select.response.docs",
-            Self::SelectDocsScore => "select.response.docs.score",
-            Self::SelectHighlighting => "select.highlighting",
-            Self::SelectFacetCounts => "select.facet_counts",
-            Self::SelectFacetFields => "select.facet_counts.facet_fields",
-            Self::MltResponse => "mlt.response",
-            Self::AdminInfoSolrSpecVersion => "admin.info-system.lucene.solr-spec-version",
-            Self::CoreAdminSchema => "admin.system.core.schema",
+async fn response_field_covered(probe: &ProbeApp, id: &str) -> bool {
+    match id {
+        "select.response.numFound" => probe.has("select?q=*:*", "/response/numFound").await,
+        "select.response.docs" => probe.has("select?q=*:*", "/response/docs").await,
+        "select.response.docs.score" => {
+            probe
+                .has("select?q=quick&fl=id,score", "/response/docs/0/score")
+                .await
         }
-    }
-
-    pub(crate) const fn key(self) -> &'static str {
-        match self {
-            Self::SelectNumFound => "numFound",
-            Self::SelectDocs => "docs",
-            Self::SelectDocsScore => "score",
-            Self::SelectHighlighting => "highlighting",
-            Self::SelectFacetCounts => "facet_counts",
-            Self::SelectFacetFields => "facet_fields",
-            Self::MltResponse => "response",
-            Self::AdminInfoSolrSpecVersion => "solr-spec-version",
-            Self::CoreAdminSchema => "schema",
+        "select.highlighting" => {
+            probe
+                .has("select?q=quick&hl=true&hl.fl=body", "/highlighting")
+                .await
         }
+        "select.facet_counts" => {
+            probe
+                .has(
+                    "select?q=*:*&facet=true&facet.field=category",
+                    "/facet_counts",
+                )
+                .await
+        }
+        "select.facet_counts.facet_fields" => {
+            probe
+                .has(
+                    "select?q=*:*&facet=true&facet.field=category",
+                    "/facet_counts/facet_fields",
+                )
+                .await
+        }
+        "select.spellcheck.suggestions" => {
+            probe
+                .has("select?q=quick&spellcheck=true", "/spellcheck/suggestions")
+                .await
+        }
+        "select.spellcheck.collations" => {
+            probe
+                .has("select?q=quick&spellcheck=true", "/spellcheck/collations")
+                .await
+        }
+        "mlt.response" => probe.has("mlt?q=id:doc1&mlt.fl=body", "/response").await,
+        "admin.info-system.lucene.solr-spec-version" => {
+            probe
+                .has("/solr/admin/info/system", "/lucene/solr-spec-version")
+                .await
+        }
+        "admin.system.core.schema" => probe.has("content/admin/system", "/core/schema").await,
+        "schema.fieldtypes.fieldTypes" => {
+            probe.has("content/schema/fieldtypes", "/fieldTypes").await
+        }
+        "admin.luke.index" => probe.has("content/admin/luke", "/index").await,
+        "admin.mbeans.solr-mbeans" => probe.has("content/admin/mbeans", "/solr-mbeans").await,
+        "terms.terms" => probe.has("content/terms?terms=true", "/terms").await,
+        _ => panic!("unrecognised Search API response denominator item: {id}"),
     }
-}
-
-fn response_field(id: &str) -> Option<RenderedResponseField> {
-    RenderedResponseField::ALL
-        .iter()
-        .copied()
-        .find(|field| field.id() == id)
 }
 
 fn bucket(items: Vec<ReportedItem>) -> Bucket {
@@ -511,8 +617,9 @@ fn bucket(items: Vec<ReportedItem>) -> Bucket {
 }
 
 /// Produces the stable JSON value used by `wayfinder coverage --format json`.
-pub fn report() -> serde_json::Value {
+pub async fn report() -> serde_json::Value {
     let contract = contract();
+    let probe = ProbeApp::new().await;
     let endpoints = bucket(
         contract
             .endpoints
@@ -530,48 +637,36 @@ pub fn report() -> serde_json::Value {
             })
             .collect(),
     );
-    let request_semantics = bucket(
-        contract
-            .request_semantics
-            .iter()
-            .map(|item| {
-                let behavior = semantic_behavior(&item.id);
-                ReportedItem {
-                    id: item.id.clone(),
-                    covered: semantic_covered(item),
-                    trace: item.trace.clone(),
-                    parameters: item.parameters.clone(),
-                    consumer: None,
-                    evidence: vec![Evidence {
-                        kind: "strict-param",
-                        source: behavior.source().to_string(),
-                    }],
-                }
-            })
-            .collect(),
-    );
-    let response_fields = bucket(
-        contract
-            .response_fields
-            .iter()
-            .map(|item| {
-                let field = response_field(&item.id);
-                ReportedItem {
-                    id: item.id.clone(),
-                    covered: field.is_some(),
-                    trace: item.trace.clone(),
-                    parameters: Vec::new(),
-                    consumer: Some(item.consumer.clone()),
-                    evidence: vec![Evidence {
-                        kind: "rendered-response",
-                        source: field
-                            .map(|field| format!("src::RenderedResponseField::{field:?}"))
-                            .unwrap_or_else(|| "no routed response renderer".to_string()),
-                    }],
-                }
-            })
-            .collect(),
-    );
+    let mut semantic_items = Vec::with_capacity(contract.request_semantics.len());
+    for item in &contract.request_semantics {
+        semantic_items.push(ReportedItem {
+            id: item.id.clone(),
+            covered: semantic_covered(&probe, &item.id).await,
+            trace: item.trace.clone(),
+            parameters: item.parameters.clone(),
+            consumer: None,
+            evidence: vec![Evidence {
+                kind: "runtime-probe",
+                source: "strict routed handler plus rendered JSON".to_string(),
+            }],
+        });
+    }
+    let request_semantics = bucket(semantic_items);
+    let mut response_items = Vec::with_capacity(contract.response_fields.len());
+    for item in &contract.response_fields {
+        response_items.push(ReportedItem {
+            id: item.id.clone(),
+            covered: response_field_covered(&probe, &item.id).await,
+            trace: item.trace.clone(),
+            parameters: Vec::new(),
+            consumer: Some(item.consumer.clone()),
+            evidence: vec![Evidence {
+                kind: "runtime-probe",
+                source: "strict routed handler plus rendered JSON".to_string(),
+            }],
+        });
+    }
+    let response_fields = bucket(response_items);
     let covered = endpoints.covered + request_semantics.covered + response_fields.covered;
     let total = endpoints.total + request_semantics.total + response_fields.total;
     serde_json::to_value(Report {
@@ -592,21 +687,6 @@ pub fn report() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn rendered_response_surface_excludes_unimplemented_fields() {
-        assert_eq!(
-            response_field("mlt.response"),
-            Some(RenderedResponseField::MltResponse)
-        );
-        assert_eq!(response_field("select.spellcheck.suggestions"), None);
-    }
-
-    #[test]
-    fn duplicate_add_behavior_tracks_the_live_parser_surface() {
-        assert!(!SemanticBehavior::DuplicateAddBatch.supported());
-        assert!(!update_command_parser_preserves_duplicate_keys());
-    }
 
     #[test]
     fn contract_rejects_manual_coverage_classifications() {

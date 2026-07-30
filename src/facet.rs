@@ -141,12 +141,7 @@ pub fn facet_counts(
     let (facet_fields, warnings) = facet_fields(index, config, params, base, nl)?;
     let mut counts = Map::new();
     counts.insert("facet_queries".to_string(), facet_queries);
-    counts.insert(
-        crate::coverage::RenderedResponseField::SelectFacetFields
-            .key()
-            .to_string(),
-        facet_fields,
-    );
+    counts.insert("facet_fields".to_string(), facet_fields);
     counts.insert("facet_ranges".to_string(), facet_ranges);
     // Out of scope (PRD §5 leaves them for later): the keys are present and
     // empty because Solr always emits all five (findings fact 3).

@@ -1673,12 +1673,7 @@ impl CoreIndex {
         // fixture with `fl=score,<dynamic field>` ever gets captured.
         if let Some(score) = score.filter(|_| fl.is_some_and(|fl| fl.iter().any(|f| f == "score")))
         {
-            out.insert(
-                crate::coverage::RenderedResponseField::SelectDocsScore
-                    .key()
-                    .to_string(),
-                json!(score),
-            );
+            out.insert("score".to_string(), json!(score));
         }
 
         // Stored dynamic fields come back as top-level keys, the way Solr
