@@ -233,6 +233,43 @@ impl WayfinderSchema {
         }
     }
 
+    /// Whether `name` can hold fast-field (docValues) values, resolved with
+    /// the same static-before-dynamic precedence `is_static`/`match_dynamic`
+    /// already establish for indexing (issue #66): a declared `[[fields]]`
+    /// entry's own `fast` flag wins, otherwise the matching
+    /// `[[dynamic_fields]]` rule's `fast` flag, otherwise `None` if `name`
+    /// resolves to neither.
+    pub fn resolved_fast(&self, name: &str) -> Option<bool> {
+        if let Some(f) = self.field_config(name) {
+            return Some(f.fast);
+        }
+        self.match_dynamic(name).map(|rule| rule.fast)
+    }
+
+    /// The actual Tantivy fast-field column backing `name`: itself for a
+    /// static field, or the catch-all JSON path (`_dynamic[_text].<name>`,
+    /// the same prefix `CoreIndex::rewrite_dynamic_fields` inserts for the
+    /// query path) for a field that only matches a `[[dynamic_fields]]`
+    /// pattern. `None` if `name` resolves to neither.
+    pub fn resolved_fast_column(&self, name: &str) -> Option<String> {
+        if self.is_static(name) {
+            return Some(name.to_string());
+        }
+        self.match_dynamic(name)
+            .map(|rule| format!("{}.{}", self.dynamic_target(rule), name))
+    }
+
+    /// The value kind backing `name`, resolved with the same precedence as
+    /// `resolved_fast`: a declared field's own kind, or the kind of the
+    /// `[[dynamic_fields]]` rule matching it.
+    pub fn resolved_value_kind(&self, name: &str) -> Option<ValueKind> {
+        if let Some(kind) = self.value_kind(name) {
+            return Some(kind);
+        }
+        self.match_dynamic(name)
+            .and_then(|rule| dynamic_value_kind(rule, &self.field_types).ok())
+    }
+
     /// Runs `text` through the analyzer registered for field type `type_name`,
     /// returning the resulting terms. Used by the schema tests to prove each
     /// preset and custom chain actually does what it claims.

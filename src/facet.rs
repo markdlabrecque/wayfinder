@@ -231,7 +231,15 @@ fn facet_fields(
     let mut out = Map::new();
     let mut warnings = Vec::new();
     for field_name in fields {
-        check_facetable(&index.wf_schema, field_name)?;
+        check_facetable(&index.wf_schema, field_name, true)?;
+        // The Tantivy column to actually aggregate over: `field_name` itself
+        // for a static field, or the catch-all JSON path for a field that
+        // only matches a `[[dynamic_fields]]` pattern (issue #66) —
+        // `check_facetable` above already proved one of the two resolves.
+        let column = index
+            .wf_schema
+            .resolved_fast_column(field_name)
+            .expect("check_facetable proved this field resolves");
 
         // Solr's own behaviour (issue #24, `facet_field_numeric_all.json`):
         // `facet.field` on a Points-based (numeric/date) column raises the
@@ -245,17 +253,15 @@ fn facet_fields(
         // can exist for `min_doc_count: 0` to introduce), so it is purely a
         // header-honesty concern; the actual `mincount` filtering below is
         // left at its requested value.
-        let is_points_based = index
-            .wf_schema
-            .value_kind(field_name)
-            .is_some_and(|kind| kind != ValueKind::Text);
+        let kind = index.wf_schema.resolved_value_kind(field_name);
+        let is_points_based = kind.is_some_and(|kind| kind != ValueKind::Text);
         if is_points_based && mincount == 0 {
             warnings.push(format!(
                 "Raising facet.mincount from 0 to 1, because field {field_name} is Points-based."
             ));
         }
 
-        let mut counts = index.term_facet(field_name, &base_query)?;
+        let mut counts = index.term_facet(&column, kind, &base_query)?;
         counts.retain(|(_, _, count)| *count >= mincount);
         if by_index {
             counts.sort_by(|a, b| a.1.cmp(&b.1));
@@ -273,7 +279,7 @@ fn facet_fields(
             // subject to `facet.mincount` or `facet.limit`. Its count is the
             // number of *hits* with no value in the field, read from the fast
             // field column (`ExistsQuery`), never from stored values.
-            let has_value = ExistsQuery::new(field_name.to_string(), false);
+            let has_value = ExistsQuery::new(column.clone(), false);
             let absent = index.count(&narrowed(base, Occur::MustNot, Box::new(has_value)))?;
             buckets.push((None, absent as u64));
         }
@@ -302,7 +308,7 @@ fn facet_ranges(
 
     let mut out = Map::new();
     for field_name in fields {
-        check_facetable(&index.wf_schema, field_name)?;
+        check_facetable(&index.wf_schema, field_name, false)?;
         let field = index
             .wf_schema
             .field(field_name)
@@ -665,12 +671,40 @@ fn render_buckets(buckets: &[(Option<String>, u64)], nl: JsonNl) -> Value {
 /// column, and without one the only honest answers are an error or a lie.
 /// Deliberate divergence from Solr, which answers 200 with an empty array for
 /// all three of these cases — see the module docs and findings 16.
-fn check_facetable(schema: &WayfinderSchema, field_name: &str) -> Result<()> {
-    match schema.field_config(field_name) {
-        None => bail!("can not facet on undefined field: {field_name}"),
-        Some(field) if !field.fast => {
-            bail!("can not facet on a field w/o fast values (docValues): {field_name}")
+///
+/// `allow_dynamic` also resolves `field_name` through a `[[dynamic_fields]]`
+/// pattern match, mirroring the static-before-dynamic precedence indexing
+/// already uses (issue #66). `facet.field` (`facet_fields`) opts in — its
+/// aggregation runs against whatever Tantivy column name it is given, so the
+/// catch-all JSON path works exactly like a real one. `facet.range`
+/// (`facet_ranges`) does not: it also needs the field's own physical `Field`
+/// handle via `WayfinderSchema::field`, which a dynamic-only match has none of
+/// (only the catch-all container does) — so it keeps the pre-#66 static-only
+/// check rather than resolving through here into a field with no handle.
+fn check_facetable(schema: &WayfinderSchema, field_name: &str, allow_dynamic: bool) -> Result<()> {
+    let fast = if allow_dynamic {
+        schema.resolved_fast(field_name)
+    } else {
+        schema.field_config(field_name).map(|f| f.fast)
+    };
+    match fast {
+        None if !allow_dynamic && schema.resolved_fast(field_name) == Some(true) => {
+            // ponytail: `facet.range` only resolves statically-declared
+            // fields (see the module doc above `check_facetable`) because it
+            // needs the field's physical `Field` handle for
+            // `Term::from_field_i64`/etc, which a dynamic-only match has no
+            // handle for (only the catch-all container field does). So a
+            // field that matches a `[[dynamic_fields]]` pattern — and would
+            // be perfectly facetable via `facet.field` — is still refused
+            // here. Upgrade when `RangeEnd::to_term` (or its callers) no
+            // longer needs a physical `Field`, then flip this to
+            // `allow_dynamic = true` like `facet.field` already is.
+            bail!(
+                "field {field_name} matches a dynamic pattern but facet.range does not yet support dynamic fields"
+            )
         }
-        Some(_) => Ok(()),
+        None => bail!("can not facet on undefined field: {field_name}"),
+        Some(false) => bail!("can not facet on a field w/o fast values (docValues): {field_name}"),
+        Some(true) => Ok(()),
     }
 }

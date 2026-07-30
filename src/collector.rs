@@ -57,8 +57,8 @@ pub struct SortClause {
     /// schema instead (`check_sort` resolves it via
     /// `WayfinderSchema::value_kind`, which already folds in any custom
     /// `[[field_types]]` — those only ever resolve to `Text`, so there is no
-    /// numeric/date custom-type case this can miss). Note `Absent` is
-    /// unreachable in practice under Tantivy 0.26 — see its doc comment.
+    /// numeric/date custom-type case this can miss). See `Absent`'s doc
+    /// comment for when that arm is actually reached.
     pub value_kind: Option<ValueKind>,
 }
 
@@ -204,20 +204,29 @@ enum SegmentSortColumn {
     I64(Column<i64>),
     F64(Column<f64>),
     Date(Column<DateTime>),
-    /// Defensive, unreachable in practice: Tantivy 0.26 materialises a column
-    /// for every declared fast field in every segment
-    /// (`FastFieldsWriter::new` calls `record_column_type` for each fast
-    /// field at writer construction), and `check_sort` only lets
-    /// schema-declared fast fields through — so a segment with *no* column
-    /// for a sortable field cannot currently occur, and a doc with no value
-    /// takes the per-doc missing defaults in `value()` instead (verified by
-    /// planting a panic here and running the whole sort suite; issue #32
-    /// review round 2). Kept because it is correct if a future Tantivy stops
-    /// materialising empty columns: every document in the segment would read
-    /// as `missing` — `None` for a string-typed field (missing-last, finding
-    /// 16), or the type's zero value for a numeric/float/date-typed field
-    /// (missing-as-zero, finding 36/37) — resolved once at `open` time from
-    /// `clause.value_kind`, since an absent column carries no type.
+    /// Live and reachable via dynamic-only fields (issue #66): a
+    /// dynamic-only column (e.g. Drupal's `its_`/`ds_` classes matched only
+    /// through `check_sort`'s dynamic-field fallback, not a schema-declared
+    /// static field) is a JSON-path column that Tantivy only materialises in
+    /// segments where *some* document actually carried that key. A segment
+    /// built entirely from a batch of docs that never used the key has no
+    /// column for it at all — unlike a schema-declared fast field, which
+    /// Tantivy 0.26 materialises in every segment regardless of whether any
+    /// doc in it used the field (`FastFieldsWriter::new` calls
+    /// `record_column_type` for each declared fast field at writer
+    /// construction). So this variant is not reachable for a static
+    /// schema-declared field, but is reachable for a dynamic-only match
+    /// whenever the core has a multi-segment index where only some segments'
+    /// source batches carried the key (covered by the multi-segment test in
+    /// `tests/dynamic_sort_facet.rs`).
+    ///
+    /// The missing-value handling below is still correct in that case: since
+    /// the column is absent for every document in the segment, every doc
+    /// reads as `missing` — `None` for a string-typed field (missing-last,
+    /// finding 16), or the type's zero value for a numeric/float/date-typed
+    /// field (missing-as-zero, finding 36/37) — resolved once at `open` time
+    /// from `clause.value_kind`, since an absent column carries no type of
+    /// its own to read the default from.
     Absent(Option<SortValue>),
 }
 

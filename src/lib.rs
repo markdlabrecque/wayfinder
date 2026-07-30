@@ -366,13 +366,14 @@ fn check_sort(state: &AppState, params: &Params) -> Result<Vec<SortClause>, WfEr
         let key = if field_name == "score" {
             SortKey::Score
         } else {
-            let field = state
-                .index
-                .wf_schema
-                .fields
-                .iter()
-                .find(|f| f.name == field_name);
-            match field {
+            // Resolved with the same static-before-dynamic precedence
+            // indexing already uses (issue #66): a declared `[[fields]]`
+            // entry wins over a `[[dynamic_fields]]` pattern that would also
+            // match it, and a dynamic-only match sorts on the catch-all JSON
+            // column it is actually indexed into (mirrors
+            // `CoreIndex::rewrite_dynamic_fields`'s resolution for the query
+            // path), not the bare field name.
+            match state.index.wf_schema.resolved_fast(field_name) {
                 None => {
                     return Err(WfError::bad_request(
                         "wayfinder::BadSort",
@@ -380,7 +381,7 @@ fn check_sort(state: &AppState, params: &Params) -> Result<Vec<SortClause>, WfEr
                     )
                     .with_params(params));
                 }
-                Some(f) if !f.fast => {
+                Some(false) => {
                     return Err(WfError::bad_request(
                         "wayfinder::BadSort",
                         format!(
@@ -389,19 +390,28 @@ fn check_sort(state: &AppState, params: &Params) -> Result<Vec<SortClause>, WfEr
                     )
                     .with_params(params));
                 }
-                Some(f) => SortKey::Field(f.name.clone()),
+                Some(true) => {
+                    let column = state
+                        .index
+                        .wf_schema
+                        .resolved_fast_column(field_name)
+                        .expect("resolved_fast confirmed this name resolves");
+                    SortKey::Field(column)
+                }
             }
         };
 
         // The schema's declared value kind travels with the clause so the
         // collector can materialise a segment-wide-absent column's missing
         // value as the right *type* (finding 36/37) — `score` has none, it is
-        // never missing. `value_kind` already resolves any custom
+        // never missing. `resolved_value_kind` already resolves any custom
         // `[[field_types]]`, which only ever produce `Text`, so there is no
-        // numeric/date custom-type case this can miss.
+        // numeric/date custom-type case this can miss. Resolved from the
+        // original `field_name`, not the (possibly rewritten) column in
+        // `key`, since a dynamic column's own name carries no schema entry.
         let value_kind = match &key {
             SortKey::Score => None,
-            SortKey::Field(name) => state.index.wf_schema.value_kind(name),
+            SortKey::Field(_) => state.index.wf_schema.resolved_value_kind(field_name),
         };
         clauses.push(SortClause::new(key, descending, value_kind));
 
