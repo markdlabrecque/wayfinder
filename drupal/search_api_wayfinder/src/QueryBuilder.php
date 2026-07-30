@@ -55,6 +55,8 @@ class QueryBuilder {
     }
     $params['fq'] = count($filters) === 1 ? $filters[0] : $filters;
 
+    $params += $this->buildFacets($query, $index);
+
     $sort = $this->buildSort($query, $index);
     if ($sort !== '') {
       $params['sort'] = $sort;
@@ -282,6 +284,76 @@ class QueryBuilder {
       throw new \InvalidArgumentException('Unsupported operator for wildcard searches.');
     }
     return implode(' ', array_map(fn ($item) => $this->fieldMapper->filterValue($item, $type), $values));
+  }
+
+  /**
+   * Builds the facet.* params from the query's 'search_api_facets' option.
+   *
+   * The option is the contrib facets module's shape (its
+   * QueryTypePluginBase::getFacetOptions()): keyed by facet delta, each entry
+   * ['field' => <SA field id>, 'limit' => int, 'operator' => 'and'|'or',
+   * 'min_count' => int, 'missing' => bool, 'query_type' => string], plus an
+   * optional 'sort'.
+   *
+   * ponytail: Wayfinder's facet.limit/facet.mincount/facet.missing/facet.sort
+   * are *global* params applied to every facet.field entry (src/facet.rs,
+   * facet_fields()) -- there is no f.<field>.facet.* per-field override on the
+   * wire. So a query whose facets disagree on those settings cannot be
+   * expressed: the last facet's settings win for the whole request. That is
+   * the ceiling until Wayfinder grows per-field facet params.
+   *
+   * ponytail: 'operator' is not translated. OR facets need {!ex}/{!tag} local
+   * params, which Wayfinder does not support (plan doc locked decision 4), so
+   * every facet is filtered by the full fq set.
+   *
+   * @return array<string, string|int|array<int, string>>
+   */
+  private function buildFacets(QueryInterface $query, IndexInterface $index): array {
+    $facets = $query->getOption('search_api_facets') ?: [];
+    if (!is_array($facets) || $facets === []) {
+      return [];
+    }
+
+    $fields = [];
+    $params = [];
+    foreach ($facets as $facet) {
+      $fieldId = $facet['field'] ?? NULL;
+      if (!is_string($fieldId) || $fieldId === '' || !($field = $index->getField($fieldId))) {
+        throw new \InvalidArgumentException('Facet field is missing or is not part of the index.');
+      }
+
+      $fields[] = $this->fieldMapper->fieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
+
+      if (isset($facet['limit'])) {
+        // Search API uses limit <= 0 for "no limit" (every facet array in
+        // BackendTestBase uses limit => 0 as the ordinary case), whereas
+        // Wayfinder reads facet.limit=0 as "truncate to zero buckets" and only
+        // a negative limit as unlimited (src/facet.rs facet_fields(),
+        // solr-ref/responses/facet_limit_zero.json vs
+        // facet_limit_unlimited.json). Translate rather than pass through.
+        $limit = (int) $facet['limit'];
+        $params['facet.limit'] = $limit > 0 ? $limit : -1;
+      }
+      if (isset($facet['min_count'])) {
+        $params['facet.mincount'] = (int) $facet['min_count'];
+      }
+      if (isset($facet['sort'])) {
+        $params['facet.sort'] = (string) $facet['sort'];
+      }
+      if (isset($facet['missing'])) {
+        // Sent as the literal string Solr expects, never a PHP bool: the client
+        // casts params with (string), which would turn FALSE into ''. Guarded
+        // like the settings above so a later facet that omits 'missing' does
+        // not silently clobber an earlier facet's TRUE -- last facet that
+        // *states* a setting wins, consistently across all four.
+        $params['facet.missing'] = $facet['missing'] ? 'true' : 'false';
+      }
+    }
+
+    return [
+      'facet' => 'true',
+      'facet.field' => count($fields) === 1 ? $fields[0] : $fields,
+    ] + $params;
   }
 
   /**

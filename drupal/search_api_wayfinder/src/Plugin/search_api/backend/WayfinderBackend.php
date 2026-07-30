@@ -145,9 +145,10 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
    * {@inheritdoc}
    */
   public function getSupportedFeatures() {
-    // ponytail: facets/MLT land in M3/M4 (plan doc milestone table) -- don't
-    // advertise support the backend doesn't implement yet.
-    return [];
+    // ponytail: MLT lands in M4 (plan doc milestone table) -- don't advertise
+    // support the backend doesn't implement yet. Facet support is AND-only:
+    // OR facets need {!ex}/{!tag}, which Wayfinder does not support.
+    return ['search_api_facets'];
   }
 
   /**

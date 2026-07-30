@@ -82,11 +82,16 @@ class WayfinderClient {
    * Encodes Solr query parameters without PHP's bracket notation for repeated
    * values. Guzzle's array encoder turns fq values into fq[0], fq[1], which
    * is not Solr-wire-compatible.
+   *
+   * Any array-valued param is emitted as a repeated key (fq, facet.field,
+   * ...): that is the Solr wire convention for every multi-valued param, so
+   * this is general rather than a per-param allow-list. Nested arrays and
+   * objects are still rejected as non-scalar.
    */
   private function encodeQuery(array $params): string {
     $encoded = [];
     foreach ($params as $name => $value) {
-      $values = $name === 'fq' && is_array($value) ? $value : [$value];
+      $values = is_array($value) ? $value : [$value];
       foreach ($values as $item) {
         if (!is_scalar($item) && $item !== NULL) {
           throw new \InvalidArgumentException('Query parameters must be scalar values.');

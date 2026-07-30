@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace Drupal\Tests\search_api_wayfinder\Unit;
 
+use Drupal\Core\Field\FieldDefinitionInterface;
+use Drupal\Core\Field\FieldStorageDefinitionInterface;
 use Drupal\search_api\IndexInterface;
+use Drupal\search_api\Item\FieldInterface;
 use Drupal\search_api\Query\QueryInterface;
 use Drupal\search_api\Query\ResultSet;
 use Drupal\search_api_wayfinder\ResponseParser;
@@ -29,12 +32,67 @@ use PHPUnit\Framework\TestCase;
  */
 class ResponseParserTest extends TestCase {
 
-  private function mockQuery(string $indexId = 'my_index'): QueryInterface {
+  /**
+   * @var array<string, bool>
+   *   Cardinality by field id, populated by mockIndexField() -- mirrors
+   *   QueryBuilderTest's identically named helper/property, since
+   *   FieldMapper::isMultiValued() needs the same property-definition mocks
+   *   there.
+   */
+  private array $multiValuedById = [];
+
+  private function mockIndexField(string $id, string $type, bool $multiValued): FieldInterface {
+    $this->multiValuedById[$id] = $multiValued;
+
+    $field = $this->createMock(FieldInterface::class);
+    $field->method('getFieldIdentifier')->willReturn($id);
+    $field->method('getType')->willReturn($type);
+    $field->method('getPropertyPath')->willReturn($id);
+    $field->method('getDatasourceId')->willReturn('entity:test');
+    return $field;
+  }
+
+  /**
+   * Builds a mock query. Optional `$fields`/`$facets` args are only needed by
+   * the facet-parsing tests, which must resolve each facet's mapped Wayfinder
+   * field name (via the real FieldMapper, exactly as QueryBuilder does) to
+   * match `facet_counts.facet_fields`' keys back to the query's facet deltas.
+   *
+   * @param array<string, \Drupal\search_api\Item\FieldInterface> $fields
+   * @param array<string, array> $facets
+   *   `search_api_facets` option shape, see QueryBuilderTest's class-level
+   *   facet doc comment.
+   */
+  private function mockQuery(string $indexId = 'my_index', array $fields = [], array $facets = []): QueryInterface {
     $index = $this->createMock(IndexInterface::class);
     $index->method('id')->willReturn($indexId);
+    $index->method('getField')->willReturnCallback(
+      fn (string $id) => $fields[$id] ?? NULL
+    );
+
+    $properties = [];
+    foreach (array_keys($fields) as $id) {
+      $multiValued = $this->multiValuedById[$id] ?? FALSE;
+      $storage = $this->createMock(FieldStorageDefinitionInterface::class);
+      $storage->method('getCardinality')->willReturn(
+        $multiValued ? FieldStorageDefinitionInterface::CARDINALITY_UNLIMITED : 1
+      );
+      $definition = $this->createMock(FieldDefinitionInterface::class);
+      $definition->method('isList')->willReturn(TRUE);
+      $definition->method('getFieldStorageDefinition')->willReturn($storage);
+      $properties[$id] = $definition;
+    }
+    $index->method('getPropertyDefinitions')->willReturn($properties);
+
+    foreach ($fields as $field) {
+      $field->method('getIndex')->willReturn($index);
+    }
 
     $query = $this->createMock(QueryInterface::class);
     $query->method('getIndex')->willReturn($index);
+    $query->method('getOption')->willReturnCallback(
+      static fn (string $name, $default = NULL) => $name === 'search_api_facets' ? $facets : $default
+    );
 
     // Query::execute() creates the ResultSet up front and hands it to the
     // backend via getResults(); ResponseParser::parse() must populate that
@@ -150,6 +208,151 @@ class ResponseParserTest extends TestCase {
     $item = $resultSet->getResultItems()['entity:node/1:en'];
 
     $this->assertSame(1.0, $item->getScore());
+  }
+
+  /**
+   * M3 facets. `facet_counts.facet_fields`' flat array-pairs shape
+   * (`["term", count, "term", count, ...]`, no `json.nl` sent) is ground
+   * truth from `solr-ref/responses/facet_basic.json` and
+   * `facet_missing.json` -- read directly, not guessed; only the field-name
+   * *key* here is search_api_wayfinder's own mapped name (`ss_category`)
+   * rather than the raw core-Wayfinder fixture's plain `category`, since the
+   * fixture is captured against a bare core, not Search-API-mapped traffic.
+   *
+   * The extra-data shape (`[$delta => [['count' => int, 'filter' => string],
+   * ...]]`) matches what `facets/src/Plugin/facets/query_type/
+   * SearchApiString.php::build()` reads off `$this->results`.
+   *
+   * Term filters are **double-quoted**, the missing bucket is the bare `!`
+   * sentinel. That is not a stylistic choice: Search API's own conformance
+   * suite (`vendor/drupal/search_api/tests/src/Kernel/BackendTestBase.php`,
+   * `checkFacets()` and friends) `assertEquals`es the raw extra-data array
+   * against `['count' => 2, 'filter' => '"article_category"']`, i.e. before
+   * any downstream unquoting, so a backend emitting bare terms fails the
+   * suite. `search_api_db` writes the same shape
+   * (`$row->value !== NULL ? '"' . $row->value . '"' : '!'`).
+   *
+   * @covers ::parse
+   */
+  public function testParsePopulatesSearchApiFacetsExtraData(): void {
+    $facets = [
+      'category' => [
+        'field' => 'category',
+        'limit' => 10,
+        'min_count' => 1,
+        'missing' => FALSE,
+      ],
+    ];
+    $index = ['category' => $this->mockIndexField('category', 'string', FALSE)];
+    $response = [
+      'response' => ['numFound' => 5, 'start' => 0, 'docs' => []],
+      'facet_counts' => [
+        'facet_fields' => [
+          'ss_category' => ['animals', 2, 'classic', 2, 'garden', 1, 'misc', 1],
+        ],
+      ],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $this->mockQuery('my_index', $index, $facets));
+
+    $this->assertSame([
+      'category' => [
+        ['count' => 2, 'filter' => '"animals"'],
+        ['count' => 2, 'filter' => '"classic"'],
+        ['count' => 1, 'filter' => '"garden"'],
+        ['count' => 1, 'filter' => '"misc"'],
+      ],
+    ], $resultSet->getExtraData('search_api_facets'));
+  }
+
+  /**
+   * @covers ::parse
+   */
+  public function testParseMultipleFacetFieldsEachGetTheirOwnDeltaKey(): void {
+    $facets = [
+      'category' => ['field' => 'category', 'limit' => 10, 'min_count' => 1, 'missing' => FALSE],
+      'brand' => ['field' => 'brand', 'limit' => 10, 'min_count' => 1, 'missing' => FALSE],
+    ];
+    $index = [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+      'brand' => $this->mockIndexField('brand', 'string', TRUE),
+    ];
+    $response = [
+      'response' => ['numFound' => 5, 'start' => 0, 'docs' => []],
+      'facet_counts' => [
+        'facet_fields' => [
+          'ss_category' => ['animals', 2, 'classic', 3],
+          // "brand" is multi-valued, so its facet_counts key must use the
+          // 'm' mapped name -- exactly as QueryBuilder emitted it in
+          // facet.field.
+          'sm_brand' => ['acme', 4],
+        ],
+      ],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $this->mockQuery('my_index', $index, $facets));
+
+    $extraData = $resultSet->getExtraData('search_api_facets');
+    $this->assertSame([
+      ['count' => 2, 'filter' => '"animals"'],
+      ['count' => 3, 'filter' => '"classic"'],
+    ], $extraData['category']);
+    $this->assertSame([
+      ['count' => 4, 'filter' => '"acme"'],
+    ], $extraData['brand']);
+  }
+
+  /**
+   * `facet_missing.json`: the missing bucket is the JSON literal `null` key
+   * at the end of the flat pairs, unconditionally last, when `facet.missing`
+   * was requested. `search_api_solr`'s `extractFacets()` (its Solarium
+   * result reader) translates that bucket's empty term to the literal
+   * filter string `"!"`, which the `facets` module's `SearchApiString`
+   * query type specifically checks for (`isMissing() && $result_filter ===
+   * '!'`) -- so `'!'` is not an arbitrary choice, it is the string contract
+   * the contrib facets module expects for the "missing" bucket.
+   *
+   * @covers ::parse
+   */
+  public function testParseMissingBucketUsesBangFilter(): void {
+    $facets = [
+      'category' => ['field' => 'category', 'limit' => 10, 'min_count' => 1, 'missing' => TRUE],
+    ];
+    $index = ['category' => $this->mockIndexField('category', 'string', FALSE)];
+    $response = [
+      'response' => ['numFound' => 5, 'start' => 0, 'docs' => []],
+      'facet_counts' => [
+        'facet_fields' => [
+          'ss_category' => ['animals', 2, 'classic', 2, 'garden', 1, 'misc', 1, NULL, 1],
+        ],
+      ],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $this->mockQuery('my_index', $index, $facets));
+
+    $extraData = $resultSet->getExtraData('search_api_facets') ?? [];
+    $categoryTerms = $extraData['category'] ?? [];
+    $this->assertNotEmpty($categoryTerms, 'search_api_facets extra data must include the "category" delta');
+    $this->assertSame(['count' => 1, 'filter' => '!'], end($categoryTerms));
+  }
+
+  /**
+   * No facets were requested: no `search_api_facets` extra data at all
+   * (matching the pattern the rest of this codebase uses for optional,
+   * request-dependent data -- e.g. `sort`/`start` are simply absent from
+   * QueryBuilder's params array when not requested, rather than present with
+   * an empty/default value).
+   *
+   * @covers ::parse
+   */
+  public function testParseSetsNoFacetsExtraDataWhenNoFacetsWereRequested(): void {
+    $response = [
+      'response' => ['numFound' => 0, 'start' => 0, 'docs' => []],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $this->mockQuery('my_index'));
+
+    $this->assertFalse($resultSet->hasExtraData('search_api_facets'));
   }
 
 }
