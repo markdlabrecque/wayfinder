@@ -2275,15 +2275,38 @@ impl CoreIndex {
         self.reader.searcher().num_docs()
     }
 
+    /// Number of searchable segments backing the current searcher.
+    ///
+    /// Read off the same searcher `doc_count` uses, so the admin UI's segment
+    /// count is the one the query pipeline is actually reading from — not a
+    /// fresh `meta.json` read that could disagree with the open reader. The
+    /// reader is `ReloadPolicy::Manual` and reloaded on commit (see `open`),
+    /// so this changes only when a commit does, exactly as the doc count does.
+    ///
+    /// Read-only: taking a searcher neither commits nor reloads.
+    pub fn segment_count(&self) -> usize {
+        self.reader.searcher().segment_readers().len()
+    }
+
     /// Total bytes of this core's index directory.
     ///
     /// ponytail: a plain recursive `std::fs` walk of the data dir, summing
     /// file lengths. Ceiling: it is O(files) per call with no caching, counts
     /// apparent (not allocated) size, follows nothing but the directory tree,
-    /// and silently skips entries it cannot stat — good enough for one admin
-    /// page on a single-core process, not for a metrics endpoint polled at
-    /// high frequency. The index-stats milestone (PRD §5, v2.5) is where a
-    /// real accounting would live.
+    /// and silently skips entries it cannot stat.
+    ///
+    /// Decision, at the index-stats milestone this comment used to defer to
+    /// (PRD §5 v2.5, issue #129): **keep it uncached**. Both callers are
+    /// human-paced admin pages (`GET /ui`, `GET /ui/stats`) on a single-core
+    /// process — there is no metrics endpoint, no auto-refresh, and nothing
+    /// on a `/select` path calls this, so the walk is bounded by one operator
+    /// clicking a link. A cache would buy nothing measurable and would cost
+    /// an invalidation rule (the directory changes on merges and background
+    /// segment deletes, not just on commits), which is a staleness bug
+    /// waiting to happen: a size figure that silently lags reality is worse
+    /// than a walk nobody is timing. Revisit when a *polled* consumer appears
+    /// — a Prometheus/metrics endpoint or a self-refreshing page — since that
+    /// is the change that makes the per-call cost real.
     pub fn disk_size_bytes(&self) -> u64 {
         dir_size_bytes(&self.data_dir)
     }
@@ -2739,6 +2762,59 @@ stored = true
             vec!["id", "body", "score", "extra_s"],
             "`score` must sit immediately after the schema-declared stored \
              fields and before any dynamic-field keys"
+        );
+    }
+
+    /// `segment_count` must track the index's *real* segment count, not the
+    /// `1` that a single-commit corpus happens to have —
+    /// `tests/admin_ui_index_stats.rs`'s black-box oracle is real, but the
+    /// 5-doc fixture it runs against commits once, so a hardcoded `1` would
+    /// survive it. This builds a deliberately multi-segment index
+    /// (`merge_policy = "no_merge"`, one commit per doc) and compares against
+    /// a fresh, independent `tantivy::Index::open_in_dir` read of the same
+    /// directory — never against the searcher the implementation itself uses.
+    #[test]
+    fn segment_count_tracks_a_multi_segment_index() {
+        let dir = TempDir::new().expect("create temp dir");
+        let schema_path = dir.path().join("schema.toml");
+        std::fs::write(&schema_path, SCHEMA_TOML).expect("write schema.toml");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let config = ServerConfig::parse("[indexing]\nmerge_policy = \"no_merge\"\n")
+            .expect("no_merge config is valid");
+        let index = CoreIndex::open(&schema_path, &data_dir, &config).expect("open test index");
+
+        assert_eq!(
+            index.segment_count(),
+            0,
+            "a core with nothing committed has no searchable segments"
+        );
+
+        for i in 0..3 {
+            index
+                .add_documents(&[json!({"id": format!("doc{i}"), "body": "quick"})], true)
+                .expect("add_documents");
+            index.commit().expect("commit");
+
+            let expected = Index::open_in_dir(&data_dir)
+                .expect("independent oracle opens the committed directory")
+                .searchable_segment_metas()
+                .expect("independent oracle lists searchable segment metas")
+                .len();
+            assert_eq!(
+                index.segment_count(),
+                expected,
+                "after {} commit(s) the reported segment count must equal the \
+                 real one",
+                i + 1
+            );
+        }
+
+        assert!(
+            index.segment_count() > 1,
+            "with `no_merge` and one commit per doc the index must be \
+             genuinely multi-segment, or this test cannot catch a hardcoded \
+             count"
         );
     }
 
