@@ -1718,3 +1718,17 @@ capf hl_fragsize_zero_whole_field_method_original "$FRAGSIZE_CORE/select?q=body:
 capf hl_fragsize_small_truncated "$FRAGSIZE_CORE/select?q=body:quick&hl=true&hl.fl=body&hl.method=original&hl.fragsize=40&wt=json"
 echo "fragsize core '$FRAGSIZE_CORE' left in place on '$FRAGSIZE_CONTAINER' (port 8995)"
 echo "  (docker rm -f $FRAGSIZE_CONTAINER to stop)"
+
+# --- q=*:* with a bad qf (issue #112) ---------------------------------------
+# q=*:* with a bad qf: confirmed against real Solr (one-off container, same
+# schema as the edismax block above -- not re-run through this script) that
+# `qf` is validated before `q` is ever looked at, so an undefined `qf` field
+# 400s even when `q=*:*` -- same narrow, non-verbatim contract as
+# `tests/error_shapes.rs`, and deliberately not a `cape` call / manifest.tsv
+# row for the same reason as `edismax_qf_partial_invalid` above. Checked
+# directly by `star_query_with_undefined_qf_field_still_400s` and
+# `star_query_with_partially_invalid_qf_still_400s`. Fixtures:
+# solr-ref/responses/edismax_qf_star_unknown.json
+# solr-ref/responses/edismax_qf_star_partial_invalid.json
+# curl -sg "$EDISMAX_SOLR/$EDISMAX_CORE/select?q=*:*&defType=edismax&qf=nosuchfield&fl=id&wt=json"
+# curl -sg "$EDISMAX_SOLR/$EDISMAX_CORE/select?q=*:*&defType=edismax&qf=title+nosuchfield&fl=id&wt=json"
