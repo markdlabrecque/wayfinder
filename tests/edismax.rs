@@ -414,24 +414,6 @@ async fn pf_naming_only_a_dynamic_field_still_boosts_the_adjacent_match() {
 
 #[tokio::test]
 async fn edismax_basic_matches_committed_fixture() {
-    // Self-expiring skip guard, issue #51 (corrected root cause per
-    // reviewer round 1 — this is NOT fieldnorm quantization; both Tantivy's
-    // `FIELD_NORMS_TABLE` and Lucene's `SmallFloat` quantization are exact/
-    // identity for the 2-10-token doc lengths in this corpus, so there is no
-    // quantization error to diverge on). Same root cause as `pf_off`'s guard
-    // below: Wayfinder's `text_en` deliberately does not strip stopwords
-    // (PRD open question 5, documented on `CoreIndex::mlt_query`), unlike
-    // real Solr's `text_en`. Stopwords retained in *other* docs (eC, pA, pB,
-    // the mm*/p* titles) shift the per-field average doc length that feeds
-    // the BM25 length norm (avgdl_title 3.1->3.3, avgdl_body 3.5->4.3),
-    // which changes `eB`/`eD`'s length-norm component relative to what Solr
-    // computed, flipping their relative order versus the committed fixture
-    // (`eC, eD, eB, eA`) while leaving the *set* of matching docs
-    // unchanged. This intentionally asserts Wayfinder's current (wrong)
-    // order rather than the fixture's order, so that closing #51 — or any
-    // unrelated `text_en`/stopword change that happens to fix this — trips
-    // this assertion instead of staying silently green. When it fails,
-    // restore `assert_matches_fixture(body, "edismax_basic")` and close #51.
     let (app, _dir) = edismax_app().await;
     let (status, body) = get(
         &app,
@@ -439,21 +421,7 @@ async fn edismax_basic_matches_committed_fixture() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let fixture_order = ordered_ids(&fixture("edismax_basic"));
-    assert_eq!(
-        fixture_order,
-        vec!["eC", "eD", "eB", "eA"],
-        "the committed fixture's own order changed — re-derive this guard's expectations"
-    );
-    let actual_order = ordered_ids(&body);
-    assert_eq!(
-        actual_order,
-        vec!["eC", "eB", "eD", "eA"],
-        "known text_en-stopword-driven order flip (issue #51) no longer reproduces — the \
-         divergence may be fixed; if `actual_order` now equals the fixture order \
-         `{fixture_order:?}`, restore `assert_matches_fixture(body, \"edismax_basic\")` and \
-         close #51"
-    );
+    assert_matches_fixture(body, "edismax_basic");
 }
 
 // --- qf: per-field boost changes relative order (finding 69) ---------------
@@ -534,19 +502,6 @@ async fn qf_boost_direction_actually_reorders_ea_and_eb() {
 
 #[tokio::test]
 async fn pf_absent_gives_identical_scores_for_adjacent_and_non_adjacent_matches() {
-    // Self-expiring skip guard, issue #51: real Solr's `text_en` strips
-    // stopwords, so pA's body ("a quick fox ran away") and pB's ("a fox
-    // that is quick ran away") both index to 4 tokens and score identically
-    // (finding 70). Wayfinder's own `text_en` deliberately does not strip
-    // stopwords (already-ratified PRD divergence, PRD open question 5,
-    // documented on `CoreIndex::mlt_query`), so pA indexes to 5 tokens and
-    // pB to 7 — a real, unequal document-length norm, not float noise. This
-    // can't be fixed inside edismax's scope (query-side stopword filtering
-    // wouldn't change an already-committed index-time length norm), so this
-    // asserts the current (unequal) scores explicitly rather than the
-    // equal-scores property the fixture would otherwise pin. When this
-    // fails, restore the `(pa - pb).abs() <= score_tolerance()` assertion
-    // and close #51.
     let (app, _dir) = edismax_app().await;
     let (status, body) = get(
         &app,
@@ -563,15 +518,8 @@ async fn pf_absent_gives_identical_scores_for_adjacent_and_non_adjacent_matches(
     let pa = scores["pA"];
     let pb = scores["pB"];
     assert!(
-        (pa - pb).abs() > score_tolerance(),
-        "known text_en-stopword-driven score inequality (issue #51) no longer reproduces — the \
-         divergence may be fixed; if pA and pB now score within score_tolerance() of each \
-         other, restore the equal-scores assertion and close #51: pA={pa}, pB={pb}"
-    );
-    assert!(
-        pa > pb,
-        "known direction of the divergence changed (issue #51) — pA (shorter indexed doc, 5 \
-         tokens without stopword-stripping) should still score higher than pB (7 tokens): \
+        (pa - pb).abs() <= score_tolerance(),
+        "Solr-compatible text_en stopword removal must leave pA and pB with equal scores: \
          pA={pa}, pB={pb}"
     );
 }
@@ -846,19 +794,6 @@ async fn minus_operator_excludes_matches_the_committed_fixture() {
 
 #[tokio::test]
 async fn plus_operator_requires_matches_the_committed_fixture() {
-    // Self-expiring skip guard, issue #51 (corrected root cause per
-    // reviewer round 1): same root cause as
-    // `edismax_basic_matches_committed_fixture` above, NOT fieldnorm
-    // quantization — Wayfinder's `text_en` deliberately does not strip
-    // stopwords (PRD open question 5), which shifts the per-field average
-    // doc length feeding the BM25 length norm (avgdl_title 3.1->3.3,
-    // avgdl_body 3.5->4.3), changing `eA`/`eB`'s length-norm component
-    // relative to what Solr computed and flipping their relative order
-    // versus the committed fixture
-    // (`eD, eA, eB`) while leaving the matching doc set unchanged. Asserts
-    // the current (wrong) order explicitly; when this fails, restore
-    // `assert_matches_fixture(body, "edismax_operators_required")` and
-    // close #51.
     let (app, _dir) = edismax_app().await;
     let (status, body) = get(
         &app,
@@ -866,21 +801,7 @@ async fn plus_operator_requires_matches_the_committed_fixture() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let fixture_order = ordered_ids(&fixture("edismax_operators_required"));
-    assert_eq!(
-        fixture_order,
-        vec!["eD", "eA", "eB"],
-        "the committed fixture's own order changed — re-derive this guard's expectations"
-    );
-    let actual_order = ordered_ids(&body);
-    assert_eq!(
-        actual_order,
-        vec!["eD", "eB", "eA"],
-        "known text_en-stopword-driven order flip (issue #51) no longer reproduces — the \
-         divergence may be fixed; if `actual_order` now equals the fixture order \
-         `{fixture_order:?}`, restore `assert_matches_fixture(body, \
-         \"edismax_operators_required\")` and close #51"
-    );
+    assert_matches_fixture(body, "edismax_operators_required");
 }
 
 // --- mm wiring: the grammar itself is tests/mm.rs's job (finding 68) -------
@@ -1134,46 +1055,6 @@ fn blank_bm25_score_magnitudes(mut value: Value) -> Value {
     value
 }
 
-/// Self-expiring to-do list for manifest rows known to diverge from their
-/// committed fixture for a documented, tracked reason (issue #51) — the
-/// counterpart of `tests/differential.rs`'s `EXPECTED_DIVERGENCES`, but
-/// scoped to this file's `edismax_*` rows rather than extending that shared,
-/// PRD-ratified table (per the #51 triage decision: this is a follow-up
-/// bug, not a ratified permanent divergence). Every entry's reason names the
-/// issue that owns the fix. If a listed row's diff ever becomes empty (the
-/// divergence stopped reproducing), the loop below fails loudly and names
-/// the entry to remove — a stale entry here would otherwise be a permanently
-/// green lie.
-const EDISMAX_KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    (
-        "edismax_basic",
-        "issue #51: eB/eD order flip from Wayfinder's text_en not stripping stopwords \
-         (PRD open question 5), same root cause as pf_off — not fieldnorm quantization",
-    ),
-    (
-        "edismax_score_baseline",
-        "issue #51: eB/eD order flip from Wayfinder's text_en not stripping stopwords \
-         (PRD open question 5), same root cause as pf_off — not fieldnorm quantization",
-    ),
-    (
-        "edismax_boost_multiplicative",
-        "issue #51: eB/eD order flip from Wayfinder's text_en not stripping stopwords \
-         (PRD open question 5), same root cause as pf_off — not fieldnorm quantization",
-    ),
-    (
-        "edismax_operators_required",
-        "issue #51: eA/eB order flip from Wayfinder's text_en not stripping stopwords \
-         (PRD open question 5), same root cause as pf_off — not fieldnorm quantization",
-    ),
-];
-
-fn edismax_known_divergence_reason(name: &str) -> Option<&'static str> {
-    EDISMAX_KNOWN_DIVERGENCES
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, reason)| *reason)
-}
-
 #[tokio::test]
 async fn hermetic_edismax_manifest_entries_match_committed_fixtures() {
     let (app, _dir) = edismax_app().await;
@@ -1185,15 +1066,6 @@ async fn hermetic_edismax_manifest_entries_match_committed_fixtures() {
         !entries.is_empty(),
         "expected at least the edismax_* rows capture.sh's edismax block appends to manifest.tsv"
     );
-
-    let manifest_names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-    for (name, reason) in EDISMAX_KNOWN_DIVERGENCES {
-        assert!(
-            manifest_names.contains(name),
-            "EDISMAX_KNOWN_DIVERGENCES entry `{name}` (reason: {reason}) does not match any \
-             manifest entry — fix the name or remove the stale entry"
-        );
-    }
 
     let mut failures = Vec::new();
     for entry in &entries {
@@ -1218,21 +1090,8 @@ async fn hermetic_edismax_manifest_entries_match_committed_fixtures() {
         let actual = blank_bm25_score_magnitudes(actual);
         let report = diff(&expected, &actual);
 
-        match edismax_known_divergence_reason(&entry.name) {
-            Some(reason) if report.diffs.is_empty() => failures.push(format!(
-                "{}: EDISMAX_KNOWN_DIVERGENCES says this should still diverge ({reason}), but \
-                 it now matches — the underlying divergence is fixed, so remove this entry from \
-                 EDISMAX_KNOWN_DIVERGENCES and close the tracking issue",
-                entry.name
-            )),
-            Some(reason) => eprintln!(
-                "{}: expected divergence ({reason}): {:?}",
-                entry.name, report.diffs
-            ),
-            None if !report.diffs.is_empty() => {
-                failures.push(format!("{}: {:?}", entry.name, report.diffs))
-            }
-            None => {}
+        if !report.diffs.is_empty() {
+            failures.push(format!("{}: {:?}", entry.name, report.diffs));
         }
     }
 
