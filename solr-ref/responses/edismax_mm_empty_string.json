@@ -1,0 +1,4 @@
+{
+  "responseHeader":{"status":400,"QTime":9,"params":{"mm":"","q":"alpha beta gamma","defType":"edismax","qf":"body","fl":"id","wt":"json"}},
+  "error":{"metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","java.lang.NumberFormatException"],"msg":"Invalid 'mm' spec. Expecting an integer.","code":400}
+}

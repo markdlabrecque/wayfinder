@@ -1,0 +1,1 @@
+{"responseHeader":{"status":0,"QTime":30,"params":{"q":"alpha beta gamma","defType":"edismax","qf":"body","fl":"id","wt":"json"}},"response":{"numFound":3,"start":0,"numFoundExact":true,"docs":[{"id":"mmA"},{"id":"mmB"},{"id":"mmC"}]}}
