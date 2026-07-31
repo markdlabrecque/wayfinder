@@ -96,7 +96,7 @@ fn version_seed() -> i64 {
 /// Lucene's classic English stopword list (`StandardAnalyzer`'s default,
 /// also Solr's own `text_en` field type) — see `CoreIndex::mlt_query`'s doc
 /// comment for why `/mlt` injects this explicitly rather than relying on
-/// `text_en`'s own (stopword-free) analyzer chain.
+/// built-in `text_en`'s index-time stopword removal.
 const ENGLISH_STOPWORDS: &[&str] = &[
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into", "is", "it",
     "no", "not", "of", "on", "or", "such", "that", "the", "their", "then", "there", "these",
@@ -554,13 +554,66 @@ impl CoreIndex {
         // start rather than silently return wrong results — which is what
         // falling through to `open_in_dir` with the *old* schema would do.
         let snapshot = schema::snapshot_path(data_dir);
-        if snapshot.exists() {
+        // A snapshot is Wayfinder's durable proof that an existing index
+        // predates this open. `app_with_schema` legitimately pre-creates an
+        // empty data directory, so directory existence alone must never turn
+        // a fresh index into a legacy one.
+        let has_snapshot = snapshot.exists();
+        let previous_uses_changed_analyzer_path = if has_snapshot {
             let previous = std::fs::read_to_string(&snapshot)
                 .with_context(|| format!("reading stored schema {}", snapshot.display()))?;
             schema::check_compatible(&previous, &schema_toml).with_context(|| {
                 format!(
                     "the index in {} was built with an incompatible schema",
                     data_dir.display()
+                )
+            })?;
+            schema::parse(&previous)
+                .context("parsing the index's stored schema for its analyzer contract")?
+                .uses_changed_analyzer_path()
+        } else {
+            false
+        };
+
+        // `text_en` changed its index-time semantics in analyzer contract v1.
+        // A pre-marker index can safely be adopted only when neither its
+        // configured nor persisted schema could have written through a changed
+        // path: static `text_en`, or any analyzed dynamic rule sharing
+        // `_dynamic_text`'s versioned tokenizer.
+        let analyzer_contract = schema::analyzer_contract_path(data_dir);
+        if analyzer_contract.exists() {
+            let persisted = std::fs::read_to_string(&analyzer_contract).with_context(|| {
+                format!(
+                    "reading analyzer contract marker {}",
+                    analyzer_contract.display()
+                )
+            })?;
+            if persisted.trim() != schema::ANALYZER_CONTRACT {
+                bail!(
+                    "the index in {} has unsupported analyzer contract `{}`; reindex into a fresh data directory",
+                    data_dir.display(),
+                    persisted.trim()
+                );
+            }
+        } else if has_snapshot
+            && (wf_schema.uses_changed_analyzer_path() || previous_uses_changed_analyzer_path)
+        {
+            bail!(
+                "the index in {} predates the Solr-compatible text_en/_dynamic_text analyzer contract; reindex into a fresh data directory",
+                data_dir.display()
+            );
+        }
+
+        // Write the marker before opening or creating the Tantivy index. A
+        // marker-write failure now leaves no newly-created versioned index
+        // behind, so a retry cannot mistake it for a pre-contract index. A
+        // real legacy index has a snapshot and was rejected above before any
+        // marker write; an unaffected legacy index is safe to adopt.
+        if !analyzer_contract.exists() {
+            std::fs::write(&analyzer_contract, schema::ANALYZER_CONTRACT).with_context(|| {
+                format!(
+                    "writing analyzer contract marker {}",
+                    analyzer_contract.display()
                 )
             })?;
         }
@@ -570,6 +623,8 @@ impl CoreIndex {
         // is Tantivy's own rule and worth knowing before tuning them.
         let mut index = Index::builder()
             .schema(wf_schema.tantivy_schema.clone())
+            .tokenizers(wf_schema.tokenizers.clone())
+            .fast_field_tokenizers(wf_schema.tokenizers.clone())
             .settings(config.index_settings()?)
             .create_in_dir(data_dir)
             .or_else(|_| Index::open_in_dir(data_dir))
@@ -582,8 +637,7 @@ impl CoreIndex {
             );
         }
         index.set_tokenizers(wf_schema.tokenizers.clone());
-        std::fs::write(&snapshot, &schema_toml)
-            .with_context(|| format!("writing stored schema {}", snapshot.display()))?;
+        index.set_fast_field_tokenizers(wf_schema.tokenizers.clone());
 
         // `writer_threads` defaults to 1: a single writer thread allocates doc
         // ids in insertion order, which is what the tie-break in
@@ -599,6 +653,9 @@ impl CoreIndex {
             .reload_policy(ReloadPolicy::Manual)
             .try_into()
             .context("creating index reader")?;
+
+        std::fs::write(&snapshot, &schema_toml)
+            .with_context(|| format!("writing stored schema {}", snapshot.display()))?;
 
         let state = Arc::new(CommitState {
             writer: Mutex::new(writer),
@@ -1180,8 +1237,8 @@ impl CoreIndex {
     /// finding 74), each wrapped in that field's `BoostQuery`, combined via
     /// `DisjunctionMaxQuery::with_tie_breaker` (finding 69's reordering,
     /// finding 71's tie behaviour). A field whose analyzer drops every token
-    /// (an all-stopword phrase, though `text_en` here does not strip any)
-    /// is simply absent from the disjunction rather than contributing an
+    /// (for example, an all-stopword `text_en` phrase) is simply absent from
+    /// the disjunction rather than contributing an
     /// ill-defined empty clause.
     fn build_field_disjunction(
         &self,
@@ -2005,21 +2062,11 @@ impl CoreIndex {
     ///
     /// ponytail: `MoreLikeThis::stop_words` is filled with a fixed Lucene
     /// English stopword list unconditionally, rather than deriving one from
-    /// the field's own analyzer. Wayfinder's `text_en` preset deliberately
-    /// stems but does not strip stopwords (PRD open question 5's
-    /// resolution), unlike the real Solr `text_en` field type the reference
-    /// fixtures were captured against (`solr-ref/capture.sh`'s MLT block),
-    /// which does. Left as-is, common words like "a"/"the"/"with" become
-    /// real, low-but-nonzero-doc-frequency terms in Wayfinder's own index —
-    /// absent from Solr's, where the analyzer strips them before they ever
-    /// reach the term dictionary — and a loosened `mlt.mindf`/`mlt.maxdf`
-    /// (as `mlt_mintf_mindf_maxdf`/`mlt_boost` exercise) then pulls in
-    /// spurious cross-cluster matches on that shared noise alone. Injecting
-    /// the same stopword list `/mlt` itself, rather than teaching `text_en`
-    /// to strip stopwords for every field everywhere, keeps this a
-    /// `/mlt`-local compensation for a schema-preset decision made
-    /// elsewhere, not a change to indexing/query behaviour anywhere else in
-    /// the crate. Revisit if `text_en` ever grows real stopword removal.
+    /// the field's own analyzer. Built-in `text_en` now removes these words at
+    /// index time, but `/mlt` can mine custom analyzers and other language
+    /// presets that intentionally retain them. Keeping the MLT noise list
+    /// independent preserves its existing term-selection behavior without
+    /// changing those analyzer contracts.
     ///
     /// ponytail: reimplements (rather than calls) Tantivy's own
     /// `MoreLikeThis`/`MoreLikeThisQuery` algorithm. That type's containing

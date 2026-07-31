@@ -66,10 +66,17 @@ const LANGUAGES: &[(&str, Language)] = &[
 /// Tantivy's own `default` analyzer: simple tokenizer, long tokens dropped,
 /// lowercased, no stemming. Solr calls this shape `text_general`.
 const TEXT_GENERAL_TOKENIZER: &str = "default";
-/// Tantivy's own English analyzer — `text_general` plus an English stemmer.
-/// `text_en` maps onto it rather than a hand-built equivalent so the tracer
-/// bullet's captured relevance behaviour is unchanged.
-const TEXT_EN_TOKENIZER: &str = "en_stem";
+/// Wayfinder's versioned Solr-compatible English analyzer: simple tokenizer,
+/// long-token removal, lowercase, English stopword removal, then stemming.
+/// It intentionally does not override Tantivy's `en_stem`, which remains
+/// available for custom analyzer chains and upstream defaults.
+const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v1";
+
+/// The on-disk analyzer contract for indexes built after `text_en` gained
+/// Solr-compatible stopword removal. This is separate from Tantivy's schema:
+/// it lets startup identify pre-contract indexes before their old tokenizer
+/// identity can be adopted.
+pub const ANALYZER_CONTRACT: &str = "text_en_stopwords_v1";
 
 #[derive(Debug, Deserialize)]
 struct SchemaFile {
@@ -231,6 +238,22 @@ impl WayfinderSchema {
     pub fn is_raw_string(&self, name: &str) -> bool {
         self.field_config(name)
             .is_some_and(|f| matches!(f.type_.as_str(), "string" | "keyword"))
+    }
+
+    /// Whether this schema can contain data on an analyzer path whose
+    /// tokenizer identity changed in analyzer contract v1. Static fields are
+    /// affected only for built-in `text_en`; every analyzed dynamic rule is
+    /// affected because Tantivy stores it in the shared `_dynamic_text` field,
+    /// whose tokenizer is Wayfinder's versioned English analyzer regardless
+    /// of that rule's declared type.
+    pub fn uses_changed_analyzer_path(&self) -> bool {
+        self.fields.iter().any(|field| field.type_ == "text_en")
+            || self.dynamic_fields.iter().any(|field| {
+                matches!(
+                    resolve_type(&field.type_, &self.field_types),
+                    Ok(ResolvedType::Text { .. })
+                )
+            })
     }
 
     /// Which catch-all JSON field a dynamic rule's values live in.
@@ -461,13 +484,25 @@ fn language_by_name(name: &str) -> Option<Language> {
         .map(|(_, lang)| *lang)
 }
 
-/// Registers the language presets and every custom chain into a tokenizer
-/// manager seeded with Tantivy's defaults (`raw`, `default`, `en_stem`).
+/// Registers Wayfinder's English preset, the other language presets, and
+/// every custom chain into a tokenizer manager seeded with Tantivy's defaults
+/// (`raw`, `default`, `en_stem`).
 fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager> {
     let manager = TokenizerManager::default();
+    let english_stopwords =
+        StopWordFilter::new(Language::English).expect("Tantivy ships an English stopword list");
+    manager.register(
+        TEXT_EN_TOKENIZER,
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(RemoveLongFilter::limit(40))
+            .filter(LowerCaser)
+            .filter(english_stopwords)
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
     for (code, lang) in LANGUAGES {
         if *code == "en" {
-            continue; // `text_en` uses Tantivy's own `en_stem`.
+            continue; // registered above under Wayfinder's versioned identity.
         }
         manager.register(
             &format!("text_{code}"),
@@ -525,6 +560,15 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
         .any(|field| field.name == VERSION_FIELD)
     {
         bail!("field `{VERSION_FIELD}` is reserved for Wayfinder's internal version field");
+    }
+    if parsed
+        .field_types
+        .iter()
+        .any(|field_type| field_type.name == TEXT_EN_TOKENIZER)
+    {
+        bail!(
+            "field type `{TEXT_EN_TOKENIZER}` is reserved for Wayfinder's internal text_en analyzer"
+        );
     }
     let tokenizers = build_tokenizers(&parsed.field_types)?;
 
@@ -721,6 +765,13 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
 /// Where the schema an index was built with is kept, next to the index itself.
 pub fn snapshot_path(data_dir: &Path) -> PathBuf {
     data_dir.join("wayfinder-schema.toml")
+}
+
+/// Where the internal analyzer contract for an index is kept. It is separate
+/// from the operator-owned schema snapshot because analyzer semantics can
+/// change while a TOML field type name remains `text_en`.
+pub fn analyzer_contract_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("wayfinder-analyzer-contract")
 }
 
 /// Compares the schema an existing index was built with against the configured

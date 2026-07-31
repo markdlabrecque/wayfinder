@@ -791,9 +791,10 @@ operational simplicity are where this project wins, and those are the primary go
    whether `[[dynamic_fields]]` is empty (an empty-to-non-empty transition adds the catch-all
    JSON fields, so it changes the real schema); `required` is input validation and not part of
    the Tantivy schema, so toggling it is compatible.
-5. ~~**Analyzer preset coverage.**~~ **Resolved by issue #10:** every language in
+5. ~~**Analyzer preset coverage.**~~ **Resolved by issues #10 and #51:** every language in
    `tantivy::tokenizer::Language` ships, 18 in total, as `text_<code>` presets alongside
-   `string`/`keyword`/`text_general`/`text_en`. Presets stem but do not strip stopwords, matching
-   `en_stem`'s shape; stopword removal is available through a custom `[[field_types]]` chain.
-   Tantivy ships no stopword list for Arabic, Greek, Romanian, Tamil or Turkish, so a `stopwords`
-   filter in those languages is a load-time error rather than a silent no-op.
+   `string`/`keyword`/`text_general`/`text_en`. Built-in `text_en` removes English stopwords
+   before stemming, matching Solr; the other language presets remain stem-only, and custom
+   `[[field_types]]` chains remain available for operator-selected stopword removal. Tantivy ships
+   no stopword list for Arabic, Greek, Romanian, Tamil or Turkish, so a `stopwords` filter in
+   those languages is a load-time error rather than a silent no-op.

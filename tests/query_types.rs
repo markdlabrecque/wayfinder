@@ -22,7 +22,8 @@
 //!   `rewrite_dynamic_fields`'s `<ident>:` scan (documented in its own
 //!   `ponytail:` comment in `src/core_index.rs`), not a Solr-compatibility
 //!   fact. The expected token shapes it relies on (that `SimpleTokenizer` +
-//!   `LowerCaser` + English `Stemmer` — `text_en`'s `en_stem` preset — split
+//!   `LowerCaser` + English stopword removal + English `Stemmer` — built-in
+//!   `text_en`'s versioned analyzer — split
 //!   `count_i` into `["count", "i"]` and `_dynamic.count_i` into
 //!   `["dynam", "count", "i"]`) were verified against Wayfinder's own
 //!   tokenizer pipeline before writing the test, not assumed.
@@ -705,8 +706,8 @@ async fn quoted_phrase_containing_colon_is_a_phrase_not_a_field_query() {
 
 /// A schema with a `*_i` dynamic int rule, default field `body`. One doc
 /// whose `body` contains the literal token sequence `count i seven` (which is
-/// exactly what the phrase `"count_i: seven"` tokenizes to on `text_en`'s
-/// `en_stem` analyzer — `SimpleTokenizer` splits on the non-alphanumeric `_`
+/// exactly what the phrase `"count_i: seven"` tokenizes to on built-in
+/// `text_en`'s versioned analyzer — `SimpleTokenizer` splits on the non-alphanumeric `_`
 /// and `:`), plus a `count_i` value the unquoted control query exercises.
 const DYNAMIC_QUOTE_SCHEMA_TOML: &str = r#"
 [core]

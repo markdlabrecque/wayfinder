@@ -14,20 +14,20 @@
   "response":{
     "numFound":4,
     "start":0,
-    "maxScore":2.174078,
+    "maxScore":4.3576603,
     "numFoundExact":true,
     "docs":[{
       "id":"eC",
-      "score":2.174078
-    },{
-      "id":"eB",
-      "score":1.7908058
+      "score":4.3576603
     },{
       "id":"eD",
-      "score":1.1889164
+      "score":3.6149795
+    },{
+      "id":"eB",
+      "score":3.5762868
     },{
       "id":"eA",
-      "score":0.8828587
+      "score":2.6373773
     }]
   }
 }

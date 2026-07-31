@@ -678,32 +678,7 @@ const ACCEPTED_DIVERGENCES: &[(&str, &str)] = &[
          empty body in Solr; Wayfinder stays method-agnostic and serves its normal JSON 404 \
          there too — noted, not matched",
     ),
-    (
-        "hl_fragsize_small_truncated",
-        "PRD open question 5's resolution (PRD \"Field types\": presets stem but do not strip \
-         stopwords) applied to a fragment boundary: Solr's own `text_en` strips English \
-         stopwords, so with `hl.fragsize=40` its first fragment ends at `from` (offset 26) — \
-         the stopword `the` (27..30) is not a token there, and the next real token \
-         `engineering` ends at 42, past the 40-char boundary. Wayfinder keeps `the` as a real \
-         token, so the same boundary rule puts its fragment end at 30. Byte-exact on both \
-         sides and caused solely by the ratified analyzer difference, not by `hl.fragsize` \
-         handling: the whole-field (`hl.fragsize=0`) rows from the same capture match \
-         exactly (finding 81)",
-    ),
 ];
-
-/// The single `highlighting.long1.body[0]` snippet of a `fragsize104`
-/// response, markers stripped, for the `hl_fragsize_small_truncated` accepted
-/// divergence's guard. Missing/mistyped reads back as `""`, which that guard's
-/// assertions then reject rather than silently excusing.
-fn snippet_of(response: &Value) -> String {
-    response
-        .pointer("/highlighting/long1/body/0")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .replace("<em>", "")
-        .replace("</em>", "")
-}
 
 fn accepted_divergence_reason(name: &str) -> Option<&'static str> {
     ACCEPTED_DIVERGENCES
@@ -1954,70 +1929,6 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
                             "{}: expected Wayfinder's method-agnostic JSON 404, got {} \
                              ({reason})",
                             entry.name, status
-                        ));
-                    }
-                }
-                "hl_fragsize_small_truncated" => {
-                    // Self-expiring guard: this entry is only excusable while
-                    // the *cause* still holds — the fixture's fragment stops
-                    // one stopword earlier than Wayfinder's because Solr's
-                    // `text_en` analyzed `the` away. Both halves are checked,
-                    // so the entry cannot rot into a blanket waiver on
-                    // `hl.fragsize` truncation generally.
-                    let expected_snippet = snippet_of(&fixture(&entry.name));
-                    let actual_snippet = snippet_of(&actual);
-                    let has_stopword =
-                        |s: &str| s.split_whitespace().any(|w| w.trim_matches(',') == "the");
-                    assert!(
-                        !has_stopword(&expected_snippet),
-                        "{}: Solr's fragment must still be the stopword-stripped one \
-                         ({expected_snippet:?}) for this accepted divergence to apply ({reason})",
-                        entry.name
-                    );
-                    assert!(
-                        has_stopword(&actual_snippet),
-                        "{}: Wayfinder's fragment must still carry the stopword \
-                         ({actual_snippet:?}) for this accepted divergence to apply — if \
-                         `text_en` now strips stopwords, remove this entry ({reason})",
-                        entry.name
-                    );
-                    if status.as_u16() != entry.status {
-                        failures.push(format!(
-                            "{}: HTTP status {} vs fixture status {} ({reason})",
-                            entry.name, status, entry.status
-                        ));
-                    }
-                    if actual_snippet == expected_snippet {
-                        failures.push(format!(
-                            "{}: Wayfinder matched the fixture's fragment — the documented \
-                             analyzer-driven divergence no longer holds, remove this \
-                             ACCEPTED_DIVERGENCES entry ({reason})",
-                            entry.name
-                        ));
-                    }
-                    // Unlike the entries above — where the fixture is non-JSON
-                    // or the status itself is the divergence, so a structural
-                    // diff would be meaningless — this row is an ordinary 200
-                    // JSON envelope that matches Solr *everywhere except* the
-                    // one analyzed fragment. So it is still diffed in full and
-                    // waived on exactly one path: a regression in `numFound`,
-                    // `response.docs`, or `responseHeader.params` on this row
-                    // must not ride in under the accepted-divergence label.
-                    const WAIVED_PATH: &str = "highlighting.long1.body[0]";
-                    let report = diff(
-                        &normalize(fixture(&entry.name)).value,
-                        &normalize(actual.clone()).value,
-                    );
-                    let unwaived: Vec<&Diff> = report
-                        .diffs
-                        .iter()
-                        .filter(|d| d.path != WAIVED_PATH)
-                        .collect();
-                    if !unwaived.is_empty() {
-                        failures.push(format!(
-                            "{}: this accepted divergence waives `{WAIVED_PATH}` only, but the \
-                             response also differs at {unwaived:?} ({reason})",
-                            entry.name
                         ));
                     }
                 }

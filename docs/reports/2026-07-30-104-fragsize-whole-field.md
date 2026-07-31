@@ -33,15 +33,10 @@ already scored covered pre-#104 via the weak presence check, so `tests/search_ap
 new-coverage gap.
 
 `hl_fragsize_small_truncated.json` (`hl.method=original&hl.fragsize=40`, captured in the same
-block as a documentation/contrast fixture, not independently wired to a bespoke test) is a
-**ratified, permanent** divergence, not a bug: Solr's `text_en` strips the English stopword
-"the" from the fragment-boundary token stream, Wayfinder's deliberately does not (PRD open
-question 5's resolution), so the two sides' identical boundary rule lands at different offsets.
-Recorded in `tests/differential.rs`'s `ACCEPTED_DIVERGENCES` with a self-expiring guard that
-asserts the stopword asymmetry still holds on both sides, and a scoped diff-based waiver that
-fails unless the *only* unwaived path in that row's response is `highlighting.long1.body[0]`
-(tightened in review round 2 from an inherited full-envelope waiver pattern that would have let
-a regression anywhere else in that row's response pass silently).
+block as a documentation/contrast fixture) became a normal compatibility row in issue #51:
+Wayfinder's built-in `text_en` now removes the English stopword "the" before stemming, so its
+fragment-boundary token stream and output match Solr's. #51 removed the temporary
+`ACCEPTED_DIVERGENCES` waiver and restored the ordinary differential assertion.
 
 ## Review verdict
 
@@ -77,9 +72,9 @@ work used its full budget and the report should be read that way).
 
 The reviewer independently verified `encode_minimal`'s entity table against `htmlescape` 0.3.1's
 actual source, constructed a synthetic multi-hit test case to confirm the whole-field branch
-highlights *every* occurrence in a multi-match field (not just the first), verified the PRD
-open-question-5 citation and stopword-divergence arithmetic, ran the full gate independently,
-and mutation-tested the trailing-reseat logic and the divergence guard.
+highlights *every* occurrence in a multi-match field (not just the first), ran the full gate
+independently, and mutation-tested the trailing-reseat logic and the then-applicable divergence
+guard. Issue #51 later removed that analyzer divergence.
 
 ## Test evidence
 
@@ -131,10 +126,9 @@ helper, mirroring the issue-#99 `_version_` block's style). New finding 81 added
 
 ## Deliberate descopes / accepted residual gaps
 
-- `hl_fragsize_small_truncated.json` is classified as a **ratified/permanent**
-  `ACCEPTED_DIVERGENCES` entry (not a to-do `EXPECTED_DIVERGENCES`) — root-caused to Wayfinder's
-  `text_en` deliberately not stripping the stopword "the" (PRD open question 5's resolution),
-  guarded by a self-expiring assertion that the asymmetry still holds.
+- `hl_fragsize_small_truncated.json` was temporarily classified as an
+  `ACCEPTED_DIVERGENCES` entry for the old `text_en` stopword mismatch. Issue #51 removed that
+  mismatch and restored ordinary fixture comparison.
 - Wayfinder returns exactly one snippet for `hl.fragsize=0` regardless of `hl.snippets` — an
   **inference, not a captured fact** (finding 81 states this explicitly): none of the three
   fixtures in this capture sent `hl.snippets`, so real Solr's answer to

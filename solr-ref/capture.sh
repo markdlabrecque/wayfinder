@@ -1576,11 +1576,11 @@ cape edismax_score_baseline     'select?q=rocket&defType=edismax&qf=title+body&f
 cape edismax_boost_multiplicative 'select?q=rocket&defType=edismax&qf=title+body&boost=2&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json'
 cape edismax_bq_additive        'select?q=rocket&defType=edismax&qf=title+body&bq=title:mission^5&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json'
 # in-query term boost (issue #109): `rocket^5` inside `q` itself, distinct
-# from `boost=`/`bq=`. Confirmed against real Solr (one-off container,
-# manually re-derived from this block's schema/docs -- not re-run through
-# this script, per the fixture-corruption warning in CLAUDE.md) that it is
-# an exact 5x multiplier on that leaf's own score contribution: every eA-eD
-# score here is exactly 5x `edismax_score_baseline`'s.
+# from `boost=`/`bq=`. Reverified for issue #51 on 2026-07-30 in a clean,
+# isolated `solr:9` container using this block's exact schema/corpus and two
+# same-container requests (`q=rocket`, then `q=rocket^5`); the committed
+# term-boost response is exactly 5x that baseline per eA-eD. The temporary
+# captures were kept outside the repository, so this script was not rerun.
 cape edismax_term_boost         'select?q=rocket^5&defType=edismax&qf=title+body&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json'
 # qf naming one undefined field among otherwise-valid ones (issue #111):
 # confirmed against real Solr (one-off container, same schema as this block

@@ -22,11 +22,10 @@ second pass by an independent reviewer before merge.
 
 **Field types.** `string`/`keyword` (unanalyzed), `text_general`, `text_en`, `text_<code>` for
 all 18 `tantivy::tokenizer::Language` variants, `int`/`long` (i64), `float`/`double` (f64),
-`date` (RFC3339 UTC). `text_general` and `text_en` map onto Tantivy's own `default` and `en_stem`
-analyzers rather than hand-built equivalents, so the tracer bullet's captured relevance
-behaviour is untouched — confirmed by the 12 tracer-bullet tests still passing unchanged.
-Language presets stem but do not strip stopwords, matching `en_stem`'s shape; stopword removal
-is available through a custom chain.
+`date` (RFC3339 UTC). At issue #10, `text_general` and `text_en` mapped onto Tantivy's own
+`default` and `en_stem` analyzers. Issue #51 superseded that `text_en` choice with a Wayfinder-owned
+versioned Solr-compatible analyzer that removes English stopwords before stemming; other language
+presets remain stem-only, and custom chains remain available for operator-selected stopword removal.
 
 **Custom analyzer chains.** `[[field_types]]` with `tokenizer = "simple"` and ordered
 `lowercase` / `stopwords` / `stemmer` filters, registered in a `TokenizerManager` that the index
