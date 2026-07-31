@@ -49,9 +49,12 @@ pub fn parse_field_weights(spec: &str) -> Vec<(String, f32)> {
 pub fn min_should_match(spec: &str, clause_count: usize) -> usize {
     let spec = spec.trim();
     let n = clause_count as i64;
-    if spec.is_empty() {
-        return clause_count;
-    }
+    // No empty-spec early return: an empty/whitespace spec cannot reach here
+    // from the HTTP path any more (issue #113 -- `mm=` 400s in
+    // `parse_edismax_query` before this function is called, matching real
+    // Solr), and for a direct caller the general path below already produces
+    // the identical answer -- `split_whitespace` yields no token, so `result`
+    // stays at the all-required default.
     let mut result = n; // default: all required, before any override below.
     for token in spec.split_whitespace() {
         match token.find('<') {

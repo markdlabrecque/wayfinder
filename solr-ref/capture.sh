@@ -1624,6 +1624,42 @@ cape edismax_mm_conditional     'select?q=alpha+beta+gamma&defType=edismax&qf=bo
 # curl -sf "$EDISMAX_SOLR/$EDISMAX_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[{"id":"nA","title":"filler","body":"rocket launch success"},{"id":"nB","title":"filler","body":"launch rocket success"}]'
 # curl -sg "$EDISMAX_SOLR/$EDISMAX_CORE/select?q=rocket+launch&defType=edismax&qf=body&pf=body&fl=id,score&fq=id:(nA+OR+nB)&wt=json"
 # curl -sg "$EDISMAX_SOLR/$EDISMAX_CORE/select?q=rocket+launch+-zzznonexistent&defType=edismax&qf=body&pf=body&fl=id,score&fq=id:(nA+OR+nB)&wt=json"
+# mm entirely absent vs mm= (empty string) (issue #113): CORRECTS the issue's
+# own stated premise. Issue #113 assumed real Solr ignores an empty `mm` and
+# falls back to its normal OR default, same as `mm` being absent entirely.
+# Confirmed against real Solr (one-off container, same schema/corpus as this
+# block -- not re-run through this script) that this is WRONG: `mm` absent
+# does fall back to the normal OR default (`edismax_mm_absent` below, 200,
+# numFound 3: mmA/mmB/mmC), but `mm=` (present, empty) does NOT silently
+# fall back to anything -- it 400s with a NumberFormatException, same as any
+# other malformed `mm` spec. `edismax_mm_absent` is a genuine manifest row
+# (200, non-error). `edismax_mm_empty_string` is deliberately NOT a `cape`
+# call / manifest.tsv row: it's an error envelope, and the generic hermetic
+# sweep compares `error.msg`/`error.metadata` verbatim, which would always
+# fail (Solr's Java exception text vs Wayfinder's own) -- same narrow,
+# non-verbatim contract as `tests/error_shapes.rs` and issue #111's
+# `edismax_qf_partial_invalid`. Captured and checked directly by
+# `mm_present_but_empty_400s_like_a_malformed_spec` instead. Fixture:
+# solr-ref/responses/edismax_mm_empty_string.json
+# curl -sg "$EDISMAX_SOLR/$EDISMAX_CORE/select?q=alpha+beta+gamma&defType=edismax&qf=body&mm=&fl=id&wt=json"
+cape edismax_mm_absent          'select?q=alpha+beta+gamma&defType=edismax&qf=body&fl=id&wt=json'
+# Reviewer round-2 follow-up (issue #113): the 200/400 clause-count boundary
+# above lived only in prose (finding 85, tests/edismax.rs comments) -- this is
+# the primary committed-fixture evidence for one point on that boundary,
+# `q=*:*` (a single-clause query that reaches the `mm=` guard's clauses.len()
+# check with count < 2 and so must 200, not 400). numFound (10) is confirmed
+# against a real one-off Solr capture already cited by the implementor
+# (test comment on `empty_mm_alongside_a_single_clause_q_does_not_400`); the
+# doc-order/id list in the committed fixture was NOT independently
+# re-captured against live Solr for this task (no Docker container available)
+# -- it was reconstructed from Wayfinder's own hermetic test run for this
+# exact request and matches the insertion-order convention already observed
+# in `edismax_mm_absent` above (a genuine real-Solr capture) for a
+# no-sort/no-score match on a freshly built, unmerged segment. Re-running this
+# `cape` call against a live container is the remaining step to fully close
+# this gap; until then this fixture is corroborating, not independently
+# verified, evidence for anything past `numFound`.
+cape edismax_mm_empty_star      'select?q=*:*&defType=edismax&qf=body&mm=&fl=id&wt=json'
 echo "edismax core '$EDISMAX_CORE' left in place on '$EDISMAX_CONTAINER' (port 8994)"
 echo "  (docker rm -f $EDISMAX_CONTAINER to stop)"
 

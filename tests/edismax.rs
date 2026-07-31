@@ -932,6 +932,189 @@ async fn mm_conditional_grammar_matches_the_committed_fixture() {
     assert_matches_fixture(body, "edismax_mm_conditional");
 }
 
+#[tokio::test]
+async fn mm_present_but_empty_400s_like_a_malformed_spec() {
+    // Issue #113's own stated premise is WRONG: it claims real Solr ignores
+    // an empty `mm` and falls back to its normal OR default, same as `mm`
+    // being absent entirely. Confirmed against real Solr (one-off
+    // container, same schema/corpus as this file's other `mm_*` tests --
+    // `docs/solr-ref-findings.md`) that `mm=` (present, but empty) 400s with
+    // a `NumberFormatException`, same as any other malformed `mm` spec --
+    // it does NOT silently fall back to anything. `mm` entirely *absent* is
+    // a different case (see `mm_absent_still_uses_normal_or_default` below)
+    // and must NOT change.
+    //
+    // Wayfinder's current (pre-fix) behavior: `edismax::min_should_match`
+    // treats an empty spec as "require every clause" (`clause_count`), which
+    // is silently wrong in the opposite direction from what the issue
+    // assumed -- real Solr doesn't pick either interpretation, it rejects
+    // the request outright.
+    //
+    // Per `tests/error_shapes.rs`'s documented narrow contract (same pattern
+    // as issue #111's `qf_naming_one_undefined_field_among_valid_ones_400s`
+    // above), only the 400 status and standard error envelope shape are
+    // asserted -- `error.msg` is free text (Solr's is a Java exception
+    // string; Wayfinder's is not) and is never compared verbatim.
+    let (app, _dir) = edismax_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=alpha+beta+gamma&defType=edismax&qf=body&mm=&fl=id&wt=json",
+    )
+    .await;
+    let expected = fixture("edismax_mm_empty_string");
+    let want_code = expected["error"]["code"]
+        .as_i64()
+        .expect("fixture has error.code");
+
+    assert_eq!(
+        status.as_u16() as i64,
+        want_code,
+        "mm= (present but empty) must 400 like any other malformed mm spec, not silently \
+         fall back to an interpretation: {body}"
+    );
+    assert_eq!(body["error"]["code"].as_i64(), Some(want_code));
+    assert!(
+        body["error"]["msg"].as_str().is_some_and(|s| !s.is_empty()),
+        "error.msg must be present and non-empty (never compared verbatim): {body}"
+    );
+    let metadata = body["error"]["metadata"]
+        .as_array()
+        .expect("error.metadata must be a flat array");
+    assert!(
+        metadata.iter().any(|v| v == "error-class")
+            && metadata.iter().any(|v| v == "root-error-class"),
+        "error.metadata must carry the same key shape as Solr's (values not compared): {body}"
+    );
+}
+
+#[tokio::test]
+async fn mm_absent_still_uses_normal_or_default() {
+    // Characterization test, not a regression this fix touches: `mm`
+    // entirely absent (no `mm=` param at all, as opposed to
+    // `mm_present_but_empty_400s_like_a_malformed_spec`'s `mm=`) must keep
+    // falling back to the normal OR default. Real Solr confirms this is
+    // already correct (`edismax_mm_absent` fixture) -- mmA/mmB/mmC each
+    // match at least one of "alpha beta gamma"'s three optional clauses,
+    // mmD matches zero and stays excluded.
+    let (app, _dir) = edismax_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=alpha+beta+gamma&defType=edismax&qf=body&fl=id&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_matches_fixture(body, "edismax_mm_absent");
+}
+
+#[tokio::test]
+async fn empty_mm_alongside_a_single_clause_q_does_not_400() {
+    // The other half of issue #113's correction, added by the implementor
+    // after review round 1 (finding 85). Real Solr does not validate `mm`
+    // eagerly as a request param -- it only *parses* the spec when it has a
+    // multi-clause boolean query to apply it to, so the identical `mm=` that
+    // 400s above (`q=alpha beta gamma`, three clauses) 200s when `q` yields
+    // fewer than two clauses. Captured one-off against real Solr on the same
+    // schema/corpus as this file's other `mm_*` tests (not re-run through
+    // `capture.sh`; no fixture committed, same as finding 82's confirming
+    // capture): `q=*:*` -> 200/numFound 10, `q=alpha` -> 200/numFound 3,
+    // `q=-mission` -> 200/numFound 8, `q="alpha beta"` and `q=title:rocket`
+    // -> 200. Multi-clause 400s regardless of occur kind: `q=alpha beta`,
+    // `q=+alpha +beta`, `q=alpha -mission`.
+    //
+    // Only status and `numFound` are asserted: those are the captured facts
+    // this guards (was the request rejected, and did the empty `mm` change
+    // which docs matched), and the corpus here is the captured corpus.
+    // `q=-mission` is the case a naive placement gets wrong -- Wayfinder
+    // appends its own `AllQuery` `Should` clause to an all-`MustNot` query,
+    // so a clause-count check made after that augmentation would 400 a
+    // request real Solr answers 200.
+    let (app, _dir) = edismax_app().await;
+    for (query, want_num_found) in [
+        ("select?q=*:*&defType=edismax&qf=body&mm=&fl=id&wt=json", 10),
+        (
+            "select?q=alpha&defType=edismax&qf=body&mm=&fl=id&wt=json",
+            3,
+        ),
+        (
+            "select?q=-mission&defType=edismax&qf=title&mm=&fl=id&wt=json",
+            8,
+        ),
+    ] {
+        let (status, body) = get(&app, query).await;
+        assert_eq!(status, StatusCode::OK, "{query} must not 400: {body}");
+        assert_eq!(
+            body["response"]["numFound"].as_i64(),
+            Some(want_num_found),
+            "{query} must match the captured Solr result count: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn empty_mm_alongside_star_all_matches_committed_fixture() {
+    // Reviewer round-2 follow-up (issue #113): the round above only asserted
+    // `numFound` against prose (finding 85 / this file's own comments), not a
+    // committed fixture -- the same class of gap that let round 1's bad
+    // placement (guard before the `*:*` short-circuit) hide from a green
+    // suite. `edismax_mm_empty_star` is a genuine `manifest.tsv` row (see
+    // `hermetic_edismax_manifest_entries_match_committed_fixtures` below,
+    // which sweeps it too), so this is redundant with that sweep by design --
+    // it exists as an explicit, named assertion for this specific boundary
+    // point rather than relying solely on the generic manifest loop.
+    //
+    // Caveat, stated here rather than left implicit: this fixture's
+    // `numFound` (10) is corroborated by the real one-off Solr capture this
+    // test's sibling above cites; the doc order/id list was reconstructed
+    // from Wayfinder's own hermetic output (see `solr-ref/capture.sh`'s
+    // comment on this `cape` line) because no live Solr container was
+    // available to re-capture it independently. It is not yet fully
+    // real-Solr-verified evidence -- re-running `capture.sh`'s edismax block
+    // against a live container would close that gap.
+    let (app, _dir) = edismax_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&defType=edismax&qf=body&mm=&fl=id&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_matches_fixture(body, "edismax_mm_empty_star");
+}
+
+#[tokio::test]
+async fn empty_mm_400s_for_every_multi_clause_shape_regardless_of_occur() {
+    // Companion to the test above, same capture (finding 85): what makes an
+    // empty `mm` reachable is the clause *count*, not whether the clauses are
+    // optional. All three of these 400 in real Solr.
+    let (app, _dir) = edismax_app().await;
+    for query in [
+        "select?q=alpha+beta&defType=edismax&qf=body&fl=id&mm=&wt=json",
+        "select?q=%2Balpha+%2Bbeta&defType=edismax&qf=body&fl=id&mm=&wt=json",
+        "select?q=alpha+-mission&defType=edismax&qf=body&fl=id&mm=&wt=json",
+    ] {
+        let (status, body) = get(&app, query).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{query} must 400 like real Solr: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn whitespace_only_mm_400s_like_an_empty_one() {
+    // `mm=%20` is the adjacent shape review round 1 asked about: real Solr
+    // 400s on it with the same `NumberFormatException` as `mm=` (finding 85),
+    // which is why the guard trims before testing for emptiness rather than
+    // checking `is_empty()` on the raw value.
+    let (app, _dir) = edismax_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=alpha+beta+gamma&defType=edismax&qf=body&mm=%20&fl=id&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
 // --- unsupported edismax params are ignored, not rejected (finding 75) -----
 
 #[tokio::test]
@@ -1175,6 +1358,9 @@ async fn fixture_names_referenced_by_this_file_all_exist_in_the_manifest() {
         "edismax_mm_2",
         "edismax_mm_3",
         "edismax_mm_conditional",
+        "edismax_mm_empty_string",
+        "edismax_mm_absent",
+        "edismax_mm_empty_star",
         "edismax_qf_partial_invalid",
         "edismax_pf_negation_isolated",
         "edismax_pf_negation_with_absent_negated_term",

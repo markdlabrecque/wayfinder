@@ -1439,3 +1439,60 @@ fragment" to be different answers at all.
     `resolve_field_weights(...).is_empty()`/`default_field` lookups, still run after it and are
     unaffected. Checked directly by `star_query_with_undefined_qf_field_still_400s` and
     `star_query_with_partially_invalid_qf_still_400s` in `tests/edismax.rs`.
+
+## Finding from issue #113 (`mm` present but empty)
+
+89. **`mm` present but empty (`mm=`) is a malformed spec real Solr *rejects*, not one it ignores
+    -- but only when `q` yields a multi-clause boolean query. Issue #113's own premise, "Solr
+    ignores an empty `mm` param", is wrong.** Confirmed by one-off captures against a disposable
+    `solr:9` running this block's edismax schema/corpus (not re-run through `capture.sh`, same
+    precedent as findings 82-84): `q=alpha+beta+gamma&defType=edismax&qf=body&mm=` 400s with
+    `"Invalid 'mm' spec. Expecting an integer."`, `root-error-class
+    java.lang.NumberFormatException` (fixture `solr-ref/responses/edismax_mm_empty_string.json`).
+    A bare `mm` with no `=` and a whitespace-only `mm=%20` produce byte-identical 400s -- Solr
+    trims before parsing, which is why Wayfinder's guard tests `spec.trim().is_empty()` rather
+    than `spec.is_empty()`.
+
+    The second half of the finding, and the part that decides where the check belongs: Solr does
+    *not* validate `mm` eagerly as a request parameter. The spec is only parsed when there is a
+    multi-clause boolean query to apply it to, so the identical `mm=` 200s whenever `q` yields
+    fewer than two clauses. Captured 200s: `q=*:*` (numFound 10), `q=` (numFound 0), `q=alpha`
+    (numFound 3), `q=title:rocket`, `q="alpha beta"` (a phrase is one clause), and `q=-mission`
+    (numFound 8). Captured 400s: `q=alpha beta`, `q=+alpha +beta`, `q=alpha -mission` -- occur
+    kind is irrelevant, only the clause count. A review round that assumed the opposite
+    (eager param validation, check before the `*:*` short-circuit) would have shipped a real
+    divergence on `q=*:*&mm=`; the capture is what settled it. Precedence against a second bad
+    param was captured too: `qf=nosuchfield` alongside `mm=` 400s on the `qf` name (finding 84's
+    error), so the `qf` check stays ahead of the `mm` one.
+
+    `mm` entirely *absent* is a different case and unchanged by this issue: no
+    `minimum_number_should_match` is set at all and the normal OR default stands
+    (`edismax_mm_absent.json`, a committed 200 fixture with its own `manifest.tsv` row).
+    `edismax_mm_empty_string.json` is deliberately *not* `cape`d into `manifest.tsv` or
+    `manifest-errors.tsv`, for exactly the reason finding 84 (#111) established: it is an error
+    envelope, and the generic hermetic sweep compares `error.msg`/`error.metadata` verbatim,
+    which can never match (Solr's Java exception text vs Wayfinder's own). It is checked
+    directly by `mm_present_but_empty_400s_like_a_malformed_spec` against the narrow, non-verbatim
+    contract `tests/error_shapes.rs` documents. The clause-count 200/400 boundary is covered by
+    `empty_mm_alongside_a_single_clause_q_does_not_400` and
+    `empty_mm_400s_for_every_multi_clause_shape_regardless_of_occur`.
+
+    **Reviewer round-2 follow-up, actioned:** the boundary evidence above previously lived only
+    in this prose and in test comments -- the same class of gap that let round 1's bad guard
+    placement hide behind a green suite. One point on the boundary (`q=*:*`, a single-clause
+    query) is now also a committed fixture + `manifest.tsv` row,
+    `solr-ref/responses/edismax_mm_empty_star.json` (asserted directly by
+    `empty_mm_alongside_star_all_matches_committed_fixture` and swept generically by
+    `hermetic_edismax_manifest_entries_match_committed_fixtures`). That fixture's `numFound`
+    (10) is confirmed against the real one-off Solr capture cited above; its exact doc-order/id
+    list was reconstructed from Wayfinder's own hermetic output, not independently
+    re-captured against a live Solr container (none was available for that follow-up task) --
+    see the `cape edismax_mm_empty_star` comment in `solr-ref/capture.sh` for the caveat and
+    the remaining step. The other boundary points (`q=alpha`, `q=-mission`, and the three
+    multi-clause 400 shapes) remain prose/comment-only evidence, an open follow-up.
+
+    Wayfinder's pre-fix behaviour was wrong in the opposite direction from the issue's premise:
+    `edismax::min_should_match` had an `if spec.is_empty() { return clause_count; }` early return,
+    silently reading an empty `mm` as "require every clause". That line is removed -- the general
+    path returns the identical value for an empty spec anyway (`split_whitespace` yields no
+    token, so the all-required default stands), so it was redundant rather than load-bearing.

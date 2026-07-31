@@ -1147,6 +1147,43 @@ impl CoreIndex {
         if clauses.is_empty() {
             return Ok(Box::new(EmptyQuery));
         }
+
+        // `mm` *present but empty* (`mm=`, or a bare `mm` with no `=`, or a
+        // whitespace-only `mm=%20` -- all three arrive here as `Some("")`/
+        // `Some(" ")`) is a malformed spec, not an absent one: real Solr 400s
+        // with `Invalid 'mm' spec. Expecting an integer.` (a
+        // `NumberFormatException` -- fixture
+        // `solr-ref/responses/edismax_mm_empty_string.json`, finding 85).
+        // Issue #113's own premise, that Solr ignores an empty `mm`, is wrong.
+        // `mm` entirely absent (`None`) is the untouched case: no
+        // `minimum_number_should_match` is set at all and the normal OR
+        // default stands (`edismax_mm_absent.json`). `Params::get`
+        // distinguishes the two -- `mm=` parses to `Some("")`, an absent `mm`
+        // to `None`.
+        //
+        // Placement is load-bearing and capture-derived, not a guess (finding
+        // 85): Solr only *parses* `mm` when it has a multi-clause boolean
+        // query to apply it to, so an empty `mm` alongside a `q` that yields
+        // fewer than two clauses is never reached and 200s. Captured
+        // one-clause 200s: `q=*:*` (short-circuited above), `q=` (the empty-
+        // `clauses` return above), `q=alpha`, `q=title:rocket`,
+        // `q="alpha beta"`, `q=-mission`. Captured multi-clause 400s:
+        // `q=alpha beta`, `q=+alpha +beta`, `q=alpha -mission` -- occur kind
+        // is irrelevant, only the count. Hence: after the `*:*` and empty-
+        // `clauses` early returns, after `qf` validation (a bad `qf` alongside
+        // `mm=` 400s on the `qf` name, captured), and on the raw clause count
+        // *before* the all-`MustNot` `AllQuery` augmentation below, which is
+        // Wayfinder-internal and would otherwise turn a captured-200
+        // `q=-mission` into a 400.
+        if clauses.len() >= 2
+            && let Some(spec) = mm
+            && spec.trim().is_empty()
+        {
+            return Err(QueryError::Syntax(
+                "Invalid 'mm' spec. Expecting an integer.".to_string(),
+            ));
+        }
+
         // Same all-`MustNot` guard as `build_ast`: an edismax `q=-mission`
         // alone must mean "every doc except one with mission", not zero
         // results from an ill-defined all-exclusion `BooleanQuery`.
