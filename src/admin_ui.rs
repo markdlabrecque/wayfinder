@@ -28,6 +28,13 @@
 //! memory: Wayfinder is mmap-based, so there is no JVM-heap-shaped figure to
 //! show, and the page says so in prose (PRD §5 v2.5, restating §6's
 //! absent-heap-knob honesty) instead of fabricating one.
+//!
+//! Issue #130 adds the fifth page, `GET /ui/ping`: this process's ping/health
+//! status. Like the query tester, it renders a real handler's real answer --
+//! `crate::ping_ui` calls `crate::ping`, the function
+//! `/solr/{core}/admin/ping` itself routes to, and this module only formats
+//! the status it returned. There is deliberately no second health-check code
+//! path.
 
 use crate::schema::{CopyFieldConfig, DynamicFieldConfig, FieldConfig};
 use askama::Template;
@@ -265,6 +272,38 @@ fn human_duration(total_secs: u64) -> String {
     }
     parts.push(format!("{seconds}s"));
     parts.join(" ")
+}
+
+#[derive(Template)]
+#[template(path = "ping.html")]
+struct PingPage<'a> {
+    core_name: &'a str,
+    status: &'a str,
+    http_status: u16,
+}
+
+/// Renders the ping/health page.
+///
+/// `status` and `http_status` both come from a real call to `crate::ping` —
+/// the very function `/solr/{core}/admin/ping` routes to (see
+/// `crate::ping_ui`) — so this module renders a health verdict it never
+/// computes. There is no second health-check path to keep in sync with the
+/// wire endpoint: if `/admin/ping` starts saying something other than `OK`,
+/// this page says it too, with no change here.
+///
+/// Read-only, like the core, schema and stats pages: no form, no params, no
+/// mutation.
+pub fn render_ping_page(
+    core_name: &str,
+    status: &str,
+    http_status: u16,
+) -> Result<String, askama::Error> {
+    PingPage {
+        core_name,
+        status,
+        http_status,
+    }
+    .render()
 }
 
 /// Pretty-prints a `/select` response body and makes it safe to emit into
@@ -517,6 +556,30 @@ mod tests {
             .expect("template must render");
         assert!(!html.contains("<script>"));
         assert!(html.contains("&#60;script&#62;"));
+    }
+
+    #[test]
+    fn ping_page_renders_the_status_it_is_given() {
+        let html = render_ping_page("content", "OK", 200).expect("template must render");
+        assert!(html.contains("content"));
+        assert!(html.contains("Status: OK"), "{html}");
+        assert!(html.contains("200"), "{html}");
+    }
+
+    /// The ping page is read-only: no form, no submit control, nothing that
+    /// could turn a status view into a mutation.
+    #[test]
+    fn ping_page_has_no_form() {
+        let html = render_ping_page("content", "OK", 200).expect("template must render");
+        assert!(!html.to_lowercase().contains("<form"), "{html}");
+    }
+
+    #[test]
+    fn ping_page_escapes_the_core_name_and_the_status() {
+        let html = render_ping_page("<script>", "<b>OK</b>", 200).expect("template must render");
+        assert!(!html.contains("<script>"), "{html}");
+        assert!(html.contains("&#60;script&#62;"), "{html}");
+        assert!(html.contains("&#60;b&#62;OK"), "{html}");
     }
 
     fn field(

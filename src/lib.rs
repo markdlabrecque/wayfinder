@@ -20,7 +20,9 @@
 //! the core's schema (issue #128), served from the `WayfinderSchema` the core
 //! is running on rather than a fresh read of the TOML, and `GET /ui/stats`
 //! the core's doc/segment counts, on-disk size and process uptime (issue
-//! #129). See `crate::admin_ui`.
+//! #129), and `GET /ui/ping` this process's ping/health status (issue #130),
+//! which — like the query tester — calls the real `ping` handler rather than
+//! running a health check of its own. See `crate::admin_ui`.
 
 mod admin_ui;
 mod collector;
@@ -258,7 +260,12 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
         // Index stats (issue #129) — read-only, and derived per request from
         // the live core plus this app's start instant, so there is no stats
         // subsystem and no cached figure that could go stale.
-        .route("/ui/stats", get(stats_ui));
+        .route("/ui/stats", get(stats_ui))
+        // Ping/health (issue #130) — same thin-wrapper reasoning as
+        // `/ui/query`: `ping_ui` calls `ping` itself, so there is no second
+        // health-check path that could report healthy while `/admin/ping`
+        // does not.
+        .route("/ui/ping", get(ping_ui));
 
     // Test-only, never in a default/release build (#39): a route that always
     // panics, so `tests/panic_recovery.rs` can exercise the real router's
@@ -472,6 +479,62 @@ async fn query_ui(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("failed to render the query tester: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /ui/ping` — the admin UI's ping/health page (issue #130, PRD §5
+/// v2.5).
+///
+/// The health verdict is not computed here: this handler calls [`ping`] — the
+/// very function `/solr/{core}/admin/ping` routes to, with this process's
+/// single core name filled in — and renders that call's real `status` value
+/// and HTTP status. So there is no second health-check code path to keep in
+/// sync with the wire endpoint; a page that says `OK` says it because
+/// `/admin/ping` just did.
+///
+/// Read-only: `ping` takes no searcher and writes nothing, and this handler
+/// adds nothing to it. No params either — `ping`'s only param is `wt`, which
+/// selects a response writer this page does not use.
+async fn ping_ui(State(state): State<Arc<AppState>>) -> Response {
+    // The one and only health path: `/admin/ping`'s own handler.
+    let response = match ping(
+        State(Arc::clone(&state)),
+        AxPath(state.core_name.clone()),
+        RawQuery(None),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    };
+    let http_status = response.status().as_u16();
+    let body = match response.into_body().collect().await {
+        Ok(collected) => String::from_utf8_lossy(&collected.to_bytes()).into_owned(),
+        // `ping` builds its body in memory, so this is unreachable in
+        // practice; surfacing it as text beats unwrapping.
+        Err(e) => format!("failed to read the /admin/ping response body: {e}"),
+    };
+
+    // Whatever `ping` reported, verbatim. A response without a string
+    // `status` is not something `ping` produces today, but showing the raw
+    // body beats the page inventing a verdict of its own.
+    let parsed = serde_json::from_str::<Value>(&body).ok();
+    let status = parsed
+        .as_ref()
+        .and_then(|value| value["status"].as_str())
+        .unwrap_or(body.as_str());
+
+    match admin_ui::render_ping_page(&state.core_name, status, http_status) {
+        Ok(html) => (
+            StatusCode::from_u16(http_status).unwrap_or(StatusCode::OK),
+            Html(html),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to render the ping page: {e}"),
         )
             .into_response(),
     }
