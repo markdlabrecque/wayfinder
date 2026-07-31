@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Wayfinder &mdash; ping ({{ core_name }})</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 2rem; }
+      .ping { font-size: 1.25rem; font-weight: 600; }
+      .note { color: #666; max-width: 40rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Wayfinder</h1>
+    <h2>Ping &mdash; core {{ core_name }}</h2>
+    <p class="ping">Status: {{ status }}</p>
+    <p class="note">
+      This is the value this process's own
+      <code>/solr/{{ core_name }}/admin/ping</code> handler returned for this
+      request (HTTP {{ http_status }}) &mdash; the page runs that handler, it
+      does not perform a health check of its own.
+    </p>
+  </body>
+</html>
