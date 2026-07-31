@@ -532,11 +532,12 @@ own scoping pass if ever pursued):
 - Multi-instance/cluster views. Out of scope for the same reason SolrCloud is (§1 non-goals) — one
   process, one core.
 
-**Architecture.** New routes under `/ui` (or `/admin` — naming TBD at implementation time), served by
-the same axum app, alongside the existing `/solr/*` API routes — not a second process, not a second
-deployment artifact. Server-rendered HTML, compiled in via `askama` (compile-time-checked templates,
-no runtime template parsing, no JS build step) rather than a client-side framework — this keeps the
-"single static binary" goal intact the same way TOML-not-XML config does. Data comes from the same
+**Architecture.** New routes under `/ui` (resolved by issue #94; `/admin` was the other
+candidate), served by the same axum app, alongside the existing `/solr/*` API routes — not a
+second process, not a second deployment artifact. Server-rendered HTML, compiled in via `askama`
+(compile-time-checked templates, no runtime template parsing, no JS build step) rather than a
+client-side framework — this keeps the "single static binary" goal intact the same way
+TOML-not-XML config does. Data comes from the same
 in-process index/schema state the query pipeline already reads (no core registry exists — `app()`
 serves exactly one core, per open question 1); no new stats-collection subsystem, only what's
 already tracked or trivially derivable (e.g. index directory size via `std::fs`).
