@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Wayfinder &mdash; query tester ({{ core_name }})</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 2rem; }
+      label { display: inline-block; width: 8rem; font-weight: 600; }
+      input[type=text] { width: 28rem; }
+      p { margin: 0.4rem 0; }
+      pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; }
+      .status-error { color: #a00; }
+    </style>
+  </head>
+  <body>
+    <h1>Wayfinder</h1>
+    <h2>Query tester &mdash; core {{ core_name }}</h2>
+    <form method="get" action="/ui/query">
+      <p>
+        <label for="wf-q">q</label>
+        <input type="text" id="wf-q" name="q" value="{{ q }}">
+      </p>
+      <p>
+        <label for="wf-fq">fq</label>
+        <input type="text" id="wf-fq" name="fq" value="{{ fq }}">
+      </p>
+      <p>
+        <label for="wf-fl">fl</label>
+        <input type="text" id="wf-fl" name="fl" value="{{ fl }}">
+      </p>
+      <p>
+        <label for="wf-rows">rows</label>
+        <input type="text" id="wf-rows" name="rows" value="{{ rows }}">
+      </p>
+      <p>
+        <label for="wf-start">start</label>
+        <input type="text" id="wf-start" name="start" value="{{ start }}">
+      </p>
+      <p>
+        <label for="wf-facet-field">facet.field</label>
+        <input type="text" id="wf-facet-field" name="facet.field" value="{{ facet_field }}">
+      </p>
+      <p>
+        <label for="wf-facet">facet</label>
+        <input type="checkbox" id="wf-facet" name="facet" value="true"{% if facet %} checked{% endif %}>
+        <span>enable faceting (Solr ignores facet.field without it)</span>
+      </p>
+      <p><button type="submit">Run query</button></p>
+    </form>
+    {% if has_result %}
+    <h3>
+      HTTP status:
+      <span{% if result_status >= 400 %} class="status-error"{% endif %}>{{ result_status }}</span>
+    </h3>
+    <pre>{{ result_json|safe }}</pre>
+    {% endif %}
+  </body>
+</html>

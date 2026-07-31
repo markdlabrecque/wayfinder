@@ -14,7 +14,9 @@
 //!
 //! Alongside the Solr wire API, `GET /ui` serves the admin UI's core page
 //! (issue #94, PRD §5 v2.5) — Wayfinder's own surface, not Solr's, rendered
-//! from the same in-process core state. See `crate::admin_ui`.
+//! from the same in-process core state — and `GET /ui/query` the query tester
+//! over it (issue #127), which runs its queries through `select` itself
+//! rather than a second query path. See `crate::admin_ui`.
 
 mod admin_ui;
 mod collector;
@@ -41,6 +43,7 @@ use axum::extract::{DefaultBodyLimit, Path as AxPath, RawQuery, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, get};
+use http_body_util::BodyExt;
 use serde_json::{Map, Value, json};
 use tantivy::Score;
 use tantivy::query::{EmptyQuery, Occur, Query, QueryClone};
@@ -231,7 +234,10 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
         // denominator's route surface. `get`, not `any` — the
         // method-agnostic routing the macro uses exists to match Solr's
         // request handlers, and that reason does not apply here.
-        .route("/ui", get(core_ui));
+        .route("/ui", get(core_ui))
+        // Query tester (issue #127) — same reasoning as `/ui` above, and
+        // deliberately a thin wrapper: `query_ui` calls `select` itself.
+        .route("/ui/query", get(query_ui));
 
     // Test-only, never in a default/release build (#39): a route that always
     // panics, so `tests/panic_recovery.rs` can exercise the real router's
@@ -307,6 +313,122 @@ async fn core_ui(State(state): State<Arc<AppState>>) -> Response {
             format!("failed to render the admin UI: {e}"),
         )
             .into_response(),
+    }
+}
+
+/// `GET /ui/query` — the admin UI's query tester (issue #127, PRD §5 v2.5).
+///
+/// A form over the core's own `/select` and nothing more: with a non-empty
+/// query string it calls [`select`] — the very function `/solr/{core}/select`
+/// routes to, with this process's single core name filled in — and renders
+/// that call's real status and JSON body. There is no second parsing,
+/// validation, or execution path, so nothing here can drift from the wire
+/// API: a query that 400s against `/select` 400s here, with `/select`'s own
+/// error envelope on the page rather than a UI-invented message.
+///
+/// Read-only: `select` never mutates the index, and this handler adds
+/// nothing to it.
+///
+/// The status code is `select`'s, not the page render's, so the tester is
+/// as scriptable/diagnosable as the endpoint it wraps; the body is always
+/// HTML (including on an error), so the form is still there to correct and
+/// resubmit.
+async fn query_ui(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> Response {
+    let raw = raw.unwrap_or_default();
+    let params = Params::parse(&raw);
+    let form = admin_ui::QueryForm {
+        q: params.get("q").unwrap_or(""),
+        fq: params.get("fq").unwrap_or(""),
+        fl: params.get("fl").unwrap_or(""),
+        rows: params.get("rows").unwrap_or(""),
+        start: params.get("start").unwrap_or(""),
+        facet_field: params.get("facet.field").unwrap_or(""),
+        facet: params.get("facet").is_some_and(|v| v == "true"),
+    };
+
+    let result = match submitted_query(&raw) {
+        None => None,
+        Some(query) => {
+            // The one and only query path: `/select`'s own handler.
+            let response = match select(
+                State(Arc::clone(&state)),
+                AxPath(state.core_name.clone()),
+                RawQuery(Some(query)),
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(e) => e.into_response(),
+            };
+            let status = response.status().as_u16();
+            let body = match response.into_body().collect().await {
+                Ok(collected) => String::from_utf8_lossy(&collected.to_bytes()).into_owned(),
+                // `select` builds its body in memory, so this is unreachable
+                // in practice; surfacing it as text beats unwrapping.
+                Err(e) => format!("failed to read the /select response body: {e}"),
+            };
+            Some((status, body))
+        }
+    };
+
+    let render = admin_ui::render_query_page(
+        &state.core_name,
+        &form,
+        result
+            .as_ref()
+            .map(|(status, body)| (*status, body.as_str())),
+    );
+    match render {
+        Ok(html) => {
+            let status = result
+                .map(|(status, _)| StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
+                .unwrap_or(StatusCode::OK);
+            (status, Html(html)).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to render the query tester: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// The query string to hand to `/select`, or `None` if this is a first load
+/// (or a submission of a wholly empty form) and no query should run.
+///
+/// Params written as `key=` (an explicit `=` with nothing after it) are
+/// dropped: a GET form submits every one of its inputs, so an untouched `fq`
+/// box would otherwise reach `/select` as `fq=`, an empty filter query that
+/// 400s. Everything that survives is forwarded *verbatim*, still
+/// percent-encoded, so `/select` sees those params exactly as it would have
+/// received them directly — same values, same order, same echo.
+///
+/// Two known consequences, both accepted for a form UI rather than papered
+/// over:
+///
+/// - An *intentionally* empty value (`q=`, `fl=`) cannot be expressed
+///   through the tester. `/select` distinguishes an absent `q` from an empty
+///   one; the tester can only reach the absent case.
+/// - The rule is written in terms of the raw segment, not the decoded value,
+///   so a valueless `&fq` (no `=` at all) survives even though `Params`
+///   decodes it to the same `""`. That shape is unreachable from the form
+///   (a browser always sends `key=value`) and is kept deliberately: a bare
+///   token is how flag-style params are written by hand, and dropping it
+///   would silently discard a param the operator typed.
+fn submitted_query(raw: &str) -> Option<String> {
+    let kept: Vec<&str> = raw
+        .split('&')
+        .filter(|segment| !segment.is_empty())
+        .filter(|segment| match segment.split_once('=') {
+            Some((_, value)) => !value.is_empty(),
+            // A valueless flag (`&debug`) is a real param, not a blank box.
+            None => true,
+        })
+        .collect();
+    if kept.is_empty() {
+        None
+    } else {
+        Some(kept.join("&"))
     }
 }
 
