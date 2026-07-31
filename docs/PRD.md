@@ -445,7 +445,7 @@ conditional lists (`2<-1 5<80%`). Implement it fully; it is a small self-contain
 | **v1** | The table above + edismax + the differential harness |
 | **v1.5 — the capture** | The `search_api_solr` contract capture (§2), pulled ahead of the rest of v2: generated config set + HTTP trace of a real Drupal site, frozen as fixtures, plus the coverage denominator computed from them |
 | **v2 — Search API** | `search_api_wayfinder` connector module (issue #57, done), `search-api.toml` preset (done), `/admin/system` version handshake (done). `/admin/luke`, `/terms`, `/admin/mbeans` explicitly descoped — see below. |
-| **v2.5 — Admin web UI** | A read-only operator dashboard, server-rendered by the same binary. See below. |
+| **v2.5 — Admin web UI** | A read-only operator dashboard, server-rendered by the same binary. Tracer bullet (core view, issue #94) done. See below. |
 | **v3** | Result caches + autowarm, spellcheck/suggester, grouping/collapse, `_version_` (issue TBD — scope narrowed, see below) |
 | **v4** | Function queries (`bf`, `{!func}`), spatial, snapshot-based read replicas |
 | **Deep roadmap** | Distributed / sharded search, SolrCloud. The majority of Solr's complexity and directly opposed to the operational-simplicity goal. |
@@ -541,9 +541,9 @@ in-process index/schema state the query pipeline already reads (no core registry
 serves exactly one core, per open question 1); no new stats-collection subsystem, only what's
 already tracked or trivially derivable (e.g. index directory size via `std::fs`).
 
-**Tracer bullet for this phase.** One page: the core view, reading real doc count and on-disk size
-from the one running core. Done when that page renders correctly against a core with data in it —
-schema view, stats, and the query tester are the "flesh it out" that follows, not part of the slice.
+**Tracer bullet for this phase — done (issue #94).** One page: the core view, reading real doc
+count and on-disk size from the one running core, at `GET /ui`. Schema view, stats, and the query
+tester are the "flesh it out" that follows, each its own follow-up issue, not part of the slice.
 
 **Testing.** Hermetic unit/integration tests against a real in-process core (no browser automation
 required at this scope — assert on rendered HTML/text content and HTTP status, the same style as the
