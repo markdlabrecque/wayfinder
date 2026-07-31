@@ -1,0 +1,28 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":4,
+    "params":{
+      "q":"rocket launch",
+      "defType":"edismax",
+      "qf":"body",
+      "pf":"body",
+      "fl":"id,score",
+      "fq":"id:(nA OR nB)",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "maxScore":2.03014,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"nA",
+      "score":2.03014
+    },{
+      "id":"nB",
+      "score":1.01507
+    }]
+  }
+}

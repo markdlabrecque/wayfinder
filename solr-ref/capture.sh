@@ -1604,6 +1604,26 @@ cape edismax_mm_1               'select?q=alpha+beta+gamma&defType=edismax&qf=bo
 cape edismax_mm_2               'select?q=alpha+beta+gamma&defType=edismax&qf=body&mm=2&fl=id&fq=id:(mmA+OR+mmB+OR+mmC+OR+mmD)&wt=json'
 cape edismax_mm_3               'select?q=alpha+beta+gamma&defType=edismax&qf=body&mm=3&fl=id&fq=id:(mmA+OR+mmB+OR+mmC+OR+mmD)&wt=json'
 cape edismax_mm_conditional     'select?q=alpha+beta+gamma&defType=edismax&qf=body&mm=2%3C-1+3%3C80%25&fl=id&fq=id:(mmA+OR+mmB+OR+mmC+OR+mmD)&wt=json'
+# pf phrase-building over a negated clause (issue #114): the ticket assumed
+# (its own wording: "presumably") that `pf`'s phrase should exclude a negated
+# (`-term`) clause's text. A real-Solr capture (one-off container, same
+# title/body schema as this block, plus two extra docs not in this script's
+# corpus -- nA="rocket launch success"/nB="launch rocket success") disproves
+# that: adding `-zzznonexistent` (absent from every doc) makes `pf`'s boost
+# vanish completely, identical to the unboosted score nB already carries in
+# the isolated capture. Consistent with real Solr's own `pf` folding a
+# negated clause's text into the phrase it builds, same as Wayfinder's
+# existing `literal_texts` today -- no divergence, no fix needed.
+# Deliberately not `cape`/manifest.tsv calls: nA/nB aren't part of this
+# script's shared corpus (added only in the test's own setup, to avoid
+# perturbing numFound-sensitive fixtures already captured against it), so the
+# generic hermetic sweep has nothing to index them against. Locked in by
+# `pf_phrase_over_a_negated_absent_term_loses_its_boost_matching_solr`
+# instead. Fixtures: solr-ref/responses/edismax_pf_negation_isolated.json,
+# edismax_pf_negation_with_absent_negated_term.json
+# curl -sf "$EDISMAX_SOLR/$EDISMAX_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[{"id":"nA","title":"filler","body":"rocket launch success"},{"id":"nB","title":"filler","body":"launch rocket success"}]'
+# curl -sg "$EDISMAX_SOLR/$EDISMAX_CORE/select?q=rocket+launch&defType=edismax&qf=body&pf=body&fl=id,score&fq=id:(nA+OR+nB)&wt=json"
+# curl -sg "$EDISMAX_SOLR/$EDISMAX_CORE/select?q=rocket+launch+-zzznonexistent&defType=edismax&qf=body&pf=body&fl=id,score&fq=id:(nA+OR+nB)&wt=json"
 echo "edismax core '$EDISMAX_CORE' left in place on '$EDISMAX_CONTAINER' (port 8994)"
 echo "  (docker rm -f $EDISMAX_CONTAINER to stop)"
 
