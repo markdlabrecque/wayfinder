@@ -503,10 +503,10 @@ functionally depends on v2 or blocks on it.
 **In scope (v1 of this phase):**
 
 - **Core view** — name, doc count, on-disk size, field count for the one core this process
-  serves (§7/open question 1: single-core-per-process is current architecture, not just a
-  lean — `app()` takes exactly one schema/data-dir). One page, the landing view. A
-  multi-core *list* would need a core registry that does not exist yet; out of scope here,
-  revisit if/when open question 1 resolves toward multi-core.
+  serves (§10 open question 1, resolved: single-core-per-process — `app()` takes exactly one
+  schema/data-dir). One page, the landing view. A multi-core *list* would need a core registry
+  that does not exist; out of scope here, revisit only if open question 1 reopens toward
+  multi-core.
 - **Schema view** — the core's persisted TOML schema rendered read-only: fields, types, `stored`/
   `fast`/`multi_valued` flags, dynamic-field patterns, copy-fields. Sourced from the same on-disk
   schema §3 already persists and diffs against at startup — no new storage.
@@ -768,9 +768,14 @@ operational simplicity are where this project wins, and those are the primary go
 
 ## 10. Open questions
 
-1. **Multi-core vs single-core-per-process.** Multi-core is more Solr-like; one process per
-   core is simpler and better matches the operational-simplicity goal. Lean
-   single-core-per-process unless something forces otherwise.
+1. ~~**Multi-core vs single-core-per-process.**~~ **Resolved: single-core-per-process.** Multi-core
+   is more Solr-like, but one process per core is simpler and matches the operational-simplicity
+   goal, and it is what the codebase already does — `src/lib.rs`'s module doc states it as the
+   current architecture, and `app()` takes exactly one schema/data-dir pair with no `CoreRegistry`
+   anywhere. Issue #94 confirmed this the hard way: a ticket drafted against a "list all cores"
+   premise had to be corrected once the code was read, because there is no registry to list. v2.5's
+   admin UI (§5) is scoped around this — one core view, not a core list — and stays that way unless
+   a future need forces multi-core, at which point this line reopens rather than silently drifting.
 2. ~~**Which Solr version to report** from `/admin/system`.~~ **Resolved by issue #59:**
    `[admin] reported_solr_version` defaults to `"9.0.0"` — the lowest version in the 9.x branch
    the Search API capture's generated `schema.xml` already targets (finding 78), and every
