@@ -21,10 +21,18 @@
 //! in-process `WayfinderSchema` the core was opened with. As with the query
 //! tester, there is no second parsing path — the page shows what the running
 //! index is actually using, not what the TOML on disk says now.
+//!
+//! Issue #129 adds the fourth page, `GET /ui/stats`: doc count, segment
+//! count, on-disk size and process uptime, again read straight off the live
+//! `CoreIndex` and the process's own start instant. It reports no resident
+//! memory: Wayfinder is mmap-based, so there is no JVM-heap-shaped figure to
+//! show, and the page says so in prose (PRD §5 v2.5, restating §6's
+//! absent-heap-knob honesty) instead of fabricating one.
 
 use crate::schema::{CopyFieldConfig, DynamicFieldConfig, FieldConfig};
 use askama::Template;
 use serde_json::Value;
+use std::time::Duration;
 
 /// Bytes per unit step. Binary (1024), labelled with the SI-ish short names
 /// Solr's own admin UI uses, which is the convention operators expect.
@@ -182,6 +190,81 @@ pub fn render_schema_page(
         copy_fields,
     }
     .render()
+}
+
+#[derive(Template)]
+#[template(path = "stats.html")]
+struct StatsPage<'a> {
+    core_name: &'a str,
+    doc_count: u64,
+    segment_count: usize,
+    size_bytes: u64,
+    size_human: String,
+    uptime_secs: u64,
+    uptime_human: String,
+}
+
+/// Renders the index-stats page.
+///
+/// Every figure is derived at request time from the same in-process state the
+/// query pipeline uses — the live searcher (doc count, segment count), a walk
+/// of the core's data dir (size), and the process's own start instant
+/// (uptime). There is no stats-collection subsystem behind this, and nothing
+/// here is cached, so the page cannot report a stale figure.
+///
+/// Deliberately absent: any resident-memory figure. Tantivy is mmap-based and
+/// the OS page cache does the work a JVM heap does, so there is no
+/// heap-shaped value to report; PRD §5 v2.5 (and §6's absent-heap-knob
+/// precedent) call for saying so in prose rather than fabricating one, which
+/// is what `templates/stats.html` does.
+///
+/// Read-only, like the core and schema pages: no form, no params, no
+/// mutation.
+pub fn render_stats_page(
+    core_name: &str,
+    doc_count: u64,
+    segment_count: usize,
+    size_bytes: u64,
+    uptime: Duration,
+) -> Result<String, askama::Error> {
+    let uptime_secs = uptime.as_secs();
+    StatsPage {
+        core_name,
+        doc_count,
+        segment_count,
+        size_bytes,
+        size_human: human_size(size_bytes),
+        uptime_secs,
+        uptime_human: human_duration(uptime_secs),
+    }
+    .render()
+}
+
+/// `3723` -> `"1h 2m 3s"`, `0` -> `"0s"`.
+///
+/// ponytail: whole seconds, largest-unit-first, no locale awareness and no
+/// units above days. Ceiling: purely cosmetic — the exact second count is
+/// rendered alongside it (the same exact-plus-readable pairing
+/// `templates/core.html` uses for size), so nothing parses this string. It is
+/// rendered *after* the exact figure rather than before it so the first number
+/// on the row is always the monotonically increasing one.
+fn human_duration(total_secs: u64) -> String {
+    let days = total_secs / 86_400;
+    let hours = (total_secs % 86_400) / 3_600;
+    let minutes = (total_secs % 3_600) / 60;
+    let seconds = total_secs % 60;
+    let mut parts = Vec::new();
+    if days > 0 {
+        parts.push(format!("{days}d"));
+    }
+    if days > 0 || hours > 0 {
+        parts.push(format!("{hours}h"));
+    }
+    if days > 0 || hours > 0 || minutes > 0 {
+        parts.push(format!("{minutes}m"));
+    }
+    parts.push(format!("{seconds}s"));
+    parts.join(" ")
 }
 
 /// Pretty-prints a `/select` response body and makes it safe to emit into
@@ -376,6 +459,64 @@ mod tests {
     fn html_safe_json_passes_through_a_non_json_body_escaped() {
         let out = html_safe_json("<b>not json</b>");
         assert_eq!(out, "\\u003cb\\u003enot json\\u003c/b\\u003e");
+    }
+
+    #[test]
+    fn human_duration_counts_up_from_seconds() {
+        assert_eq!(human_duration(0), "0s");
+        assert_eq!(human_duration(59), "59s");
+        assert_eq!(human_duration(60), "1m 0s");
+        assert_eq!(human_duration(3_723), "1h 2m 3s");
+        assert_eq!(human_duration(90_061), "1d 1h 1m 1s");
+    }
+
+    #[test]
+    fn stats_page_renders_every_figure_it_is_given() {
+        let html = render_stats_page("content", 5, 3, 4096, Duration::from_secs(3_723))
+            .expect("template must render");
+        assert!(html.contains("content"));
+        assert!(html.contains("<td>5</td>"), "doc count: {html}");
+        assert!(html.contains("<td>3</td>"), "segment count: {html}");
+        assert!(html.contains("4.0 KB (4096 bytes)"), "size: {html}");
+        assert!(html.contains("3723 seconds (1h 2m 3s)"), "uptime: {html}");
+    }
+
+    /// The honesty line, pinned: prose about mmap and no fabricated figure.
+    /// Guards the PRD §5 v2.5 / §6 requirement against a later edit that
+    /// "helpfully" adds a resident-memory number to the page.
+    #[test]
+    fn stats_page_reports_no_resident_memory_figure() {
+        let html = render_stats_page("content", 5, 1, 4096, Duration::from_secs(1))
+            .expect("template must render");
+        let lower = html.to_lowercase();
+        assert!(lower.contains("mmap"), "{html}");
+        let pos = lower
+            .find("resident")
+            .unwrap_or_else(|| panic!("the page must have a resident-memory line: {html}"));
+        let window = &lower[pos..(pos + 200).min(lower.len())];
+        for unit in ["kb", "mb", "gb", " b)", " bytes"] {
+            assert!(
+                !window.contains(unit),
+                "the resident-memory line must carry no byte figure (`{unit}`): {window}"
+            );
+        }
+    }
+
+    /// The stats page is read-only: no form, no submit control, nothing that
+    /// could turn a page view into a mutation.
+    #[test]
+    fn stats_page_has_no_form() {
+        let html = render_stats_page("content", 0, 0, 0, Duration::from_secs(0))
+            .expect("template must render");
+        assert!(!html.to_lowercase().contains("<form"), "{html}");
+    }
+
+    #[test]
+    fn stats_page_escapes_the_core_name() {
+        let html = render_stats_page("<script>", 0, 0, 0, Duration::from_secs(0))
+            .expect("template must render");
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&#60;script&#62;"));
     }
 
     fn field(

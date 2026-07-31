@@ -18,7 +18,9 @@
 //! over it (issue #127), which runs its queries through `select` itself
 //! rather than a second query path, and `GET /ui/schema` a read-only view of
 //! the core's schema (issue #128), served from the `WayfinderSchema` the core
-//! is running on rather than a fresh read of the TOML. See `crate::admin_ui`.
+//! is running on rather than a fresh read of the TOML, and `GET /ui/stats`
+//! the core's doc/segment counts, on-disk size and process uptime (issue
+//! #129). See `crate::admin_ui`.
 
 mod admin_ui;
 mod collector;
@@ -39,6 +41,7 @@ pub use coverage::report as coverage_report;
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Path as AxPath, RawQuery, State};
@@ -60,6 +63,13 @@ struct AppState {
     core_name: String,
     index: CoreIndex,
     config: ServerConfig,
+    /// When this app was built, i.e. when the process began serving — the
+    /// only piece of admin-UI state that is not derivable from the index
+    /// (issue #129). Captured once in `build()` and never updated;
+    /// `Instant` because uptime is an elapsed-time question, and a monotonic
+    /// clock cannot be walked backwards by an NTP step the way a
+    /// `SystemTime` difference can.
+    started_at: Instant,
 }
 
 /// Request params Wayfinder implements today. Only consulted when
@@ -221,6 +231,7 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
         core_name,
         index,
         config,
+        started_at: Instant::now(),
     });
 
     // `any`, not `get`/`post`: Solr's request handlers are method-agnostic —
@@ -243,7 +254,11 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
         // Schema view (issue #128) — read-only, and served from the
         // `WayfinderSchema` already on `AppState.index`, so there is no
         // second schema-parsing path to keep in sync with `schema::load`.
-        .route("/ui/schema", get(schema_ui));
+        .route("/ui/schema", get(schema_ui))
+        // Index stats (issue #129) — read-only, and derived per request from
+        // the live core plus this app's start instant, so there is no stats
+        // subsystem and no cached figure that could go stale.
+        .route("/ui/stats", get(stats_ui));
 
     // Test-only, never in a default/release build (#39): a route that always
     // panics, so `tests/panic_recovery.rs` can exercise the real router's
@@ -348,6 +363,38 @@ async fn schema_ui(State(state): State<Arc<AppState>>) -> Response {
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("failed to render the schema view: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /ui/stats` — the admin UI's index stats page (issue #129, PRD §5
+/// v2.5).
+///
+/// Doc count and segment count come off the live searcher, the on-disk size
+/// off a walk of the core's data dir (all three the same `CoreIndex`
+/// accessors `/ui` uses), and the uptime off `AppState.started_at` — so every
+/// figure describes the index this process is actually serving, and none of
+/// them is cached.
+///
+/// No resident-memory figure is reported: Wayfinder is mmap-based, the page
+/// says so, and it does not invent a JVM-heap-shaped number (PRD §5 v2.5,
+/// §6's absent-heap-knob honesty).
+///
+/// Read-only, and a render failure surfaces as a plain 500, same as `/ui`.
+async fn stats_ui(State(state): State<Arc<AppState>>) -> Response {
+    let html = admin_ui::render_stats_page(
+        &state.core_name,
+        state.index.doc_count(),
+        state.index.segment_count(),
+        state.index.disk_size_bytes(),
+        state.started_at.elapsed(),
+    );
+    match html {
+        Ok(body) => Html(body).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to render the index stats: {e}"),
         )
             .into_response(),
     }
