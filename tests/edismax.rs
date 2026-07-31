@@ -412,6 +412,84 @@ async fn pf_naming_only_a_dynamic_field_still_boosts_the_adjacent_match() {
     );
 }
 
+// --- pf phrase building over a negated clause (issue #114) -----------------
+//
+// Issue #114 assumed (its own wording: "presumably") that `literal_texts`
+// (the text `pf`'s phrase is built from) should exclude a negated (`-term`)
+// clause in `q`, since a term the user explicitly excluded "shouldn't also
+// be phrase-boosted". A real-Solr capture (one-off container, same
+// title/body schema as this file's `EDISMAX_SCHEMA_TOML`, docs `nA`="rocket
+// launch success"/`nB`="launch rocket success" — same adjacent-vs-not-
+// adjacent trick as `pA`/`pB` above) disproves that assumption: adding a
+// negated clause for a term absent from every doc (`-zzznonexistent`) does
+// not leave `pf`'s boost intact over the remaining positive terms — it
+// makes the boost vanish completely. `edismax_pf_negation_isolated.json`
+// (no negation) scores nA=2.03014/nB=1.01507 (pf boosts nA, the adjacent
+// match); `edismax_pf_negation_with_absent_negated_term.json` (same query
+// plus `-zzznonexistent`) scores nA=1.01507/nB=1.01507 — identical to the
+// unboosted score nB already carries in the isolated capture, i.e. the
+// boost vanished entirely. Consistent with real Solr's own `pf` also
+// folding the negated term's text into the phrase it builds, and a phrase
+// containing a term that can never appear in any matching doc can never
+// match, silently dropping the boost. This is exactly what Wayfinder's `literal_texts`
+// (not filtering by `Occur`) already does today — so there is **no
+// divergence and no bug here**; issue #114 is closed as a corrected premise,
+// not a fix, per this test locking in the confirmed-matching behavior.
+#[tokio::test]
+async fn pf_phrase_over_a_negated_absent_term_loses_its_boost_matching_solr() {
+    let (app, _dir) = edismax_app().await;
+    let (status, body) = common::post_docs(
+        &app,
+        &serde_json::json!([
+            {"id": "nA", "title": "filler", "body": "rocket launch success"},
+            {"id": "nB", "title": "filler", "body": "launch rocket success"}
+        ]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "indexing must succeed, got {body}");
+
+    // Fixtures carry raw Solr BM25 magnitudes and are ground truth only for
+    // which docs match / structural score relationships, never the exact
+    // float (module doc, PRD ratified-divergence 4) -- so this compares
+    // Wayfinder's own two live responses structurally, using the fixtures
+    // only in the doc comment above to state what real Solr showed.
+    let (status_no_neg, body_no_neg) = get(
+        &app,
+        "select?q=rocket+launch&defType=edismax&qf=body&pf=body&fl=id,score&fq=id:(nA+OR+nB)&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status_no_neg,
+        StatusCode::OK,
+        "no-negation request: {body_no_neg}"
+    );
+    let scores_no_neg = scores_by_id(&body_no_neg);
+    let na_no_neg = scores_no_neg["nA"];
+    let nb_no_neg = scores_no_neg["nB"];
+    assert!(
+        na_no_neg > nb_no_neg + score_tolerance(),
+        "without negation, pf=body must boost nA (adjacent \"rocket launch\") above nB \
+         (non-adjacent \"launch rocket\"): {scores_no_neg:?}"
+    );
+
+    let (status_neg, body_neg) = get(
+        &app,
+        "select?q=rocket+launch+-zzznonexistent&defType=edismax&qf=body&pf=body&fl=id,score&fq=id:(nA+OR+nB)&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status_neg,
+        StatusCode::OK,
+        "with-negation request: {body_neg}"
+    );
+    let scores_neg = scores_by_id(&body_neg);
+    assert!(
+        (scores_neg["nA"] - scores_neg["nB"]).abs() <= score_tolerance(),
+        "once a negated clause is present, pf's boost must vanish entirely (nA and nB score \
+         equally, matching real Solr's own behavior), got {scores_neg:?}"
+    );
+}
+
 #[tokio::test]
 async fn edismax_basic_matches_committed_fixture() {
     let (app, _dir) = edismax_app().await;
@@ -1010,6 +1088,8 @@ async fn fixture_names_referenced_by_this_file_all_exist_in_the_manifest() {
         "edismax_mm_3",
         "edismax_mm_conditional",
         "edismax_qf_partial_invalid",
+        "edismax_pf_negation_isolated",
+        "edismax_pf_negation_with_absent_negated_term",
     ] {
         let _ = fixture(name);
     }

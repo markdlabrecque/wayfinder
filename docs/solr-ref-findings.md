@@ -1401,3 +1401,23 @@ fragment" to be different answers at all.
     up front via `field_target` (the same static-before-dynamic resolution `resolve_field_weights`
     itself uses, so a `qf` naming only a dynamic field, issue #84, is unaffected) before falling
     through to the existing empty-resolution 400 for a `qf` naming *only* undefined fields.
+
+## Finding from issue #114 (`pf` and a negated clause)
+
+87. **Issue #114's premise -- that `pf` "presumably" should exclude a negated (`-term`) clause's
+    text from the phrase it builds -- is wrong; real Solr does exactly what Wayfinder already
+    does.** Confirmed by a one-off capture against a query with a negated clause for a term
+    absent from every doc (`-zzznonexistent`): `pf`'s boost, present and correctly favoring the
+    adjacent-phrase doc without the negation (`edismax_pf_negation_isolated.json`,
+    nA=2.03014/nB=1.01507), vanishes completely once the negation is added
+    (`edismax_pf_negation_with_absent_negated_term.json`, nA=1.01507/nB=1.01507 -- identical to
+    the unboosted score `nB` already carries in the isolated capture, i.e. the boost vanished
+    entirely). The scoreboard is consistent with real Solr's own `pf` folding the negated
+    clause's text into the phrase it builds, the same as Wayfinder's `literal_texts`
+    (unconditional on `Occur`) does today: a phrase containing a term that can never appear in
+    any matching doc can never match, silently dropping the boost. (The capture doesn't observe
+    Solr's internal parsed query directly -- `debugQuery=true` would settle that for one more
+    curl -- but for a single-term `pf` with no `pf2`/`pf3`, "folds the term in" and "skips pf
+    entirely" are observationally indistinguishable, and `pf2`/`pf3` are out of PRD v1 scope.)
+    This is not a Wayfinder-specific bug -- no production code change was made. Locked in by
+    `pf_phrase_over_a_negated_absent_term_loses_its_boost_matching_solr` (`tests/edismax.rs`).
