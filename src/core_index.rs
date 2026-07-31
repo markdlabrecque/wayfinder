@@ -1069,21 +1069,6 @@ impl CoreIndex {
         bq: &[String],
         boost: Option<f32>,
     ) -> Result<Box<dyn Query>, QueryError> {
-        // `*:*` is special-cased exactly like the plain parser (`parse_query`
-        // above): Tantivy 0.26's own grammar parses it as
-        // `UserInputLeaf::Exists { field: "*" }`, which without this
-        // short-circuit falls into this function's per-leaf `_` arm and 400s
-        // as an undefined field (`*` is not a real field). Real Solr returns
-        // every doc for `q=*:*&defType=edismax`, same as under the lucene
-        // parser.
-        if q.trim() == "*:*" {
-            return Ok(Box::new(AllQuery));
-        }
-
-        let default_field = self.wf_schema.field(default_field_name).ok_or_else(|| {
-            QueryError::Internal(format!("unknown default field `{default_field_name}`"))
-        })?;
-
         // Real Solr 400s if *any* named `qf` field is undefined, even when
         // other fields in the same `qf` are valid (issue #111) -- unlike
         // `pf`'s own unknown-field leniency (finding 8), which this does not
@@ -1093,6 +1078,11 @@ impl CoreIndex {
         // Must use `field_target` (static-before-dynamic), not a raw
         // `wf_schema.field` lookup -- a `qf` naming only a dynamic field
         // (issue #84) is valid and must not 400 here.
+        //
+        // This runs *before* the `*:*` short-circuit below (issue #112):
+        // Solr validates `qf` regardless of the query shape, so
+        // `q=*:*&qf=nosuchfield` 400s just as a term query would. Returning
+        // `AllQuery` first made an invalid `qf` silently 200.
         if !qf.trim().is_empty() {
             for (name, _) in edismax::parse_field_weights(qf) {
                 if self.field_target(&name).is_none() {
@@ -1102,6 +1092,22 @@ impl CoreIndex {
                 }
             }
         }
+
+        // `*:*` is special-cased exactly like the plain parser (`parse_query`
+        // above): Tantivy 0.26's own grammar parses it as
+        // `UserInputLeaf::Exists { field: "*" }`, which without this
+        // short-circuit falls into this function's per-leaf `_` arm and 400s
+        // as an undefined field (`*` is not a real field). Real Solr returns
+        // every doc for `q=*:*&defType=edismax`, same as under the lucene
+        // parser. A valid (or absent) `qf` is irrelevant to the result here —
+        // every doc matches — so nothing below this point needs to run.
+        if q.trim() == "*:*" {
+            return Ok(Box::new(AllQuery));
+        }
+
+        let default_field = self.wf_schema.field(default_field_name).ok_or_else(|| {
+            QueryError::Internal(format!("unknown default field `{default_field_name}`"))
+        })?;
 
         let qf_fields = self.resolve_field_weights(qf, default_field_name);
         if qf_fields.is_empty() {

@@ -1068,6 +1068,94 @@ async fn qf_naming_one_undefined_field_among_valid_ones_400s() {
     );
 }
 
+#[tokio::test]
+async fn star_query_with_undefined_qf_field_still_400s() {
+    // Captured Solr fact (`edismax_qf_star_unknown` fixture): real Solr
+    // validates `qf` before ever looking at whether `q` is `*:*` -- an
+    // undefined `qf` field 400s regardless of the query shape. Issue #112:
+    // Wayfinder's `q.trim() == "*:*"` short-circuit in
+    // `parse_edismax_query` returns `AllQuery` before the `qf`
+    // field-validation loop (added for issue #111) ever runs, so today this
+    // incorrectly 200s with all docs instead of 400ing.
+    //
+    // Per `tests/error_shapes.rs`'s documented narrow contract, only the 400
+    // status and standard error envelope shape are asserted -- `error.msg`
+    // is free text (Solr's is a Java exception string; Wayfinder's is not)
+    // and is never compared verbatim.
+    let (app, _dir) = edismax_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&defType=edismax&qf=nosuchfield&fl=id&wt=json",
+    )
+    .await;
+    let expected = fixture("edismax_qf_star_unknown");
+    let want_code = expected["error"]["code"]
+        .as_i64()
+        .expect("fixture has error.code");
+
+    assert_eq!(
+        status.as_u16() as i64,
+        want_code,
+        "q=*:* with an undefined qf field must 400, not short-circuit to AllQuery: {body}"
+    );
+    assert_eq!(body["error"]["code"].as_i64(), Some(want_code));
+    assert!(
+        body["error"]["msg"].as_str().is_some_and(|s| !s.is_empty()),
+        "error.msg must be present and non-empty (never compared verbatim): {body}"
+    );
+    let metadata = body["error"]["metadata"]
+        .as_array()
+        .expect("error.metadata must be a flat array");
+    assert!(
+        metadata.iter().any(|v| v == "error-class")
+            && metadata.iter().any(|v| v == "root-error-class"),
+        "error.metadata must carry the same key shape as Solr's (values not compared): {body}"
+    );
+}
+
+#[tokio::test]
+async fn star_query_with_partially_invalid_qf_still_400s() {
+    // Captured Solr fact (`edismax_qf_star_partial_invalid` fixture): same
+    // `q=*:*` short-circuit bug (issue #112) as the test above, but for the
+    // partially-valid `qf` shape issue #111 fixed for non-`*:*` queries --
+    // `qf=title+nosuchfield` still 400s on the undefined name alone, even
+    // with `q=*:*` and even though `title` in the same `qf` is valid.
+    //
+    // Per `tests/error_shapes.rs`'s documented narrow contract, only the 400
+    // status and standard error envelope shape are asserted -- `error.msg`
+    // is free text (Solr's is a Java exception string; Wayfinder's is not)
+    // and is never compared verbatim.
+    let (app, _dir) = edismax_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&defType=edismax&qf=title+nosuchfield&fl=id&wt=json",
+    )
+    .await;
+    let expected = fixture("edismax_qf_star_partial_invalid");
+    let want_code = expected["error"]["code"]
+        .as_i64()
+        .expect("fixture has error.code");
+
+    assert_eq!(
+        status.as_u16() as i64,
+        want_code,
+        "q=*:* with a partially-invalid qf must still 400 on the undefined name: {body}"
+    );
+    assert_eq!(body["error"]["code"].as_i64(), Some(want_code));
+    assert!(
+        body["error"]["msg"].as_str().is_some_and(|s| !s.is_empty()),
+        "error.msg must be present and non-empty (never compared verbatim): {body}"
+    );
+    let metadata = body["error"]["metadata"]
+        .as_array()
+        .expect("error.metadata must be a flat array");
+    assert!(
+        metadata.iter().any(|v| v == "error-class")
+            && metadata.iter().any(|v| v == "root-error-class"),
+        "error.metadata must carry the same key shape as Solr's (values not compared): {body}"
+    );
+}
+
 // --- a captured Solr fact this file assumes, made explicit -----------------
 
 #[tokio::test]
@@ -1090,6 +1178,8 @@ async fn fixture_names_referenced_by_this_file_all_exist_in_the_manifest() {
         "edismax_qf_partial_invalid",
         "edismax_pf_negation_isolated",
         "edismax_pf_negation_with_absent_negated_term",
+        "edismax_qf_star_unknown",
+        "edismax_qf_star_partial_invalid",
     ] {
         let _ = fixture(name);
     }

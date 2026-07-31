@@ -1421,3 +1421,21 @@ fragment" to be different answers at all.
     entirely" are observationally indistinguishable, and `pf2`/`pf3` are out of PRD v1 scope.)
     This is not a Wayfinder-specific bug -- no production code change was made. Locked in by
     `pf_phrase_over_a_negated_absent_term_loses_its_boost_matching_solr` (`tests/edismax.rs`).
+
+## Finding from issue #112 (`qf` naming validation under `q=*:*`)
+
+88. **`qf` naming validation is independent of `q`'s shape — even `q=*:*`, which short-circuits
+    to a match-everything query with no field lookups at all, still 400s on an invalid `qf`.**
+    Confirmed by two one-off captures (same schema as the #111 capture above, not re-run through
+    `capture.sh`): `edismax_qf_star_unknown.json` (`qf=nosuchfield` alone) and
+    `edismax_qf_star_partial_invalid.json` (`qf=title+nosuchfield`, partially valid) both 400
+    against real Solr with the same underlying Java exception shape as finding 84's capture, even
+    though the query itself is `q=*:*`. Before this fix, `parse_edismax_query`'s `*:*`
+    short-circuit (added to special-case Tantivy's `Exists { field: "*" }` parse of `*:*`, see
+    finding elsewhere in this doc) returned `AllQuery` before the `qf`-validation loop added for
+    issue #111 ever ran, so an invalid `qf` under `q=*:*` silently 200d instead of 400ing. The fix
+    moves that existing validation loop (`src/core_index.rs`, `parse_edismax_query`) to run
+    *before* the `*:*` short-circuit, not after — the short-circuit itself, and the
+    `resolve_field_weights(...).is_empty()`/`default_field` lookups, still run after it and are
+    unaffected. Checked directly by `star_query_with_undefined_qf_field_still_400s` and
+    `star_query_with_partially_invalid_qf_still_400s` in `tests/edismax.rs`.
