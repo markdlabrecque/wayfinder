@@ -82,8 +82,10 @@ replaced. `capture.sh` and finding 82 retain the same reproducible provenance.
 ## Full handoff gate
 
 Initial gate: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
-passed. The final review-round full gate is blocked as recorded below after the narrowed
-marker-state and built-in-name-reservation fixes.
+passed. After the narrow review-cap fixes, the test writer replaced one immediately invoked
+closure with an equivalent lexical block to satisfy `clippy::redundant_closure_call`; behavior
+was unchanged. The final Orchestrator-run invocation of the same full command passed completely,
+including `schema_layer` 37/37 and `edismax` 31/31.
 
 ## Review follow-up evidence
 
@@ -92,13 +94,15 @@ marker-state and built-in-name-reservation fixes.
   `cargo test --test schema_layer custom_field_type_cannot_shadow_the_builtin_text_en_preset`
   passed (1 test).
 - `cargo test --test schema_layer` passed all 37 tests.
-- The required full command, `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`,
-  is currently blocked by `clippy::redundant_closure_call` in the checkpointed test at
-  `tests/schema_layer.rs:335-338`; no production change can affect that lint and no test was edited.
+- Final `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` passed with
+  no formatting, lint, unit, integration, hermetic differential, or doc-test failures.
 
 ## Review and CI
 
-Review round 1 found the analyzed-dynamic migration gap, built-in-name shadowing hole, and
-provisioning ordering risk. The narrowed follow-up persists a legacy-dynamic marker state and
-reserves the built-in name; final gate evidence is recorded below. CI remains pending; no PR was
-opened or pushed.
+Two independent review rounds were completed. Round 1 found the analyzed-dynamic migration gap,
+internal-tokenizer override hole, stale comments, and provisioning-order risk; those were fixed.
+Round 2 reached the enforced review cap after finding that raw-only legacy dynamic adoption could
+falsely certify the old catch-all and that a custom field type could shadow built-in `text_en`.
+The narrow post-cap fixes persist a distinct legacy-dynamic marker state and reserve the built-in
+name. Focused regressions and the full gate pass; no third review was performed and no known code
+follow-up remains. CI is pending and must pass before merge.
