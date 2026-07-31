@@ -16,7 +16,9 @@
 //! (issue #94, PRD §5 v2.5) — Wayfinder's own surface, not Solr's, rendered
 //! from the same in-process core state — and `GET /ui/query` the query tester
 //! over it (issue #127), which runs its queries through `select` itself
-//! rather than a second query path. See `crate::admin_ui`.
+//! rather than a second query path, and `GET /ui/schema` a read-only view of
+//! the core's schema (issue #128), served from the `WayfinderSchema` the core
+//! is running on rather than a fresh read of the TOML. See `crate::admin_ui`.
 
 mod admin_ui;
 mod collector;
@@ -237,7 +239,11 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
         .route("/ui", get(core_ui))
         // Query tester (issue #127) — same reasoning as `/ui` above, and
         // deliberately a thin wrapper: `query_ui` calls `select` itself.
-        .route("/ui/query", get(query_ui));
+        .route("/ui/query", get(query_ui))
+        // Schema view (issue #128) — read-only, and served from the
+        // `WayfinderSchema` already on `AppState.index`, so there is no
+        // second schema-parsing path to keep in sync with `schema::load`.
+        .route("/ui/schema", get(schema_ui));
 
     // Test-only, never in a default/release build (#39): a route that always
     // panics, so `tests/panic_recovery.rs` can exercise the real router's
@@ -311,6 +317,37 @@ async fn core_ui(State(state): State<Arc<AppState>>) -> Response {
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("failed to render the admin UI: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /ui/schema` — the admin UI's schema view (issue #128, PRD §5 v2.5).
+///
+/// Renders the core's declared fields (name, type, and the
+/// `stored`/`fast`/`multi_valued`/`required` flags), its dynamic-field rules,
+/// and its copy-field pairs, straight off the in-process `WayfinderSchema`
+/// `CoreIndex::open` loaded at startup — the same struct
+/// `schema::check_compatible` validates against. Re-reading the TOML per
+/// request would introduce a second parsing path that could disagree with the
+/// index actually being served.
+///
+/// Read-only: no params, no form, no mutation route. A render failure is a
+/// bug in a compile-time-checked template, so it surfaces as a plain 500,
+/// same as `/ui`.
+async fn schema_ui(State(state): State<Arc<AppState>>) -> Response {
+    let wf_schema = &state.index.wf_schema;
+    let html = admin_ui::render_schema_page(
+        &state.core_name,
+        &wf_schema.fields,
+        &wf_schema.dynamic_fields,
+        &wf_schema.copy_fields,
+    );
+    match html {
+        Ok(body) => Html(body).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to render the schema view: {e}"),
         )
             .into_response(),
     }

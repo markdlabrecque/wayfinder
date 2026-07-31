@@ -15,7 +15,14 @@
 //! only *renders* it — the query is executed by `crate::select` itself (see
 //! `crate::query_ui`), so there is no second query-parsing/execution path to
 //! keep in sync with the wire API.
+//!
+//! Issue #128 adds the third page, `GET /ui/schema`: a read-only view of the
+//! core's fields, dynamic-field rules, and copy-field pairs, rendered from the
+//! in-process `WayfinderSchema` the core was opened with. As with the query
+//! tester, there is no second parsing path — the page shows what the running
+//! index is actually using, not what the TOML on disk says now.
 
+use crate::schema::{CopyFieldConfig, DynamicFieldConfig, FieldConfig};
 use askama::Template;
 use serde_json::Value;
 
@@ -139,6 +146,40 @@ pub fn render_query_page(
         has_result,
         result_status,
         result_json,
+    }
+    .render()
+}
+
+#[derive(Template)]
+#[template(path = "schema.html")]
+struct SchemaPage<'a> {
+    core_name: &'a str,
+    fields: &'a [FieldConfig],
+    dynamic_fields: &'a [DynamicFieldConfig],
+    copy_fields: &'a [CopyFieldConfig],
+}
+
+/// Renders the schema view page.
+///
+/// Every value comes from the `WayfinderSchema` the core already holds in
+/// memory (loaded once by `CoreIndex::open`) — the schema TOML is never read
+/// again to serve this page, so the view cannot drift from the schema the
+/// running index actually uses, and cannot fail on a file that moved after
+/// startup.
+///
+/// Read-only, like the core page: nothing here takes a searcher, a writer, or
+/// any request input.
+pub fn render_schema_page(
+    core_name: &str,
+    fields: &[FieldConfig],
+    dynamic_fields: &[DynamicFieldConfig],
+    copy_fields: &[CopyFieldConfig],
+) -> Result<String, askama::Error> {
+    SchemaPage {
+        core_name,
+        fields,
+        dynamic_fields,
+        copy_fields,
     }
     .render()
 }
@@ -335,5 +376,147 @@ mod tests {
     fn html_safe_json_passes_through_a_non_json_body_escaped() {
         let out = html_safe_json("<b>not json</b>");
         assert_eq!(out, "\\u003cb\\u003enot json\\u003c/b\\u003e");
+    }
+
+    fn field(
+        name: &str,
+        type_: &str,
+        stored: bool,
+        fast: bool,
+        multi: bool,
+        req: bool,
+    ) -> FieldConfig {
+        FieldConfig {
+            name: name.to_string(),
+            type_: type_.to_string(),
+            stored,
+            required: req,
+            fast,
+            multi_valued: multi,
+        }
+    }
+
+    /// Every `<td>` cell of every `<tr>` in `html`, in document order.
+    ///
+    /// Lets the assertions below pin *which* value lands in which column
+    /// without pinning whitespace or the surrounding markup, so the table can
+    /// be restyled without rewriting the tests.
+    fn table_rows(html: &str) -> Vec<Vec<String>> {
+        html.split("<tr>")
+            .skip(1)
+            .map(|row| {
+                let row = row.split("</tr>").next().unwrap_or("");
+                row.split("<td>")
+                    .skip(1)
+                    .filter_map(|cell| cell.split("</td>").next())
+                    .map(|cell| cell.trim().to_string())
+                    .collect()
+            })
+            .filter(|cells: &Vec<String>| !cells.is_empty())
+            .collect()
+    }
+
+    fn sample_schema_page() -> String {
+        let fields = vec![
+            field("plain_field", "string", false, false, false, false),
+            field("stored_field", "string", true, false, false, false),
+            field("fast_field", "string", false, true, false, false),
+            field("multi_field", "string", false, false, true, false),
+            field("required_field", "string", false, false, false, true),
+        ];
+        let dynamic_fields = vec![
+            DynamicFieldConfig {
+                pattern: "*_s".to_string(),
+                type_: "string".to_string(),
+                stored: true,
+                fast: true,
+                multi_valued: false,
+            },
+            DynamicFieldConfig {
+                pattern: "*_i".to_string(),
+                type_: "long".to_string(),
+                stored: true,
+                fast: false,
+                multi_valued: false,
+            },
+        ];
+        let copy_fields = vec![CopyFieldConfig {
+            source: "body".to_string(),
+            dest: "body_copy".to_string(),
+        }];
+        render_schema_page("content", &fields, &dynamic_fields, &copy_fields)
+            .expect("template must render")
+    }
+
+    /// Each flag must land in its own column, reflecting that field's real
+    /// value: five fields differing in exactly one flag each, pinned cell by
+    /// cell. `tests/admin_ui_schema_view.rs` only asserts that two such rows
+    /// *differ*, which the differing field names alone already satisfy — this
+    /// is what actually catches a swapped or hardcoded flag column.
+    #[test]
+    fn schema_page_renders_each_field_flag_in_its_own_column() {
+        let html = sample_schema_page();
+        let rows = table_rows(&html);
+        let expected = [
+            ["plain_field", "string", "no", "no", "no", "no"],
+            ["stored_field", "string", "yes", "no", "no", "no"],
+            ["fast_field", "string", "no", "yes", "no", "no"],
+            ["multi_field", "string", "no", "no", "yes", "no"],
+            ["required_field", "string", "no", "no", "no", "yes"],
+        ];
+        for row in expected {
+            assert!(
+                rows.contains(&row.iter().map(|c| c.to_string()).collect::<Vec<_>>()),
+                "expected field row {row:?} in the rendered page; rows: {rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_page_renders_dynamic_rules_with_their_own_type_and_flags() {
+        let html = sample_schema_page();
+        let rows = table_rows(&html);
+        for row in [
+            ["*_s", "string", "yes", "yes", "no"],
+            ["*_i", "long", "yes", "no", "no"],
+        ] {
+            assert!(
+                rows.contains(&row.iter().map(|c| c.to_string()).collect::<Vec<_>>()),
+                "expected dynamic-field row {row:?}; rows: {rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_page_renders_copy_fields_as_source_dest_pairs() {
+        let html = sample_schema_page();
+        let rows = table_rows(&html);
+        assert!(
+            rows.contains(&vec!["body".to_string(), "body_copy".to_string()]),
+            "expected the copy-field pair row; rows: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn schema_page_says_so_when_a_section_is_empty() {
+        let fields = vec![field("id", "string", true, true, false, true)];
+        let html = render_schema_page("content", &fields, &[], &[]).expect("template must render");
+        assert_eq!(
+            html.matches("none declared").count(),
+            2,
+            "both the dynamic-field and copy-field sections must say they are \
+             empty rather than rendering a headerless table; {html}"
+        );
+    }
+
+    /// Field names come from an operator-authored TOML, so they reach the page
+    /// as untrusted text — same escaping contract as the core name.
+    #[test]
+    fn schema_page_escapes_field_names_and_types() {
+        let fields = vec![field("<script>", "<b>", false, false, false, false)];
+        let html = render_schema_page("content", &fields, &[], &[]).expect("template must render");
+        assert!(!html.contains("<script>"), "{html}");
+        assert!(html.contains("&#60;script&#62;"), "{html}");
+        assert!(html.contains("&#60;b&#62;"), "{html}");
     }
 }

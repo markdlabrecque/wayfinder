@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Wayfinder &mdash; schema ({{ core_name }})</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 2rem; }
+      table { border-collapse: collapse; margin-bottom: 2rem; }
+      th, td { text-align: left; padding: 0.25rem 1rem 0.25rem 0; }
+      th { font-weight: 600; }
+      .none { color: #666; font-style: italic; }
+    </style>
+  </head>
+  <body>
+    <h1>Wayfinder</h1>
+    <h2>Schema &mdash; core {{ core_name }}</h2>
+
+    <h3>Fields</h3>
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">Field</th>
+          <th scope="col">Type</th>
+          <th scope="col">Stored</th>
+          <th scope="col">Fast</th>
+          <th scope="col">Multi-valued</th>
+          <th scope="col">Required</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for field in fields %}
+        <tr>
+          <td>{{ field.name }}</td>
+          <td>{{ field.type_ }}</td>
+          <td>{% if field.stored %}yes{% else %}no{% endif %}</td>
+          <td>{% if field.fast %}yes{% else %}no{% endif %}</td>
+          <td>{% if field.multi_valued %}yes{% else %}no{% endif %}</td>
+          <td>{% if field.required %}yes{% else %}no{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <h3>Dynamic fields</h3>
+    {% if dynamic_fields.is_empty() %}
+    <p class="none">none declared</p>
+    {% else %}
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">Pattern</th>
+          <th scope="col">Type</th>
+          <th scope="col">Stored</th>
+          <th scope="col">Fast</th>
+          <th scope="col">Multi-valued</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for rule in dynamic_fields %}
+        <tr>
+          <td>{{ rule.pattern }}</td>
+          <td>{{ rule.type_ }}</td>
+          <td>{% if rule.stored %}yes{% else %}no{% endif %}</td>
+          <td>{% if rule.fast %}yes{% else %}no{% endif %}</td>
+          <td>{% if rule.multi_valued %}yes{% else %}no{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+    <h3>Copy fields</h3>
+    {% if copy_fields.is_empty() %}
+    <p class="none">none declared</p>
+    {% else %}
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">Source</th>
+          <th scope="col">Destination</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for copy in copy_fields %}
+        <tr>
+          <td>{{ copy.source }}</td>
+          <td>{{ copy.dest }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </body>
+</html>
