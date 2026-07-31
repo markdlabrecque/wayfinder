@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Required for the merge queue: GitHub builds each queued PR against the
+  # speculative merged state and runs checks under this event. Without it the
+  # required checks never report and every queued PR times out.
+  merge_group:
   workflow_dispatch:
 
 env:
