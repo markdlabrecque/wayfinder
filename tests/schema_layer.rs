@@ -14,6 +14,7 @@ mod common;
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
+use tantivy::Index;
 use tempfile::TempDir;
 use wayfinder::schema;
 
@@ -81,6 +82,22 @@ fn write_schema(toml: &str) -> (TempDir, std::path::PathBuf) {
     (dir, path)
 }
 
+/// Materializes an index produced before #51's analyzer-contract marker
+/// existed. It has the ordinary persisted schema snapshot and Tantivy schema,
+/// but intentionally no new marker file.
+fn create_pre_analyzer_contract_index(dir: &std::path::Path, toml: &str) {
+    let schema_path = dir.join("schema.toml");
+    std::fs::write(&schema_path, toml).expect("write legacy schema");
+    let wf_schema = schema::load(&schema_path).expect("legacy schema loads");
+    let data_dir = dir.join("data");
+    std::fs::create_dir_all(&data_dir).expect("create legacy data dir");
+    let _legacy_index = Index::builder()
+        .schema(wf_schema.tantivy_schema)
+        .create_in_dir(&data_dir)
+        .expect("create legacy Tantivy index");
+    std::fs::write(schema::snapshot_path(&data_dir), toml).expect("write legacy schema snapshot");
+}
+
 // --- dynamic field matching -------------------------------------------------
 
 #[test]
@@ -145,12 +162,12 @@ fn text_presets_tokenize_as_expected() {
     let (_dir, path) = write_schema(FULL_SCHEMA_TOML);
     let wf = schema::load(&path).expect("schema loads");
 
-    // text_en: lowercased and stemmed.
+    // Solr-compatible text_en: lowercase, remove English stopwords, then stem.
     assert_eq!(
         wf.tokenize("text_en", "The Quick Runners")
             .expect("text_en preset"),
-        vec!["the", "quick", "runner"],
-        "text_en must lowercase and stem"
+        vec!["quick", "runner"],
+        "text_en must drop English stopwords before stemming remaining tokens"
     );
 
     // text_general: lowercased, NOT stemmed.
@@ -174,6 +191,227 @@ fn text_presets_tokenize_as_expected() {
         vec!["The Quick Runners"],
         "keyword must behave like string"
     );
+}
+
+#[test]
+fn pre_analyzer_contract_text_en_index_refuses_startup_requiring_reindex() {
+    let dir = TempDir::new().expect("temp dir");
+    create_pre_analyzer_contract_index(dir.path(), FULL_SCHEMA_TOML);
+
+    let err = common::app_with_schema(dir.path(), FULL_SCHEMA_TOML)
+        .expect_err("a pre-marker index with text_en data must require reindexing");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("text_en") && msg.to_lowercase().contains("reindex"),
+        "legacy text_en refusal must identify the analyzer and require reindexing, got: {msg}"
+    );
+}
+
+#[test]
+fn pre_analyzer_contract_dynamic_text_index_refuses_startup_requiring_reindex() {
+    let dynamic_text = FULL_SCHEMA_TOML
+        .replace(
+            r#"name = "title"
+type = "text_en""#,
+            r#"name = "title"
+type = "text_general""#,
+        )
+        .replace(
+            r#"name = "body"
+type = "text_en""#,
+            r#"name = "body"
+type = "text_general""#,
+        );
+    let dir = TempDir::new().expect("temp dir");
+    create_pre_analyzer_contract_index(dir.path(), &dynamic_text);
+
+    let err = common::app_with_schema(dir.path(), &dynamic_text)
+        .expect_err("a pre-marker dynamic text catch-all must require reindexing");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("text_en") && msg.to_lowercase().contains("reindex"),
+        "legacy dynamic-text refusal must identify text_en and require reindexing, got: {msg}"
+    );
+}
+
+#[test]
+fn pre_analyzer_contract_raw_static_and_dynamic_schema_is_adopted() {
+    let raw_only = r#"
+[core]
+name = "raw-content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+
+[[fields]]
+name = "body"
+type = "string"
+stored = true
+
+[[fields]]
+name = "category"
+type = "keyword"
+stored = true
+
+[[dynamic_fields]]
+pattern = "*_s"
+type = "string"
+stored = true
+
+[[dynamic_fields]]
+pattern = "*_k"
+type = "keyword"
+stored = true
+"#;
+    let dir = TempDir::new().expect("temp dir");
+    create_pre_analyzer_contract_index(dir.path(), raw_only);
+
+    let _ = common::app_with_schema(dir.path(), raw_only)
+        .expect("a pre-marker schema with only raw static and dynamic fields must be adopted");
+}
+
+#[test]
+fn legacy_dynamic_text_identity_cannot_be_adopted_then_reused_for_analyzed_rules() {
+    // A pre-#51 raw-only dynamic schema is safe to adopt, even though its
+    // unused `_dynamic_text` catch-all still names Tantivy's old `en_stem`
+    // tokenizer. That adoption must not bless the old identity with a v1
+    // marker: a later compatible rule edit that begins using the catch-all
+    // must require a reindex.
+    let raw_only = r#"
+[core]
+name = "legacy-raw-dynamic"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+
+[[fields]]
+name = "body"
+type = "string"
+stored = true
+
+[[dynamic_fields]]
+pattern = "*_s"
+type = "string"
+stored = true
+"#;
+    let dir = TempDir::new().expect("temp dir");
+    let schema_path = dir.path().join("schema.toml");
+    std::fs::write(&schema_path, raw_only).expect("write legacy schema");
+    let current = schema::load(&schema_path).expect("raw-only dynamic schema loads");
+    let legacy_schema_json = serde_json::to_string(&current.tantivy_schema)
+        .expect("serialize current Tantivy schema")
+        .replace("wayfinder_text_en_v1", "en_stem");
+    assert!(
+        legacy_schema_json.contains("_dynamic_text")
+            && legacy_schema_json.contains("en_stem")
+            && !legacy_schema_json.contains("wayfinder_text_en_v1"),
+        "test setup: materialize the old `_dynamic_text` tokenizer identity"
+    );
+    let materialize_legacy = |root: &std::path::Path| {
+        std::fs::write(root.join("schema.toml"), raw_only).expect("write legacy schema");
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).expect("create legacy data dir");
+        let legacy_index = Index::builder()
+            .schema(
+                serde_json::from_str(&legacy_schema_json).expect("legacy Tantivy schema parses"),
+            )
+            .create_in_dir(&data_dir)
+            .expect("create legacy Tantivy index");
+        std::fs::write(schema::snapshot_path(&data_dir), raw_only).expect("write legacy snapshot");
+        drop(legacy_index);
+    };
+    materialize_legacy(dir.path());
+    let marker = dir.path().join("data/wayfinder-analyzer-contract");
+    {
+        let _app = common::app_with_schema(dir.path(), raw_only)
+            .expect("an unused legacy dynamic-text catch-all is safe to adopt");
+    }
+    assert!(
+        marker.is_file(),
+        "test setup: safe adoption must write its analyzer-contract marker"
+    );
+
+    let future_dir = TempDir::new().expect("future temp dir");
+    materialize_legacy(future_dir.path());
+    std::fs::copy(
+        marker,
+        future_dir.path().join("data/wayfinder-analyzer-contract"),
+    )
+    .expect("copy falsely written v1 marker");
+
+    let now_analyzed = raw_only.replace(
+        r#"pattern = "*_s"
+type = "string""#,
+        r#"pattern = "*_s"
+type = "text_general""#,
+    );
+    assert_ne!(
+        now_analyzed, raw_only,
+        "test setup: the compatible dynamic rule edit must begin using `_dynamic_text`"
+    );
+    let err = common::app_with_schema(future_dir.path(), &now_analyzed).expect_err(
+        "a v1 marker written during raw-only adoption must not bless legacy _dynamic_text data",
+    );
+    assert!(
+        format!("{err:#}").to_lowercase().contains("reindex"),
+        "legacy _dynamic_text identity must refuse startup with a reindex error, got: {err:#}"
+    );
+}
+
+#[test]
+fn pre_analyzer_contract_analyzed_dynamic_rules_always_refuse_startup() {
+    // Dynamic values all pass through `_dynamic_text`, whose tokenizer changed
+    // for #51, regardless of the user-facing dynamic rule's declared type.
+    let without_static_text_en = FULL_SCHEMA_TOML.replace("text_en", "text_general");
+    let dynamic_rule = r#"pattern = "*_txt_i"
+type = "text_general""#;
+    let schema_with_dynamic_type = |type_name: &str| {
+        without_static_text_en.replace(
+            dynamic_rule,
+            &format!(
+                r#"pattern = "*_txt_i"
+type = "{type_name}""#
+            ),
+        )
+    };
+    let custom = format!(
+        r#"{}
+[[field_types]]
+name = "custom_lowercase"
+tokenizer = "simple"
+[[field_types.filters]]
+kind = "lowercase"
+"#,
+        schema_with_dynamic_type("custom_lowercase")
+    );
+
+    for (type_name, toml) in [
+        ("text_general", schema_with_dynamic_type("text_general")),
+        ("text_de", schema_with_dynamic_type("text_de")),
+        ("custom_lowercase", custom),
+    ] {
+        let dir = TempDir::new().expect("temp dir");
+        create_pre_analyzer_contract_index(dir.path(), &toml);
+
+        let err = common::app_with_schema(dir.path(), &toml).expect_err(&format!(
+            "a pre-marker index with a `{type_name}` dynamic rule must require reindexing"
+        ));
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("text_en") && msg.to_lowercase().contains("reindex"),
+            "legacy `{type_name}` dynamic-rule refusal must identify text_en and require reindexing, got: {msg}"
+        );
+    }
 }
 
 #[test]
@@ -237,6 +475,43 @@ language = "english"
             .expect("custom field type must be registered"),
         vec!["quick", "runner"],
         "custom chain must lowercase, drop stopwords, then stem"
+    );
+}
+
+#[test]
+fn custom_field_type_cannot_shadow_the_builtin_text_en_preset() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "text_en"
+tokenizer = "simple"
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path)
+        .expect_err("a custom field type must not shadow the built-in text_en preset");
+    assert!(
+        format!("{err:#}").contains("text_en"),
+        "built-in-preset shadowing error must identify text_en: {err:#}"
+    );
+}
+
+#[test]
+fn custom_field_type_cannot_use_the_internal_text_en_tokenizer_identity() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "wayfinder_text_en_v1"
+tokenizer = "simple"
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path).expect_err(
+        "a custom field type must not overwrite Wayfinder's internal text_en tokenizer",
+    );
+    assert!(
+        format!("{err:#}").contains("wayfinder_text_en_v1"),
+        "reserved tokenizer-name error must identify the rejected custom field type: {err:#}"
     );
 }
 

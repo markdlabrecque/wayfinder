@@ -110,14 +110,11 @@ skips must expire" rule rather than relaxing the fixture-derived assertions.
 Filed for the out-of-scope engine divergence, then corrected to the accurate root cause after
 round 1. Contains:
 
-- **4 known-divergence test guards** (doc-order flips on near-ties): `edismax_basic`,
-  `edismax_score_baseline`, `edismax_boost_multiplicative`, `edismax_operators_required` — all
-  caused by `text_en` not stripping stopwords (PRD open question 5, already scoped out of v1),
-  which shifts per-field average document length and flips the relative BM25 order of two
-  near-tied docs. Fix is the same as the pre-existing `pf` equal-score divergence: add stopword
-  stripping to `text_en` at index time. Not fixable at query time / inside edismax's own scope.
-- **`pf` scoring equality broken by the same divergence**: `pA`/`pB` score unequally in
-  Wayfinder (2.778 vs 2.358) where real Solr scores them equal, for the same avgdl reason.
+- **Resolved by #51:** the four temporary known-divergence guards (`edismax_basic`,
+  `edismax_score_baseline`, `edismax_boost_multiplicative`, `edismax_operators_required`) and
+  the `pf` equal-score mismatch came from `text_en` retaining stopwords, which shifted per-field
+  average document length. #51's index-time stopword removal restores the fixture orders and
+  equal `pA`/`pB` scores; the guards were replaced with normal fixture assertions.
 - **Unfixtured edge cases**, listed for future work, none blocking #7:
   - `pf` can build a phrase over a negated (`-term`) clause — `literal_texts` doesn't filter by
     `Occur`.

@@ -1343,32 +1343,29 @@ fragment" to be different answers at all.
     which is why it was implemented that way; confirming it needs another capture.
 
     The same capture's control row `hl_fragsize_small_truncated.json`
-    (`hl.method=original&hl.fragsize=40`) is a **ratified divergence**, not a bug in the above:
-    Solr's fragment is `"<em>quick</em> prototype notes from"` (ends at offset 26) and
-    Wayfinder's is `"<em>quick</em> prototype notes from the"` (ends at 30). Both sides apply the
-    same boundary rule — first token whose end offset reaches `hl.fragsize` starts a new fragment,
-    and `engineering` ends at 42 — and differ only because Solr's `text_en` strips the English
-    stopword `the` (27..30) while Wayfinder's deliberately does not (PRD open question 5's
-    resolution: presets stem but do not strip stopwords). Recorded in
-    `tests/differential.rs`'s `ACCEPTED_DIVERGENCES` with a self-expiring guard that asserts the
-    stopword asymmetry still holds on both sides.
+    (`hl.method=original&hl.fragsize=40`) is a normal compatibility row after issue #51:
+    built-in `text_en` now strips the English stopword `the` (27..30) before stemming, so
+    Wayfinder and Solr both end the fragment at `"<em>quick</em> prototype notes from"` (offset
+    26). The temporary accepted-divergence waiver was removed and the row now uses the ordinary
+    differential assertion.
 
 ## Finding from the issue #109 in-query term boost capture
 
 82. **`q=rocket^5` under `defType=edismax` is an exact multiplier on that term's own score
     contribution, scoped to the leaf it decorates — not a whole-query multiplier like `boost=`.**
-    Captured against the existing edismax corpus (`wayfinder-solr-7`'s `eA`-`eD` docs, one-off
-    re-derivation, not re-run through `capture.sh`): every `eA`-`eD` score in
-    `edismax_term_boost.json` (`q=rocket^5`) is exactly 5x `edismax_score_baseline.json`'s
-    (`q=rocket`) — `eC`: 0.43481556 -> 2.174078, `eB`: 0.35816115 -> 1.7908058, `eD`:
-    0.23778328 -> 1.1889164, `eA`: 0.17657174 -> 0.8828587. A second capture (`q=rocket^5
-    mission`, not committed as a fixture since it only confirms scoping, not a new fact) showed
-    `eB` (matching only `rocket`) scaled by the same exact 5x while `eC`/`eD` (matching both
-    terms) did not scale uniformly, confirming the boost applies to the `rocket` leaf alone and
-    not the composed query. Before this fix, `flatten_edismax_clauses` discarded
-    `UserInputAst::Boost`'s weight entirely (the same weight the plain, non-edismax `parse_query`
-    path already honors via `build_ast`'s own `UserInputAst::Boost` arm), so `q=rocket^5` had no
-    scoring effect at all under edismax.
+    Issue #51 reverified this on 2026-07-30 in a clean isolated `solr:9` container using the
+    exact edismax schema/corpus and two same-container requests. `q=rocket` returned
+    `eC/eD/eB/eA` at `0.871532/0.72299594/0.71525735/0.5274755`; `q=rocket^5` returned the
+    same order at exactly 5x: `4.3576603/3.6149795/3.5762868/2.6373773`. That evidence corrected
+    the stale one-off `edismax_term_boost.json` fixture without rerunning `capture.sh`; its
+    temporary captures remain outside the repository. A second capture (`q=rocket^5 mission`,
+    not committed as a fixture since it only confirms scoping, not a new fact) showed `eB`
+    (matching only `rocket`) scaled by the same exact 5x while `eC`/`eD` (matching both terms)
+    did not scale uniformly, confirming the boost applies to the `rocket` leaf alone and not the
+    composed query. Before this fix, `flatten_edismax_clauses` discarded `UserInputAst::Boost`'s
+    weight entirely (the same weight the plain, non-edismax `parse_query` path already honors via
+    `build_ast`'s own `UserInputAst::Boost` arm), so `q=rocket^5` had no scoring effect at all
+    under edismax.
 
 ## Finding from issue #110 (`boost=<function-query>`)
 
