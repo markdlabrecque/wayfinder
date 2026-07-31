@@ -559,7 +559,7 @@ impl CoreIndex {
         // empty data directory, so directory existence alone must never turn
         // a fresh index into a legacy one.
         let has_snapshot = snapshot.exists();
-        let previous_uses_changed_analyzer_path = if has_snapshot {
+        let (previous_uses_changed_analyzer_path, previous_has_dynamic_fields) = if has_snapshot {
             let previous = std::fs::read_to_string(&snapshot)
                 .with_context(|| format!("reading stored schema {}", snapshot.display()))?;
             schema::check_compatible(&previous, &schema_toml).with_context(|| {
@@ -568,11 +568,14 @@ impl CoreIndex {
                     data_dir.display()
                 )
             })?;
-            schema::parse(&previous)
-                .context("parsing the index's stored schema for its analyzer contract")?
-                .uses_changed_analyzer_path()
+            let previous_schema = schema::parse(&previous)
+                .context("parsing the index's stored schema for its analyzer contract")?;
+            (
+                previous_schema.uses_changed_analyzer_path(),
+                previous_schema.has_dynamic_fields(),
+            )
         } else {
-            false
+            (false, false)
         };
 
         // `text_en` changed its index-time semantics in analyzer contract v1.
@@ -588,12 +591,27 @@ impl CoreIndex {
                     analyzer_contract.display()
                 )
             })?;
-            if persisted.trim() != schema::ANALYZER_CONTRACT {
-                bail!(
-                    "the index in {} has unsupported analyzer contract `{}`; reindex into a fresh data directory",
-                    data_dir.display(),
-                    persisted.trim()
-                );
+            match persisted.trim() {
+                schema::ANALYZER_CONTRACT => {}
+                // A raw-only dynamic pre-v1 index is safe to open, but its
+                // unused `_dynamic_text` schema still names `en_stem`. Do not
+                // let a compatible rule edit begin using that old catch-all.
+                schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT
+                    if wf_schema.uses_changed_analyzer_path()
+                        || previous_uses_changed_analyzer_path =>
+                {
+                    bail!(
+                        "the index in {} predates the Solr-compatible text_en/_dynamic_text analyzer contract; reindex into a fresh data directory",
+                        data_dir.display()
+                    );
+                }
+                schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT => {}
+                other => {
+                    bail!(
+                        "the index in {} has unsupported analyzer contract `{other}`; reindex into a fresh data directory",
+                        data_dir.display()
+                    );
+                }
             }
         } else if has_snapshot
             && (wf_schema.uses_changed_analyzer_path() || previous_uses_changed_analyzer_path)
@@ -608,9 +626,16 @@ impl CoreIndex {
         // marker-write failure now leaves no newly-created versioned index
         // behind, so a retry cannot mistake it for a pre-contract index. A
         // real legacy index has a snapshot and was rejected above before any
-        // marker write; an unaffected legacy index is safe to adopt.
+        // marker write; an unaffected legacy index is safe to adopt. A legacy
+        // dynamic schema retains a distinct state because its unused
+        // `_dynamic_text` catch-all still carries the old `en_stem` identity.
         if !analyzer_contract.exists() {
-            std::fs::write(&analyzer_contract, schema::ANALYZER_CONTRACT).with_context(|| {
+            let marker = if has_snapshot && previous_has_dynamic_fields {
+                schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT
+            } else {
+                schema::ANALYZER_CONTRACT
+            };
+            std::fs::write(&analyzer_contract, marker).with_context(|| {
                 format!(
                     "writing analyzer contract marker {}",
                     analyzer_contract.display()

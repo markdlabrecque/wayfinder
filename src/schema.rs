@@ -77,6 +77,10 @@ const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v1";
 /// it lets startup identify pre-contract indexes before their old tokenizer
 /// identity can be adopted.
 pub const ANALYZER_CONTRACT: &str = "text_en_stopwords_v1";
+/// A safely adopted pre-v1 index whose unused `_dynamic_text` catch-all still
+/// has Tantivy's old `en_stem` identity. It is not full v1 certification: a
+/// later rule that starts writing analyzed dynamic values must reindex.
+pub const ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT: &str = "text_en_stopwords_v1_legacy_dynamic_text";
 
 #[derive(Debug, Deserialize)]
 struct SchemaFile {
@@ -254,6 +258,13 @@ impl WayfinderSchema {
                     Ok(ResolvedType::Text { .. })
                 )
             })
+    }
+
+    /// Whether this schema has the `_dynamic_text` catch-all. Before analyzer
+    /// contract v1, every dynamic schema created it with Tantivy's `en_stem`,
+    /// even if all configured rules were raw.
+    pub fn has_dynamic_fields(&self) -> bool {
+        !self.dynamic_fields.is_empty()
     }
 
     /// Which catch-all JSON field a dynamic rule's values live in.
@@ -561,13 +572,14 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     {
         bail!("field `{VERSION_FIELD}` is reserved for Wayfinder's internal version field");
     }
-    if parsed
+    if let Some(field_type) = parsed
         .field_types
         .iter()
-        .any(|field_type| field_type.name == TEXT_EN_TOKENIZER)
+        .find(|field_type| field_type.name == "text_en" || field_type.name == TEXT_EN_TOKENIZER)
     {
         bail!(
-            "field type `{TEXT_EN_TOKENIZER}` is reserved for Wayfinder's internal text_en analyzer"
+            "field type `{}` is reserved for Wayfinder's built-in text_en analyzer",
+            field_type.name
         );
     }
     let tokenizers = build_tokenizers(&parsed.field_types)?;

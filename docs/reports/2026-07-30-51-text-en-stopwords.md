@@ -14,11 +14,13 @@ analyzer order. Custom chains and non-English presets are unchanged.
   fast-field tokenizer manager required by Tantivy JSON fields.
 - Added `wayfinder-analyzer-contract`. A pre-marker index with static built-in `text_en`, or any
   analyzed dynamic rule sharing `_dynamic_text`, refuses startup with a fresh-data-directory
-  reindex error; pre-marker indexes without either changed analyzer path are adopted and marked.
-  The marker is written before opening/creating Tantivy data, so a marker-write failure cannot
-  leave a fresh versioned index looking legacy on retry.
-- Reserved `wayfinder_text_en_v1` against custom `[[field_types]]` names, preventing an operator
-  from replacing built-in `text_en`'s analyzer identity.
+  reindex error. A raw-only legacy dynamic schema remains adoptable but receives a distinct
+  legacy-dynamic state, rather than full v1 certification; a later compatible rule edit that
+  starts using its old `en_stem` catch-all therefore requires reindexing. The marker is written
+  before opening/creating Tantivy data, so a marker-write failure cannot leave a fresh versioned
+  index looking legacy on retry.
+- Reserved both `text_en` and `wayfinder_text_en_v1` against custom `[[field_types]]` names,
+  preventing operators from shadowing the built-in preset or replacing its analyzer identity.
 - Removed the now-obsolete `hl_fragsize_small_truncated` analyzer waiver so it uses the ordinary
   differential assertion.
 
@@ -70,19 +72,33 @@ replaced. `capture.sh` and finding 82 retain the same reproducible provenance.
   `['the', 'quick', 'runner']` versus expected `['quick', 'runner']`; restored.
 - Mutation: bypassed the pre-marker refusal; `pre_analyzer_contract_text_en_index_refuses_startup_requiring_reindex`
   failed because startup returned an app; restored.
-- Review-round targeted green: `cargo test --test schema_layer && cargo test --test edismax`
-  passed 35 and 31 tests. The schema regressions cover `text_general`, non-English, and custom
-  analyzed dynamic rules; raw static/dynamic legacy adoption; and rejection of a custom analyzer
-  named `wayfinder_text_en_v1`.
+- Review-round targeted green: the two focused regressions
+  `legacy_dynamic_text_identity_cannot_be_adopted_then_reused_for_analyzed_rules` and
+  `custom_field_type_cannot_shadow_the_builtin_text_en_preset` passed; then
+  `cargo test --test schema_layer` passed all 37 tests. The schema regressions cover
+  `text_general`, non-English, and custom analyzed dynamic rules; raw static/dynamic legacy
+  adoption; and rejection of custom analyzers named `text_en` or `wayfinder_text_en_v1`.
 
 ## Full handoff gate
 
 Initial gate: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
-passed. After review-round fixes, the exact same full gate passed again: fmt clean, strict clippy
-clean, and every suite passed with zero failures (including 43 unit, 31 edismax, 35 schema-layer,
-and 27 differential tests).
+passed. The final review-round full gate is blocked as recorded below after the narrowed
+marker-state and built-in-name-reservation fixes.
+
+## Review follow-up evidence
+
+- `cargo test --test schema_layer legacy_dynamic_text_identity_cannot_be_adopted_then_reused_for_analyzed_rules`
+  passed (1 test), and
+  `cargo test --test schema_layer custom_field_type_cannot_shadow_the_builtin_text_en_preset`
+  passed (1 test).
+- `cargo test --test schema_layer` passed all 37 tests.
+- The required full command, `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`,
+  is currently blocked by `clippy::redundant_closure_call` in the checkpointed test at
+  `tests/schema_layer.rs:335-338`; no production change can affect that lint and no test was edited.
 
 ## Review and CI
 
-Review round 1 found the analyzed-dynamic migration gap, reserved-name hole, and provisioning
-ordering risk; all were fixed and re-gated above. CI remains pending; no PR was opened or pushed.
+Review round 1 found the analyzed-dynamic migration gap, built-in-name shadowing hole, and
+provisioning ordering risk. The narrowed follow-up persists a legacy-dynamic marker state and
+reserves the built-in name; final gate evidence is recorded below. CI remains pending; no PR was
+opened or pushed.

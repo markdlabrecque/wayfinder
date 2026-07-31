@@ -332,10 +332,10 @@ stored = true
     };
     materialize_legacy(dir.path());
     let marker = dir.path().join("data/wayfinder-analyzer-contract");
-    (|| {
+    {
         let _app = common::app_with_schema(dir.path(), raw_only)
             .expect("an unused legacy dynamic-text catch-all is safe to adopt");
-    })();
+    }
     assert!(
         marker.is_file(),
         "test setup: safe adoption must write its analyzer-contract marker"
