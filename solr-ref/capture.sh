@@ -2314,3 +2314,38 @@ capx omit_header_update_error_true POST "$CORE/update?omitHeader=true&wt=json" '
 #    bind the complete balanced `(+"quick" +"fox")` expression and return 200.
 # curl -sg 'http://localhost:8994/solr/content/select?q=(%7B!edismax+qf%3D%27title+body%27%7D(%2B%22quick%22+%2B%22fox%22))&df=id&debugQuery=true&fl=id&sort=id+asc&wt=json' \
 #   -o solr-ref/responses/edismax_shape_b_debug_nested_paren.json
+# --- boolean param parsing (issue #187) -------------------------------------
+# Captured 2026-08-01 against a one-off `solr:9` container on port 8996
+# (`wayfinder-solr-187`, removed afterwards), with the tracer-bullet schema and
+# five-document corpus from the start of this script recreated verbatim. Only
+# these requests were run; this script was NOT re-run wholesale.
+#
+# The issue's premise is wrong. Solr 9's `StrUtils.parseBool` does NOT accept
+# `1`/`0`/`t`/`f`/`y`; those are a 400. What it does, on the lowercased value:
+#   true  if it starts with `true`, `on` or `yes`   (so `truestuff` is true)
+#   false if it starts with `false` or `off`, or equals `no` exactly
+#         (so `offside` is false but `noo` is a 400)
+#   otherwise 400 `invalid boolean value: <value>`
+# Case-insensitive throughout: `TRUE`, `Yes`, `oN` all parse.
+#
+# Where the error surfaces depends on when the param is read: `facet=1` is read
+# before the base query and yields an error-only envelope, while
+# `facet.missing=nope` is read inside faceting and yields Solr's issue-#35
+# shape -- `response` block alongside `error`.
+#
+# Not captured as a fixture: `omitHeader=1`. Header suppression is decided
+# before the response writer exists, so Solr answers with a Jetty HTML error
+# page, not a JSON envelope. Wayfinder deliberately answers with its ordinary
+# JSON 400 there (documented divergence, see docs/solr-ref-findings.md).
+#
+# Reproduce (after recreating the opening schema/corpus on port 8996):
+# B='select?q=*:*&rows=0&facet=true&facet.field=category'
+# cap bool_facet_missing_upper_true "$B&facet.missing=TRUE&wt=json"
+# cap bool_facet_missing_yes        "$B&facet.missing=yes&wt=json"
+# cap bool_facet_missing_on         "$B&facet.missing=on&wt=json"
+# cap bool_facet_missing_no         "$B&facet.missing=no&wt=json"
+# cap bool_facet_missing_prefix     "$B&facet.missing=truestuff&wt=json"
+# cap bool_facet_missing_invalid    "$B&facet.missing=nope&wt=json"
+# cap bool_facet_on      'select?q=*:*&rows=0&facet=on&facet.field=category&wt=json'
+# cap bool_facet_invalid 'select?q=*:*&rows=0&facet=1&facet.field=category&wt=json'
+# cap bool_omit_header_yes 'select?q=*:*&rows=0&omitHeader=yes&wt=json'
