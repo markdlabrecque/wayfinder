@@ -1582,3 +1582,64 @@ evidence.
     carry a `responseHeader`, so the corpus does not by itself show what `/update` does under
     `omitHeader=true`; see the `ponytail:` on `update_success` in `src/lib.rs`. Nothing in this
     corpus is a 4xx/5xx, so this finding is silent on error envelopes -- that gap is issue #179.
+
+## Findings from issue #139 (`hl.fl=*`, `hl.mergeContiguous`, `hl.requireFieldMatch`)
+
+Claiming findings 94 and 95. No new capture: derived from the already-committed
+`solr-ref/search-api/` trace set and configset, which is why this is an inference from
+existing ground truth rather than a fixture claim.
+
+94. **`hl.fl=*` expands against the *schema's* fields, not the query's `qf`/`df` set, and a
+    field it sweeps up that cannot be analyzed is silently skipped rather than erroring.**
+    Every captured `search_api_solr` search sends
+    `hl=true&hl.fl=*&hl.requireFieldMatch=false&hl.snippets=3&hl.fragsize=0&hl.mergeContiguous=false&hl.simple.pre=[HIGHLIGHT]&hl.simple.post=[/HIGHLIGHT]`;
+    `hl.fl=*` (`hl.fl=%2A`) appears in 19 of the 28 traces. Two things are pinned by the
+    traces themselves:
+    - **Not a `df` fallback.** The traced core's `/select` handler *does* set a `df`, to `id`
+      (`solr-ref/search-api/configset/solrconfig_extra.xml:113`, the `<requestHandler
+      name="/select">` defaults block — note it is *not* in `solrconfig_query.xml`, which is
+      the file it would be natural to look in). A real `df` therefore exists on every one of
+      these requests, and yet no wildcard trace ever keys `highlighting` on `id`: `00002`,
+      `00005`, `00006`, `00007` and `00009` all key it on
+      `tm_X3b_en_body`/`tm_X3b_en_title` only. That is *stronger* evidence than an absent
+      `df` would have been — the fallback candidate is present and still unused — so `hl.fl=*`
+      is resolved before, and independently of, finding 53's `df` default.
+    - **Non-text fields are skipped, not rejected.** `sm_context_tags`
+      (`solr-ref/search-api/configset/schema.xml:161`) is declared `type="strings"
+      stored="true"`, i.e. a genuinely stored `StrField`, and it is present in the returned
+      docs of every wildcard-`hl` trace that returns docs at all (`00002`, `00005`-`00007`,
+      `00009`-`00017`). So Solr's stored-field expansion of `*` demonstrably swept up a
+      non-analyzed field, and every one of those responses is a 200 with no `highlighting`
+      entry for it. An expansion that ran each expanded name through Solr's per-field
+      highlightability check and *rejected* a failure would have had to 400 these requests;
+      none did.
+
+      Care is needed with the other non-text names in these docs: `ss_type`, `its_nid`,
+      `bs_sticky`, `ds_created` and the dynamic `sm_*` fields are all `stored="false"`
+      (`schema.xml:185,187,191,196,202`) and reach `docs` via docValues, so their absence
+      from `highlighting` is already explained by Solr's stored-only expansion set and
+      evidences nothing about non-text handling. The only genuinely stored non-`tm_` fields
+      here are `sm_context_tags`, `id` and `_root_`.
+
+    Note what this bullet does *not* settle: no captured query term ever matches a
+    `sm_context_tags` value, so the corpus shows only that a stored `StrField` in the
+    expansion set does not error — never what Solr would emit for one on a match.
+
+    What the traces **cannot** settle is "every text field" vs. "the query's `qf` set": the
+    only text fields this corpus populates (`tm_X3b_en_body`, `tm_X3b_en_title`) are always
+    also in `qf`, and every `q=*:*` wildcard trace (e.g. `00013`) has no term overlap at all,
+    so each doc's entry is `{}` whichever way `*` resolved. Solr's own implementation decides
+    it: `DefaultSolrHighlighter::getHighlightFields` expands `*` via
+    `SolrPluginUtils.expandWildcardsInField` over field *names*, with no reference to the
+    query. Wayfinder follows that (`src/highlight.rs::highlightable_fields`), narrowed to
+    stored, *analyzed* text fields — see that function's doc comment for the deliberate
+    `StrField` divergence and the dynamic-field ceiling.
+
+95. **`hl.requireFieldMatch=false` and `hl.mergeContiguous=false` are Solr's own documented
+    defaults, so the captured traffic's explicit `false` asks for nothing.** Both are
+    allowlist-only in Wayfinder (`SELECT_PARAMS` in `src/lib.rs`): `src/highlight.rs` applies
+    no field-match filtering and does no fragment merging, so the `false` path is already its
+    unconditional behaviour and there is no knob behind either name. The `true` side of both
+    is unimplemented and, deliberately, unasserted — no captured fixture pins either, and
+    `hl.requireFieldMatch=true` currently produces `false`'s output silently rather than
+    being rejected. Alongside `hl.maxAnalyzedChars`, these remain uncaptured for highlighting.

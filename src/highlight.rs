@@ -47,6 +47,10 @@
 //!   unparseable `hl.fragsize` is unaffected and still falls back as before
 //!   (`DEFAULT_FRAGSIZE` under `hl.method=original`, Tantivy's own 150-char
 //!   default otherwise).
+//! - **issue #139**: `hl.fl` also accepts Solr's `*` wildcard, which expands
+//!   to the schema's highlightable fields and never errors on the non-text
+//!   ones it sweeps up. See `resolve_hl_fl`/`highlightable_fields` below for
+//!   the evidence and the asymmetry between wildcard and explicit fields.
 
 use std::fmt;
 
@@ -102,11 +106,7 @@ pub fn highlighting(
 ) -> Result<Value> {
     // finding 53: `hl.fl` defaults to `df`, not `*`/absent.
     let fl_raw = params.get("hl.fl").unwrap_or(default_field);
-    let fields: Vec<&str> = fl_raw
-        .split(|c: char| c == ',' || c.is_whitespace())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
+    let fields = resolve_hl_fl(&index.wf_schema, fl_raw)?;
 
     let snippets_cap: usize = params
         .get("hl.snippets")
@@ -141,15 +141,6 @@ pub fn highlighting(
 
     let pre = params.get("hl.simple.pre").unwrap_or(DEFAULT_PRE);
     let post = params.get("hl.simple.post").unwrap_or(DEFAULT_POST);
-
-    // Validated once per request, before touching Tantivy at all: an
-    // undefined or non-text `hl.fl` field is a request-input problem (Solr's
-    // own `check_sort` / `facet::check_facetable` precedent), not the kind of
-    // internal failure a genuine `SnippetGenerator`/searcher error would be.
-    for field_name in &fields {
-        check_highlightable(&index.wf_schema, field_name)
-            .map_err(|e| anyhow::Error::new(InvalidHlField(e)))?;
-    }
 
     let mut out = Map::new();
     for &(_, addr) in page {
@@ -186,6 +177,98 @@ pub fn highlighting(
         out.insert(key, Value::Object(per_field));
     }
     Ok(Value::Object(out))
+}
+
+/// Solr's `hl.fl` wildcard: "every highlightable field in the schema".
+const HL_FL_WILDCARD: &str = "*";
+
+/// Splits `hl.fl` into the concrete field list to highlight, expanding the
+/// `*` wildcard (issue #139) and validating every *explicitly named* field.
+///
+/// The two halves are validated differently on purpose, and that asymmetry
+/// is the whole point of this function:
+///
+/// - An **explicitly named** field that is undefined or non-text is a
+///   request-input problem and 400s, exactly as before (`InvalidHlField`,
+///   `check_highlightable`) -- the user asked for something impossible.
+/// - A field the **wildcard** produced is never an error. Real Solr's
+///   `DefaultSolrHighlighter::getHighlightFields` expands `*` against the
+///   *schema's* field names (via `SolrPluginUtils.expandWildcardsInField`),
+///   not against the query's `qf`/`df` set, and a field that comes back from
+///   that expansion but cannot be analyzed simply never produces a snippet
+///   -- indistinguishable on the wire from "no term overlap" (finding 51's
+///   `{}` covers both). Running wildcard-expanded names through
+///   `check_highlightable` would instead 400 any schema that merely
+///   *contains* a non-text field, which is not a shape Solr can produce.
+///   So the wildcard filters down to highlightable fields up front, and the
+///   non-highlightable ones are silently skipped.
+///
+/// Evidence that `*` is not a `df` fallback, from the captured Search API
+/// traffic: the traced core's `/select` handler sets `df` to `id`
+/// (`solr-ref/search-api/configset/solrconfig_extra.xml`), yet every
+/// wildcard trace with snippets keys them on `tm_X3b_en_body`/
+/// `tm_X3b_en_title` and never on `id` (`solr-ref/search-api/trace/`
+/// `00002`, `00005`, `00006`, `00007`, `00009`). Those same responses are
+/// also 200s over docs storing plenty of non-text fields (`ss_type`,
+/// `sm_context_tags`, `its_nid`, ...), none of which appear under
+/// `highlighting` -- which is the silent-skip behaviour above, captured.
+fn resolve_hl_fl<'a>(schema: &'a WayfinderSchema, fl_raw: &'a str) -> Result<Vec<&'a str>> {
+    let mut fields: Vec<&'a str> = Vec::new();
+    for token in fl_raw
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if token == HL_FL_WILDCARD {
+            for name in highlightable_fields(schema) {
+                if !fields.contains(&name) {
+                    fields.push(name);
+                }
+            }
+        } else {
+            // Validated before touching Tantivy at all: Solr's own
+            // `check_sort` / `facet::check_facetable` precedent for telling a
+            // request-input problem from an internal failure.
+            check_highlightable(schema, token)
+                .map_err(|e| anyhow::Error::new(InvalidHlField(e)))?;
+            if !fields.contains(&token) {
+                fields.push(token);
+            }
+        }
+    }
+    Ok(fields)
+}
+
+/// Every statically declared field `*` expands to: stored (highlighting
+/// reads the stored value, so an unstored field could never produce a
+/// snippet) and *analyzed* text. Schema declaration order, matching Solr's
+/// own insertion-ordered expansion set.
+///
+/// `is_raw_string` excludes `string`/`keyword` fields even though they share
+/// `ValueKind::Text` with analyzed types: they are Solr's `StrField`, which
+/// is not analyzed and so contributes no snippet. Excluding them here rather
+/// than letting them fall through to a no-overlap non-result keeps a
+/// `q=category:animals`-style request from emitting a marker-wrapped whole
+/// raw value that no fixture pins.
+///
+/// ponytail: static `[[fields]]` only, and only the bare `*` token --
+/// no `[[dynamic_fields]]` instances and no partial globs (`tm_*`). Real
+/// Solr expands against the field names actually present in the index, so it
+/// would also return dynamic-field instances; Wayfinder stores every dynamic
+/// value in the shared `_dynamic_text`/`_dynamic` catch-alls rather than in
+/// per-name Tantivy fields, so there are no per-instance names for `*` to
+/// resolve to and `CoreIndex::highlight_field` has no handle to address one
+/// with. Lifting that ceiling means per-instance highlight extraction out of
+/// the catch-all, which no captured fixture pins.
+fn highlightable_fields(schema: &WayfinderSchema) -> Vec<&str> {
+    schema
+        .fields
+        .iter()
+        .filter(|f| f.stored)
+        .filter(|f| schema.value_kind(&f.name) == Some(ValueKind::Text))
+        .filter(|f| !schema.is_raw_string(&f.name))
+        .map(|f| f.name.as_str())
+        .collect()
 }
 
 /// Refuses an `hl.fl` field Tantivy cannot highlight, rather than surfacing
