@@ -2001,3 +2001,56 @@ echo "  (docker rm -f $FRAGSIZE_CONTAINER to stop)"
 # capm mlt_json_nl_map_empty_terms 'mlt?q=id:mlt1&mlt.fl=body&mlt.interestingTerms=details&json.nl=map&wt=json'
 # capm mlt_fl_wildcard_score      'mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fl=%2A%2Cscore&wt=json'
 # capm mlt_maxntp_noop            'mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&mlt.maxntp=5000&wt=json'
+
+# --- edismax: phrase-vs-OR and the Shape-B binding rule (issue #147) ---------
+# Two edismax facts rested on documentation and inference rather than on a
+# fixture, which inverts CLAUDE.md's "fixtures are ground truth" contract.
+# Captured 2026-08-01 against a real `solr:9` using the edismax block above
+# verbatim -- same container (`wayfinder-solr-7`, port 8994), same `content`
+# core, same `title`/`body` text_en schema, same 10-doc corpus -- running only
+# these three requests, not this script wholesale.
+#
+# 1. Unquoted multi-token clause: phrase or OR? `q=quick%2Brocket` is a single
+#    clause (`+` is an ordinary term character mid-token in Lucene's
+#    `_TERM_CHAR` set) whose `text_en` analysis yields two tokens, and no
+#    document in the corpus has "quick" and "rocket" adjacent, so the two
+#    readings are distinguishable: a `PhraseQuery` matches 0, a boolean OR
+#    matches 6. Real Solr answered `numFound=6` (eA eB eC eD pA pB), settling
+#    it as the OR reading and confirming `build_field_disjunction` (#137) plus
+#    finding 92's documented-`autoGeneratePhraseQueries`-default inference.
+#    `sort=id+asc` keeps the row safe for the hermetic sweep's exact document
+#    order (PRD ratified-divergence 4 covers BM25 order).
+cape edismax_unquoted_multitoken 'select?q=quick%2Brocket&defType=edismax&qf=title+body&fl=id&sort=id+asc&wt=json'
+#
+# 2/3. The Shape-B inline-nested-query binding rule, with `debugQuery=true`, one
+#    capture per terminator `local_params::bound_token_len` implements. `qf`
+#    names `title`/`body` while `df=id`, so the `parsedquery` says out loud
+#    which clause the `+` bound to.
+#
+#    Deliberately NOT `cape` calls / manifest.tsv rows: Wayfinder emits no
+#    `debug` section at all, so the whole-body hermetic sweep
+#    (`hermetic_edismax_manifest_entries_match_committed_fixtures`) and
+#    `tests/differential.rs` could only pass by widening a normaliser over a
+#    real capability gap. Same deliberate exclusion as
+#    `edismax_qf_partial_invalid` (#111), and
+#    `shape_b_debugquery_captures_back_the_binding_rule_in_findings_90_and_91`
+#    asserts neither appears in either manifest. Checked directly by
+#    `tests/edismax.rs`'s `shape_b_debug_parsedquery_*` tests instead.
+#
+#    Whitespace terminator (trace 00003's shape). Captured:
+#      parsedquery = (+(+DisjunctionMaxQuery((title:quick | body:quick)))) +id:rocket
+#      numFound    = 0
+#    "quick" fanned out over `qf`; "rocket", after the bound run, was resolved
+#    by the outer lucene parser against `df=id` and matches nothing.
+# curl -sg 'http://localhost:8994/solr/content/select?q=(%7B!edismax+qf%3D%27title+body%27%7D%2B%22quick%22+%2B%22rocket%22)&df=id&debugQuery=true&fl=id&sort=id+asc&wt=json' \
+#   -o solr-ref/responses/edismax_shape_b_debug_parsedquery.json
+#
+#    `)`-at-run-local-paren-depth-0 terminator (trace 00006's shape, no
+#    whitespace after `}` anywhere). Captured:
+#      parsedquery = +(+DisjunctionMaxQuery((title:quick | body:quick)))
+#      numFound    = 2 (pA pB)
+#    The `)` closed the outer paren rather than being swallowed into the bound
+#    run: a whitespace-only terminator would have handed the nested parser an
+#    unbalanced `)`, and no `id:` clause came out of it either.
+# curl -sg 'http://localhost:8994/solr/content/select?q=(%7B!edismax+qf%3D%27title+body%27%7D%2B%22quick%22)&df=id&debugQuery=true&fl=id&sort=id+asc&wt=json' \
+#   -o solr-ref/responses/edismax_shape_b_debug_parsedquery_paren_terminated.json

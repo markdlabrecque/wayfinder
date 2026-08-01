@@ -806,6 +806,20 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
         "select.q.plain-query" => {
             probe.number("select?q=quick", "/response/numFound").await == Some(2)
         }
+        // Fixture-derived, per issue #147. `q={!edismax}quick+rocket` is one
+        // unquoted clause (`+` is an ordinary term character mid-token in
+        // Lucene's `_TERM_CHAR` set) analysing to two tokens, so the expected
+        // count turns entirely on whether edismax builds a phrase or a boolean
+        // OR for it. `solr-ref/responses/edismax_unquoted_multitoken.json`
+        // (manifest row `edismax_unquoted_multitoken`, real `solr:9`) answers
+        // that with `numFound=6` over the capture corpus's ten docs -- every
+        // doc carrying *either* token, and zero of them carrying the two
+        // adjacent -- so it is the OR reading. Applied to `PROBE_DOCS`, where
+        // "quick" and "rocket" both occur only in doc1 and doc2, OR gives 2
+        // (the phrase reading would give 0, since neither doc has them
+        // adjacent). This value was previously the speculative `Some(2)`
+        // written in `bb44cc4` (#105) for an entry that could not pass then;
+        // it now traces to the capture, which is what CLAUDE.md requires.
         "select.q.local-params-edismax.and" => {
             probe
                 .number(

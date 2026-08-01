@@ -1455,43 +1455,32 @@ impl CoreIndex {
     /// multi-token clause is an *optional boolean* over its tokens, and only
     /// an explicitly quoted clause becomes a `PhraseQuery`.
     ///
-    /// **That split is documentation-derived, not fixture-derived — say so
-    /// rather than dressing it up (issue #147 closes the gap).** Being exact
-    /// about the authority, because the first version of this comment was not:
+    /// **That split is settled by capture, not by documentation** (issue
+    /// #147). `solr-ref/responses/edismax_unquoted_multitoken.json` — manifest
+    /// row `edismax_unquoted_multitoken`,
+    /// `q=quick%2Brocket&defType=edismax&qf=title+body&sort=id+asc`, taken
+    /// against a real `solr:9` with `capture.sh`'s edismax block schema and
+    /// 10-doc corpus — answers `numFound=6` (`eA eB eC eD pA pB`): every
+    /// document carrying *either* token, and no document in that corpus
+    /// carries the two adjacent. A `PhraseQuery` reading would have matched 0,
+    /// so Solr's answer is the boolean-OR reading this function implements.
+    /// Asserted by
+    /// `tests/edismax.rs::unquoted_multitoken_clause_matches_committed_capture`,
+    /// which reads both `numFound` and the id list out of that fixture.
     ///
-    /// - The reasoning is Solr's documented default for
-    ///   `autoGeneratePhraseQueries`: off for schema `version >= 1.4`.
-    ///   `solr-ref/search-api/configset/schema.xml:52` declares
-    ///   `version="1.6"`, and **no `autoGeneratePhraseQueries` attribute is
-    ///   set anywhere in the configset** — grepping the whole of `solr-ref/`
-    ///   for the name returns exactly one hit, the XML comment at
-    ///   `schema.xml:63` covered next — so the default is what governs.
-    /// - `schema.xml:63`, which this comment used to cite as if it were the
-    ///   setting, is **inside an XML comment** documenting the history of the
-    ///   `version` attribute. Quoting it alone establishes nothing; it is only
-    ///   evidence of what the default *is*, paired with line 52.
-    /// - **No fixture distinguishes phrase from OR.** All 21
-    ///   `defType=edismax` rows in `solr-ref/manifest.tsv` use either a quoted
-    ///   phrase (`q=%22quick+fox%22`) or `+`-as-space single-token clauses
-    ///   (`q=%2Brocket+%2Blaunch`). Finding 74's fixtures, which motivated the
-    ///   original always-`PhraseQuery` behaviour, are all quoted — which is
-    ///   why the distinction went unnoticed until issue #137's
-    ///   `{!edismax}quick+rocket` probe.
-    /// - The only thing asserting the OR behaviour is the
-    ///   `select.q.local-params-edismax.and` coverage probe, whose expected
-    ///   `Some(2)` was authored **speculatively** in `bb44cc4` (#105) as a
-    ///   placeholder for an entry that could not pass then. It has never been
-    ///   validated against real Solr, which is the inverse of this repo's
-    ///   "fixtures are ground truth" contract.
+    /// The capture replaces the reasoning this comment used to rest on — Solr's
+    /// *documented* `autoGeneratePhraseQueries` default (off for schema
+    /// `version >= 1.4`, with `solr-ref/search-api/configset/schema.xml:52`
+    /// declaring `version="1.6"` and the attribute set nowhere in the
+    /// configset). That inference is now corroborated rather than load-bearing;
+    /// finding 92 records it, and findings 90/91 the related binding rule.
+    /// Note for anyone re-deriving it: `schema.xml:63` is **inside an XML
+    /// comment** documenting the `version` attribute's history and establishes
+    /// nothing on its own.
     ///
-    /// Issue #147 owns `capture.sh` and will capture
-    /// `q=quick%2Brocket&defType=edismax&qf=<text field>` plus a
-    /// `debugQuery=true` Shape-B trace to settle both this and the binding
-    /// rule against Solr itself. If Solr contradicts the OR reading, this is a
-    /// bug to fix here, not a fixture to normalise away.
-    /// `tests/local_params.rs::phrase_vs_or_is_still_unsettled_by_capture` is
-    /// the expiring guard: it fails once those fixtures land, so this comment
-    /// cannot outlive the evidence gap it describes.
+    /// The `select.q.local-params-edismax.and` coverage probe's expectation is
+    /// derived from this fixture too, having been a speculative placeholder
+    /// from `bb44cc4` (#105) until issue #147.
     fn build_field_disjunction(
         &self,
         phrase_text: &str,

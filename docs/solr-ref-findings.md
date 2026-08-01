@@ -1508,7 +1508,22 @@ fragment" to be different answers at all.
     is irrelevant to that: the block is never at position 0 anyway. A lucene inline nested
     query binds only the **next run of characters** after `}`; everything after that run is
     parsed by the outer lucene parser against `df`, which here is `id` and matches nothing.
-    All seven captured Shape-B traces fit that model and only that model:
+    Solr says so itself: issue #147 captured the parse tree with `debugQuery=true`, in a
+    container using `capture.sh`'s edismax block schema/corpus with `qf=title body` against
+    `df=id` so the parsed query names the field each token resolved through.
+    `solr-ref/responses/edismax_shape_b_debug_parsedquery.json`
+    (`q=({!edismax qf='title body'}+"quick" +"rocket")`) parses to
+    `(+(+DisjunctionMaxQuery((title:quick | body:quick)))) +id:rocket` -- only the bound run
+    reached the nested edismax query, and `+"rocket"` after it went to the outer lucene parser
+    against `df=id`, matching nothing.
+    `solr-ref/responses/edismax_shape_b_debug_parsedquery_paren_terminated.json`
+    (`q=({!edismax qf='title body'}+"quick")`) parses to
+    `+(+DisjunctionMaxQuery((title:quick | body:quick)))`, `numFound=2` (`pA pB`). Neither is a
+    `manifest.tsv` row -- Wayfinder emits no `debug` section, so the whole-body sweeps could only
+    pass by widening a normaliser over a real capability gap (same exclusion as
+    `edismax_qf_partial_invalid`, #111); the commands are commented at the end of
+    `solr-ref/capture.sh`. All seven captured Shape-B traces fit that model and only that model,
+    which is how the rule was originally derived:
 
     | trace | text after `}` | numFound | under the model |
     |---|---|---|---|
@@ -1530,7 +1545,14 @@ fragment" to be different answers at all.
 91. **The bound run's terminators are whitespace *or* an unbalanced `)`, not whitespace
     alone.** Every captured Shape-B `q` wraps the whole query in `(...)`, so trace 00006's
     `({!edismax ...}+"quick")` has no whitespace after the bound run at all -- binding purely
-    on whitespace swallows the closing paren and the query fails to parse. `"` is *not* a
+    on whitespace swallows the closing paren and the query fails to parse. Confirmed directly by
+    issue #147's `debugQuery=true` capture of that shape,
+    `solr-ref/responses/edismax_shape_b_debug_parsedquery_paren_terminated.json`: real Solr
+    answers 200 with `parsedquery` `+(+DisjunctionMaxQuery((title:quick | body:quick)))` and no
+    `df=id` clause, i.e. the `)` closed the query's opening paren and contributed no clause of its
+    own -- so the terminator is Solr's behaviour, not an inference from `numFound`. The whitespace
+    half has its own capture, `solr-ref/responses/edismax_shape_b_debug_parsedquery.json`
+    (see finding 90). `"` is *not* a
     terminator: every captured bound run is a quoted phrase, optionally `+`-prefixed, and the
     quotes belong to the nested query's own text. This is what
     `local_params::bound_token_len` implements. Note the whitespace terminator applies at
@@ -1541,23 +1563,31 @@ fragment" to be different answers at all.
     `src/local_params.rs`'s module doc rather than guessed at.
 
 92. **`autoGeneratePhraseQueries` defaults to *off*, so an unquoted string that analyzes to
-    several tokens is a boolean OR over those tokens, not a phrase query.** **Documentation-
-    derived, not captured — issue #147 settles it.** The configset never *sets* the attribute:
-    `solr-ref/search-api/configset/schema.xml:52` declares `version="1.6"`, and grepping the
-    whole of `solr-ref/` for `autoGeneratePhraseQueries` returns exactly one hit — the XML
-    comment quoted just below — so Solr's documented default for `version >= 1.4` (off)
-    governs. That one hit -- `schema.xml:63`, "autoGeneratePhraseQueries attribute introduced
+    several tokens is a boolean OR over those tokens, not a phrase query.** **Settled by
+    capture (issue #147).** `solr-ref/responses/edismax_unquoted_multitoken.json` -- manifest row
+    `edismax_unquoted_multitoken`, `q=quick%2Brocket&defType=edismax&qf=title+body&sort=id+asc`,
+    against a real `solr:9` with `capture.sh`'s edismax block schema and 10-doc corpus -- answers
+    `numFound=6` (`eA eB eC eD pA pB`): every document carrying *either* token, and no document in
+    that corpus carries the two adjacent, so a phrase reading would have matched 0. The two
+    readings are therefore distinguished, and Solr chose OR.
+    `tests/edismax.rs::unquoted_multitoken_clause_matches_committed_capture` reads both `numFound`
+    and the id list out of that fixture, and the
+    `select.q.local-params-edismax.and` coverage probe -- whose expected `Some(2)` was authored
+    speculatively in `bb44cc4` (#105) -- now derives its expectation from it (OR over `PROBE_DOCS`,
+    where "quick" and "rocket" occur only in doc1 and doc2, gives 2; a phrase reading would give
+    0). Before the capture this finding rested on Solr's *documented* default: the configset never
+    *sets* the attribute, `solr-ref/search-api/configset/schema.xml:52` declares `version="1.6"`,
+    and grepping the whole of `solr-ref/` for `autoGeneratePhraseQueries` returns exactly one hit
+    — the XML comment quoted next — so the documented default for `version >= 1.4` (off) governs.
+    That inference is now corroborated rather than load-bearing. That one hit -- `schema.xml:63`,
+    "autoGeneratePhraseQueries attribute introduced
     to drive QueryParser behavior when a single string produces multiple tokens. Defaults to off
     for version >= 1.4" -- is **inside an XML comment** documenting the history of the
     `version` attribute, and is the line this finding used to be quoted as resting on: it
     evidences what the default is, it is not a setting, and citing it alone establishes nothing.
-    No fixture distinguishes phrase from OR: all 21 `defType=edismax` rows in
-    `solr-ref/manifest.tsv` use either a quoted phrase or `+`-as-space single-token clauses, and
-    the only assertion of the OR behaviour is the `select.q.local-params-edismax.and` coverage
-    probe, whose expected `Some(2)` was authored speculatively in `bb44cc4` (#105). Issue #147
-    captures `q=quick%2Brocket&defType=edismax&qf=<text field>` to answer it from Solr;
-    `tests/local_params.rs::phrase_vs_or_is_still_unsettled_by_capture` fails once that fixture
-    exists, so this finding cannot outlive the gap. This matters because `+` and `-` are
+    Note the 21 pre-#147 `defType=edismax` rows in `solr-ref/manifest.tsv` all use either a quoted
+    phrase or `+`-as-space single-token clauses, which is why the distinction went unnoticed until
+    issue #137's `{!edismax}quick+rocket` probe. This matters because `+` and `-` are
     ordinary term characters *mid-token* in Lucene's
     `_TERM_CHAR` set, so `quick+rocket` is **one** clause whose analysis yields two terms --
     not two clauses. Wayfinder's `build_field_disjunction` previously made a `PhraseQuery`

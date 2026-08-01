@@ -1457,3 +1457,387 @@ async fn hermetic_edismax_manifest_entries_match_committed_fixtures() {
         failures.join("\n")
     );
 }
+
+// --- issue #147: the two facts that rest on inference, not capture ----------
+//
+// `build_field_disjunction` (#137) makes an unquoted multi-token clause a
+// boolean OR rather than a `PhraseQuery`, and `local_params::bound_token_len`
+// (#137) binds an inline `{!edismax}` to the next run only. Neither is backed
+// by a fixture today: the first rests on Solr's *documented*
+// `autoGeneratePhraseQueries` default (finding 92, explicitly flagged
+// documentation-derived), the second on consistency with seven captured
+// `numFound` values rather than on Solr's own parse tree (findings 90/91).
+// CLAUDE.md's compatibility contract says fixtures are ground truth and
+// expected values never come from what the implementation happens to produce,
+// so both gaps are contract violations with an issue attached.
+//
+// The two tests below are the fixture-derived assertions. They are red until
+// issue #147's captures land, and they read every expected value out of the
+// fixture -- no number in this section was written by looking at Wayfinder.
+
+/// Fixture answering "does an unquoted multi-token edismax clause build a
+/// phrase or an OR?". `q=quick%2Brocket` is *one* clause (`+` is an ordinary
+/// term character mid-token in Lucene's `_TERM_CHAR` set) whose `text_en`
+/// analysis yields two tokens, so Solr's answer separates the two readings:
+/// a phrase can only match a document with "quick rocket" adjacent, an OR
+/// matches every document carrying either token.
+const UNQUOTED_MULTITOKEN_FIXTURE: &str = "edismax_unquoted_multitoken";
+
+/// The request the fixture above must be captured from. Deliberately
+/// `sort=id+asc`: without it the response order is BM25 order, which diverges
+/// between Tantivy and Solr by a permanently-ratified margin (PRD
+/// ratified-divergence 4), and this fixture is about *which* documents match,
+/// not their ranking. Also what keeps it safe as a `manifest.tsv` row for
+/// `hermetic_edismax_manifest_entries_match_committed_fixtures`, which compares
+/// document order exactly for a row carrying no `score`.
+const UNQUOTED_MULTITOKEN_PATH: &str =
+    "select?q=quick%2Brocket&defType=edismax&qf=title+body&fl=id&sort=id+asc&wt=json";
+
+/// Fixture recording Solr's own parse tree for the Shape-B inline nested query
+/// (`solr-ref/search-api/trace/00003.json`'s shape), captured with
+/// `debugQuery=true`. `qf` names `title`/`body` while `df` names `id`, exactly
+/// the split the captured `/select` handler defaults have
+/// (`solr-ref/search-api/configset/solrconfig_extra.xml:110-118`: `df=id`), so
+/// the parsed query says out loud which clause the `+` bound to: under
+/// "bind the next run" only `"quick"` reaches the `qf` fan-out and `"rocket"`
+/// is resolved by the outer lucene parser against `df`; under any
+/// "bind the whole remainder" reading `"rocket"` fans out over `qf` too and
+/// never touches `df`.
+const SHAPE_B_DEBUG_FIXTURE: &str = "edismax_shape_b_debug_parsedquery";
+
+/// The request `SHAPE_B_DEBUG_FIXTURE` must be captured from. Not a
+/// `manifest.tsv` row: Wayfinder implements no `debug` section, so the
+/// whole-body sweep would compare a `debug` key that cannot exist. Same
+/// deliberate exclusion as `edismax_qf_partial_invalid` (issue #111) -- the
+/// exact command belongs in `capture.sh` as a comment instead.
+const SHAPE_B_DEBUG_PATH: &str = "select?q=(%7B!edismax+qf%3D%27title+body%27%7D%2B%22quick%22+%2B%22rocket%22)&df=id&debugQuery=true&fl=id&sort=id+asc&wt=json";
+
+/// The decoded `q` of `SHAPE_B_DEBUG_PATH`, i.e. what `debug.rawquerystring`
+/// must echo back. Checking it is what makes the fixture self-identifying:
+/// a `parsedquery` is only evidence about the binding rule if it is the parse
+/// of *this* query.
+const SHAPE_B_DEBUG_Q: &str = "({!edismax qf='title body'}+\"quick\" +\"rocket\")";
+
+/// Second `debugQuery=true` Shape-B fixture, for the *other* terminator in the
+/// rule `local_params::bound_token_len` implements.
+///
+/// `SHAPE_B_DEBUG_FIXTURE` above only ever evidences the **whitespace**
+/// terminator: in trace 00003's shape the bound run `+"quick"` ends at a space.
+/// Finding 91 claims a second terminator — a `)` at run-local paren depth 0 —
+/// and that half is what trace 00006's shape (`({!edismax ...}+"quick")`, the
+/// whole `q` parenthesised with no whitespace after the run at all) exercises.
+/// Without this capture the `)` half of findings 90/91 stays inferred from
+/// `numFound` alone, which is the thing issue #147 exists to stop.
+const SHAPE_B_DEBUG_PAREN_FIXTURE: &str = "edismax_shape_b_debug_parsedquery_paren_terminated";
+
+/// The request `SHAPE_B_DEBUG_PAREN_FIXTURE` must be captured from. Excluded
+/// from `manifest.tsv` for the same reason as `SHAPE_B_DEBUG_PATH`.
+const SHAPE_B_DEBUG_PAREN_PATH: &str = "select?q=(%7B!edismax+qf%3D%27title+body%27%7D%2B%22quick%22)&df=id&debugQuery=true&fl=id&sort=id+asc&wt=json";
+
+/// The decoded `q` of `SHAPE_B_DEBUG_PAREN_PATH`.
+const SHAPE_B_DEBUG_PAREN_Q: &str = "({!edismax qf='title body'}+\"quick\")";
+
+fn fixture_file(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("solr-ref/responses")
+        .join(format!("{name}.json"))
+}
+
+/// Loads a fixture that issue #147 must capture, failing with the exact
+/// command to run rather than a bare "No such file".
+fn require_capture(name: &str, path_and_query: &str) -> Value {
+    let file = fixture_file(name);
+    let raw = std::fs::read_to_string(&file).unwrap_or_else(|e| {
+        panic!(
+            "issue #147's capture is missing: {file} ({e}).\n\
+             Capture it against a real `solr:9` running `solr-ref/capture.sh`'s edismax block \
+             schema and 10-doc corpus (container `wayfinder-solr-7`, port 8994, core `content`, \
+             fields `title`/`body`), append the block at the END of capture.sh per CLAUDE.md, and \
+             do NOT re-run capture.sh wholesale:\n\
+             \n  \
+             curl -sg 'http://localhost:8994/solr/content/{path_and_query}' \\\n    \
+             -o solr-ref/responses/{name}.json\n",
+            file = file.display(),
+        )
+    });
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse fixture {}: {e}", file.display()))
+}
+
+fn num_found(envelope: &Value) -> u64 {
+    envelope
+        .pointer("/response/numFound")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("response.numFound must be a number in {envelope}"))
+}
+
+/// `numFound` and the matching document ids for an unquoted multi-token
+/// edismax clause come from Solr, not from Wayfinder.
+///
+/// Red until `solr-ref/responses/edismax_unquoted_multitoken.json` exists. If
+/// Solr's answer turns out to be the *phrase* reading, this test fails with a
+/// real divergence: per CLAUDE.md that is a bug in `build_field_disjunction`
+/// to fix, not an assertion to relax or a fixture to normalise.
+#[tokio::test]
+async fn unquoted_multitoken_clause_matches_committed_capture() {
+    // The capture only separates phrase from OR if the corpus it was taken
+    // against has the two tokens present but never adjacent. Assert that on
+    // the transcribed corpus first, so a future corpus edit cannot quietly
+    // turn this fixture into one that both readings satisfy.
+    let corpus = edismax_corpus();
+    let docs = corpus.as_array().expect("corpus is an array");
+    let text = |doc: &Value, field: &str| {
+        doc.get(field)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    };
+    let mut with_quick = 0usize;
+    let mut with_rocket = 0usize;
+    for doc in docs {
+        for field in ["title", "body"] {
+            let value = text(doc, field);
+            assert!(
+                !value.contains("quick rocket"),
+                "`{field}` of {doc} has \"quick\" and \"rocket\" adjacent, so a `PhraseQuery` and \
+                 a boolean OR would both match it and the capture stops discriminating"
+            );
+            if value
+                .split_whitespace()
+                .any(|w| w.trim_matches('.') == "quick")
+            {
+                with_quick += 1;
+            }
+            if value
+                .split_whitespace()
+                .any(|w| w.trim_matches('.') == "rocket")
+            {
+                with_rocket += 1;
+            }
+        }
+    }
+    assert!(
+        with_quick > 0 && with_rocket > 0,
+        "the corpus must carry both tokens for the capture to discriminate; saw quick in \
+         {with_quick} field(s), rocket in {with_rocket}"
+    );
+
+    // The request replayed against Wayfinder is the one `manifest.tsv` records
+    // as captured, not a string retyped here -- if the two disagree the
+    // fixture is not evidence about this request at all.
+    let row = load_manifest(&manifest_path())
+        .into_iter()
+        .find(|e| e.name == UNQUOTED_MULTITOKEN_FIXTURE)
+        .unwrap_or_else(|| {
+            panic!(
+                "solr-ref/manifest.tsv has no `{UNQUOTED_MULTITOKEN_FIXTURE}` row. Issue #147 owns \
+                 capture.sh/manifest.tsv: append\n  \
+                 cape {UNQUOTED_MULTITOKEN_FIXTURE} '{UNQUOTED_MULTITOKEN_PATH}'\n\
+                 at the END of capture.sh's edismax section so the capture is reproducible and \
+                 swept by hermetic_edismax_manifest_entries_match_committed_fixtures."
+            )
+        });
+    assert_eq!(
+        row.path, UNQUOTED_MULTITOKEN_PATH,
+        "the captured request must be the unquoted-multi-token one this test reasons about \
+         (a literal `+` mid-token, `%2B`, not `+`-as-space)"
+    );
+    assert_eq!(row.status, 200, "real Solr answers this request 200");
+
+    let expected = require_capture(UNQUOTED_MULTITOKEN_FIXTURE, &row.path);
+    let (app, _dir) = edismax_app().await;
+    let (status, actual) = get(&app, &row.path).await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(
+        num_found(&actual),
+        num_found(&expected),
+        "numFound for `{path}` must equal real Solr's. Solr matched {solr} document(s), Wayfinder \
+         {wf}. If Solr matched none while Wayfinder matched several, Solr built a `PhraseQuery` \
+         for the unquoted multi-token clause and `build_field_disjunction`'s boolean-OR reading \
+         (finding 92, documentation-derived) is wrong -- fix the implementation and escalate, do \
+         not relax this assertion.\nSolr: {expected}\nWayfinder: {actual}",
+        path = row.path,
+        solr = num_found(&expected),
+        wf = num_found(&actual),
+    );
+    assert_eq!(
+        ordered_ids(&actual),
+        ordered_ids(&expected),
+        "the matching document ids (in `sort=id asc` order, so BM25 divergence cannot enter) must \
+         be exactly Solr's"
+    );
+}
+
+/// Solr's own `parsedquery` for a Shape-B inline nested query must show the
+/// `+` binding only the next run -- the rule `local_params::bound_token_len`
+/// implements and findings 90/91 record from `numFound` consistency alone.
+///
+/// Asserted structurally, not by string equality against a guessed
+/// `parsedquery`: which field each token was resolved against is the property
+/// that separates "bind the next run" from "bind the whole remainder", and it
+/// survives any rendering difference in how Lucene prints a disjunction.
+#[tokio::test]
+async fn shape_b_debug_parsedquery_shows_the_plus_binding_only_the_next_run() {
+    let expected = require_capture(SHAPE_B_DEBUG_FIXTURE, SHAPE_B_DEBUG_PATH);
+
+    let raw = expected
+        .pointer("/debug/rawquerystring")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            panic!(
+                "fixture `{SHAPE_B_DEBUG_FIXTURE}` must be captured with `debugQuery=true` -- \
+                 there is no `debug.rawquerystring` in it: {expected}"
+            )
+        });
+    assert_eq!(
+        raw, SHAPE_B_DEBUG_Q,
+        "the capture must be the parse of the Shape-B query this test reasons about \
+         (trace 00003's shape, with `qf` naming fields `df` does not)"
+    );
+
+    let parsed = expected
+        .pointer("/debug/parsedquery")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            panic!("fixture `{SHAPE_B_DEBUG_FIXTURE}` has no `debug.parsedquery`: {expected}")
+        });
+
+    // The bound run did reach the edismax nested query: "quick" fanned out
+    // over both `qf` fields.
+    for field in ["title", "body"] {
+        assert!(
+            parsed.contains(&format!("{field}:quick")),
+            "`{field}:quick` is absent from Solr's parsedquery, so the `+\"quick\"` run never \
+             reached the `{{!edismax qf='title body'}}` nested query at all: {parsed}"
+        );
+    }
+    // ...and nothing after that run did: "rocket" never fanned out over `qf`.
+    for field in ["title", "body"] {
+        assert!(
+            !parsed.contains(&format!("{field}:rocket")),
+            "`{field}:rocket` is present in Solr's parsedquery, so the inline nested query bound \
+             more than the next run -- `local_params::bound_token_len` and findings 90/91 are \
+             wrong about the binding rule, and that is an implementation bug to fix (escalate; \
+             do not relax this assertion): {parsed}"
+        );
+    }
+    // It was resolved by the outer lucene parser against `df=id` instead,
+    // which is what makes real Solr's Shape-B recall as low as it is.
+    assert!(
+        parsed.contains("id:rocket"),
+        "Solr's parsedquery does not resolve `+\"rocket\"` against `df=id`, so finding 90's \
+         \"everything after the bound run is parsed by the outer lucene parser against `df`\" is \
+         not what Solr did: {parsed}"
+    );
+
+    // Behavioural half: the same request against Wayfinder. Weaker than the
+    // parsedquery assertions above by construction -- with `df=id` the
+    // mandatory `id:"rocket"` clause makes Solr's own answer 0, so a wrong
+    // binding rule could coincide here -- but it is what pins that Wayfinder
+    // and Solr agree on the *outcome* of the tree above.
+    let (app, _dir) = edismax_app().await;
+    let (status, actual) = get(&app, SHAPE_B_DEBUG_PATH).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        num_found(&actual),
+        num_found(&expected),
+        "numFound for the Shape-B query must equal real Solr's.\nSolr: {expected}\nWayfinder: \
+         {actual}"
+    );
+}
+
+/// The other half of the binding rule: a `)` at run-local paren depth 0 ends
+/// the bound run too, so the run does not leak past it.
+///
+/// What a "terminates on whitespace only" implementation would do differently
+/// is the whole discriminating power here, and it is sharp: with no whitespace
+/// anywhere after `}`, that implementation binds `+"quick")` — the entire
+/// remainder, closing paren included. So it hands the nested edismax parser an
+/// unbalanced `)` (a syntax error, not a 200), and leaves the outer lucene
+/// parser with nothing at all to close the `(` it already opened. Three
+/// observables separate the two, all of them read out of the fixture:
+///
+/// 1. Solr answered **200** with a parse tree at all, rather than erroring on
+///    an unbalanced paren.
+/// 2. `parsedquery` is exactly the `qf` fan-out over `quick` — the `)` was
+///    consumed as the outer paren's closer, so no `df` clause and no stray
+///    term came from it.
+/// 3. `numFound`/document ids are non-degenerate (unlike
+///    `SHAPE_B_DEBUG_FIXTURE`, whose mandatory `id:"rocket"` makes both engines
+///    return zero and so cannot tell a right binding rule from a wrong one).
+#[tokio::test]
+async fn shape_b_debug_parsedquery_shows_a_closing_paren_terminating_the_bound_run() {
+    let expected = require_capture(SHAPE_B_DEBUG_PAREN_FIXTURE, SHAPE_B_DEBUG_PAREN_PATH);
+
+    let raw = expected
+        .pointer("/debug/rawquerystring")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            panic!(
+                "fixture `{SHAPE_B_DEBUG_PAREN_FIXTURE}` must be captured with `debugQuery=true` \
+                 -- there is no `debug.rawquerystring` in it: {expected}"
+            )
+        });
+    assert_eq!(
+        raw, SHAPE_B_DEBUG_PAREN_Q,
+        "the capture must be the parse of trace 00006's shape: the whole `q` parenthesised, with \
+         the bound run running straight into the closing `)` and no whitespace after `}}` anywhere. \
+         A query with whitespace after the run evidences the other terminator, not this one"
+    );
+
+    let parsed = expected
+        .pointer("/debug/parsedquery")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            panic!("fixture `{SHAPE_B_DEBUG_PAREN_FIXTURE}` has no `debug.parsedquery`: {expected}")
+        });
+
+    // Observable 2a: the run did reach the nested edismax query and fanned out
+    // over both `qf` fields, so the `)` did not corrupt it.
+    for field in ["title", "body"] {
+        assert!(
+            parsed.contains(&format!("{field}:quick")),
+            "`{field}:quick` is absent from Solr's parsedquery, so the `+\"quick\"` run did not \
+             reach the `{{!edismax qf='title body'}}` nested query cleanly -- which is what a \
+             whitespace-only terminator produces here, by binding `+\"quick\")` and handing the \
+             nested parser an unbalanced paren: {parsed}"
+        );
+    }
+
+    // Observable 2b: nothing came out of the `)`. Under the whitespace-only
+    // reading there is no text left for the outer parser, and under a reading
+    // that terminated the run but then re-parsed the `)` as text there would be
+    // a stray `df` clause. Neither leaves a `df=id` clause behind, and real
+    // Solr must not either: the `)` is the outer paren's closer, nothing more.
+    assert!(
+        !parsed.contains("id:"),
+        "Solr's parsedquery carries a `df=id` clause, so something after the bound run was parsed \
+         as query text rather than as the closing paren of the `(` the query opens with. Findings \
+         90/91's account of the `)` terminator would then be wrong -- escalate rather than relaxing \
+         this: {parsed}"
+    );
+
+    // Observable 1 + 3: status and result set. `sort=id asc` makes the id list
+    // order-stable across the BM25 divergence, so it is asserted exactly.
+    let (app, _dir) = edismax_app().await;
+    let (status, actual) = get(&app, SHAPE_B_DEBUG_PAREN_PATH).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a `)`-terminated bound run is a valid query to real Solr (the fixture is a 200), so \
+         Wayfinder must not 400 it"
+    );
+    assert_eq!(
+        num_found(&actual),
+        num_found(&expected),
+        "numFound for the `)`-terminated Shape-B query must equal real Solr's.\nSolr: {expected}\n\
+         Wayfinder: {actual}"
+    );
+    assert_eq!(
+        ordered_ids(&actual),
+        ordered_ids(&expected),
+        "the matching document ids must be exactly Solr's -- this is the Shape-B capture whose \
+         result set is non-degenerate, so it is the one that can actually catch a binding rule \
+         that terminates the run in the wrong place"
+    );
+}
