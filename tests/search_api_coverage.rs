@@ -1128,11 +1128,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         "route",
         None,
         None,
-        &[
-            "GET /solr/{core}/admin/luke",
-            "GET /solr/{core}/admin/mbeans",
-            "GET /solr/{core}/terms",
-        ],
+        &["GET /solr/{core}/admin/mbeans", "GET /solr/{core}/terms"],
     );
     let (sc, su) = assert_bucket(
         "request semantics",
@@ -1173,7 +1169,6 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         &[
             "select.spellcheck.suggestions",
             "select.spellcheck.collations",
-            "admin.luke.index",
             "admin.mbeans.solr-mbeans",
             "terms.terms",
         ],
@@ -1211,8 +1206,19 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // were already in the contract, just unmet. The rest of Solr's Schema API
     // is deliberately absent from the contract (PRD section 5 parity
     // roadmap), so this does not open a `/schema/*` family.
+    // 48/75 -> 50/75 when issue #157 implemented `GET /solr/{core}/admin/luke`
+    // (reversing the #57 descope for this endpoint), flipping two entries at
+    // once: the endpoint itself, now wired in `search_api_routes!`, and the
+    // `admin.luke.index` response field, whose probe now gets an `index{}`
+    // object with five real figures --
+    // `numDocs`/`maxDoc`/`deletedDocs`/`hasDeletions`/`segmentCount` -- read
+    // off the live searcher. Denominator unchanged -- both entries were already in
+    // the contract, just unmet. Lucene-identity keys in `index{}` and the
+    // per-field `schema`/`index` flag strings stay omitted or placeheld
+    // deliberately (PRD section 5 v2.75), which is why the endpoint carries no
+    // `manifest.tsv` row and cannot be differentially diffed.
     assert_eq!(
-        report.overall.fraction, "48/75",
+        report.overall.fraction, "50/75",
         "initial coverage fraction"
     );
 }

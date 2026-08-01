@@ -2453,6 +2453,27 @@ impl CoreIndex {
         self.reader.searcher().segment_readers().len()
     }
 
+    /// Deleted-but-not-yet-reclaimed documents behind the current searcher —
+    /// Lucene's `deletedDocs`, and the difference between `maxDoc` and
+    /// `numDocs` (`/admin/luke`, issue #157).
+    ///
+    /// Summed off the same searcher's segment readers `doc_count` and
+    /// `segment_count` use, so all three agree about which commit they
+    /// describe. A tantivy delete tombstones the doc in its segment's alive
+    /// bitset; the row itself goes away only when a merge rewrites the
+    /// segment, which is exactly Lucene's semantics for this figure — so this
+    /// is a read of real bookkeeping, not a counter Wayfinder maintains.
+    ///
+    /// Read-only: taking a searcher neither commits nor reloads.
+    pub fn deleted_doc_count(&self) -> u64 {
+        self.reader
+            .searcher()
+            .segment_readers()
+            .iter()
+            .map(|reader| u64::from(reader.num_deleted_docs()))
+            .sum()
+    }
+
     /// Total bytes of this core's index directory.
     ///
     /// ponytail: a plain recursive `std::fs` walk of the data dir, summing
