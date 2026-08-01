@@ -935,6 +935,20 @@ fn check_sort(state: &AppState, params: &Params) -> Result<Vec<SortClause>, WfEr
 /// `PER_FIELD_PARAMS` and `allowed` (issue #140). The shape has to be matched
 /// rather than listed, since `<field>` is any field name the schema resolves.
 fn check_params(state: &AppState, allowed: &[&str], params: &Params) -> Result<(), WfError> {
+    // Validate only endpoints that implement this envelope parameter. Keeping
+    // it inside the allowlist boundary lets admin endpoints continue ignoring
+    // `omitHeader` under their default non-strict parameter policy.
+    if allowed.contains(&"omitHeader") {
+        params.validate_omit_header().map_err(|value| {
+            WfError::bad_request(
+                "wayfinder::InvalidParam",
+                format!(
+                    "invalid omitHeader value `{value}`; expected true, yes, on, false, no, or off"
+                ),
+            )
+            .with_params(params)
+        })?;
+    }
     if !state.config.strict_params {
         return Ok(());
     }

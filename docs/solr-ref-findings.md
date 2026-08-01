@@ -1953,3 +1953,25 @@ capture), with the tracer-bullet schema and five-document corpus plus one unstor
      query returns its one source document. Leading, trailing, and consecutive dots are not
      rejected or collapsed. These four fixtures replace issue #164's Tantivy-source-derived
      assumption with Solr wire evidence and are ordinary core-relative GETs in `manifest.tsv`.
+
+## Findings from issue #179 (`omitHeader` on errors and boolean spellings)
+
+Captured against a clean one-off `solr:9.10.1` container (port 9010,
+`wayfinder-solr-179`, removed after capture). Fixtures:
+`omit_header_error_true.json`, `omit_header_error_yes.json`,
+`omit_header_update_error_true.json`, and the raw `omit_header_invalid_one.html`
+response.
+
+112. **`omitHeader` suppresses `responseHeader` on error responses, and its accepted values
+     are case-insensitive `true`/`yes`/`on` and `false`/`no`/`off` — not `1` or `t`.** The
+     undefined-field control with `omitHeader=false` returns the normal 400 JSON envelope with
+     `responseHeader`; the otherwise identical `true`, `yes`, and `TRUE` requests return only
+     the `error` block. A malformed `/update` POST likewise drops its normally header-bearing
+     `NoParams` error envelope under `omitHeader=true`. Success probes gave the same result for
+     `on` and every case variant.
+     This settles #179's original question in favour of suppression. It also corrects the issue
+     comment's premise: on Solr 9.10.1, `omitHeader=1` and `omitHeader=t` are invalid booleans,
+     returning HTTP 400 Jetty HTML before the JSON response writer runs; `0`, `f`, `y`, and `n`
+     are invalid likewise. The two JSON captures live in `manifest-errors.tsv`; the raw `1`
+     response stays outside it because the differential harness intentionally parses that
+     manifest as JSON.

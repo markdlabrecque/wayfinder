@@ -41,6 +41,8 @@ pub enum Envelope {
 #[derive(Default)]
 struct ErrorExtra {
     params: Value,
+    /// `WithParams` errors use the same envelope switch as successes.
+    omit_header: bool,
     /// Issue #35: some errors are detected only after the base query has
     /// already run, so Solr's own fixture for them carries the base query's
     /// `response` block alongside `error` (e.g. `facet_unknown_field.json`).
@@ -95,6 +97,7 @@ impl WfError {
     /// Attaches the request params for the `WithParams` envelope.
     pub fn with_params(mut self, params: &Params) -> Self {
         self.extra.params = params.echo();
+        self.extra.omit_header = params.omit_header();
         self
     }
 
@@ -143,13 +146,18 @@ impl IntoResponse for WfError {
                 "responseHeader": { "status": code, "QTime": 0 },
                 "error": error,
             }),
-            Envelope::WithParams => match self.extra.response {
-                Some(response) => json!({
+            Envelope::WithParams => match (self.extra.omit_header, self.extra.response) {
+                (true, Some(response)) => json!({
+                    "response": response,
+                    "error": error,
+                }),
+                (true, None) => json!({ "error": error }),
+                (false, Some(response)) => json!({
                     "responseHeader": { "status": code, "QTime": 0, "params": self.extra.params },
                     "response": response,
                     "error": error,
                 }),
-                None => json!({
+                (false, None) => json!({
                     "responseHeader": { "status": code, "QTime": 0, "params": self.extra.params },
                     "error": error,
                 }),

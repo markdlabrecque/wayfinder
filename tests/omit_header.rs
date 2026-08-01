@@ -405,3 +405,126 @@ async fn admin_luke_omit_header_is_not_a_registered_param_and_leaves_the_envelop
          scope for admin endpoints (no trace ever sends it there), got {body}"
     );
 }
+
+// --- error envelopes and boolean vocabulary (issue #179) -------------------
+
+/// Ground truth: `omit_header_error_true.json` is Solr 9.10.1's 400 response
+/// to this request. `omitHeader` removes only the envelope header: the error
+/// block and HTTP status remain intact.
+#[tokio::test]
+async fn select_error_omit_header_true_suppresses_header_and_retains_error() {
+    let (app, _dir) = indexed_app().await;
+    let (status, body) = get(&app, "select?q=nosuchfield:x&omitHeader=true&wt=json").await;
+
+    let expected = fixture("omit_header_error_true");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got {body}");
+    assert!(
+        body.get("responseHeader").is_none(),
+        "omitHeader=true must suppress responseHeader, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/error/code"),
+        expected.pointer("/error/code"),
+        "omitHeader=true must retain the fixture error code, got {body}"
+    );
+}
+
+/// Ground truth: `omit_header_error_yes.json` captures the accepted `yes`
+/// alias. Finding 109 further establishes case-insensitive `true` and `on`.
+#[tokio::test]
+async fn select_error_omit_header_accepts_yes_true_and_on_case_insensitively() {
+    let (app, _dir) = indexed_app().await;
+    let expected = fixture("omit_header_error_yes");
+
+    for value in ["yes", "TRUE", "oN"] {
+        let (status, body) = get(
+            &app,
+            &format!("select?q=nosuchfield:x&omitHeader={value}&wt=json"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "omitHeader={value}: {body}"
+        );
+        assert!(
+            body.get("responseHeader").is_none(),
+            "omitHeader={value} must suppress responseHeader, got {body}"
+        );
+        assert_eq!(
+            body.pointer("/error/code"),
+            expected.pointer("/error/code"),
+            "omitHeader={value} must retain the fixture error code, got {body}"
+        );
+    }
+}
+
+/// Finding 109's false vocabulary leaves the normal error envelope intact.
+#[tokio::test]
+async fn select_error_omit_header_false_no_and_off_retain_header() {
+    let (app, _dir) = indexed_app().await;
+    let expected_error_code = fixture("omit_header_error_true")["error"]["code"].clone();
+
+    for value in ["false", "NO", "oFf"] {
+        let (status, body) = get(
+            &app,
+            &format!("select?q=nosuchfield:x&omitHeader={value}&wt=json"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "omitHeader={value}: {body}"
+        );
+        assert_eq!(
+            body.pointer("/error/code"),
+            Some(&expected_error_code),
+            "omitHeader={value} must retain the fixture error code, got {body}"
+        );
+        assert!(
+            body.get("responseHeader").is_some(),
+            "omitHeader={value} must retain responseHeader, got {body}"
+        );
+    }
+}
+
+/// Ground truth: `omit_header_update_error_true.json` proves suppression also
+/// applies to `/update`'s normally header-bearing, no-params error envelope.
+#[tokio::test]
+async fn update_error_omit_header_true_suppresses_header_and_retains_error() {
+    let (app, _dir) = indexed_app().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/solr/{CORE}/update?omitHeader=true&wt=json"))
+        .header("content-type", "application/json")
+        .body(Body::from("{not json"))
+        .unwrap();
+    let resp = app.oneshot(req).await.expect("must not fail");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body must be readable");
+    let body: Value = serde_json::from_slice(&bytes).expect("body must be valid JSON");
+    let expected = fixture("omit_header_update_error_true");
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got {body}");
+    assert!(
+        body.get("responseHeader").is_none(),
+        "omitHeader=true must suppress /update error responseHeader, got {body}"
+    );
+    assert_eq!(body.pointer("/error/code"), expected.pointer("/error/code"));
+}
+
+/// Ground truth: `omit_header_invalid_one.html` is Solr 9.10.1's HTTP 400
+/// for `omitHeader=1`; numeric boolean spellings are invalid, not aliases.
+#[tokio::test]
+async fn select_omit_header_one_is_invalid() {
+    let (app, _dir) = indexed_app().await;
+    let (status, body) = get(&app, "select?q=*:*&omitHeader=1&wt=json").await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "omitHeader=1 must be rejected rather than treated as false, got {body}"
+    );
+}

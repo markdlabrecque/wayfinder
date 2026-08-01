@@ -62,49 +62,37 @@ impl Params {
         self.pairs.iter().map(|(k, _)| k.as_str())
     }
 
-    /// Solr's `omitHeader`: `true` drops `responseHeader` from the response
-    /// entirely. Anything else — `false`, absent, an unrecognized value — keeps
-    /// it.
-    ///
-    /// That exact-string strictness is *this codebase's* convention, not
-    /// Solr's: `== Some("true")` is how every other boolean param is read
-    /// (`src/lib.rs`'s `commit`, `softCommit`, `facet`, `stats`, `hl`,
-    /// `mlt.boost`, `terms`). Solr itself is laxer — `StrUtils.parseBool`
-    /// accepts `1`, `t`, `yes` and is case-insensitive, so `omitHeader=1`
-    /// suppresses the header in real Solr and does not here.
-    ///
-    /// ponytail: that is a real, unfixtured divergence. No fixture exercises
-    /// it — `search_api_solr` only ever sends the literal `true`/`false` (all
-    /// 28 traces), and no `manifest.tsv` row uses `omitHeader` at all — so
-    /// widening it here would be guessing at behaviour nothing captured
-    /// confirms, and would diverge from the sibling params above for no
-    /// evidenced gain. Settling it belongs with the other open `omitHeader`
-    /// question in issue #179: one `capture.sh` block covering `omitHeader=1`
-    /// alongside the error-envelope case answers both, after which either
-    /// widen all the boolean reads together or pin the strictness with a test.
-    ///
-    /// Ground truth is `search_api_solr`'s own traffic
-    /// (`solr-ref/search-api/trace/`): all twenty traces that send
-    /// `omitHeader=true` (`00002`-`00019`, `00021` on `/select`, `00022` on
-    /// `/mlt`, plus `00028` on `/terms`) have responses with no
-    /// `responseHeader` key at all, while `00001` (`/update`,
-    /// `omitHeader=false`) does carry one.
-    ///
-    /// ponytail: **success responses only.** Every error envelope
-    /// (`src/error.rs`'s `WfError`) still carries its `responseHeader`
-    /// unconditionally, whatever `omitHeader` says. That is not a decision
-    /// backed by evidence, it is the absence of one: all 28 captured traces
-    /// are 200s, and neither `solr-ref/manifest.tsv` nor
-    /// `solr-ref/manifest-errors.tsv` has a single row using `omitHeader`, so
-    /// no fixture shows whether real Solr suppresses the header on an error.
-    /// The ceiling is deliberate — leaving the landed error-envelope shape
-    /// untouched beats guessing. What would settle it: a `capture.sh` block
-    /// issuing an erroring request (say `select?q=*:*&facet=true&facet.field=nope`)
-    /// with `omitHeader=true`, captured against real `solr:9`. If it shows
-    /// suppression, thread this check into `WfError`'s rendering; if not,
-    /// pin the current behaviour with a test.
+    /// Whether Solr's validated `omitHeader` value suppresses `responseHeader`.
     pub fn omit_header(&self) -> bool {
-        self.get("omitHeader") == Some("true")
+        matches!(self.parse_omit_header(), Ok(true))
+    }
+
+    /// Validates Solr 9.10.1's `omitHeader` vocabulary: `true`/`yes`/`on`
+    /// and `false`/`no`/`off`, case-insensitively. Numeric and single-letter
+    /// boolean spellings are invalid for this parameter.
+    pub fn validate_omit_header(&self) -> Result<(), &str> {
+        self.parse_omit_header().map(|_| ())
+    }
+
+    fn parse_omit_header(&self) -> Result<bool, &str> {
+        match self.get("omitHeader") {
+            None => Ok(false),
+            Some(value)
+                if ["true", "yes", "on"]
+                    .iter()
+                    .any(|v| value.eq_ignore_ascii_case(v)) =>
+            {
+                Ok(true)
+            }
+            Some(value)
+                if ["false", "no", "off"]
+                    .iter()
+                    .any(|v| value.eq_ignore_ascii_case(v)) =>
+            {
+                Ok(false)
+            }
+            Some(value) => Err(value),
+        }
     }
 
     /// Renders `responseHeader.params` per findings fact 5/6: raw string
