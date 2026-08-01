@@ -67,6 +67,38 @@ fn main() {
 
     let table = render_markdown_table(&results);
     let corpus_size = results.corpus_size;
+    let corpus_note = if corpus_size == 2_000_000 {
+        let wayfinder_load_mb = results.wayfinder.resident_mem_load_mb;
+        let wayfinder_indexed_mb = results.wayfinder.resident_mem_idle_mb;
+        let wayfinder_rss_increase_mb = wayfinder_load_mb - wayfinder_indexed_mb;
+        let target_outcome = if wayfinder_load_mb < 500.0 {
+            format!(
+                "- Wayfinder met the PRD's <500 MB query-load resident-memory target at \
+                 {wayfinder_load_mb:.1} MB.\n"
+            )
+        } else {
+            format!(
+                "- Wayfinder missed the PRD's <500 MB query-load resident-memory target: \
+                 {wayfinder_indexed_mb:.1} MB was resident at the post-index idle sample, and RSS \
+                 increased by {wayfinder_rss_increase_mb:.1} MB between that sample and the \
+                 {wayfinder_load_mb:.1} MB maximum sampled during query load.\n"
+            )
+        };
+        format!(
+            "- This is a long manual local run outside CI; indexing is expected to dominate wall \
+             time.\n\
+             {target_outcome}\
+             - The harness does not distinguish allocator-resident memory from mmap-backed index \
+             pages.\n"
+        )
+    } else {
+        "- **\"Resident memory, 2M docs under query load\" is only ever populated by a run \
+         with a 2M-doc corpus** (see the row's own \"not measured\" state above otherwise, \
+         and the \"Measurement path\" column for how each number was captured). The 2M corpus \
+         is not automated (see `bench/README.md`); real 2M numbers require running \
+         `bench/run.sh 42 2000000`.\n"
+            .to_owned()
+    };
     let doc = format!(
         "# Wayfinder vs Solr 9 -- benchmark results (issue #13)\n\n\
          Measured against PRD §8 targets, on a corpus of {corpus_size} docs generated \
@@ -75,11 +107,7 @@ fn main() {
          run.\n\n\
          {table}\n\n\
          ## Notes\n\n\
-         - **\"Resident memory, 2M docs under query load\" is only ever populated by a run \
-         with a 2M-doc corpus** (see the row's own \"not measured\" state above otherwise, \
-         and the \"Measurement path\" column for how each number was captured). The 2M corpus \
-         is not automated (see `bench/README.md`); real 2M numbers require running \
-         `bench/run.sh 42 2000000`.\n\
+         {corpus_note}\
          - Measured on a local Docker Desktop/OrbStack host, not dedicated hardware; absolute \
          numbers (especially Solr cold start, which benefits from a warm image cache and \
          may not reflect a cold pull) will vary by machine. Reproduce locally with \
