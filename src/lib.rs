@@ -2015,6 +2015,18 @@ async fn mlt(
 /// {"terms":{"tm_X3b_en_title":["dog",2,"lazi",2,"quick",2,"about",1,...]}}
 /// ```
 ///
+/// `tm_X3b_en_title` is not a declared field — it matches
+/// `presets/search-api.toml`'s `tm_X3b_en_*` `[[dynamic_fields]]` rule — and
+/// the first version of this handler 400d that request as an undefined field
+/// while presenting the trace as ground truth. It no longer does:
+/// `check_terms_field` resolves dynamic names through the same
+/// `CoreIndex::field_target` `/select` uses, and
+/// `tests/terms.rs::terms_resolves_the_shipped_drupal_preset_tm_x3b_en_title_field`
+/// issues that exact request against `presets/search-api.toml` loaded as-is and
+/// asserts the trace's ten terms and counts. Wayfinder-side, the traced request
+/// works; what is still unverified against real Solr is the analyzer chain
+/// (see the ponytail note at the end).
+///
 /// Shape and semantics, all read off that trace:
 ///
 /// - `terms=true` gates the component. Without it — absent, or an explicit
@@ -2042,8 +2054,10 @@ async fn mlt(
 ///   independent.
 /// - The value is the flat `[term, count, term, count, ...]` array. That is
 ///   what `json.nl=flat` produces and the only shape this endpoint's response
-///   takes, so `json.nl` is accepted and needs no general named-list machinery
-///   (issue #153 is deliberately not a prerequisite).
+///   takes, so no general named-list machinery is needed (issue #153 is
+///   deliberately not a prerequisite). `json.nl=flat` and an absent `json.nl`
+///   are accepted; `map`/`arrarr`/`arrmap` are 400d rather than silently
+///   answered flat — see `check_terms_json_nl`.
 /// - Ordering is Solr's `terms.sort=count` default: count descending, ties
 ///   broken by term ascending. The trace pins both halves — `dog`/`lazi`/
 ///   `quick` tied at 2 ahead of the singletons, and the singletons themselves
@@ -2079,13 +2093,13 @@ async fn terms(
     let params = Params::parse(query.as_deref().unwrap_or(""));
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, TERMS_PARAMS, &params)?;
+    check_terms_json_nl(&params).map_err(|e| e.with_params(&params))?;
 
     let mut terms_block = Map::new();
     let terms_requested = params.get("terms") == Some("true");
     if terms_requested {
         for field_name in params.get_all("terms.fl") {
-            check_terms_field(&state.index.wf_schema, field_name)
-                .map_err(|e| e.with_params(&params))?;
+            check_terms_field(&state.index, field_name).map_err(|e| e.with_params(&params))?;
             let totals = state.index.field_terms(field_name).map_err(|e| {
                 WfError::internal("wayfinder::TermsError", e.to_string()).with_params(&params)
             })?;
@@ -2122,35 +2136,93 @@ async fn terms(
     Ok(axum::Json(Value::Object(body)).into_response())
 }
 
+/// Refuses a `json.nl` asking for a named-list shape `/terms` does not render.
+///
+/// `json.nl` is in `TERMS_PARAMS` because `search_api_solr` always sends it
+/// (`solr-ref/search-api/trace/00028.json` sends `json.nl=flat`), and flat —
+/// `[term, count, term, count, ...]` — is the only shape this handler produces.
+/// Accepting `json.nl=map` and then answering flat anyway would be exactly the
+/// silent-wrong-answer `TERMS_PARAMS`' own doc comment argues against, so the
+/// three values this codebase already gives a documented, *fixture-pinned*
+/// meaning to for facet counts (`map`, `arrarr`, `arrmap` — see
+/// `src/facet.rs`'s `JsonNl`, backed by `facet_json_nl_map.json` and friends)
+/// are a 400 here rather than a 200 in the wrong shape.
+///
+/// Any other value is treated as flat, matching `JsonNl::from_params`' own
+/// fallback for an unrecognised value. Nothing here claims that is Solr's
+/// behaviour: no captured response shows Solr's reaction to a bogus `json.nl`,
+/// so this follows the one precedent in the tree instead of inventing one.
+/// Rendering these shapes for real (issue #153's named-list machinery) is what
+/// replaces this check.
+fn check_terms_json_nl(params: &Params) -> Result<(), WfError> {
+    match params.get("json.nl") {
+        Some(shape @ ("map" | "arrarr" | "arrmap")) => Err(WfError::bad_request(
+            "wayfinder::TermsUnsupportedJsonNl",
+            format!(
+                "json.nl={shape} is not supported on /terms: the terms block is only \
+                 rendered in the flat [term, count, ...] shape (json.nl=flat)"
+            ),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Refuses a `terms.fl` that `/terms` cannot enumerate, the same way
 /// `stats::check_statable` refuses an unaggregatable `stats.field` — an
 /// undefined field, or a defined one whose term dictionary does not hold UTF-8
 /// text.
 ///
-/// The type test is `ValueKind::Text`, which covers both `string`/`keyword`
-/// (unanalyzed, but still raw UTF-8 in the dictionary, and Solr's own
-/// TermsComponent enumerates a `StrField` happily) and every `text_*`/custom
-/// chain. It excludes `int`/`long`/`float`/`double`/`date`, whose dictionary
-/// entries are Tantivy's fixed-width order-preserving encoding, and the dynamic
-/// catch-all JSON fields, whose entries are path-prefixed and type-tagged.
-/// Those are not renderable as Solr's terms at all: decoding them lossily
-/// produced replacement-character keys, and worse, silently *summed* the
-/// document frequencies of two distinct encoded terms that happened to decode
-/// to the same replacement string. A 400 is the honest answer until `/terms`
-/// grows real per-type term rendering (Solr's `terms.raw`, deliberately out of
-/// scope for issue #155 and absent from `TERMS_PARAMS`).
+/// **Existence is resolved, not just looked up.** `CoreIndex::
+/// resolves_field_name` (the public face of `field_target`, the same
+/// static-before-dynamic resolution `/select` uses) accepts a declared
+/// `[[fields]]` entry *and* a name only a `[[dynamic_fields]]` pattern matches.
+/// An earlier version consulted `WayfinderSchema::field` alone, which 400d
+/// `terms.fl=tm_X3b_en_title` — `presets/search-api.toml`'s own `tm_X3b_en_*`
+/// rule, and the exact request `solr-ref/search-api/trace/00028.json` captures
+/// — as an undefined field while `q=tm_X3b_en_title:lazy` resolved fine on the
+/// same core. A name matching neither is still a 400.
+///
+/// The type test is `resolved_value_kind` == `ValueKind::Text`, resolved with
+/// the same precedence: a declared field's own kind, else the matching dynamic
+/// rule's. `Text` covers both `string`/`keyword` (unanalyzed, but still raw
+/// UTF-8 in the dictionary, and Solr's own TermsComponent enumerates a
+/// `StrField` happily) and every `text_*`/custom chain. It excludes
+/// `int`/`long`/`float`/`double`/`date`, whether declared or reached through a
+/// dynamic rule (`is_*` -> `int`), whose dictionary entries are Tantivy's
+/// fixed-width order-preserving encoding rather than UTF-8. Those are not
+/// renderable as Solr's terms at all: decoding them lossily produced
+/// replacement-character keys, and worse, silently *summed* the document
+/// frequencies of two distinct encoded terms that happened to decode to the
+/// same replacement string. A 400 is the honest answer until `/terms` grows
+/// real per-type term rendering (Solr's `terms.raw`, deliberately out of scope
+/// for issue #155 and absent from `TERMS_PARAMS`).
+///
+/// Note what the rule is *not*: it is not "declared fields only", and it is not
+/// "the catch-all JSON containers are excluded". A text dynamic name is
+/// enumerable precisely because `CoreIndex::field_terms` addresses its own
+/// path-prefixed slice of the `_dynamic_text` container rather than the
+/// container wholesale. What stays excluded is a non-text *value* encoding,
+/// wherever it lives.
+///
+/// ponytail: naming a catch-all container directly (`terms.fl=_dynamic_text`)
+/// is refused as non-text — `resolved_value_kind` has no `[[fields]]` entry or
+/// dynamic rule for it — even though its entries are in fact UTF-8. That is
+/// deliberate: enumerating it would report every dynamic field's terms mixed
+/// together under one key, with the raw `<path>\0s` bytes still attached.
+/// Raising this ceiling means rendering the path back out as Solr field names,
+/// which is a different response shape than `/terms` has, not a relaxed check.
 ///
 /// No fixture pins the message: the ticket defers the `/terms` capture, so this
 /// follows `check_statable`'s precedent of a clear unpinned 400 rather than
 /// inventing a fixture-shaped wording.
-fn check_terms_field(schema: &schema::WayfinderSchema, field_name: &str) -> Result<(), WfError> {
-    if schema.field(field_name).is_none() {
+fn check_terms_field(index: &CoreIndex, field_name: &str) -> Result<(), WfError> {
+    if !index.resolves_field_name(field_name) {
         return Err(WfError::bad_request(
             "wayfinder::UndefinedField",
             format!("undefined field \"{field_name}\""),
         ));
     }
-    if schema.value_kind(field_name) != Some(schema::ValueKind::Text) {
+    if index.wf_schema.resolved_value_kind(field_name) != Some(schema::ValueKind::Text) {
         return Err(WfError::bad_request(
             "wayfinder::TermsUnsupportedField",
             format!(

@@ -1377,6 +1377,17 @@ impl CoreIndex {
         })
     }
 
+    /// Whether this core can address `name` at all — the public face of
+    /// `field_target`, so callers outside this module (`lib.rs`'s
+    /// `check_terms_field`) test existence through the *same* static-before-
+    /// dynamic resolution the query path uses instead of growing a second,
+    /// drift-prone copy of the rule. True for a declared `[[fields]]` entry
+    /// and for a name only a `[[dynamic_fields]]` pattern matches; false for a
+    /// name matching neither.
+    pub fn resolves_field_name(&self, name: &str) -> bool {
+        self.field_target(name).is_some()
+    }
+
     /// One edismax clause's `qf`-wide query: `phrase_text` tokenized with
     /// each `qf` field's own indexing analyzer (a bare word normally
     /// tokenizes to exactly one term; a quoted multi-word phrase to more
@@ -2518,6 +2529,38 @@ impl CoreIndex {
     /// `stats::check_statable`'s precedent). The check here is the backstop that
     /// makes the ceiling real for any other future caller.
     ///
+    /// **Dynamic names resolve too**, through the same `field_target` the
+    /// `/select` path uses (issue #155's follow-up: `terms.fl=tm_X3b_en_title`
+    /// used to 400 as an undefined field even though `q=tm_X3b_en_title:lazy`
+    /// worked on the same core). A dynamic name has no term dictionary of its
+    /// own — every name matching a `[[dynamic_fields]]` rule shares the rule's
+    /// catch-all JSON container (`_dynamic_text`/`_dynamic`), and the *whole*
+    /// address lives inside each dictionary entry. Verified against
+    /// `tantivy` 0.26.1's own encoding, not assumed: a JSON field's dictionary
+    /// key is `Term::serialized_value_bytes()`, which for
+    /// `[type code=JSON][JSON path][JSON_END_OF_PATH][ValueBytes]`
+    /// (`schema/term.rs:298`) minus the leading type tag
+    /// (`TERM_TYPE_TAG_LEN = 1`) is
+    /// `<path><JSON_END_OF_PATH=0x00><Type::Str=b's'><term utf-8>`. So
+    /// `tm_X3b_en_title`'s `lazi` is stored as `tm_X3b_en_title\0slazi`.
+    ///
+    /// The prefix is therefore built by `term_for_target(target, "")` — the
+    /// exact same constructor the query path uses to look a term up, so the two
+    /// cannot drift — and matched **byte-for-byte including the terminating
+    /// `0x00` and `b's'`**. That anchoring is what keeps two names under one
+    /// rule apart: no other JSON path can produce those bytes at that offset,
+    /// since `0x00` terminates the path and cannot occur inside it. A prefix of
+    /// just the name would also match `tm_X3b_en_title_extra`; a split on the
+    /// first `0x00` without checking the path would match every field in the
+    /// container. `tests/terms.rs`'s
+    /// `terms_dynamic_fields_do_not_leak_across_the_shared_catch_all_container`
+    /// guards it.
+    ///
+    /// Dictionary keys are byte-ordered, so all of one path's entries are
+    /// contiguous: the scan seeks to `>= prefix` and stops at the first key
+    /// that is not prefixed, rather than walking the shared container's whole
+    /// vocabulary.
+    ///
     /// ponytail: the whole dictionary is materialised in memory before the
     /// handler truncates it to `terms.limit`. Ceiling: a field with a very
     /// large vocabulary pays for every term on every request. Solr streams and
@@ -2525,17 +2568,30 @@ impl CoreIndex {
     /// (PRD v3's suggester work) rather than the module's handshake-sized
     /// requests.
     pub fn field_terms(&self, field_name: &str) -> Result<BTreeMap<String, u64>> {
-        let field = self
-            .wf_schema
-            .field(field_name)
+        let target = self
+            .field_target(field_name)
             .ok_or_else(|| anyhow!("undefined field \"{field_name}\""))?;
         let searcher = self.reader.searcher();
         let mut totals: BTreeMap<String, u64> = BTreeMap::new();
+        // Empty for a static field, `<path>\0s` for a dynamic one — so the
+        // static case strips nothing and the dynamic case strips exactly the
+        // address Tantivy prepended.
+        let prefix: Vec<u8> = match &target {
+            FieldTarget::Static(_) => Vec::new(),
+            FieldTarget::Dynamic { .. } => self
+                .term_for_target(&target, "")
+                .serialized_value_bytes()
+                .to_vec(),
+        };
         for segment_reader in searcher.segment_readers() {
-            let inverted = segment_reader.inverted_index(field)?;
-            let mut stream = inverted.terms().stream()?;
+            let inverted = segment_reader.inverted_index(target.field())?;
+            let mut stream = inverted.terms().range().ge(&prefix).into_stream()?;
             while stream.advance() {
-                let term = std::str::from_utf8(stream.key()).with_context(|| {
+                let Some(rest) = stream.key().strip_prefix(prefix.as_slice()) else {
+                    // Keys are byte-ordered, so the prefixed run is over.
+                    break;
+                };
+                let term = std::str::from_utf8(rest).with_context(|| {
                     format!(
                         "field `{field_name}` has a term dictionary entry that is not UTF-8: \
                          /terms can only enumerate a text field"

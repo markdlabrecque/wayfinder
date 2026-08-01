@@ -1564,4 +1564,3 @@ fragment" to be different answers at all.
     for any multi-token clause, which is right for finding 74's fixtures (all quoted) and
     wrong for a bare multi-token string; it now takes the quoted/unquoted distinction from
     the grammar's own `Delimiter`.
-
