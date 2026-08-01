@@ -1788,10 +1788,13 @@ async fn update(
     // `/update` errors carry a responseHeader but no params echo — Solr does
     // not echo params on this endpoint (`err_update_bad_json.json`).
     let update_err = |class: &'static str, msg: String| {
-        WfError::bad_request(class, msg).envelope(Envelope::NoParams)
+        WfError::bad_request(class, msg)
+            .with_params(&params)
+            .envelope(Envelope::NoParams)
     };
     check_core(&state, &core, &params, Envelope::NoParams)?;
-    check_params(&state, UPDATE_PARAMS, &params).map_err(|e| e.envelope(Envelope::NoParams))?;
+    check_params(&state, UPDATE_PARAMS, &params)
+        .map_err(|e| e.with_params(&params).envelope(Envelope::NoParams))?;
 
     // GET carries no body (finding 47): it is not a method error, but a
     // *content-stream* one — 400 "missing content stream" unless the only
@@ -1806,7 +1809,9 @@ async fn update(
             ));
         }
         state.index.commit().map_err(|e| {
-            WfError::internal("wayfinder::CommitError", e.to_string()).envelope(Envelope::NoParams)
+            WfError::internal("wayfinder::CommitError", e.to_string())
+                .with_params(&params)
+                .envelope(Envelope::NoParams)
         })?;
         return Ok(update_success(&params));
     }
@@ -1865,6 +1870,7 @@ async fn update(
                 flush_adds!();
                 state.index.commit().map_err(|e| {
                     WfError::internal("wayfinder::CommitError", e.to_string())
+                        .with_params(&params)
                         .envelope(Envelope::NoParams)
                 })?;
             }
@@ -1883,7 +1889,9 @@ async fn update(
         params.get("commit") == Some("true") || params.get("softCommit") == Some("true");
     if commit_now {
         state.index.commit().map_err(|e| {
-            WfError::internal("wayfinder::CommitError", e.to_string()).envelope(Envelope::NoParams)
+            WfError::internal("wayfinder::CommitError", e.to_string())
+                .with_params(&params)
+                .envelope(Envelope::NoParams)
         })?;
     }
     // `commitWithin=<ms>` schedules a commit at most that many ms out — also

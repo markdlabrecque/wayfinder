@@ -94,7 +94,8 @@ impl WfError {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, class, msg)
     }
 
-    /// Attaches the request params for the `WithParams` envelope.
+    /// Attaches request state for a header-bearing envelope. `NoParams` uses
+    /// only `omitHeader`; it never renders the echoed params.
     pub fn with_params(mut self, params: &Params) -> Self {
         self.extra.params = params.echo();
         self.extra.omit_header = params.omit_header();
@@ -142,6 +143,7 @@ impl IntoResponse for WfError {
         };
         let body = match self.envelope {
             Envelope::Bare => json!({ "error": error }),
+            Envelope::NoParams if self.extra.omit_header => json!({ "error": error }),
             Envelope::NoParams => json!({
                 "responseHeader": { "status": code, "QTime": 0 },
                 "error": error,
