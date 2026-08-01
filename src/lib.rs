@@ -1064,6 +1064,12 @@ async fn core_admin_system(
 /// The pre-7.0 `UPDATEHANDLER.*` key spellings are deliberately not
 /// implemented, nor is `getIndexSize()`'s `/replication` fallback.
 ///
+/// The stats leaves are deliberately NOT uniformly typed: the trace shows the
+/// counters as bare integers and the time budgets as unit-suffixed strings
+/// (`softAutoCommitMaxTime: "5000ms"`), and `softAutoCommitMaxTime` is absent
+/// altogether when soft autocommit is off. That inconsistency is Solr's, and
+/// matching it is the contract -- see the per-key notes in the body.
+///
 /// Everything ELSE in the captured 48 KB -- `CONTAINER`, `ADMIN`, `QUERY`,
 /// `CACHE`, per-handler request timers, Java class names, JVM/filesystem
 /// figures -- has no consumer, so this handler emits only the two categories
@@ -1109,28 +1115,54 @@ async fn admin_mbeans(
     // map), and `solr-mbeans` is an object here unconditionally -- Wayfinder
     // has no `flat` named-list rendering for it to differ from.
 
-    let update_stats = json!({
-        "UPDATE.updateHandler.docsPending": state.index.pending_docs(),
-        "UPDATE.updateHandler.deletesById": state.index.deletes_by_id(),
-        "UPDATE.updateHandler.deletesByQuery": state.index.deletes_by_query(),
-        // Wayfinder's `autocommit_max_time` is already in ms, which is the
-        // unit this key reports. `-1` when unset, matching the consumer's own
-        // `$max_time = -1` initialisation.
-        //
-        // Documented cosmetic divergence: real Solr renders this as the STRING
-        // `"5000ms"` (trace `00025.json`). Wayfinder reports a bare integer,
-        // consistent with the three counters beside it. The only consumer does
-        // `(int) $value`, which reads either identically, and no manifest row
-        // pins this endpoint's bytes.
-        "UPDATE.updateHandler.softAutoCommitMaxTime":
-            state.config.commit.autocommit_max_time.map_or(-1i64, |ms| ms as i64),
-    });
+    // The mixed typing in this map is SOLR'S, verified leaf-by-leaf against
+    // trace `00025.json`, not an oversight -- do not "tidy" it into
+    // consistency, that would be the bug. In the captured bytes:
+    //   "UPDATE.updateHandler.docsPending"       = 0         (integer)
+    //   "UPDATE.updateHandler.deletesById"       = 0         (integer)
+    //   "UPDATE.updateHandler.deletesByQuery"    = 0         (integer)
+    //   "UPDATE.updateHandler.softAutoCommitMaxTime" = "5000ms"  (STRING)
+    //   "UPDATE.updateHandler.autoCommitMaxTime"     = "15000ms" (STRING)
+    // i.e. the three counters are bare integers while the two time budgets are
+    // unit-suffixed strings. Matching Solr is the contract, so this map does
+    // both.
+    let mut update_stats = Map::new();
+    update_stats.insert(
+        "UPDATE.updateHandler.docsPending".to_string(),
+        json!(state.index.pending_docs()),
+    );
+    update_stats.insert(
+        "UPDATE.updateHandler.deletesById".to_string(),
+        json!(state.index.deletes_by_id()),
+    );
+    update_stats.insert(
+        "UPDATE.updateHandler.deletesByQuery".to_string(),
+        json!(state.index.deletes_by_query()),
+    );
+    // Wayfinder's `autocommit_max_time` is already in ms, which is the unit
+    // this key reports, so it renders straight into Solr's `"<N>ms"` spelling.
+    //
+    // When soft autocommit is unset the key is OMITTED, because that is what
+    // Solr does -- it never puts `-1` on the wire. The `-1` in
+    // `SolrConnectorPluginBase.php:787-793` is the *consumer's* initialiser for
+    // a key it did not find (`$max_time = -1`, then an `isset(...)` guard), so
+    // emitting `-1` ourselves would be reflecting the client's default back at
+    // it as though Solr had reported it.
+    if let Some(ms) = state.config.commit.autocommit_max_time {
+        update_stats.insert(
+            "UPDATE.updateHandler.softAutoCommitMaxTime".to_string(),
+            json!(format!("{ms}ms")),
+        );
+    }
     let size_bytes = state.index.disk_size_bytes();
     let core_stats = json!({
         "CORE.coreName": state.core_name,
         "INDEX.size": admin_ui::human_size(size_bytes),
-        // Not read by any client; included because it is the same real figure
-        // unrounded, exactly as `/ui/stats` shows it.
+        // Parity, not invention: `INDEX.sizeInBytes` is genuinely in the trace
+        // (`21607`, sitting beside `INDEX.size: "21.1 KB"` -- the same figure
+        // rounded), so emitting it matches captured Solr rather than adding a
+        // Wayfinder-only key. No client reads it; it is the unrounded value,
+        // exactly as `/ui/stats` shows it.
         "INDEX.sizeInBytes": size_bytes,
     });
 
@@ -1150,7 +1182,7 @@ async fn admin_mbeans(
     // returns the bean list alone, and the coverage probe for
     // `admin.mbeans.solr-mbeans` GETs the endpoint with no `stats` at all.
     if want_stats {
-        update_handler.insert("stats".to_string(), update_stats);
+        update_handler.insert("stats".to_string(), Value::Object(update_stats));
         core_bean.insert("stats".to_string(), core_stats);
     }
 

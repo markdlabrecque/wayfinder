@@ -168,6 +168,13 @@ async fn get_m(app: &Router, core: &str, query: &str) -> (StatusCode, Value) {
     request_full(app, "GET", &format!("{core}/{query}"), None).await
 }
 
+/// Config enabling soft autocommit, which is the state the captured Solr was in
+/// (trace `00025.json` reports `softAutoCommitMaxTime: "5000ms"`). Tests that
+/// assert all SIX leaves resolve must use it: Solr omits
+/// `softAutoCommitMaxTime` entirely when soft autocommit is off, so a core with
+/// it unset legitimately exposes only five.
+const SOFT_AUTOCOMMIT_ON: &str = "[commit]\nautocommit_max_time = 5000\n";
+
 /// The six exact key paths the module reads, per
 /// `SolrConnectorPluginBase::getStatsSummary()`'s Solr >= 7.0 branch.
 fn assert_six_leaves_present(body: &Value) {
@@ -193,7 +200,7 @@ fn assert_six_leaves_present(body: &Value) {
 async fn mbeans_six_leaves_resolve_by_exact_key_strings() {
     let dir = TempDir::new().expect("temp dir");
     let core = "mbeans_leaves";
-    let app = build_mbeans_app(dir.path(), core, None).expect("app must build");
+    let app = build_mbeans_app(dir.path(), core, Some(SOFT_AUTOCOMMIT_ON)).expect("app must build");
     let (status, body) = post_m(
         &app,
         core,
@@ -217,7 +224,7 @@ async fn mbeans_six_leaves_resolve_by_exact_key_strings() {
 async fn mbeans_leaves_do_not_resolve_at_plausible_but_wrong_paths() {
     let dir = TempDir::new().expect("temp dir");
     let core = "mbeans_wrong_paths";
-    let app = build_mbeans_app(dir.path(), core, None).expect("app must build");
+    let app = build_mbeans_app(dir.path(), core, Some(SOFT_AUTOCOMMIT_ON)).expect("app must build");
     let (status, body) = get_m(&app, core, "admin/mbeans?stats=true&json.nl=map&wt=json").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_six_leaves_present(&body);
