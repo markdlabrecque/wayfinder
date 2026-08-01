@@ -29,7 +29,7 @@
 //!   strings for a date field, the gap verbatim as the date-math expression
 //!   (`facet_range_numeric.json`, `facet_range_date.json`).
 //!
-//! **Documented divergence** (findings 16, narrowed by issue #26): real Solr
+//! **Documented divergence** (finding 105, narrowed by issue #26): real Solr
 //! answers a facet on an *existing but unfacetable* field — a non-docValues
 //! field, or a stored-only field — with HTTP 200 and an empty array. Wayfinder
 //! refuses with a 400, because Tantivy has no column to aggregate and a silently
@@ -729,7 +729,7 @@ fn render_buckets(buckets: &[(Option<String>, u64)], nl: JsonNl) -> Value {
 /// This is the whole point of the issue: aggregation needs a fast (docValues)
 /// column, and without one the only honest answers are an error or a lie.
 /// Deliberate divergence from Solr, which answers 200 with an empty array for
-/// all three of these cases — see the module docs and findings 16.
+/// all three of these cases — see the module docs and finding 105.
 ///
 /// `allow_dynamic` also resolves `field_name` through a `[[dynamic_fields]]`
 /// pattern match, mirroring the static-before-dynamic precedence indexing

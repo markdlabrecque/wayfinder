@@ -329,7 +329,7 @@ Clean, zero warnings, exit 0.
   `facet.range` span not divisible by `gap` (implementation echoes the requested `end` verbatim;
   Solr may echo a gap-aligned end when `hardend` is unset — unconfirmed); `json.nl=arrarr`/`arrmap`
   accepted but rendered flat; `json.nl=map` + `facet.missing` empty-string key.
-- **Finding 16's unfacetable-field 400 is "deliberate by findings-note only"** —
+- **Finding 105's unfacetable-field 400 is "deliberate by findings-note only"** —
   `docs/PRD.md` is not touched by this diff, and this project's `CLAUDE.md` says a divergence is
   a bug unless the PRD documents it as deliberate. Finding 15 (unknown-core JSON-vs-HTML, from
   issue #11) has the identical status. Two divergences now await PRD ratification; that is an

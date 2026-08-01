@@ -61,7 +61,7 @@ they were taken.
 
 **Asymmetry worth flagging**, found by stage 1 and not mentioned in the issue text: un-prefixed
 `facet.field=nosuchfield` is 200-with-empty-array in real Solr (a documented, pre-existing
-Wayfinder divergence per finding 16/issue #26), but the prefixed case `{!key=k}nosuchfield` is a
+Wayfinder divergence per finding 105/issue #26), but the prefixed case `{!key=k}nosuchfield` is a
 real 400 in Solr too. Wayfinder 400s in both cases — so this change moves the prefixed case
 *toward* Solr's actual behaviour, and leaves the pre-existing un-prefixed divergence untouched.
 

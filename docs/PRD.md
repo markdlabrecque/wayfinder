@@ -165,7 +165,7 @@ chosen. Nothing may be added here without the same two things.
    for something impossible", which is exactly the silent-empty-counts failure the tracer-bullet
    review flagged. Tantivy cannot aggregate a non-`fast` column at all, so the honest answer is a
    hard 400 in the Solr error envelope, worded to mirror the `sort` equivalent in finding 11.
-   (issue #3's finding 16, narrowed by issue #26)
+   (issue #3's finding 105, narrowed by issue #26)
 
    **Scope note, and a caution about how this list gets built.** As first ratified this divergence
    also covered a facet on a field that *does not exist*, on the strength of a fixture showing

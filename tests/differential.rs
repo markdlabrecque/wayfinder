@@ -651,16 +651,16 @@ const ACCEPTED_DIVERGENCES: &[(&str, &str)] = &[
     ),
     (
         "facet_non_docvalues_text",
-        "finding 16 / PRD ratified-divergence 2: Wayfinder 400s a facet on an unfacetable \
+        "finding 105 / PRD ratified-divergence 2: Wayfinder 400s a facet on an unfacetable \
          (non-docValues) field where Solr 200s with empty counts",
     ),
     (
         "facet_non_docvalues_text_enum",
-        "finding 16 / PRD ratified-divergence 2, facet.method=enum variant of the same field",
+        "finding 105 / PRD ratified-divergence 2, facet.method=enum variant of the same field",
     ),
     (
         "facet_stored_only_field",
-        "finding 16 / PRD ratified-divergence 2, stored-only (non-indexed) field variant",
+        "finding 105 / PRD ratified-divergence 2, stored-only (non-indexed) field variant",
     ),
     (
         "update_unknown_core",
@@ -1889,7 +1889,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
                         failures.push(format!(
                             "{}: Wayfinder matched the fixture's status — the documented \
                              unfacetable-field divergence no longer holds, remove this \
-                             ACCEPTED_DIVERGENCES entry and update finding 16 ({reason})",
+                             ACCEPTED_DIVERGENCES entry and update finding 105 ({reason})",
                             entry.name
                         ));
                     }
