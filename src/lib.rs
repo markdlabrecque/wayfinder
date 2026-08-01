@@ -202,8 +202,8 @@ const SELECT_PARAMS: &[&str] = &[
 const PER_FIELD_PARAMS: &[&str] = &["facet.missing"];
 /// `commitWithin` / `overwrite` / `softCommit` landed with #9. `omitHeader`
 /// landed with #143 — `search_api_solr` sends `omitHeader=false` on every
-/// `/update` (`solr-ref/search-api/trace/00001.json`). No `TZ`: the module
-/// never sends one here.
+/// `/update` (`solr-ref/search-api/trace/00001.json`). `json.nl` landed with
+/// #153. No `TZ`: the module never sends one here.
 const UPDATE_PARAMS: &[&str] = &[
     "commit",
     "commitWithin",
@@ -211,6 +211,7 @@ const UPDATE_PARAMS: &[&str] = &[
     "softCommit",
     "omitHeader",
     "wt",
+    "json.nl",
 ];
 const PING_PARAMS: &[&str] = &["wt"];
 /// `/admin/info/system` (server-level) and `<core>/admin/system`

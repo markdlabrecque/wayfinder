@@ -750,14 +750,11 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
         // first-value-wins and an array under last-value-wins, under "ignore
         // `json.nl`", and under any handling that drops the repeated key.
         //
-        // Applying first-value-wins to `/select` is an inference from trace
-        // `00025.json` plus `Params::get` (`src/params.rs`), which returns the
-        // first value for a repeated key -- not from a `/select` capture of a
-        // repeated `json.nl`, because no such capture exists. The inference
-        // holds because the resolution is request-parsing behaviour that runs
-        // before any endpoint-specific code, so it cannot vary by endpoint;
-        // the same reasoning already backs `src/lib.rs`. Capturing repeated
-        // `json.nl` against real Solr belongs to #153.
+        // The captured `/select` fixture
+        // `solr-ref/responses/select_json_nl_repeated_map_flat.json` (and its
+        // manifest row) pins Solr's first-value-wins result. This runtime probe
+        // independently verifies the discriminating response shape in
+        // Wayfinder; it does not itself compare against that fixture.
         //
         // ponytail: two mutants survive this probe, both by construction
         // rather than for want of a test.
@@ -1715,14 +1712,11 @@ mod tests {
         );
     }
 
-    // Issue #167: `request.json-nl.repeated-map-and-flat`'s probe
-    // (`semantic_covered`, src/coverage.rs, the
-    // `"request.json-nl.repeated-map-and-flat" => probe.ok(...)` arm) only
-    // asserts an HTTP 200 on
-    // `content/admin/mbeans?json.nl=flat&json.nl=map`. It flipped to covered
-    // as a side effect of #158 routing `GET /solr/{core}/admin/mbeans` at
-    // all, with nothing verifying `solr-mbeans` is even present, let alone
-    // shaped as an object -- the shape the trace (`00025.json`) settled on.
+    // Historical issue #167 context: this probe once asserted only HTTP 200
+    // on `content/admin/mbeans?json.nl=flat&json.nl=map`. It therefore flipped
+    // to covered as a side effect of #158 routing
+    // `GET /solr/{core}/admin/mbeans`, with nothing verifying `solr-mbeans`
+    // was present or object-shaped as trace `00025.json` requires.
     // Same class of bug as #162 (an existence/200 check standing in for a
     // shape check), same stub-router fix pattern: the real handler cannot be
     // coaxed into emitting a non-object `solr-mbeans` (`admin_mbeans` in

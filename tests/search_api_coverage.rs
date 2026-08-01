@@ -30,7 +30,7 @@ use tempfile::TempDir;
 /// Derive the new value from `cargo run -- coverage --format json`. Never
 /// hand-compute it: the numerator has moved for reasons no ticket named more
 /// than once in this repo's history.
-const EXPECTED_FRACTION: &str = "67/75";
+const EXPECTED_FRACTION: &str = "68/75";
 
 const CONTRACT: &str = include_str!("../coverage/search_api_coverage_contract.json");
 const SOURCE_EVIDENCE: &str =
@@ -1048,8 +1048,8 @@ async fn classification_guards_exercise_real_router_strict_param_and_renderer_be
         common::request_full(&app, "POST", "content/update?json.nl=flat", Some("[]")).await;
     assert_eq!(
         status,
-        axum::http::StatusCode::BAD_REQUEST,
-        "update must preserve its strict-parameter surface: {body}"
+        axum::http::StatusCode::OK,
+        "update must accept json.nl=flat under strict params: {body}"
     );
 
     // Issue #155 landed the route this used to assert was absent. The guard's
@@ -1201,15 +1201,11 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         Some(&expected.request_semantics),
         None,
         &[
-            // Issue #158: "admin.mbeans.stats" and
-            // "request.json-nl.repeated-map-and-flat" both flip the moment
-            // `GET /solr/{core}/admin/mbeans` is routed at all --
-            // `request.json-nl.repeated-map-and-flat`'s probe
-            // (`content/admin/mbeans?json.nl=flat&json.nl=map`, src/coverage.rs)
-            // only checks a 200 response, which the route addition satisfies
-            // as a side effect. It is NOT owned by #153 (repeated `json.nl`
-            // on `/select`) despite the name similarity -- its probe never
-            // touches `/select`.
+            // Issues #158/#153: `request.json-nl.repeated-map-and-flat`
+            // requires both the captured mbeans route and a discriminating
+            // `/select` facet shape. The first of repeated `map,flat` values
+            // must win, as pinned by `select_json_nl_repeated_map_flat.json`;
+            // route presence alone no longer covers this semantic.
             // Issue #143: "request.omitHeader" and "request.timezone.utc"
             // are resolved -- `omitHeader`/`TZ` are registered in
             // `SELECT_PARAMS`/`MLT_PARAMS` (so `strict_params = true` no
@@ -1257,7 +1253,6 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
             // mere presence of the `facet_fields` container. Removed from this
             // list rather than left, per this file's own "self-expiring"
             // convention.
-            "request.json-nl.flat",
             "select.spellcheck.collate",
             "select.spellcheck.dictionaries",
             "select.spellcheck.enable",
@@ -1380,6 +1375,10 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // and #188 tightened that predicate to require the expanded fields while
     // making the implementation satisfy it. Denominator unchanged -- both
     // entries were already in the frozen contract.
+    // 67/75 -> 68/75 when issue #153 added `json.nl` to `UPDATE_PARAMS`,
+    // letting the existing strict `/update?json.nl=flat` probe complete.
+    // The request semantic was already in the frozen contract; selection
+    // rendering remains covered by the fixture-backed differential suite.
     assert_eq!(
         report.overall.fraction, EXPECTED_FRACTION,
         "initial coverage fraction"
@@ -1473,12 +1472,11 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
     );
 }
 
-/// Issue #167: `request.json-nl.repeated-map-and-flat`'s probe
-/// (`semantic_covered`, src/coverage.rs) checks only an HTTP 200 on
-/// `content/admin/mbeans?json.nl=flat&json.nl=map` -- the same class of bug
-/// #162 fixed for three response-field probes, but here on a
-/// request-semantics probe. Tightening it to also require `solr-mbeans` to
-/// be a JSON object, and conjoining a `/select` facet leg, must not drop the
+/// Issue #167: `request.json-nl.repeated-map-and-flat`'s probe once checked
+/// only HTTP 200 on `content/admin/mbeans?json.nl=flat&json.nl=map`, the same
+/// class of bug #162 fixed for three response-field probes. The current probe
+/// requires object-shaped `solr-mbeans` and a discriminating `/select` facet
+/// leg using `json.nl=map&json.nl=flat`. That tightening must not drop the
 /// fraction below `EXPECTED_FRACTION`: neither leg's *request* needs to change to reach
 /// real data -- `admin_mbeans` in `src/lib.rs` builds `solr-mbeans`
 /// unconditionally, and the seeded probe corpus already facets `category` --

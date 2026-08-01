@@ -700,6 +700,26 @@ async fn strict_params_accepts_commitwithin_overwrite_and_softcommit() {
     );
 }
 
+#[tokio::test]
+async fn strict_params_accepts_json_nl_flat_on_empty_json_update() {
+    let dir = TempDir::new().expect("temp dir");
+    let schema_path = dir.path().join("schema.toml");
+    std::fs::write(&schema_path, common::SCHEMA_TOML).expect("write schema.toml");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    let config_path = dir.path().join("wayfinder.toml");
+    std::fs::write(&config_path, "strict_params = true\n").expect("write wayfinder.toml");
+    let app =
+        wayfinder::app_with_config(&schema_path, &data_dir, &config_path).expect("app must build");
+    let (status, body) =
+        request_full(&app, "POST", "content/update?json.nl=flat", Some("{}")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "json.nl=flat must be accepted on JSON updates under strict_params, got: {body}"
+    );
+}
+
 // --- autocommit config (no fixture — config behaviour per spec) ------------
 
 #[tokio::test]
