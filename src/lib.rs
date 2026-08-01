@@ -178,6 +178,7 @@ macro_rules! search_api_routes {
             ("/solr/{core}/update", update, update_method),
             ("/solr/{core}/select", select, any_method),
             ("/solr/{core}/mlt", mlt, any_method),
+            ("/solr/{core}/terms", terms, any_method),
             ("/solr/{core}/admin/ping", ping, any_method),
             ("/solr/admin/info/system", admin_info_system, any_method),
             ("/solr/{core}/admin/system", core_admin_system, any_method),
@@ -218,6 +219,24 @@ const MLT_PARAMS: &[&str] = &[
     "mlt.interestingTerms",
     "wt",
 ];
+
+/// `/terms` params in scope for issue #155 (Solr's TermsComponent). `terms`
+/// gates the component, `terms.fl` (repeatable) names the fields;
+/// `omitHeader`/`wt`/`json.nl` are the envelope params `search_api_solr`
+/// always sends on this endpoint (`solr-ref/search-api/trace/00028.json`).
+///
+/// ponytail: deliberately absent, so `strict_params = true` still 400s them —
+/// `terms.limit`, `terms.sort`, `terms.prefix`, `terms.lower`/`upper`,
+/// `terms.mincount`/`maxcount`, `terms.regex`, `terms.raw`, `terms.ttf`. The
+/// ceiling is Solr's defaults only (`limit=10`, `sort=count`), which is
+/// exactly what the trace exercises and what the coverage contract asks for.
+/// Add the rest when the suggester work (PRD v3) produces a capture that needs
+/// them — listing a param here that the handler ignores would be worse than
+/// 400ing it, since it would silently answer the wrong question.
+const TERMS_PARAMS: &[&str] = &["terms", "terms.fl", "omitHeader", "wt", "json.nl"];
+
+/// Solr's `terms.limit` default. Not configurable here — see `TERMS_PARAMS`.
+const TERMS_DEFAULT_LIMIT: usize = 10;
 
 /// Builds the Wayfinder HTTP app for a single core with all server-config
 /// defaults (PRD §6). Use `app_with_config` to supply a config file.
@@ -1982,4 +2001,100 @@ async fn mlt(
     }
 
     Ok(axum::Json(body).into_response())
+}
+
+/// `GET /solr/<core>/terms` — Solr's TermsComponent (issue #155, PRD's
+/// contract-endpoint backlog). Enumerates a field's **analyzed** inverted-index
+/// term dictionary with per-term document frequency.
+///
+/// Ground truth is `solr-ref/search-api/trace/00028.json`, a real `solr:9`
+/// response to `search_api_solr`'s own request
+/// (`?omitHeader=true&wt=json&json.nl=flat&terms=true&terms.fl=tm_X3b_en_title`):
+///
+/// ```text
+/// {"terms":{"tm_X3b_en_title":["dog",2,"lazi",2,"quick",2,"about",1,...]}}
+/// ```
+///
+/// Shape and semantics, all read off that trace:
+///
+/// - `terms=true` gates the component. Without it there is no `terms` block at
+///   all, which is how Solr's search components work — the endpoint still 200s.
+/// - `terms.fl` is repeatable, one key under `terms` per field, each
+///   independent.
+/// - The value is the flat `[term, count, term, count, ...]` array. That is
+///   what `json.nl=flat` produces and the only shape this endpoint's response
+///   takes, so `json.nl` is accepted and needs no general named-list machinery
+///   (issue #153 is deliberately not a prerequisite).
+/// - Ordering is Solr's `terms.sort=count` default: count descending, ties
+///   broken by term ascending. The trace pins both halves — `dog`/`lazi`/
+///   `quick` tied at 2 ahead of the singletons, and the singletons themselves
+///   alphabetical.
+/// - `terms.limit` defaults to 10 (`TERMS_DEFAULT_LIMIT`), applied per field
+///   after the sort.
+/// - `omitHeader=true` (which the module always sends here) drops
+///   `responseHeader` entirely.
+///
+/// A `terms.fl` naming an undefined field is a 400 in Solr's envelope with no
+/// `response` key: unlike `facet.field`'s post-query error
+/// (`facet_unknown_field.json`, which carries the base query's `response`),
+/// `/terms` has no base query to have partially run, so this follows the
+/// pre-query precedent (`facet_err_range_single.json`).
+///
+/// ponytail: no `solr-ref/manifest.tsv` row, so the differential harness does
+/// not cover this endpoint yet. Ceiling named because it is a real gap: the
+/// capture needs the differential core, and it is likely to surface analyzer
+/// differences between Tantivy's Snowball chain and Solr's `text_en` — finding
+/// 93 already records one (`over` is not in Tantivy's English stopword list).
+/// Those are findings to escalate, not to normalise away.
+async fn terms(
+    State(state): State<Arc<AppState>>,
+    AxPath(core): AxPath<String>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, WfError> {
+    let params = Params::parse(query.as_deref().unwrap_or(""));
+    check_core(&state, &core, &params, Envelope::WithParams)?;
+    check_params(&state, TERMS_PARAMS, &params)?;
+
+    let mut terms_block = Map::new();
+    if params.get("terms") == Some("true") {
+        for field_name in params.get_all("terms.fl") {
+            if state.index.wf_schema.field(field_name).is_none() {
+                return Err(WfError::bad_request(
+                    "wayfinder::UndefinedField",
+                    format!("undefined field \"{field_name}\""),
+                )
+                .with_params(&params));
+            }
+            let totals = state.index.field_terms(field_name).map_err(|e| {
+                WfError::internal("wayfinder::TermsError", e.to_string()).with_params(&params)
+            })?;
+            // `field_terms` yields terms ascending, so a *stable* sort on
+            // count descending leaves equal counts in term-ascending order —
+            // Solr's `terms.sort=count` tie-break, asserted against the
+            // trace's alphabetical run of singletons.
+            let mut entries: Vec<(String, u64)> = totals.into_iter().collect();
+            entries.sort_by(|(_, a), (_, b)| b.cmp(a));
+            entries.truncate(TERMS_DEFAULT_LIMIT);
+            let mut flat = Vec::with_capacity(entries.len() * 2);
+            for (term, count) in entries {
+                flat.push(json!(term));
+                flat.push(json!(count));
+            }
+            terms_block.insert(field_name.to_string(), Value::Array(flat));
+        }
+    }
+
+    let mut body = Map::new();
+    if params.get("omitHeader") != Some("true") {
+        body.insert(
+            "responseHeader".to_string(),
+            json!({
+                "status": 0,
+                "QTime": 0,
+                "params": params.echo(),
+            }),
+        );
+    }
+    body.insert("terms".to_string(), Value::Object(terms_block));
+    Ok(axum::Json(Value::Object(body)).into_response())
 }

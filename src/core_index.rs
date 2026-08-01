@@ -2,7 +2,7 @@
 //! core (PRD open question 1 — single-core-per-process, so there's exactly
 //! one of these per running `app()`).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -2472,6 +2472,66 @@ impl CoreIndex {
             .iter()
             .map(|reader| u64::from(reader.num_deleted_docs()))
             .sum()
+    }
+
+    /// Every term in `field_name`'s **inverted index** term dictionary, with
+    /// its document frequency — Solr's TermsComponent (`/terms`, issue #155).
+    ///
+    /// Deliberately *not* `term_facet`: that runs a docValues
+    /// `TermsAggregation` over a fast column, which never sees the analyzed
+    /// tokens of a `text_en` field (`lazy` -> `lazi`, `archived` -> `archiv`).
+    /// The trace this endpoint matches
+    /// (`solr-ref/search-api/trace/00028.json`) reports stemmed terms, so the
+    /// term dictionary is the only source that can answer it.
+    ///
+    /// Two properties the ticket calls out, both encoded here:
+    ///
+    /// - **Doc frequencies sum across segments.** One term generally lives in
+    ///   several segments' dictionaries, each with its own local `doc_freq`;
+    ///   Solr reports the total, so the `BTreeMap` accumulates rather than
+    ///   overwrites.
+    /// - **Deleted documents still count.** `TermInfo::doc_freq` is the raw
+    ///   Lucene `docFreq`: deleting a document tombstones it in the segment's
+    ///   alive-docs bitmap without rewriting the postings, so the frequency
+    ///   only drops when a merge physically purges it. Solr's TermsComponent
+    ///   behaves the same way (it reads `docFreq`, not a live-docs-filtered
+    ///   count), so intersecting with `SegmentReader::alive_bitset` here would
+    ///   be a divergence, not a fix. `tests/terms.rs`'s
+    ///   `terms_doc_frequency_includes_deleted_docs_without_a_merge` guards it.
+    ///
+    /// Returned as a `BTreeMap` — unlimited and term-ascending. `terms.limit`
+    /// and `terms.sort` are response-shaping concerns and live in the handler,
+    /// which relies on the term-ascending iteration order for the
+    /// count-descending sort's tie-break.
+    ///
+    /// ponytail: the whole dictionary is materialised in memory before the
+    /// handler truncates it to `terms.limit`. Ceiling: a field with a very
+    /// large vocabulary pays for every term on every request. Solr streams and
+    /// stops early. Revisit if `/terms` ever serves a real autocomplete load
+    /// (PRD v3's suggester work) rather than the module's handshake-sized
+    /// requests.
+    pub fn field_terms(&self, field_name: &str) -> Result<BTreeMap<String, u64>> {
+        let field = self
+            .wf_schema
+            .field(field_name)
+            .ok_or_else(|| anyhow!("undefined field \"{field_name}\""))?;
+        let searcher = self.reader.searcher();
+        let mut totals: BTreeMap<String, u64> = BTreeMap::new();
+        for segment_reader in searcher.segment_readers() {
+            let inverted = segment_reader.inverted_index(field)?;
+            let mut stream = inverted.terms().stream()?;
+            while stream.advance() {
+                // ponytail: terms are raw dictionary bytes. For the analyzed
+                // text fields this endpoint targets they are UTF-8 tokens, so
+                // a lossy decode is exact; a binary/numeric field's encoded
+                // terms would render as replacement characters rather than
+                // Solr's own numeric rendering. Ceiling noted, not hit — the
+                // contract's only `terms.fl` is a text field.
+                let term = String::from_utf8_lossy(stream.key()).into_owned();
+                *totals.entry(term).or_insert(0) += u64::from(stream.value().doc_freq);
+            }
+        }
+        Ok(totals)
     }
 
     /// Total bytes of this core's index directory.

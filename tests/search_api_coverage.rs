@@ -1026,12 +1026,41 @@ async fn classification_guards_exercise_real_router_strict_param_and_renderer_be
         "update must preserve its strict-parameter surface: {body}"
     );
 
+    // Issue #155 landed the route this used to assert was absent. The guard's
+    // point was never the 404 itself -- it was that the coverage classifier
+    // reflects the *real* router, so a "covered" endpoint is one a request
+    // actually reaches. It now guards the same property from the other side:
+    // the route is wired (not a 404), it is reachable under
+    // `strict_params = true` with only the params `TERMS_PARAMS` allows, and
+    // it renders the `terms` block the `terms.terms` response-field probe
+    // classifies as covered.
     let (status, body) =
         common::request_full(&app, "GET", "content/terms?terms=true&terms.fl=body", None).await;
     assert_eq!(
         status,
-        axum::http::StatusCode::NOT_FOUND,
-        "unrouted terms endpoint must remain uncovered: {body}"
+        axum::http::StatusCode::OK,
+        "routed terms endpoint must be reachable under strict params: {body}"
+    );
+    assert!(
+        body.pointer("/terms/body").is_some_and(Value::is_array),
+        "terms renderer must produce the flat term/count array the coverage \
+         probes classify as covered: {body}"
+    );
+    // The other half of "the classifier reflects the router": a param
+    // `TERMS_PARAMS` deliberately omits (issue #155 scoped `terms.limit` out)
+    // must still 400 under strict params, so no future coverage claim can rest
+    // on a param the handler silently ignores.
+    let (status, body) = common::request_full(
+        &app,
+        "GET",
+        "content/terms?terms=true&terms.fl=body&terms.limit=5",
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::BAD_REQUEST,
+        "out-of-scope terms param must remain rejected under strict params: {body}"
     );
 
     let (status, body) = common::get(&app, "mlt?q=id:doc1&mlt.fl=body").await;
@@ -1128,7 +1157,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         "route",
         None,
         None,
-        &["GET /solr/{core}/admin/mbeans", "GET /solr/{core}/terms"],
+        &["GET /solr/{core}/admin/mbeans"],
     );
     let (sc, su) = assert_bucket(
         "request semantics",
@@ -1155,7 +1184,6 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
             "select.spellcheck.dictionaries",
             "select.spellcheck.enable",
             "select.spellcheck.query",
-            "terms.enumeration",
             "update.json-command-add-batch",
         ],
     );
@@ -1170,7 +1198,6 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
             "select.spellcheck.suggestions",
             "select.spellcheck.collations",
             "admin.mbeans.solr-mbeans",
-            "terms.terms",
         ],
     );
     let covered = ec + sc + rc;
@@ -1217,8 +1244,15 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // per-field `schema`/`index` flag strings stay omitted or placeheld
     // deliberately (PRD section 5 v2.75), which is why the endpoint carries no
     // `manifest.tsv` row and cannot be differentially diffed.
+    // 50/75 -> 53/75 when issue #155 landed the TermsComponent endpoint
+    // (`GET /solr/{core}/terms`, `terms`/`terms.fl`, the inverted-index term
+    // dictionary read in `CoreIndex::field_terms`), flipping three entries in
+    // three different buckets at once: the `GET /solr/{core}/terms` route, the
+    // `terms.enumeration` request semantic, and the `terms.terms` response
+    // field. Denominator unchanged -- no new contract items, three
+    // previously-uncovered ones now answered.
     assert_eq!(
-        report.overall.fraction, "50/75",
+        report.overall.fraction, "53/75",
         "initial coverage fraction"
     );
 }
