@@ -30,7 +30,7 @@ use tempfile::TempDir;
 /// Derive the new value from `cargo run -- coverage --format json`. Never
 /// hand-compute it: the numerator has moved for reasons no ticket named more
 /// than once in this repo's history.
-const EXPECTED_FRACTION: &str = "66/75";
+const EXPECTED_FRACTION: &str = "67/75";
 
 const CONTRACT: &str = include_str!("../coverage/search_api_coverage_contract.json");
 const SOURCE_EVIDENCE: &str =
@@ -1230,12 +1230,22 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
             // actually alter. Removed from this list rather than left, per
             // this file's own "self-expiring" convention.
             //
-            // The two `mlt.*` entries below stay: `mlt.fl.wildcard-plus-score`
-            // is issue #188 (`render_doc` has no `fl` wildcard at all, a
-            // `/select` gap too) and `mlt.maxntp` is issue #189 (no Tantivy
-            // equivalent; deliberately still 400ing under `strict_params`
-            // rather than silently ignored). Both were descoped from #141.
-            "mlt.fl.wildcard-plus-score",
+            // Issue #188: "mlt.fl.wildcard-plus-score" is resolved --
+            // `CoreIndex::render_doc` now expands `fl=*` to every stored field
+            // (declared and dynamic) and composes it with `score`, on
+            // `/select` and `/mlt` alike. Two things had to change together:
+            // the predicate, which asserted only that `/response/docs/0/score`
+            // existed and so read `select.fl.wildcard-plus-score` as a
+            // false-positive green (same class as #162/#167), and the `/mlt`
+            // probe's *request*, which omitted `mlt.mintf`/`mlt.mindf` and so
+            // read uncovered purely because real Solr's defaults find no
+            // similar docs in this corpus (finding 55) -- a reason unrelated
+            // to `fl`. Removed from this list rather than left, per this
+            // file's own "self-expiring" convention.
+            //
+            // "mlt.maxntp" stays: issue #189 (no Tantivy equivalent;
+            // deliberately still 400ing under `strict_params` rather than
+            // silently ignored). Descoped from #141.
             "mlt.maxntp",
             // Issue #140: "select.facet.per-field-missing" is resolved --
             // `f.<field>.facet.missing` now overrides the global for the field
@@ -1359,6 +1369,17 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // -- both were already in the frozen contract, just unmet. The issue's
     // other two entries did NOT flip and were descoped:
     // `mlt.fl.wildcard-plus-score` to #188 and `mlt.maxntp` to #189.
+    // 66/75 -> 67/75 when issue #188 taught `CoreIndex::render_doc` that `*` in
+    // `fl` is a wildcard over every stored field (declared and dynamic),
+    // composable with named fields and with `score`, flipping
+    // `mlt.fl.wildcard-plus-score` -- whose probe also had to start sending
+    // `mlt.mintf=1&mlt.mindf=1`, since without them this corpus has no similar
+    // docs at all and the item read uncovered for a reason unrelated to `fl`.
+    // `select.fl.wildcard-plus-score` does NOT move the numerator: it was
+    // already reading covered, falsely, on a `score`-presence-only predicate,
+    // and #188 tightened that predicate to require the expanded fields while
+    // making the implementation satisfy it. Denominator unchanged -- both
+    // entries were already in the frozen contract.
     assert_eq!(
         report.overall.fraction, EXPECTED_FRACTION,
         "initial coverage fraction"

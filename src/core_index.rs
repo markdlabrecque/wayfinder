@@ -2064,6 +2064,18 @@ impl CoreIndex {
     /// restricted to `fl` (schema field names) if given. Unknown `fl` fields
     /// are silently dropped (findings fact 6); fields with no stored value
     /// are omitted entirely, never emitted as `null`/`[]`.
+    ///
+    /// `*` in `fl` is a wildcard over every *stored* field — declared and
+    /// dynamic alike — not a literal field name (issue #188;
+    /// `solr-ref/responses/mlt_fl_wildcard_score.json`,
+    /// `solr-ref/search-api/trace/00010.json`). It composes with named fields
+    /// (naming a field the wildcard already covers is a no-op) and with
+    /// `score`, and never widens the set beyond what an absent `fl` returns.
+    ///
+    /// ponytail: `*` is the only glob understood. Solr also accepts a partial
+    /// pattern (`fl=ss_*`, `fl=*_txt`) and the wildcard is per-`fl`-member
+    /// there; here anything other than a bare `*` stays a literal name. No
+    /// captured fixture sends a partial pattern.
     pub fn render_doc(
         &self,
         addr: DocAddress,
@@ -2073,12 +2085,17 @@ impl CoreIndex {
         let searcher = self.reader.searcher();
         let doc: TantivyDocument = searcher.doc(addr)?;
 
+        // An absent `fl` and an `fl` containing `*` want the same field set, so
+        // both loops below ask this rather than matching literal names.
+        let wants =
+            |name: &str| fl.is_none_or(|fl| fl.iter().any(|want| want == "*" || want == name));
+
         let wanted: Vec<&schema::FieldConfig> = self
             .wf_schema
             .fields
             .iter()
             .filter(|f| f.stored)
-            .filter(|f| fl.is_none_or(|fl| fl.iter().any(|name| name == &f.name)))
+            .filter(|f| wants(&f.name))
             .collect();
 
         let mut out = Map::new();
@@ -2135,7 +2152,7 @@ impl CoreIndex {
                         .wf_schema
                         .match_dynamic(&name)
                         .is_some_and(|rule| rule.stored);
-                    if !stored || fl.is_some_and(|fl| !fl.iter().any(|want| want == &name)) {
+                    if !stored || !wants(&name) {
                         continue;
                     }
                     out.insert(name, serde_json::to_value(&v)?);

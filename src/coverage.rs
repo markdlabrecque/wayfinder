@@ -591,6 +591,55 @@ impl ProbeApp {
     }
 }
 
+/// Does `wildcard_path` (which must send `fl=*,score`) render *every* stored
+/// field plus a numeric `score`, at `pointer`?
+///
+/// Issue #188: asserting only that `/response/docs/0/score` exists is a
+/// false-positive green, because `score` is the one member of `fl=*,score` that
+/// a literal-name `fl` allowlist already understood -- `*` matched no field, so
+/// every real field was dropped and the item still read covered. The
+/// discriminating question is what `*` expanded to, and the reference answer for
+/// that is the *same request with no `fl` at all*: `fl=*` is exactly the
+/// `fl`-absent field set (`solr-ref/responses/select_all.json`), so
+/// `baseline_path` supplies the expectation instead of a hardcoded field list
+/// that would drift from `PROBE_SCHEMA`.
+///
+/// Compared in order, not as sets: doc keys come back in schema order for both
+/// requests (`select_fl_reversed.json` -- `fl` order is not doc key order), so
+/// ordered equality is free and pins that too. `score` is excluded from the
+/// comparison and checked separately, since the baseline request cannot carry it
+/// (`fl=score` is what turns scoring output on at all).
+async fn renders_every_stored_field_plus_score(
+    probe: &ProbeApp,
+    wildcard_path: &str,
+    baseline_path: &str,
+    pointer: &str,
+) -> bool {
+    let Some(baseline) = probe.response(baseline_path).await else {
+        return false;
+    };
+    let Some(expected) = baseline.pointer(pointer).and_then(Value::as_object) else {
+        return false;
+    };
+    // Vacuity guard: two empty docs would compare equal, so an implementation
+    // that dropped every field on both requests must not read covered.
+    if expected.is_empty() {
+        return false;
+    }
+    let Some(wildcard) = probe.response(wildcard_path).await else {
+        return false;
+    };
+    let Some(actual) = wildcard.pointer(pointer).and_then(Value::as_object) else {
+        return false;
+    };
+    if !actual.get("score").is_some_and(Value::is_number) {
+        return false;
+    }
+    let actual_fields: Vec<(&String, &Value)> =
+        actual.iter().filter(|(name, _)| *name != "score").collect();
+    actual_fields == expected.iter().collect::<Vec<_>>()
+}
+
 /// Each probe is a request against the real strict router with an assertion on
 /// its real JSON response. A handler, allowlist, or renderer regression changes
 /// this result without a coverage-only Boolean to update.
@@ -781,9 +830,13 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
                 && probe.response_ids("select?q=*:*&rows=0").await == Some(Vec::new())
         }
         "select.fl.wildcard-plus-score" => {
-            probe
-                .has("select?q=quick&fl=*,score", "/response/docs/0/score")
-                .await
+            renders_every_stored_field_plus_score(
+                probe,
+                "select?q=quick&fl=*,score",
+                "select?q=quick",
+                "/response/docs/0",
+            )
+            .await
         }
         "select.fq.string" => {
             probe
@@ -1052,13 +1105,20 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
                 .zip(second_page)
                 .is_some_and(|(first, second)| first.len() > 1 && second == vec![first[1].clone()])
         }
+        // `mlt.mintf=1&mlt.mindf=1` are load-bearing, not decoration: at Solr's
+        // defaults (mintf=2/mindf=5) this 20-doc corpus has no similar docs at
+        // all (finding 64, `docs/solr-ref-findings.md`), so `/response/docs/0`
+        // would not exist whatever `fl` did -- which is why this item read
+        // uncovered before issue #188 for a reason unrelated to the wildcard.
+        // The sibling `mlt.mintf`/`mlt.mindf` probes pin the same thresholds.
         "mlt.fl.wildcard-plus-score" => {
-            probe
-                .has(
-                    "mlt?q=id:mlt11&mlt.fl=body&fl=*,score",
-                    "/response/docs/0/score",
-                )
-                .await
+            renders_every_stored_field_plus_score(
+                probe,
+                "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fl=*,score",
+                "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1",
+                "/response/docs/0",
+            )
+            .await
         }
         // Three legs, because a 200 alone proves only that `fq` is
         // allowlisted, not that it filters (issue #141, finding 98). The
@@ -1930,6 +1990,336 @@ mod tests {
              (wrong path, wrong pointer, or a query that no longer sends \
              `f.category.facet.missing=true`)"
         );
+    }
+
+    // ---- issue #188: the `fl=*` probes were false-positive greens ----------
+    //
+    // `select.fl.wildcard-plus-score` asserted only that
+    // `/response/docs/0/score` exists. `score` is the *one* member of
+    // `fl=*,score` that pre-#188 `render_doc` understood -- `*` was matched as
+    // a literal field name, which no schema field has, so every real field was
+    // dropped and the probe read the item as covered against an implementation
+    // with no wildcard support at all. Same class of false green as #162/#167,
+    // and the reason the coverage artifact certified an unimplemented feature.
+    //
+    // `mlt.fl.wildcard-plus-score` read *uncovered*, but incidentally rather
+    // than for the right reason: its query
+    // (`mlt?q=id:mlt11&mlt.fl=body&fl=*,score`) omitted `mlt.mintf`/`mlt.mindf`,
+    // and real Solr's defaults (mintf=2/mindf=5) return no similar docs at all
+    // against a 20-doc corpus (finding 55), so `/response/docs/0` did not
+    // exist whatever `fl` did. Verified: `PROBE_DOCS` seeds exactly that
+    // corpus, and the sibling `mlt.mintf`/`mlt.mindf` probes above pin
+    // `numFound > 0` only with the thresholds loosened. So the request needs
+    // fixing alongside the predicate, or the item would keep reading uncovered
+    // after the wildcard landed.
+    //
+    // Both probes are therefore driven here against throwaway routers, in the
+    // query-*sensitive* style #140 established below (`query_carries`): a stub
+    // that matched on path alone would pin the predicate and nothing about the
+    // request, so the probe could enumerate `fl=id,body,category,score`
+    // literally -- which pre-#188 `render_doc` already answered correctly --
+    // and every assertion would still pass.
+
+    /// `doc1` as `PROBE_DOCS` seeds it, field by field in `PROBE_SCHEMA`
+    /// declaration order. That order is the contract: real Solr renders doc
+    /// keys in schema order, not `fl` order
+    /// (`solr-ref/responses/select_fl_reversed.json`), and `fl=*` must produce
+    /// every one of them (`select_all.json`, and
+    /// `solr-ref/responses/mlt_fl_wildcard_score.json` for the `,score`
+    /// composition).
+    fn probe_stored_fields() -> Vec<(&'static str, Value)> {
+        vec![
+            ("id", serde_json::json!("doc1")),
+            ("body", serde_json::json!("quick brown fox rocket")),
+            ("category", serde_json::json!(["animals", "classic"])),
+            ("rating", serde_json::json!(3)),
+            ("created", serde_json::json!("2024-01-02T00:00:00Z")),
+            ("featured", serde_json::json!("true")),
+        ]
+    }
+
+    /// The raw `fl` value the probe's query carries, if any. Whole-segment, for
+    /// the same reason `query_carries` below is: `fl=` must not also match
+    /// `hl.fl=` or `mlt.fl=`, which every `/mlt` probe query also sends.
+    fn fl_value(query: Option<&str>) -> Option<String> {
+        query
+            .unwrap_or_default()
+            .split('&')
+            .find_map(|segment| segment.strip_prefix("fl=").map(str::to_owned))
+    }
+
+    /// Renders one doc the way a server with the given capabilities would
+    /// answer `fl`. `wildcard_fields` is what `*` expands to -- every stored
+    /// field for a correct implementation, none at all for pre-#188
+    /// `render_doc` (which matched `*` as a literal field name), or a subset
+    /// for a partial expansion that forgets a whole class of field (e.g.
+    /// `render_doc`'s separate dynamic-field loop). An absent `fl` always
+    /// renders every stored field and no `score`, which is Solr's default.
+    fn render_probe_doc(fl: Option<&str>, wildcard_fields: &[&str], honour_score: bool) -> Value {
+        let requested: Vec<&str> = fl.map(|v| v.split(',').collect()).unwrap_or_default();
+        let mut doc = serde_json::Map::new();
+        for (name, value) in probe_stored_fields() {
+            let wanted = match fl {
+                None => true,
+                Some(_) => {
+                    requested.contains(&name)
+                        || (requested.contains(&"*") && wildcard_fields.contains(&name))
+                }
+            };
+            if wanted {
+                doc.insert(name.to_string(), value);
+            }
+        }
+        if honour_score && requested.contains(&"score") {
+            doc.insert("score".to_string(), serde_json::json!(1.0));
+        }
+        Value::Object(doc)
+    }
+
+    fn probe_result_block(docs: Vec<Value>) -> Value {
+        serde_json::json!({
+            "numFound": docs.len(),
+            "start": 0,
+            "maxScore": 1.0,
+            "numFoundExact": true,
+            "docs": docs,
+        })
+    }
+
+    fn probe_select_body(fl: Option<&str>, wildcard_fields: &[&str], score: bool) -> Value {
+        serde_json::json!({
+            "response": probe_result_block(vec![render_probe_doc(fl, wildcard_fields, score)]),
+        })
+    }
+
+    /// The `/mlt` envelope: `match` (the seed doc) and `response` (the similar
+    /// docs), both rendered through the same `fl` -- which is why the wildcard
+    /// gap showed up on both blocks in `mlt_fl_wildcard_score.json`.
+    /// `similar_docs` empty models real Solr's default mintf/mindf finding
+    /// nothing similar.
+    fn probe_mlt_body(
+        fl: Option<&str>,
+        wildcard_fields: &[&str],
+        score: bool,
+        similar: bool,
+    ) -> Value {
+        let doc = render_probe_doc(fl, wildcard_fields, score);
+        let similar_docs = if similar {
+            vec![doc.clone()]
+        } else {
+            Vec::new()
+        };
+        serde_json::json!({
+            "match": probe_result_block(vec![doc]),
+            "response": probe_result_block(similar_docs),
+        })
+    }
+
+    fn all_probe_field_names() -> Vec<&'static str> {
+        probe_stored_fields().into_iter().map(|(n, _)| n).collect()
+    }
+
+    /// Models a correct implementation: `*` expands to every stored field and
+    /// composes with `score`.
+    async fn select_expanding_the_wildcard_and_honouring_score(
+        RawQuery(query): RawQuery,
+    ) -> axum::Json<Value> {
+        axum::Json(probe_select_body(
+            fl_value(query.as_deref()).as_deref(),
+            &all_probe_field_names(),
+            true,
+        ))
+    }
+
+    /// Models pre-#188 `render_doc`: `fl` is a literal-name allowlist, so a
+    /// name it recognises works and `*` matches nothing -- while `score` is
+    /// still honoured. This is the shape the old probe called covered.
+    ///
+    /// Also the request-side guard: it answers an *enumerated*
+    /// `fl=id,body,category,...,score` completely, so a probe that stopped
+    /// sending `*` would read covered against a server with no wildcard
+    /// support at all.
+    async fn select_treating_the_wildcard_as_a_literal_name(
+        RawQuery(query): RawQuery,
+    ) -> axum::Json<Value> {
+        axum::Json(probe_select_body(
+            fl_value(query.as_deref()).as_deref(),
+            &[],
+            true,
+        ))
+    }
+
+    /// Models the other half being dropped: `*` expands, `score` does not.
+    async fn select_expanding_the_wildcard_but_dropping_score(
+        RawQuery(query): RawQuery,
+    ) -> axum::Json<Value> {
+        axum::Json(probe_select_body(
+            fl_value(query.as_deref()).as_deref(),
+            &all_probe_field_names(),
+            false,
+        ))
+    }
+
+    /// Models a partial expansion -- `*` reaches some stored fields but not
+    /// all, which is what fixing only `render_doc`'s declared-`[[fields]]` loop
+    /// and not its dynamic-field loop would look like.
+    async fn select_expanding_the_wildcard_partially(
+        RawQuery(query): RawQuery,
+    ) -> axum::Json<Value> {
+        axum::Json(probe_select_body(
+            fl_value(query.as_deref()).as_deref(),
+            &["id"],
+            true,
+        ))
+    }
+
+    fn mlt_only_probe(mlt: axum::routing::MethodRouter) -> ProbeApp {
+        ProbeApp {
+            app: Router::new().route("/solr/content/mlt", mlt),
+            _workspace: ProbeWorkspace::new(),
+        }
+    }
+
+    async fn mlt_expanding_the_wildcard_and_honouring_score(
+        RawQuery(query): RawQuery,
+    ) -> axum::Json<Value> {
+        axum::Json(probe_mlt_body(
+            fl_value(query.as_deref()).as_deref(),
+            &all_probe_field_names(),
+            true,
+            true,
+        ))
+    }
+
+    async fn mlt_treating_the_wildcard_as_a_literal_name(
+        RawQuery(query): RawQuery,
+    ) -> axum::Json<Value> {
+        axum::Json(probe_mlt_body(
+            fl_value(query.as_deref()).as_deref(),
+            &[],
+            true,
+            true,
+        ))
+    }
+
+    /// Models real Solr's *default* `mlt.mintf=2`/`mlt.mindf=5` against a
+    /// 20-doc corpus: nothing is similar enough, so `response.docs` is empty
+    /// however good the `fl` handling is (finding 55). Loosened thresholds are
+    /// what make the similar-docs set non-empty, so the probe must send them --
+    /// otherwise `mlt.fl.wildcard-plus-score` reads uncovered for a reason that
+    /// has nothing to do with `fl`, which is exactly how it read before #188.
+    async fn mlt_needing_loosened_thresholds(RawQuery(query): RawQuery) -> axum::Json<Value> {
+        let loosened = query_carries(query.as_deref(), "mlt.mintf=1")
+            && query_carries(query.as_deref(), "mlt.mindf=1");
+        axum::Json(probe_mlt_body(
+            fl_value(query.as_deref()).as_deref(),
+            &all_probe_field_names(),
+            true,
+            loosened,
+        ))
+    }
+
+    #[tokio::test]
+    async fn select_wildcard_plus_score_probe_rejects_a_server_that_drops_the_wildcard() {
+        let probe = select_only_probe(get(select_treating_the_wildcard_as_a_literal_name));
+        assert!(
+            !semantic_covered(&probe, "select.fl.wildcard-plus-score").await,
+            "issue #188: select.fl.wildcard-plus-score must require the fields `*` expands to, \
+             not just that `score` is present. Against a server that honours `score` and treats \
+             `*` as a literal field name -- i.e. Wayfinder immediately before this issue -- the \
+             item must read UNCOVERED. If this fails, the probe is still the false-positive green \
+             the issue names, and the coverage artifact is certifying `fl=*` against an \
+             implementation with no wildcard support at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn select_wildcard_plus_score_probe_rejects_a_server_that_drops_score() {
+        let probe = select_only_probe(get(select_expanding_the_wildcard_but_dropping_score));
+        assert!(
+            !semantic_covered(&probe, "select.fl.wildcard-plus-score").await,
+            "tightening the wildcard half must not lose the `score` half: a server that expands \
+             `*` but never emits `score` must still read uncovered"
+        );
+    }
+
+    #[tokio::test]
+    async fn select_wildcard_plus_score_probe_rejects_a_partial_wildcard_expansion() {
+        let probe = select_only_probe(get(select_expanding_the_wildcard_partially));
+        assert!(
+            !semantic_covered(&probe, "select.fl.wildcard-plus-score").await,
+            "`fl=*` is *every* stored field (`select_all.json`), so an expansion that reaches \
+             only some of them -- what fixing `render_doc`'s declared-fields loop but not its \
+             dynamic-fields loop would produce -- must read uncovered"
+        );
+    }
+
+    #[tokio::test]
+    async fn select_wildcard_plus_score_probe_accepts_a_server_honouring_both() {
+        let probe = select_only_probe(get(select_expanding_the_wildcard_and_honouring_score));
+        assert!(
+            semantic_covered(&probe, "select.fl.wildcard-plus-score").await,
+            "select.fl.wildcard-plus-score must still count the shape it is supposed to require \
+             -- every stored field plus `score`, served in response to `fl=*,score` -- as \
+             covered; if this fails the rejections above are passing vacuously (wrong path, wrong \
+             field set, or a query that no longer sends `fl=*,score`)"
+        );
+    }
+
+    #[tokio::test]
+    async fn mlt_wildcard_plus_score_probe_rejects_a_server_that_drops_the_wildcard() {
+        let probe = mlt_only_probe(get(mlt_treating_the_wildcard_as_a_literal_name));
+        assert!(
+            !semantic_covered(&probe, "mlt.fl.wildcard-plus-score").await,
+            "the `/mlt` half of the same `render_doc` gap: a server returning similar docs that \
+             carry `score` and nothing else must read uncovered"
+        );
+    }
+
+    #[tokio::test]
+    async fn mlt_wildcard_plus_score_probe_loosens_mintf_and_mindf() {
+        let probe = mlt_only_probe(get(mlt_needing_loosened_thresholds));
+        assert!(
+            semantic_covered(&probe, "mlt.fl.wildcard-plus-score").await,
+            "mlt.fl.wildcard-plus-score's query must send `mlt.mintf=1&mlt.mindf=1`. Against real \
+             Solr's defaults this corpus has no similar docs at all (finding 55), so with the \
+             thresholds left at their defaults the item reads uncovered whatever `fl` does -- \
+             which is how it read before #188, for a reason unrelated to the wildcard. This stub \
+             honours `fl=*,score` perfectly and only withholds the similar-docs set until the \
+             thresholds are loosened"
+        );
+    }
+
+    #[tokio::test]
+    async fn mlt_wildcard_plus_score_probe_accepts_a_server_honouring_both() {
+        let probe = mlt_only_probe(get(mlt_expanding_the_wildcard_and_honouring_score));
+        assert!(
+            semantic_covered(&probe, "mlt.fl.wildcard-plus-score").await,
+            "the `/mlt` accepting case, so the two rejections above cannot pass vacuously"
+        );
+    }
+
+    /// Both `fl=*` items must read covered against the *real* seeded app once
+    /// `render_doc` understands the wildcard. This is the end-to-end check the
+    /// stubs above cannot make: they pin what the predicate and the request
+    /// must be, not that Wayfinder actually satisfies them.
+    ///
+    /// `mlt.fl.wildcard-plus-score` is the one that moves the numerator -- it
+    /// was uncovered before #188 -- so `EXPECTED_FRACTION` in
+    /// `tests/search_api_coverage.rs` goes up by one.
+    #[tokio::test]
+    async fn both_wildcard_plus_score_items_are_covered_against_the_real_seeded_app() {
+        let probe = ProbeApp::new().await;
+        for id in [
+            "select.fl.wildcard-plus-score",
+            "mlt.fl.wildcard-plus-score",
+        ] {
+            assert!(
+                semantic_covered(&probe, id).await,
+                "{id} must read covered against the real routed handlers once `render_doc` \
+                 expands `fl=*` to every stored field and composes it with `score`"
+            );
+        }
     }
 
     /// `"select.highlight.snippets"` used to probe with `hl.snippets=1`, which
