@@ -1157,7 +1157,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         "route",
         None,
         None,
-        &["GET /solr/{core}/admin/mbeans"],
+        &[],
     );
     let (sc, su) = assert_bucket(
         "request semantics",
@@ -1167,13 +1167,20 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         Some(&expected.request_semantics),
         None,
         &[
-            "admin.mbeans.stats",
+            // Issue #158: "admin.mbeans.stats" and
+            // "request.json-nl.repeated-map-and-flat" both flip the moment
+            // `GET /solr/{core}/admin/mbeans` is routed at all --
+            // `request.json-nl.repeated-map-and-flat`'s probe
+            // (`content/admin/mbeans?json.nl=flat&json.nl=map`, src/coverage.rs)
+            // only checks a 200 response, which the route addition satisfies
+            // as a side effect. It is NOT owned by #153 (repeated `json.nl`
+            // on `/select`) despite the name similarity -- its probe never
+            // touches `/select`.
             "mlt.filters",
             "mlt.fl.wildcard-plus-score",
             "mlt.match-include-and-offset",
             "mlt.maxntp",
             "request.json-nl.flat",
-            "request.json-nl.repeated-map-and-flat",
             "request.omitHeader",
             "request.timezone.utc",
             "select.facet.per-field-missing",
@@ -1197,7 +1204,6 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         &[
             "select.spellcheck.suggestions",
             "select.spellcheck.collations",
-            "admin.mbeans.solr-mbeans",
         ],
     );
     let covered = ec + sc + rc;
@@ -1251,8 +1257,14 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // `terms.enumeration` request semantic, and the `terms.terms` response
     // field. Denominator unchanged -- no new contract items, three
     // previously-uncovered ones now answered.
+    // 53/75 -> 57/75 when issue #158 landed `GET /solr/{core}/admin/mbeans`:
+    // the endpoint, `admin.mbeans.stats`, and `admin.mbeans.solr-mbeans`
+    // entries the ticket named, PLUS `request.json-nl.repeated-map-and-flat`
+    // (not named by the ticket, but its probe is gated on the same route --
+    // see the comment on the request-semantics uncovered list above).
+    // Denominator unchanged -- four previously-uncovered items now answered.
     assert_eq!(
-        report.overall.fraction, "53/75",
+        report.overall.fraction, "57/75",
         "initial coverage fraction"
     );
 }
