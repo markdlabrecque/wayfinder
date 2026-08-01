@@ -394,7 +394,7 @@ async fn omit_header_yes_suppresses_the_response_header() {
 // --- unfixtured guards: every remaining boolean read, and every handler -----
 //
 // Nothing below has a Solr fixture, and that is deliberate rather than a gap.
-// Finding 113 pins the *rule*; these pin that each read site actually applies
+// Finding 115 pins the *rule*; these pin that each read site actually applies
 // it. The code they guard is validation-only, which `CLAUDE.md` requires be
 // mutation-tested: deleting the guard must break a test, not merely fail to be
 // exercised. Each test's doc comment names the mutation it was verified to
@@ -560,7 +560,7 @@ async fn select_rejects_each_invalid_boolean() {
 /// [`assert_invalid_omit_header_400`] while leaving status and message intact.
 ///
 /// The response *body* is Wayfinder's own JSON envelope, not a captured Solr
-/// one, and deliberately so (finding 113): real Solr answers an invalid
+/// one, and deliberately so (finding 115): real Solr answers an invalid
 /// `omitHeader` with a Jetty HTML error page, because header suppression is
 /// decided before the JSON response writer exists. Only the status is shared,
 /// which is why there is no fixture and no `manifest.tsv` row. Solr's *message*

@@ -939,7 +939,7 @@ fn check_params(state: &AppState, allowed: &[&str], params: &Params) -> Result<(
             // `omitHeader=1` (`omit_header_invalid_one.html`: `msg=invalid
             // boolean value: 1`) — the same message every other invalid
             // boolean gets, since it is the same `StrUtils.parseBool` failure
-            // (issue #187, finding 113).
+            // (issue #187, finding 115).
             WfError::bad_request("wayfinder::InvalidParam", params::invalid_bool_msg(value))
                 .with_params(params)
                 .suppress_response_header()

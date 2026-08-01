@@ -22,7 +22,7 @@ all five are a 400. The real rule, on the value lowercased:
 So the bug Wayfinder had was two-sided before this fix: recognized-truthy values
 (`TRUE`, `yes`, `on`, and any prefix match) were silently parsed as false, and garbage
 values (`1`, `nope`, `maybe`, empty string) were also silently parsed as false instead
-of 400ing. Recorded as finding 113 in `docs/solr-ref-findings.md`, appended after 112 (renumbered from 109 while rebasing: main took 109-112 in the meantime).
+of 400ing. Recorded as finding 115 in `docs/solr-ref-findings.md`, appended after 114 (renumbered from 109 across three rebases; main took 109-114 in the meantime).
 
 ## What was built
 
@@ -116,7 +116,7 @@ where real Solr returns a Jetty HTML error page. This is because Solr decides he
 suppression before its response writer exists, so the container's own HTML error page
 answers instead of a JSON envelope. No fixture was captured for this (none was needed
 per spec) and no `manifest.tsv` row exists for it, so no `EXPECTED_DIVERGENCES` /
-`ACCEPTED_DIVERGENCES` entry applies. Recorded in finding 113 and in the
+`ACCEPTED_DIVERGENCES` entry applies. Recorded in finding 115 and in the
 `Params::omit_header()` doc comment, which was rewritten: its "accept side" ceiling is
 now settled by `bool_omit_header_yes.json`; the still-unfixtured ceiling — error
 envelopes carry `responseHeader` regardless of `omitHeader` — is kept as-is.
@@ -128,7 +128,7 @@ envelopes carry `responseHeader` regardless of `omitHeader` — is kept as-is.
    correctly by construction/probe but is unguarded against a future refactor that
    silently breaks it.
 2. **The Jetty-HTML `omitHeader` divergence is asserted in four places
-   (finding 113, the `omit_header()` doc comment, this report, and the spec) with no
+   (finding 115, the `omit_header()` doc comment, this report, and the spec) with no
    captured artifact backing it.** No fixture or raw HTML/status-line capture exists;
    the observed real-Solr status line should be recorded somewhere checkable so the
    claim isn't purely prose.

@@ -123,7 +123,7 @@ impl Params {
 
     /// Validates `omitHeader` against Solr's boolean vocabulary -- the shared
     /// [`parse_bool`], so this parameter accepts exactly what every other
-    /// boolean param does (issue #187, finding 113): `true`/`on`/`yes` and
+    /// boolean param does (issue #187, finding 115): `true`/`on`/`yes` and
     /// `false`/`off` by case-insensitive prefix, `no` exactly, and nothing
     /// else. Numeric and single-letter spellings (`1`, `t`, `y`) stay invalid
     /// here, as they are everywhere else.
@@ -179,7 +179,7 @@ pub fn split_per_field_key<'a, 'b>(
 }
 
 /// Solr's `StrUtils.parseBool`, as measured against real `solr:9` for issue
-/// #187 (finding 113) — the one parser every boolean request param in this
+/// #187 (finding 115) — the one parser every boolean request param in this
 /// crate goes through. `None` means "invalid", which callers turn into Solr's
 /// 400 `invalid boolean value: <raw>`.
 ///
