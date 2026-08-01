@@ -1,0 +1,115 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":28,
+    "params":{
+      "q":"quick+rocket",
+      "defType":"edismax",
+      "qf":"title body",
+      "fl":"id",
+      "sort":"id asc",
+      "wt":"json",
+      "debugQuery":"true"
+    }
+  },
+  "response":{
+    "numFound":6,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"eA"
+    },{
+      "id":"eB"
+    },{
+      "id":"eC"
+    },{
+      "id":"eD"
+    },{
+      "id":"pA"
+    },{
+      "id":"pB"
+    }]
+  },
+  "debug":{
+    "rawquerystring":"quick+rocket",
+    "querystring":"quick+rocket",
+    "parsedquery":"+DisjunctionMaxQuery(((title:quick title:rocket) | (body:quick body:rocket)))",
+    "parsedquery_toString":"+((title:quick title:rocket) | (body:quick body:rocket))",
+    "explain":{
+      "eA":"\n0.5274755 = max of:\n  0.5274755 = sum of:\n    0.5274755 = weight(title:rocket in 0) [SchemaSimilarity], result of:\n      0.5274755 = score(freq=1.0), computed as boost * idf * tf from:\n        1.1451323 = idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:\n          3 = n, number of documents containing term\n          10 = N, total number of documents with field\n        0.46062404 = tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:\n          1.0 = freq, occurrences of term within document\n          1.2 = k1, term saturation parameter\n          0.75 = b, length normalization parameter\n          3.0 = dl, length of field\n          3.1 = avgdl, average length of field\n",
+      "eB":"\n0.71525735 = max of:\n  0.71525735 = sum of:\n    0.71525735 = weight(body:rocket in 1) [SchemaSimilarity], result of:\n      0.71525735 = score(freq=1.0), computed as boost * idf * tf from:\n        1.4816046 = idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:\n          2 = n, number of documents containing term\n          10 = N, total number of documents with field\n        0.48275858 = tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:\n          1.0 = freq, occurrences of term within document\n          1.2 = k1, term saturation parameter\n          0.75 = b, length normalization parameter\n          3.0 = dl, length of field\n          3.5 = avgdl, average length of field\n",
+      "eC":"\n0.871532 = max of:\n  0.60890394 = sum of:\n    0.60890394 = weight(title:rocket in 2) [SchemaSimilarity], result of:\n      0.60890394 = score(freq=1.0), computed as boost * idf * tf from:\n        1.1451323 = idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:\n          3 = n, number of documents containing term\n          10 = N, total number of documents with field\n        0.5317324 = tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:\n          1.0 = freq, occurrences of term within document\n          1.2 = k1, term saturation parameter\n          0.75 = b, length normalization parameter\n          2.0 = dl, length of field\n          3.1 = avgdl, average length of field\n  0.871532 = sum of:\n    0.871532 = weight(body:rocket in 2) [SchemaSimilarity], result of:\n      0.871532 = score(freq=3.0), computed as boost * idf * tf from:\n        1.4816046 = idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:\n          2 = n, number of documents containing term\n          10 = N, total number of documents with field\n        0.58823526 = tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:\n          3.0 = freq, occurrences of term within document\n          1.2 = k1, term saturation parameter\n          0.75 = b, length normalization parameter\n          7.0 = dl, length of field\n          3.5 = avgdl, average length of field\n",
+      "eD":"\n0.72299594 = max of:\n  0.72299594 = sum of:\n    0.72299594 = weight(title:rocket in 3) [SchemaSimilarity], result of:\n      0.72299594 = score(freq=3.0), computed as boost * idf * tf from:\n        1.1451323 = idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:\n          3 = n, number of documents containing term\n          10 = N, total number of documents with field\n        0.6313646 = tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:\n          3.0 = freq, occurrences of term within document\n          1.2 = k1, term saturation parameter\n          0.75 = b, length normalization parameter\n          5.0 = dl, length of field\n          3.1 = avgdl, average length of field\n",
+      "pA":"\n0.6362719 = max of:\n  0.6362719 = sum of:\n    0.6362719 = weight(body:quick in 4) [SchemaSimilarity], result of:\n      0.6362719 = score(freq=1.0), computed as boost * idf * tf from:\n        1.4816046 = idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:\n          2 = n, number of documents containing term\n          10 = N, total number of documents with field\n        0.42944783 = tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:\n          1.0 = freq, occurrences of term within document\n          1.2 = k1, term saturation parameter\n          0.75 = b, length normalization parameter\n          4.0 = dl, length of field\n          3.5 = avgdl, average length of field\n",
+      "pB":"\n0.6362719 = max of:\n  0.6362719 = sum of:\n    0.6362719 = weight(body:quick in 5) [SchemaSimilarity], result of:\n      0.6362719 = score(freq=1.0), computed as boost * idf * tf from:\n        1.4816046 = idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:\n          2 = n, number of documents containing term\n          10 = N, total number of documents with field\n        0.42944783 = tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:\n          1.0 = freq, occurrences of term within document\n          1.2 = k1, term saturation parameter\n          0.75 = b, length normalization parameter\n          4.0 = dl, length of field\n          3.5 = avgdl, average length of field\n"
+    },
+    "QParser":"ExtendedDismaxQParser",
+    "altquerystring":null,
+    "boost_queries":null,
+    "parsed_boost_queries":[ ],
+    "boostfuncs":null,
+    "timing":{
+      "time":28.0,
+      "prepare":{
+        "time":5.0,
+        "query":{
+          "time":5.0
+        },
+        "facet":{
+          "time":0.0
+        },
+        "facet_module":{
+          "time":0.0
+        },
+        "mlt":{
+          "time":0.0
+        },
+        "highlight":{
+          "time":0.0
+        },
+        "stats":{
+          "time":0.0
+        },
+        "expand":{
+          "time":0.0
+        },
+        "terms":{
+          "time":0.0
+        },
+        "debug":{
+          "time":0.0
+        }
+      },
+      "process":{
+        "time":22.0,
+        "query":{
+          "time":16.0
+        },
+        "facet":{
+          "time":0.0
+        },
+        "facet_module":{
+          "time":0.0
+        },
+        "mlt":{
+          "time":0.0
+        },
+        "highlight":{
+          "time":0.0
+        },
+        "stats":{
+          "time":0.0
+        },
+        "expand":{
+          "time":0.0
+        },
+        "terms":{
+          "time":0.0
+        },
+        "debug":{
+          "time":5.0
+        }
+      }
+    }
+  }
+}
