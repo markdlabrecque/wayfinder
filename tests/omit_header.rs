@@ -455,7 +455,7 @@ async fn select_error_omit_header_true_suppresses_header_and_retains_error() {
 }
 
 /// Ground truth: `omit_header_error_yes.json` captures the accepted `yes`
-/// alias. Finding 109 further establishes case-insensitive `true` and `on`.
+/// alias. Finding 111 further establishes case-insensitive `true` and `on`.
 #[tokio::test]
 async fn select_error_omit_header_accepts_yes_true_and_on_case_insensitively() {
     let (app, _dir) = indexed_app().await;
@@ -484,7 +484,7 @@ async fn select_error_omit_header_accepts_yes_true_and_on_case_insensitively() {
     }
 }
 
-/// Finding 109's false vocabulary leaves the normal error envelope intact.
+/// Finding 111's false vocabulary leaves the normal error envelope intact.
 #[tokio::test]
 async fn select_error_omit_header_false_no_and_off_retain_header() {
     let (app, _dir) = indexed_app().await;

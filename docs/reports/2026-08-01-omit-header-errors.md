@@ -8,7 +8,7 @@
 
 Fresh Solr captures establish that `omitHeader` suppresses `responseHeader` on both success and error responses. Accepted values are case-insensitive `true`/`yes`/`on` and `false`/`no`/`off`. Numeric and single-letter forms such as `1` and `t` are invalid; Solr rejects them as Jetty HTML 400 responses before its JSON response writer runs. `/update` errors also suppress their normally header-bearing `NoParams` envelope.
 
-The capture block, fixtures, error-manifest rows, and finding 109 record that evidence. Existing fixtures were not recaptured.
+The capture block, fixtures, error-manifest rows, and finding 111 record that evidence. Existing fixtures were not recaptured.
 
 ## Changed behavior
 

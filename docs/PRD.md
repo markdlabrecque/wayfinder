@@ -259,7 +259,7 @@ chosen. Nothing may be added here without the same two things.
    fallback HTML would add a second error format solely for parser failures. Valid
    `omitHeader=true`/`yes`/`on` still suppresses `responseHeader` on success and error envelopes,
    matching `omit_header_error_true.json`, `omit_header_error_yes.json`, and
-   `omit_header_update_error_true.json`. (issue #179; finding 109)
+   `omit_header_update_error_true.json`. (issue #179; finding 111)
 
 Note that divergence 3 is a difference from the *configset* the reference fixtures were captured
 against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, 4, 6, 7,
