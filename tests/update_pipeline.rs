@@ -1133,3 +1133,67 @@ async fn repeated_add_with_unknown_command_key_indexes_nothing_from_fixtures() {
     assert_eq!(status, StatusCode::OK);
     assert_matches_fixture(body, "update_select_after_repeated_add_unknown_key");
 }
+
+/// A `commit` key commits what PRECEDES it and nothing after: an `add` that
+/// follows the `commit` in the same body is a separate, still-uncommitted
+/// batch, invisible until something else commits. This is the one behavioural
+/// claim the in-order execution makes that no captured fixture reaches, and
+/// it is not equivalent to deferring the body's commit to the end of the
+/// request -- a deferred-commit implementation makes `c2` visible here too,
+/// and passes every other test in the suite (reviewer-confirmed surviving
+/// mutant). Hence this guard.
+///
+/// ponytail: unfixtured, deliberately. No `solr-ref/responses/` capture puts
+/// an `add` AFTER a `commit` key in one body, no `search_api_solr` trace sends
+/// that shape (trace 00001 has no body `commit` at all), and a fresh `solr:9`
+/// round trip was judged not worth it for this one case. The expectation is
+/// inferred from Solr's JSON update format being a command STREAM executed in
+/// order -- the same premise finding 96's captured delete/add ordering
+/// confirms directly (`update_repeated_add_delete_before.json`: a `delete`
+/// before an add of the same id does not consume it, so commands really do
+/// take effect where they sit). A capture of
+/// `{"add":...,"commit":{},"add":...}` against a real `solr:9` settles it for
+/// certain; until then this pins Wayfinder's behaviour, not Solr's, and a
+/// capture that disagrees is the fixture's win.
+#[tokio::test]
+async fn an_add_after_a_body_commit_key_stays_uncommitted() {
+    let (app, _dir) = update9_app().await;
+
+    let body = r#"{"add":{"doc":{"id":"c1","body":"before the commit key"}},"commit":{},"add":{"doc":{"id":"c2","body":"after the commit key"}}}"#;
+    let (status, body) = post9(&app, "update?wt=json", body).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "commit-then-add is a well-formed command body: {body}"
+    );
+
+    let (status, body) = get9(&app, "select?q=id:c1&wt=json").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "the add BEFORE the body's `commit` key must be committed by it: {body}"
+    );
+
+    let (status, body) = get9(&app, "select?q=id:c2&wt=json").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.pointer("/response/numFound"),
+        Some(&json!(0)),
+        "the add AFTER the body's `commit` key must still be uncommitted -- a \
+         commit deferred to the end of the request would make it visible: {body}"
+    );
+
+    // ...and it really was indexed, just uncommitted: a later commit reveals
+    // it. Without this leg the test above would also pass if the trailing add
+    // had been dropped outright.
+    let (status, body) = get9(&app, "update?commit=true&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "bare commit: {body}");
+    let (status, body) = get9(&app, "select?q=id:c2&wt=json").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "the trailing add was buffered, not dropped: {body}"
+    );
+}

@@ -1787,7 +1787,13 @@ async fn update(
             }
             // A body `commit` commits what precedes it, there and then: any
             // add after it is a separate, still-uncommitted batch unless a
-            // `commit`/`softCommit` param commits again below.
+            // `commit`/`softCommit` param commits again below. Unfixtured
+            // (no capture puts an add after a body `commit`), inferred from
+            // the command-stream semantics finding 96 pins directly for
+            // delete/add; deferring this commit to the end of the request
+            // instead is a mutant the rest of the suite does NOT catch, so
+            // `an_add_after_a_body_commit_key_stays_uncommitted` in
+            // `tests/update_pipeline.rs` guards it and carries the ceiling.
             UpdateCommand::Commit => {
                 flush_adds!();
                 state.index.commit().map_err(|e| {

@@ -1832,6 +1832,13 @@ echo "  (docker rm -f $FRAGSIZE_CONTAINER to stop)"
 # seed above; the container was removed afterwards; re-take them the same way
 # rather than re-running this whole script.
 #
+# CONSEQUENCE, stated plainly: this is the only fully commented-out block in
+# this file, so these twelve fixtures are the ONLY ones `capture.sh` cannot
+# regenerate on its own. `R_SOLR`/`R_CORE` are undefined here and `set -u`
+# would abort the run if the lines were live. To re-take them, copy the
+# commands below into a scratch script that starts its own port-8992
+# container and defines these two variables:
+#
 #   R_SOLR=http://localhost:8992/solr; R_CORE=update9
 #
 # What they settle (finding 96):
