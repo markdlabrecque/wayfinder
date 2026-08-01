@@ -1,0 +1,28 @@
+{
+    "responseHeader": {
+        "status": 0,
+        "QTime": 11
+    },
+    "match": {
+        "numFound": 1,
+        "start": 0,
+        "numFoundExact": true,
+        "docs": [
+            {
+                "id": "mlt11",
+                "body": "astronomers observed a bright comet streaking across the night sky",
+                "category": [
+                    "astronomy"
+                ],
+                "_version_": 1872342083637870593,
+                "_root_": "mlt11"
+            }
+        ]
+    },
+    "response": {
+        "numFound": 0,
+        "start": 0,
+        "numFoundExact": true,
+        "docs": []
+    }
+}

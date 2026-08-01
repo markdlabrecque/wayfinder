@@ -143,6 +143,7 @@ mlt_match_offset	200	mlt?q=category:astronomy&mlt.fl=body&mlt.match.offset=1&wt=
 mlt_json_nl_map_empty_terms	200	mlt?q=id:mlt1&mlt.fl=body&mlt.interestingTerms=details&json.nl=map&wt=json
 mlt_fl_wildcard_score	200	mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fl=*,score&wt=json
 mlt_maxntp_noop	200	mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&mlt.maxntp=5000&wt=json
+mlt_maxntp_low	200	mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&mlt.maxntp=1&wt=json
 edismax_basic	200	select?q=rocket&defType=edismax&qf=title+body&fl=id&wt=json
 edismax_qf_equal	200	select?q=rocket+launch+success&defType=edismax&qf=title+body&fl=id&wt=json
 edismax_qf_boost_title	200	select?q=rocket+launch+success&defType=edismax&qf=title^10+body&fl=id&wt=json

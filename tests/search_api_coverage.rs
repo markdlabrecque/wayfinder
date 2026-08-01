@@ -30,7 +30,7 @@ use tempfile::TempDir;
 /// Derive the new value from `cargo run -- coverage --format json`. Never
 /// hand-compute it: the numerator has moved for reasons no ticket named more
 /// than once in this repo's history.
-const EXPECTED_FRACTION: &str = "68/75";
+const EXPECTED_FRACTION: &str = "69/75";
 
 const CONTRACT: &str = include_str!("../coverage/search_api_coverage_contract.json");
 const SOURCE_EVIDENCE: &str =
@@ -1239,10 +1239,11 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
             // to `fl`. Removed from this list rather than left, per this
             // file's own "self-expiring" convention.
             //
-            // "mlt.maxntp" stays: issue #189 (no Tantivy equivalent;
-            // deliberately still 400ing under `strict_params` rather than
-            // silently ignored). Descoped from #141.
-            "mlt.maxntp",
+            // Issue #189: "mlt.maxntp" is resolved -- `/mlt` now caps
+            // analyzer-emitted seed tokens per stored field value before
+            // noise-word filtering, matching Lucene's MoreLikeThis behavior.
+            // Removed from this list rather than left, per this file's own
+            // "self-expiring" convention.
             // Issue #140: "select.facet.per-field-missing" is resolved --
             // `f.<field>.facet.missing` now overrides the global for the field
             // it names (`src/facet.rs`), and `check_params` accepts the
@@ -1379,6 +1380,10 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // letting the existing strict `/update?json.nl=flat` probe complete.
     // The request semantic was already in the frozen contract; selection
     // rendering remains covered by the fixture-backed differential suite.
+    // 68/75 -> 69/75 when issue #189 implemented `mlt.maxntp` by capping
+    // analyzer-emitted seed tokens per stored field value before noise-word
+    // filtering, flipping the existing `mlt.maxntp` probe. Denominator
+    // unchanged -- the semantic was already in the frozen contract.
     assert_eq!(
         report.overall.fraction, EXPECTED_FRACTION,
         "initial coverage fraction"

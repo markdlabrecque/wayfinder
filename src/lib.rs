@@ -289,6 +289,7 @@ const MLT_PARAMS: &[&str] = &[
     "mlt.minwl",
     "mlt.maxwl",
     "mlt.maxqt",
+    "mlt.maxntp",
     "mlt.boost",
     "mlt.interestingTerms",
     "wt",
@@ -306,11 +307,6 @@ const MLT_PARAMS: &[&str] = &[
     "mlt.match.include",
     "mlt.match.offset",
     "json.nl",
-    // ponytail: `mlt.maxntp` is deliberately absent, so `strict_params = true`
-    // keeps 400ing it (issue #189). Tantivy 0.26's `MoreLikeThis` has no
-    // `maxNumTokensParsed` equivalent, and real Solr's `mlt.maxntp` genuinely
-    // narrows results at a low value (finding block for issue #141) —
-    // allowlisting it would turn a loud 400 into a silent wrong answer.
 ];
 
 /// `/terms` params in scope for issue #155 (Solr's TermsComponent). `terms`
@@ -2342,6 +2338,23 @@ async fn mlt(
         }
     };
 
+    // Solr parses this as a signed Java int: malformed or out-of-range values
+    // are 400s, while zero and negatives mean no analyzer-emitted tokens. It
+    // parses `q` first, so a malformed query wins when both values are bad.
+    let max_num_tokens_parsed = match params.get("mlt.maxntp") {
+        None => 5000,
+        Some(value) => value
+            .parse::<i32>()
+            .map(|value| value.max(0) as usize)
+            .map_err(|_| {
+                WfError::bad_request(
+                    "wayfinder::BadMltParam",
+                    format!("invalid mlt.maxntp value `{value}`"),
+                )
+                .envelope(Envelope::NoParams)
+            })?,
+    };
+
     // Solr's `/mlt` resolves exactly one source document from `q` — `match`
     // reports the real `numFound` for `q` but only ever renders that one doc
     // (every captured fixture has `match.numFound: 1` with a one-element
@@ -2403,8 +2416,8 @@ async fn mlt(
                 .get("mlt.fl")
                 .map(|fl| fl.split(',').map(|s| s.trim().to_string()).collect());
 
-            // Solr's defaults: mintf=2, mindf=5, maxqt=25, no word-length or
-            // max-doc-frequency gate, boost=false (equal-weighted terms).
+            // Solr's defaults: mintf=2, mindf=5, maxqt=25, maxntp=5000, no
+            // word-length or max-doc-frequency gate, boost=false (equal-weighted terms).
             let opts = core_index::MltOptions {
                 min_term_frequency: Some(
                     params
@@ -2425,6 +2438,7 @@ async fn mlt(
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(25),
                 ),
+                max_num_tokens_parsed,
                 min_word_length: params.get("mlt.minwl").and_then(|s| s.parse().ok()),
                 max_word_length: params.get("mlt.maxwl").and_then(|s| s.parse().ok()),
                 // Tantivy's own boost weighting (relative term score, best

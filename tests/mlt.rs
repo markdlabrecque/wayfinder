@@ -1,17 +1,19 @@
 //! MoreLikeThis (`/mlt`, issue #6, PRD §5) — `GET /solr/<core>/mlt`.
 //!
-//! Every expected value here comes from a committed fixture in
-//! `solr-ref/responses/mlt_*.json`, captured against a dedicated 20-doc corpus
-//! (`solr-ref/capture.sh`'s MLT block, container `wayfinder-solr-6`, port
-//! 8993) — the canonical 5-doc tracer-bullet corpus has too little shared
-//! vocabulary for MLT term statistics to mean anything (`docs/solr-ref-findings.md`
-//! finding 64). Nothing here is derived from what Wayfinder happens to
-//! produce.
+//! Every fixture-backed expected value here comes from the dedicated 20-doc
+//! corpus in `solr-ref/capture.sh`'s MLT block. The original fixtures used
+//! `wayfinder-solr-6` on port 8993; `mlt_maxntp_low.json` was captured later
+//! against the identical schema/corpus in `wayfinder-solr-189` (issue #189's
+//! follow-up to the findings 97-101 MLT refinement block). The canonical 5-doc
+//! tracer-bullet corpus has too little shared
+//! vocabulary for MLT term statistics to mean anything
+//! (`docs/solr-ref-findings.md` finding 64). Nothing is derived from what
+//! Wayfinder happens to produce.
 //!
 //! Scope, per the issue: `q` (selects the source doc), `mlt.fl`, `mlt.mintf`,
 //! `mlt.mindf`, `mlt.maxdf`, `mlt.minwl`, `mlt.maxwl`, `mlt.maxqt`,
-//! `mlt.boost`, plus standard `fl`/`rows`/`start`. Out of scope (not tested
-//! here): `mlt=true` as a `/select` search component, and content-stream MLT
+//! `mlt.maxntp`, `mlt.boost`, plus standard `fl`/`rows`/`start`. Out of scope
+//! (not tested here): `mlt=true` as a `/select` search component, and content-stream MLT
 //! (POSTing free text instead of selecting a doc via `q`).
 //!
 //! ## Envelope shape, per the captured fixtures (findings 60-67)
@@ -85,6 +87,35 @@ type = "string"
 stored = true
 fast = true
 multi_valued = true
+"#;
+
+/// Retains stop words so `mlt.maxntp`'s count-before-noise ordering is
+/// observable, and permits multiple stored values so its per-value reset is
+/// observable in the same request.
+const MLT_MAXNTP_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_no_stop"
+stored = true
+multi_valued = true
+
+[[field_types]]
+name = "text_no_stop"
+tokenizer = "simple"
+[[field_types.filters]]
+kind = "lowercase"
 "#;
 
 /// The exact 20-doc corpus `solr-ref/capture.sh`'s MLT block indexes: four
@@ -572,10 +603,9 @@ async fn mlt_issue_141_params_are_not_rejected_as_unknown() {
     // kept separate so a reviewer can see exactly which params this issue
     // adds.
     //
-    // `mlt.maxntp` is deliberately *not* here: it is issue #189, and
-    // `mlt_maxntp_stays_rejected_until_issue_189_implements_it` below is the
-    // expiring guard that keeps it 400ing. Registering a param the handler
-    // cannot honour would convert a loud 400 into a silent wrong answer.
+    // `mlt.maxntp` is covered by its compatibility test below: under strict
+    // params it must be accepted, and a low value must narrow the result set
+    // rather than being silently ignored.
     let dir = TempDir::new().expect("temp dir");
     let schema_path = dir.path().join("schema.toml");
     std::fs::write(&schema_path, MLT_SCHEMA_TOML).expect("write schema.toml");
@@ -997,25 +1027,12 @@ async fn mlt_fl_wildcard_plus_score_matches_the_fixture_doc_key_order() {
     assert_same_key_order(&text, "mlt_fl_wildcard_score");
 }
 
-// --- issue #189 (descoped from #141): mlt.maxntp has no Tantivy knob -------
+// --- issue #189: mlt.maxntp limits parsed seed tokens -----------------------
 
-/// Expiring guard, not a feature test. Tantivy 0.26.1's `MoreLikeThis` struct
-/// has no `maxNumTokensParsed`-style field (read directly from
-/// `tantivy-0.26.1/src/query/more_like_this/more_like_this.rs`: only min/max
-/// doc/term frequency, `max_query_terms`, min/max word length,
-/// `boost_factor`, `stop_words`), and real Solr's `mlt.maxntp` genuinely
-/// narrows results at a low value — `mlt.maxntp=1` against `mlt11` takes the
-/// astronomy cluster from 4 matches to 0 (findings block for issue #141).
-///
-/// So it is *not* a safe accepted-and-ignore the way `TZ`/`bf` are:
-/// allowlisting it would turn a loud 400 into a silent wrong answer. It is
-/// descoped to **issue #189** and must keep 400ing under
-/// `strict_params = true` until that issue implements it for real. This test
-/// fails the moment `mlt.maxntp` is added to `MLT_PARAMS`, which is exactly
-/// when it should be deleted; `solr-ref/responses/mlt_maxntp_noop.json` stays
-/// committed for #189 to build against.
 #[tokio::test]
-async fn mlt_maxntp_stays_rejected_until_issue_189_implements_it() {
+async fn mlt_maxntp_low_narrows_and_high_preserves_the_fixture_result() {
+    // Strict params makes acceptance part of the contract: a handler that
+    // simply ignores an unregistered `mlt.maxntp` must not pass these fixtures.
     let dir = TempDir::new().expect("temp dir");
     let schema_path = dir.path().join("schema.toml");
     std::fs::write(&schema_path, MLT_SCHEMA_TOML).expect("write schema.toml");
@@ -1028,22 +1045,132 @@ async fn mlt_maxntp_stays_rejected_until_issue_189_implements_it() {
     let (status, body) = common::post_docs(&app, &mlt_corpus()).await;
     assert_eq!(status, StatusCode::OK, "indexing must succeed, got {body}");
 
-    let (status, body) = get(
+    let (status, low) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&mlt.maxntp=1&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "low mlt.maxntp must be accepted, got: {low}"
+    );
+    assert_eq!(
+        low.pointer("/response/numFound").and_then(Value::as_u64),
+        Some(0),
+        "mlt.maxntp=1 must narrow mlt11's similar docs to zero, got: {low}"
+    );
+    assert_matches_mlt_fixture(low, "mlt_maxntp_low");
+
+    let (status, high) = get(
         &app,
         "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&mlt.maxntp=5000&wt=json",
     )
     .await;
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
-        "mlt.maxntp must keep 400ing under strict_params until issue #189 implements it — if this \
-         is now a 200, delete this guard and assert `mlt_maxntp_noop.json` for real. Got: {body}"
+        StatusCode::OK,
+        "high mlt.maxntp must be accepted, got: {high}"
     );
+    assert_matches_mlt_fixture(high, "mlt_maxntp_noop");
+}
+
+#[tokio::test]
+async fn mlt_maxntp_counts_before_noise_and_resets_for_each_stored_value() {
+    // Lucene 9.12.3's addTermFrequencies starts tokenCount at zero for every
+    // stored IndexableField value and increments it before isNoiseWord. With
+    // maxntp=1, the first value spends its allowance on the MLT stop word
+    // "the", while the reset lets the second value contribute "beta". A
+    // global cap would return no docs; counting after noise would also return
+    // the alpha doc.
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), MLT_MAXNTP_SCHEMA_TOML)
+        .expect("custom MLT app must build");
+    let docs = serde_json::json!([
+        {"id":"seed", "body":["the alpha", "beta gamma"]},
+        {"id":"alpha", "body":["alpha"]},
+        {"id":"beta", "body":["beta"]}
+    ]);
+    let (status, body) = common::post_docs(&app, &docs).await;
+    assert_eq!(status, StatusCode::OK, "indexing must succeed: {body}");
+
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:seed&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxntp=1&fl=id&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "maxntp request must succeed: {body}"
+    );
+    assert_eq!(
+        body.pointer("/response/numFound"),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(
+        body.pointer("/response/docs/0/id"),
+        Some(&serde_json::json!("beta"))
+    );
+}
+
+#[tokio::test]
+async fn mlt_maxntp_matches_solrs_signed_java_int_edges() {
+    // Captured live against solr:9 on 2026-08-01: zero and negatives are
+    // accepted and mine no terms; malformed and out-of-i32 values are 400s.
+    let (app, _dir) = mlt_app().await;
+    for value in ["0", "-1"] {
+        let (status, body) = get(
+            &app,
+            &format!(
+                "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxntp={value}&wt=json"
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "maxntp={value}: {body}");
+        assert_eq!(
+            body.pointer("/response/numFound"),
+            Some(&serde_json::json!(0)),
+            "maxntp={value} must mine no terms: {body}"
+        );
+    }
+
+    for (value, fixture_name) in [
+        ("abc", "mlt_maxntp_invalid"),
+        ("2147483648", "mlt_maxntp_overflow"),
+    ] {
+        let (status, body) = get(
+            &app,
+            &format!("mlt?q=id:mlt11&mlt.fl=body&mlt.maxntp={value}&wt=json"),
+        )
+        .await;
+        let expected = fixture(fixture_name);
+        assert_eq!(
+            status.as_u16() as i64,
+            expected["error"]["code"].as_i64().unwrap(),
+            "maxntp={value} HTTP status must match Solr: {body}"
+        );
+        assert_eq!(body["responseHeader"], expected["responseHeader"]);
+        assert_eq!(body["error"]["code"], expected["error"]["code"]);
+        let metadata = body["error"]["metadata"].as_array().unwrap();
+        assert!(metadata.iter().any(|value| value == "error-class"));
+        assert!(metadata.iter().any(|value| value == "root-error-class"));
+        assert!(
+            body["error"]["msg"]
+                .as_str()
+                .is_some_and(|msg| !msg.is_empty())
+        );
+    }
+
+    // Live Solr parses `q` before `mlt.maxntp`: with both malformed, its
+    // parser error names the query and never reaches the Java-int error.
+    let (status, body) = get(&app, "mlt?q=body:%5B&mlt.fl=body&mlt.maxntp=abc&wt=json").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(
-        body.pointer("/error/msg")
-            .and_then(Value::as_str)
-            .is_some_and(|msg| msg.contains("mlt.maxntp")),
-        "the rejection must name the unsupported param, got: {body}"
+        body["error"]["msg"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("body:[") && !msg.contains("mlt.maxntp")),
+        "malformed q must win parse precedence: {body}"
     );
 }
 

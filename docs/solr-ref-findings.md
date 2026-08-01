@@ -1836,17 +1836,26 @@ Also confirmed directly from source, no capture needed: Tantivy 0.26.1's
 (`~/.cargo/registry/src/*/tantivy-0.26.1/src/query/more_like_this/more_like_this.rs`) has
 exactly these knobs — `min_doc_frequency`, `max_doc_frequency`, `min_term_frequency`,
 `max_query_terms`, `min_word_length`, `max_word_length`, `boost_factor`, `stop_words` — and
-nothing resembling Lucene's `maxNumTokensParsed`. `mlt.maxntp` cannot be implemented against
-this API; `mlt_maxntp_noop.json` pins a value (`5000`) far above this corpus's real token
-counts producing an identical result to the unmodified baseline, which is the realistic case
-for `search_api_solr`'s Drupal field bodies — but real Solr's own `mlt.maxntp` genuinely
-narrows results at a low-enough value (confirmed live: `mlt.maxntp=1` against `mlt11` drops
-the astronomy-cluster match count from 4 to 0), so accepted-and-ignore is a real capability
-gap, not a safe no-op in general the way `TZ`/`bf` are. It is therefore **descoped from #141
-to issue #189**: `mlt.maxntp` is deliberately left out of `MLT_PARAMS`, so `strict_params =
-true` keeps 400ing it rather than answering the wrong question quietly, and
-`tests/mlt.rs::mlt_maxntp_stays_rejected_until_issue_189_implements_it` is the expiring guard
-that fails the moment it is allowlisted. `mlt_maxntp_noop.json` stays committed for #189.
+nothing resembling Lucene's `maxNumTokensParsed`. `mlt_maxntp_noop.json` pins a value
+(`5000`) far above this corpus's real token counts producing an identical result to the
+unmodified baseline, which is the realistic case for `search_api_solr`'s Drupal field bodies.
+Real Solr's `mlt.maxntp` genuinely narrows results at a low-enough value:
+`mlt_maxntp_low.json`, captured on 2026-08-01 against the identical corpus in a one-off
+`solr:9` container for issue #189, pins `mlt.maxntp=1` dropping the astronomy-cluster match
+count from 4 to 0. Accepted-and-ignore is therefore a real capability gap, not a safe no-op in
+general the way `TZ`/`bf` are.
+
+Issue #189 closes that gap inside Wayfinder's existing reimplementation of Tantivy's private
+MLT term-mining algorithm. Lucene 9.12.3's `MoreLikeThis` source establishes the exact missing
+semantics: the default is 5000; the counter resets for every stored field value; every
+analyzer-emitted token consumes the cap before `isNoiseWord`; zero and negative signed-Java-int
+values mine no terms; malformed or out-of-range values are 400s. The committed
+`mlt_maxntp_invalid.json` and `mlt_maxntp_overflow.json` error fixtures pin the latter envelope
+shape. A separate live check established parse precedence: malformed `q=body:[` wins when
+`mlt.maxntp=abc` is also malformed. `CoreIndex::mlt_query` now applies the cap while mining
+stored values, and `MLT_PARAMS` allowlists `mlt.maxntp` only because the handler implements it.
+The low/high fixture pair, error fixtures, a custom-analyzer multi-value test, signed-int edge
+and parse-precedence tests, and the semantic coverage probe guard against regression.
 
 Also confirmed: the `fl=*,score` gap is not `/mlt`-specific. `mlt_fl_wildcard_score.json`
 shows real Solr returning every stored/docValues field plus `score` for `fl=*,score`, but
