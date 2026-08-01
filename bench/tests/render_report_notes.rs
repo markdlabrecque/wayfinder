@@ -12,6 +12,8 @@ const STALE_2M_NOTE: &str = "**\"Resident memory, 2M docs under query load\" is 
 const PHASE_DELTA_NOTE: &str = "RSS increased by 100.0 MB between that sample and the 700.0 MB maximum sampled during query load";
 const RSS_ATTRIBUTION_CAVEAT: &str =
     "The harness does not distinguish allocator-resident memory from mmap-backed index pages.";
+const STARTUP_TARGET_OUTCOME: &str =
+    "Wayfinder met the PRD's <50 MB startup-idle resident-memory target at 40.0 MB.";
 
 fn render_report(corpus_size: u64) -> String {
     let unique = format!(
@@ -32,9 +34,9 @@ fn render_report(corpus_size: u64) -> String {
     fs::write(&wayfinder_latencies, "1\n").expect("write Wayfinder latencies");
 
     let output = Command::new(env!("CARGO_BIN_EXE_render_report"))
-        .args(["1", "2", "3", "4", "5"])
+        .args(["1", "2", "3", "4", "5", "6"])
         .arg(&solr_latencies)
-        .args(["600", "700", "8", "9", "10"])
+        .args(["40", "600", "700", "8", "9", "10"])
         .arg(&wayfinder_latencies)
         .arg(corpus_size.to_string())
         .arg(&report)
@@ -81,6 +83,10 @@ fn literal_2m_render_omits_the_not_measured_note_but_50k_retains_it() {
     assert!(
         two_m_notes.contains(RSS_ATTRIBUTION_CAVEAT),
         "the 2M note must retain the allocator-versus-mmap attribution caveat, got:\n{two_m_notes}"
+    );
+    assert!(
+        two_m_notes.contains(STARTUP_TARGET_OUTCOME),
+        "the 2M note must report the startup-idle target outcome from the startup sample, got:\n{two_m_notes}"
     );
     assert!(
         !two_m_notes.contains("query load added"),

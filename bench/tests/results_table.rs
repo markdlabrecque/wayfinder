@@ -2,13 +2,12 @@
 //! isolation -- fixed, invented raw numbers in, exact `docs/benchmarks.md`
 //! table text out. No real benchmark run involved.
 //!
-//! Table shape (this test's design decision, since the issue only specifies
-//! "measured numbers beside the PRD targets"): five columns --
-//! `Metric | Solr baseline | Wayfinder target | Solr measured | Wayfinder measured`
-//! -- with the six PRD §8 metric rows in PRD order. Formatting: memory and
-//! image/index sizes as `{:.1} MB`, cold start as `{:.2} s`, p95 latency as
-//! `{:.2} ms`. PRD target/baseline text is reproduced ASCII-only (`2-4 GB`,
-//! `10-30 s`) rather than with the PRD's en-dashes, per this repo's
+//! Table shape: six columns -- `Metric | Solr baseline | Wayfinder target |
+//! Solr measured | Wayfinder measured | Measurement path`. Resident memory
+//! has startup-idle, post-index/pre-query, and query-load phases. Formatting:
+//! memory and image/index sizes as `{:.1} MB`, cold start as `{:.2} s`, p95
+//! latency as `{:.2} ms`. PRD target/baseline text is reproduced ASCII-only
+//! (`2-4 GB`, `10-30 s`) rather than with the PRD's en-dashes, per this repo's
 //! ASCII-only convention for committed text.
 
 use wayfinder_bench::results::{BenchmarkResults, EngineMeasurements, p95, render_markdown_table};
@@ -16,7 +15,8 @@ use wayfinder_bench::results::{BenchmarkResults, EngineMeasurements, p95, render
 fn sample_results(corpus_size: u64) -> BenchmarkResults {
     BenchmarkResults {
         solr: EngineMeasurements {
-            resident_mem_idle_mb: 987.0,
+            resident_mem_startup_idle_mb: 987.0,
+            resident_mem_post_index_mb: 2400.0,
             resident_mem_load_mb: 3200.0,
             cold_start_ms: 18_000.0,
             query_latencies_ms: (1..=100).map(|v| v as f64).collect(),
@@ -24,7 +24,8 @@ fn sample_results(corpus_size: u64) -> BenchmarkResults {
             index_size_mb: 200.0,
         },
         wayfinder: EngineMeasurements {
-            resident_mem_idle_mb: 42.0,
+            resident_mem_startup_idle_mb: 42.0,
+            resident_mem_post_index_mb: 215.0,
             resident_mem_load_mb: 410.0,
             cold_start_ms: 350.0,
             query_latencies_ms: (1..=100).map(|v| (v as f64) * 0.9).collect(),
@@ -77,8 +78,9 @@ fn render_markdown_table_matches_the_expected_shape_for_a_2m_run() {
     let expected = "\
 | Metric | Solr baseline | Wayfinder target | Solr measured | Wayfinder measured | Measurement path |
 |---|---|---|---|---|---|
-| Resident memory, idle | ~1 GB | < 50 MB | 987.0 MB | 42.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). |
-| Resident memory, 2M docs under query load | 2-4 GB | < 500 MB | 3200.0 MB | 410.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). |
+| Resident memory, startup idle | ~1 GB | < 50 MB | 987.0 MB | 42.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). RSS includes allocator-resident memory plus mmap-backed index pages. |
+| Resident memory, post-index before query load (2000000 docs) | No PRD baseline | No PRD target | 2400.0 MB | 215.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). RSS includes allocator-resident memory plus mmap-backed index pages. |
+| Resident memory, 2M docs under query load | 2-4 GB | < 500 MB | 3200.0 MB | 410.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). RSS includes allocator-resident memory plus mmap-backed index pages. |
 | Cold start to first query served | 10-30 s | < 1 s | 18.00 s | 0.35 s | Solr: Docker container (`docker run` to first successful ping). Wayfinder: native process (binary launch to first successful ping). |
 | p95 query latency (facet+filter+highlight, 2000000 docs) | baseline | <= baseline | 95.00 ms | 85.50 ms | Solr: HTTP to the Docker container's published port. Wayfinder: HTTP to the native process's bound port. |
 | Container image size | ~500 MB | < 30 MB | 512.0 MB | 24.0 MB | Both: Docker image size (`docker inspect`), not a running-container measurement. |
@@ -150,7 +152,7 @@ fn p95_label_reflects_the_actual_corpus_size_for_an_arbitrary_run() {
 fn sub_2m_run_surfaces_its_real_resident_memory_under_load_measurement() {
     let table = render_markdown_table(&sample_results(50_000));
 
-    let expected_row = "| Resident memory, 50000 docs under query load | 2-4 GB | < 500 MB | 3200.0 MB | 410.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). |";
+    let expected_row = "| Resident memory, 50000 docs under query load | 2-4 GB | < 500 MB | 3200.0 MB | 410.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). RSS includes allocator-resident memory plus mmap-backed index pages. |";
     let honest_row = table
         .lines()
         .find(|line| line.starts_with("| Resident memory, 50000 docs under query load"))
@@ -199,18 +201,18 @@ fn a_run_larger_than_2m_gets_the_honest_row_not_the_fixed_2m_label() {
         .unwrap_or_else(|| panic!("expected an honest 'Resident memory, 5000000 docs under query load' row, got:\n{table}"));
     assert_eq!(
         honest_row,
-        "| Resident memory, 5000000 docs under query load | 2-4 GB | < 500 MB | 3200.0 MB | 410.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). |"
+        "| Resident memory, 5000000 docs under query load | 2-4 GB | < 500 MB | 3200.0 MB | 410.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). RSS includes allocator-resident memory plus mmap-backed index pages. |"
     );
 }
 
 #[test]
-fn render_markdown_table_has_exactly_the_header_plus_six_metric_rows_for_a_literal_2m_run() {
+fn render_markdown_table_has_exactly_the_header_plus_seven_metric_rows_for_a_literal_2m_run() {
     let table = render_markdown_table(&sample_results(2_000_000));
     let lines: Vec<&str> = table.lines().collect();
     assert_eq!(
         lines.len(),
-        8,
-        "expected 1 header + 1 separator + 6 metric rows, got {} lines:\n{}",
+        9,
+        "expected 1 header + 1 separator + 7 metric rows, got {} lines:\n{}",
         lines.len(),
         table
     );
@@ -218,17 +220,18 @@ fn render_markdown_table_has_exactly_the_header_plus_six_metric_rows_for_a_liter
 
 // Issue #63 round-2 review, item 4: pin the sub-2M table's full shape, not
 // just that specific strings appear somewhere in it -- a sub-2M (or >2M)
-// run has a seventh metric row (the honest memory-under-load row), so the
-// table is 1 header + 1 separator + 7 metric rows = 9 lines.
+// run has eight metric rows (startup, post-index, fixed-2M not-measured,
+// and actual memory-under-load plus the four non-memory metrics), so the
+// table is 1 header + 1 separator + 8 metric rows = 10 lines.
 #[test]
-fn render_markdown_table_has_exactly_the_header_plus_seven_metric_rows_for_a_sub_2m_run() {
+fn render_markdown_table_has_exactly_the_header_plus_eight_metric_rows_for_a_sub_2m_run() {
     let table = render_markdown_table(&sample_results(50_000));
     let lines: Vec<&str> = table.lines().collect();
     assert_eq!(
         lines.len(),
-        9,
-        "expected 1 header + 1 separator + 7 metric rows (six PRD rows plus the honest \
-         memory-under-load row), got {} lines:\n{}",
+        10,
+        "expected 1 header + 1 separator + 8 metric rows (startup, post-index, fixed-2M \
+         not-measured, and actual under-load memory plus four non-memory rows), got {} lines:\n{}",
         lines.len(),
         table
     );
@@ -236,13 +239,78 @@ fn render_markdown_table_has_exactly_the_header_plus_seven_metric_rows_for_a_sub
     let expected = "\
 | Metric | Solr baseline | Wayfinder target | Solr measured | Wayfinder measured | Measurement path |
 |---|---|---|---|---|---|
-| Resident memory, idle | ~1 GB | < 50 MB | 987.0 MB | 42.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). |
+| Resident memory, startup idle | ~1 GB | < 50 MB | 987.0 MB | 42.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). RSS includes allocator-resident memory plus mmap-backed index pages. |
+| Resident memory, post-index before query load (50000 docs) | No PRD baseline | No PRD target | 2400.0 MB | 215.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). RSS includes allocator-resident memory plus mmap-backed index pages. |
 | Resident memory, 2M docs under query load | 2-4 GB | < 500 MB | not measured | not measured | Not measured: this run indexed 50000 docs, not 2M. |
-| Resident memory, 50000 docs under query load | 2-4 GB | < 500 MB | 3200.0 MB | 410.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). |
+| Resident memory, 50000 docs under query load | 2-4 GB | < 500 MB | 3200.0 MB | 410.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). RSS includes allocator-resident memory plus mmap-backed index pages. |
 | Cold start to first query served | 10-30 s | < 1 s | 18.00 s | 0.35 s | Solr: Docker container (`docker run` to first successful ping). Wayfinder: native process (binary launch to first successful ping). |
 | p95 query latency (facet+filter+highlight, 50000 docs) | baseline | <= baseline | 95.00 ms | 85.50 ms | Solr: HTTP to the Docker container's published port. Wayfinder: HTTP to the native process's bound port. |
 | Container image size | ~500 MB | < 30 MB | 512.0 MB | 24.0 MB | Both: Docker image size (`docker inspect`), not a running-container measurement. |
 | Index size on disk | baseline | <= 1.2x baseline | 200.0 MB | 230.0 MB | Solr: size inside the Docker container's data volume (`docker exec du`). Wayfinder: size of the native process's data directory on the host (`du`). |";
 
     assert_eq!(table.trim_end(), expected);
+}
+
+// Issue #243: startup RSS, post-index/pre-query RSS, and query-load RSS are
+// separate phases. The table must make that distinction visible rather than
+// presenting a generic "idle" number whose collection point is unclear.
+#[test]
+fn memory_rows_name_the_startup_and_post_index_phases_and_explain_rss_scope() {
+    let table = render_markdown_table(&sample_results(2_000_000));
+    let memory_rows: Vec<&str> = table
+        .lines()
+        .filter(|line| line.starts_with("| Resident memory,"))
+        .collect();
+
+    let startup_row = memory_rows
+        .iter()
+        .find(|line| line.contains("startup idle"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a distinct startup-idle RSS row, got memory rows:\n{}",
+                memory_rows.join("\n")
+            )
+        });
+    let post_index_row = memory_rows
+        .iter()
+        .find(|line| line.contains("post-index before query load"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a distinct post-index-before-query-load RSS row, got memory rows:\n{}",
+                memory_rows.join("\n")
+            )
+        });
+    let query_load_row = memory_rows
+        .iter()
+        .find(|line| line.contains("under query load"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected the query-load RSS row to remain distinct, got memory rows:\n{}",
+                memory_rows.join("\n")
+            )
+        });
+
+    assert_eq!(
+        memory_rows.len(),
+        3,
+        "a literal 2M run must render one memory row per phase (startup idle, post-index/pre-query, and query load)"
+    );
+    assert!(
+        startup_row.contains("987.0 MB | 42.0 MB"),
+        "startup row must use startup-idle measurements, got:\n{startup_row}"
+    );
+    assert!(
+        post_index_row.contains("2400.0 MB | 215.0 MB"),
+        "post-index row must use distinct post-index measurements, got:\n{post_index_row}"
+    );
+    assert!(
+        query_load_row.contains("3200.0 MB | 410.0 MB"),
+        "query-load row must retain load measurements, got:\n{query_load_row}"
+    );
+    for row in memory_rows {
+        assert!(
+            row.contains("RSS includes allocator-resident memory plus mmap-backed index pages."),
+            "every resident-memory row must disclose RSS's allocator and mmap scope, got:\n{row}"
+        );
+    }
 }

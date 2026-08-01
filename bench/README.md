@@ -22,9 +22,10 @@ Requires `docker`, `curl`, and `cargo` on `PATH`. One command:
   same field shape `tests/edismax.rs` and `tests/common/mod.rs` already use),
 - builds a native release Wayfinder binary and starts it,
 - builds the repo-root `Dockerfile` image (for the image-size metric),
-- indexes the corpus into Wayfinder, measures idle memory, runs a
-  facet+filter+highlight query load, measures memory under that load and
-  p95 latency, measures on-disk index size,
+- indexes the corpus into Wayfinder, capturing resident-memory samples at
+  startup-idle, post-index/pre-query, and under-load phases; runs a
+  facet+filter+highlight query load, measures p95 latency, and measures
+  on-disk index size,
 - does the same against a real Solr 9 container,
 - renders `docs/benchmarks.md` from the real measured numbers via
   `wayfinder_bench::results::render_markdown_table`.
