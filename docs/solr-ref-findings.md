@@ -1565,35 +1565,3 @@ fragment" to be different answers at all.
     wrong for a bare multi-token string; it now takes the quoted/unquoted distinction from
     the grammar's own `Delimiter`.
 
-## Finding from issue #155 (TermsComponent), analyzer-side
-
-Claiming finding 93. **Not a capture** — no Solr fixture is involved, and #155 deliberately
-captures nothing (`solr-ref/capture.sh` and `solr-ref/manifest.tsv` are owned elsewhere in that
-batch). This records a Wayfinder-vs-Solr *analyzer* difference found while deriving
-`tests/terms.rs` from `solr-ref/search-api/trace/00028.json`, so the deferred `terms`
-differential capture does not have to rediscover it.
-
-93. **Tantivy's `StopWordFilter(Language::English)` does not remove `over`; Lucene's classic
-    English stopword list — the one Solr's `text_en` uses by default — does.** Verified
-    empirically against the exact `tantivy` this crate pins (0.26.1) and the exact filter chain
-    `src/schema.rs::build_tokenizers` wires for `text_en` (`SimpleTokenizer` ->
-    `RemoveLongFilter(40)` -> `LowerCaser` -> `StopWordFilter(English)` -> `Stemmer(English)`):
-    indexing "the quick brown fox jumps over the lazy dog" leaves `over` in the term dictionary
-    as its own term, where Solr's `text_en` drops it. The *stemmer* halves agree on everything
-    the trace needs (`lazy` -> `lazi`, `archived`/`archive` -> `archiv`, `documents` ->
-    `document`, `dogs`/`cats` -> `dog`/`cat`) — the divergence is the stopword list, not the
-    stemming. Consequences, in order of when they bite:
-    - **No test depends on it today.** `tests/terms.rs`'s corpora deliberately avoid `over` and
-      any other word whose stopword-list membership is uncertain, so nothing in the suite is
-      built on the divergent behaviour in either direction.
-    - **It will matter for the `terms` differential capture** that #155's "Not in this ticket"
-      section defers (a `solr-ref/manifest.tsv` row needs a capture against the differential
-      core). `/terms` enumerates the term dictionary directly, so it is the first endpoint where
-      a stopword-list difference shows up as a whole extra/missing *term* in the response rather
-      than a scoring nudge. Expect the diff; it is a real divergence to fix or to document in the
-      PRD, not one to normalise away.
-    - **It is not limited to `/terms`.** Any `text_en` query or highlight over a document
-      containing a classic-list stopword that Tantivy keeps is affected the same way. #155
-      deliberately does not touch the stopword list — swapping in Lucene's list is an
-      analyzer-wide change that alters every existing `text_en` index, and so needs its own issue
-      and its own captured evidence.

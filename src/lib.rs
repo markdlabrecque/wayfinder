@@ -2017,8 +2017,27 @@ async fn mlt(
 ///
 /// Shape and semantics, all read off that trace:
 ///
-/// - `terms=true` gates the component. Without it there is no `terms` block at
-///   all, which is how Solr's search components work — the endpoint still 200s.
+/// - `terms=true` gates the component. Without it — absent, or an explicit
+///   `terms=false` — there is no `terms` block at all, which is how Solr's
+///   search components work: a component whose gating boolean is false
+///   contributes nothing to the response. The endpoint still 200s.
+///
+///   Not fixture-pinned, and honestly so: the trace only ever sends
+///   `terms=true`, and the ticket defers the `/terms` capture, so no captured
+///   response shows what `terms=false` returns. What *is* certain is that the
+///   two readings cannot both be right, and an unconditional `{"terms":{}}`
+///   contradicted this very doc comment. The gated reading is the one
+///   consistent with every other optional block in this codebase
+///   (`facet_counts` is absent unless `facet=true` — finding 4, which *is*
+///   captured), so that is what is implemented. The deferred capture settles
+///   it; if it disagrees, this is the line to change.
+///
+///   `terms=true` with no `terms.fl` is a *different* case, and deliberately
+///   not swept up by the gate: the component runs and contributes an empty
+///   list, so the block is present and empty (`{"terms":{}}`). That is what
+///   `src/coverage.rs`'s `terms.terms` probe asserts, and
+///   `tests/terms.rs::terms_true_without_fl_produces_an_empty_terms_object`
+///   pins it.
 /// - `terms.fl` is repeatable, one key under `terms` per field, each
 ///   independent.
 /// - The value is the flat `[term, count, term, count, ...]` array. That is
@@ -2038,14 +2057,20 @@ async fn mlt(
 /// `response` key: unlike `facet.field`'s post-query error
 /// (`facet_unknown_field.json`, which carries the base query's `response`),
 /// `/terms` has no base query to have partially run, so this follows the
-/// pre-query precedent (`facet_err_range_single.json`).
+/// pre-query precedent (`facet_err_range_single.json`). A `terms.fl` naming a
+/// *defined but non-text* field is a 400 the same way — see
+/// `check_terms_field`.
 ///
 /// ponytail: no `solr-ref/manifest.tsv` row, so the differential harness does
 /// not cover this endpoint yet. Ceiling named because it is a real gap: the
 /// capture needs the differential core, and it is likely to surface analyzer
-/// differences between Tantivy's Snowball chain and Solr's `text_en` — finding
-/// 93 already records one (`over` is not in Tantivy's English stopword list).
-/// Those are findings to escalate, not to normalise away.
+/// differences between Wayfinder's `text_en` chain and Solr's — the captured
+/// `solr-ref/search-api/configset` uses `StandardTokenizerFactory`, a
+/// `LengthFilterFactory min="2"`, a `WordDelimiterGraphFilterFactory`, and an
+/// `accents_en.txt` mapping char filter that Wayfinder has no counterpart for.
+/// None of those is a verified finding yet, so none is recorded as one; the
+/// capture is what would settle them, and any diff it shows is a finding to
+/// escalate, not to normalise away.
 async fn terms(
     State(state): State<Arc<AppState>>,
     AxPath(core): AxPath<String>,
@@ -2056,15 +2081,11 @@ async fn terms(
     check_params(&state, TERMS_PARAMS, &params)?;
 
     let mut terms_block = Map::new();
-    if params.get("terms") == Some("true") {
+    let terms_requested = params.get("terms") == Some("true");
+    if terms_requested {
         for field_name in params.get_all("terms.fl") {
-            if state.index.wf_schema.field(field_name).is_none() {
-                return Err(WfError::bad_request(
-                    "wayfinder::UndefinedField",
-                    format!("undefined field \"{field_name}\""),
-                )
-                .with_params(&params));
-            }
+            check_terms_field(&state.index.wf_schema, field_name)
+                .map_err(|e| e.with_params(&params))?;
             let totals = state.index.field_terms(field_name).map_err(|e| {
                 WfError::internal("wayfinder::TermsError", e.to_string()).with_params(&params)
             })?;
@@ -2095,6 +2116,48 @@ async fn terms(
             }),
         );
     }
-    body.insert("terms".to_string(), Value::Object(terms_block));
+    if terms_requested {
+        body.insert("terms".to_string(), Value::Object(terms_block));
+    }
     Ok(axum::Json(Value::Object(body)).into_response())
+}
+
+/// Refuses a `terms.fl` that `/terms` cannot enumerate, the same way
+/// `stats::check_statable` refuses an unaggregatable `stats.field` — an
+/// undefined field, or a defined one whose term dictionary does not hold UTF-8
+/// text.
+///
+/// The type test is `ValueKind::Text`, which covers both `string`/`keyword`
+/// (unanalyzed, but still raw UTF-8 in the dictionary, and Solr's own
+/// TermsComponent enumerates a `StrField` happily) and every `text_*`/custom
+/// chain. It excludes `int`/`long`/`float`/`double`/`date`, whose dictionary
+/// entries are Tantivy's fixed-width order-preserving encoding, and the dynamic
+/// catch-all JSON fields, whose entries are path-prefixed and type-tagged.
+/// Those are not renderable as Solr's terms at all: decoding them lossily
+/// produced replacement-character keys, and worse, silently *summed* the
+/// document frequencies of two distinct encoded terms that happened to decode
+/// to the same replacement string. A 400 is the honest answer until `/terms`
+/// grows real per-type term rendering (Solr's `terms.raw`, deliberately out of
+/// scope for issue #155 and absent from `TERMS_PARAMS`).
+///
+/// No fixture pins the message: the ticket defers the `/terms` capture, so this
+/// follows `check_statable`'s precedent of a clear unpinned 400 rather than
+/// inventing a fixture-shaped wording.
+fn check_terms_field(schema: &schema::WayfinderSchema, field_name: &str) -> Result<(), WfError> {
+    if schema.field(field_name).is_none() {
+        return Err(WfError::bad_request(
+            "wayfinder::UndefinedField",
+            format!("undefined field \"{field_name}\""),
+        ));
+    }
+    if schema.value_kind(field_name) != Some(schema::ValueKind::Text) {
+        return Err(WfError::bad_request(
+            "wayfinder::TermsUnsupportedField",
+            format!(
+                "can not enumerate terms on the non-text field \"{field_name}\": \
+                 terms.fl needs a string or text field"
+            ),
+        ));
+    }
+    Ok(())
 }

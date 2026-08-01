@@ -2504,6 +2504,20 @@ impl CoreIndex {
     /// which relies on the term-ascending iteration order for the
     /// count-descending sort's tie-break.
     ///
+    /// **Text fields only, enforced.** A term dictionary holds whatever bytes
+    /// the field's indexing wrote, and only a `string`/`text_*` field writes
+    /// UTF-8 there: a numeric or date field's terms are Tantivy's
+    /// order-preserving fixed-width encoding, and a JSON catch-all's are
+    /// path-prefixed and type-tagged. Decoding those lossily does not merely
+    /// render badly — two distinct encoded terms can collapse onto the same
+    /// replacement-character string and have their unrelated document
+    /// frequencies summed into one `BTreeMap` key, which is a wrong answer, not
+    /// an ugly one. So this errors on non-UTF-8 bytes rather than substituting
+    /// `U+FFFD`, and `lib.rs`'s `terms` handler refuses a non-text `terms.fl`
+    /// with a 400 before it ever gets here (`check_terms_field`, following
+    /// `stats::check_statable`'s precedent). The check here is the backstop that
+    /// makes the ceiling real for any other future caller.
+    ///
     /// ponytail: the whole dictionary is materialised in memory before the
     /// handler truncates it to `terms.limit`. Ceiling: a field with a very
     /// large vocabulary pays for every term on every request. Solr streams and
@@ -2521,14 +2535,13 @@ impl CoreIndex {
             let inverted = segment_reader.inverted_index(field)?;
             let mut stream = inverted.terms().stream()?;
             while stream.advance() {
-                // ponytail: terms are raw dictionary bytes. For the analyzed
-                // text fields this endpoint targets they are UTF-8 tokens, so
-                // a lossy decode is exact; a binary/numeric field's encoded
-                // terms would render as replacement characters rather than
-                // Solr's own numeric rendering. Ceiling noted, not hit — the
-                // contract's only `terms.fl` is a text field.
-                let term = String::from_utf8_lossy(stream.key()).into_owned();
-                *totals.entry(term).or_insert(0) += u64::from(stream.value().doc_freq);
+                let term = std::str::from_utf8(stream.key()).with_context(|| {
+                    format!(
+                        "field `{field_name}` has a term dictionary entry that is not UTF-8: \
+                         /terms can only enumerate a text field"
+                    )
+                })?;
+                *totals.entry(term.to_string()).or_insert(0) += u64::from(stream.value().doc_freq);
             }
         }
         Ok(totals)
@@ -3061,6 +3074,84 @@ stored = true
             "with `no_merge` and one commit per doc the index must be \
              genuinely multi-segment, or this test cannot catch a hardcoded \
              count"
+        );
+    }
+
+    /// `field_terms`'s own UTF-8 backstop, tested directly rather than through
+    /// the handler.
+    ///
+    /// `lib.rs::check_terms_field` 400s a non-text `terms.fl` before
+    /// `field_terms` is ever called, so nothing on the HTTP path can reach
+    /// these bytes — which is exactly why this needs a unit test. Without one
+    /// the backstop is untested code that a later caller (a `/terms` that
+    /// grows `terms.raw`, a suggester, an admin page) could quietly reintroduce
+    /// the lossy decode behind. A numeric field's dictionary holds Tantivy's
+    /// fixed-width order-preserving encoding: `String::from_utf8_lossy` turned
+    /// that into `U+FFFD`-prefixed keys, and because distinct encoded terms can
+    /// decode to the *same* replacement string, their unrelated document
+    /// frequencies were summed onto one `BTreeMap` key. An error is the only
+    /// honest result.
+    #[test]
+    fn field_terms_refuses_a_non_utf8_term_dictionary() {
+        const NUMERIC_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "views"
+type = "int"
+stored = true
+fast = true
+"#;
+        let dir = TempDir::new().expect("create temp dir");
+        let schema_path = dir.path().join("schema.toml");
+        std::fs::write(&schema_path, NUMERIC_SCHEMA_TOML).expect("write schema.toml");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let index = CoreIndex::open(&schema_path, &data_dir, &ServerConfig::default())
+            .expect("open test index");
+        index
+            .add_documents(
+                &[
+                    json!({"id": "n1", "body": "alpha", "views": 1}),
+                    json!({"id": "n2", "body": "beta", "views": 300}),
+                ],
+                true,
+            )
+            .expect("add_documents");
+        index.commit().expect("commit");
+
+        // The text field still works, so this test is not just asserting that
+        // `field_terms` is broken for everything.
+        let text_terms = index.field_terms("body").expect("a text field enumerates");
+        assert_eq!(
+            text_terms.get("alpha").copied(),
+            Some(1),
+            "the text field must still enumerate normally: {text_terms:?}"
+        );
+
+        let err = index
+            .field_terms("views")
+            .expect_err("an int field's term dictionary is not UTF-8 and must error");
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("views") && chain.contains("UTF-8"),
+            "the error must name the field and say why, so a caller can tell \
+             this from a generic IO failure, got {chain:?}"
         );
     }
 

@@ -45,16 +45,20 @@
 //!    tokens this trace needs**, confirmed empirically (not assumed):
 //!    `lazy` -> `lazi`, `archived`/`archive` -> `archiv`, `documents` ->
 //!    `document`, `dogs`/`cats` -> `dog`/`cat`, matching the trace exactly.
-//!    One divergence *was* found and is a real finding, not hidden: Tantivy's
-//!    `StopWordFilter(Language::English)` does **not** remove `over` (present
-//!    in "the quick brown fox jumps **over** the lazy dog"), where Lucene's
-//!    classic English stopword list (Solr's own `text_en` default) does. This
-//!    file's corpora avoid `over` and any other word whose stopword-list
-//!    membership is uncertain, so no assertion here depends on that
-//!    divergence — but it is a real Tantivy-vs-Solr gap worth a follow-up on
-//!    the `solr-ref/manifest.tsv` capture the ticket defers (its "Not in this
-//!    ticket" section already flags an analyzer-difference risk for exactly
-//!    this reason).
+//!    The stopword halves agree too: Tantivy 0.26.1's inlined English list is
+//!    the same 33-word Lucene list (its own source comment says so), and
+//!    `solr-ref/search-api/configset/stopwords_en.txt` — the file the trace's
+//!    `text_en` actually loads, per `schema_extra_types.xml`'s
+//!    `words="stopwords_en.txt"` — is that same list plus `s` and `t`. The
+//!    corpora below stay inside the intersection of the two, so no assertion
+//!    here rests on a word the two lists disagree about. The captured
+//!    configset does show other analyzer differences
+//!    (`StandardTokenizerFactory` vs Wayfinder's `SimpleTokenizer`,
+//!    `LengthFilterFactory min="2"`, `WordDelimiterGraphFilterFactory`,
+//!    `MappingCharFilterFactory`'s `accents_en.txt`, and those two extra
+//!    stopwords); none of them has been verified against a capture, so this
+//!    file claims none of them. The deferred `solr-ref/manifest.tsv` row is
+//!    what settles them.
 //! 3. **Doc-frequency-includes-deletes is a genuine, currently-unenforced
 //!    property.** Nothing in `src/core_index.rs` today reads
 //!    `InvertedIndexReader::terms()`/`TermDictionary` at all (grep confirms
@@ -105,7 +109,11 @@ use common::{app_with_schema, get, post_docs, request};
 /// `id` (string, fast, stored, unique key) plus two independent `text_en`
 /// fields (`title`, `body`), so the multiple-`terms.fl` test can exercise two
 /// distinct term dictionaries without the primary trace-shaped corpus (which
-/// only ever populates `title`) needing to grow extra vocabulary.
+/// only ever populates `title`) needing to grow extra vocabulary. `views`
+/// (`int`) exists solely so
+/// `terms_non_text_field_is_rejected_rather_than_lossily_decoded` has a
+/// declared, indexed, non-text field to point `terms.fl` at; no other test
+/// mentions it, and no corpus populates it except that one's.
 const TERMS_SCHEMA_TOML: &str = r#"
 [core]
 name = "content"
@@ -128,6 +136,12 @@ stored = true
 name = "body"
 type = "text_en"
 stored = true
+
+[[fields]]
+name = "views"
+type = "int"
+stored = true
+fast = true
 "#;
 
 async fn terms_app(corpus: &Value) -> (Router, TempDir) {
@@ -373,6 +387,246 @@ async fn terms_undefined_field_errors_with_solr_envelope() {
     assert!(
         body.get("terms").is_none(),
         "an undefined field must not silently render an empty terms block, got {body}"
+    );
+}
+
+// --- cross-segment summing --------------------------------------------------
+
+/// Independent oracle for how many segments an app's data directory really
+/// has: opens the same committed directory as a fresh `tantivy::Index`, not
+/// through any Wayfinder type, and counts its searchable segment metas. Same
+/// technique `tests/admin_ui_index_stats.rs::segment_count_oracle` uses, and
+/// deliberately not `CoreIndex::segment_count` — the point is to establish the
+/// premise of the test below without trusting the code under test.
+fn segment_count_oracle(data_dir: &std::path::Path) -> usize {
+    tantivy::Index::open_in_dir(data_dir)
+        .expect("independent oracle must open the committed data directory")
+        .searchable_segment_metas()
+        .expect("independent oracle must list searchable segment metas")
+        .len()
+}
+
+/// The property the ticket singles out: a term living in more than one segment
+/// must report the **sum** of its per-segment `doc_freq`, not any single
+/// segment's local value.
+///
+/// Every other test in this file indexes its corpus in one `post_docs` call,
+/// which commits once and so produces exactly ONE segment — and with one
+/// segment `totals.insert(term, doc_freq)` and
+/// `*totals.entry(term).or_insert(0) += doc_freq` are indistinguishable. (The
+/// delete test is no help either: its second commit writes a tombstone into
+/// the existing segment rather than adding a new one.) So this test commits
+/// three separate single-doc batches, asserts against an independent tantivy
+/// read that the index really did end up multi-segment, and only then asserts
+/// the frequency. Without the segment-count assertion a future merge-policy
+/// change could quietly collapse this back into the one-segment case and take
+/// the guard with it.
+///
+/// `sharedzz` appears in all three docs and `gamma` in one, so a correct
+/// implementation reports 3 and 1. An overwriting one reports 1 for both,
+/// since each segment's local `doc_freq` for `sharedzz` is 1. All four tokens
+/// are outside every stopword list in play and unchanged by the English
+/// stemmer — `alpha`/`beta`/`gamma` per `twelve_term_corpus` above, and the
+/// `zz` suffix per `deletable_corpus`'s `widgetzz` below. (A first draft used
+/// `onlyonce`, which the Snowball stemmer folds to `onlyonc`.)
+#[tokio::test]
+async fn terms_doc_frequency_sums_across_segments() {
+    let dir = TempDir::new().expect("temp dir");
+    let app = app_with_schema(dir.path(), TERMS_SCHEMA_TOML).expect("app must build");
+
+    for (i, extra) in ["gamma", "alpha", "beta"].iter().enumerate() {
+        let (status, body) = post_docs(
+            &app,
+            &json!([{"id": format!("s{i}"), "body": format!("sharedzz {extra}")}]),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "indexing batch {i} must succeed, got {body}"
+        );
+    }
+
+    let segments = segment_count_oracle(&dir.path().join("data"));
+    assert!(
+        segments > 1,
+        "this test is only meaningful on a multi-segment index: three separate \
+         committed batches must leave more than one searchable segment, but an \
+         independent tantivy read found {segments}. If a merge policy change \
+         made this single-segment, the cross-segment summing guard below is \
+         no longer guarding anything and needs a different construction."
+    );
+
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=body").await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    let flat = flat_terms(&body, "body");
+
+    assert_eq!(
+        term_count(flat, "sharedzz"),
+        Some(3),
+        "sharedzz is in one document in each of the {segments} segments, so its \
+         document frequency must be the SUM across segments (3), not a single \
+         segment's local doc_freq (1), got {flat:?}"
+    );
+    assert_eq!(
+        term_count(flat, "gamma"),
+        Some(1),
+        "gamma is in exactly one document overall, so summing must not inflate \
+         it either, got {flat:?}"
+    );
+    assert_eq!(
+        body.pointer("/terms/body"),
+        Some(&json!(["sharedzz", 3, "alpha", 1, "beta", 1, "gamma", 1])),
+        "the whole per-field list must be the cross-segment merge, ordered \
+         count-desc then term-asc, got {body}"
+    );
+}
+
+// --- terms gating -----------------------------------------------------------
+
+/// `terms=false` must produce no `terms` key at all: a Solr search component
+/// whose gating boolean is false contributes nothing to the response.
+///
+/// No fixture pins this — the trace only sends `terms=true`, and the ticket
+/// defers the `/terms` capture. It is asserted anyway because the handler
+/// previously inserted `terms` unconditionally, which contradicted its own doc
+/// comment ("Without it there is no `terms` block at all"), and because the
+/// gated reading matches the one *captured* precedent for an optional block:
+/// `facet_counts` is absent entirely unless `facet` is requested (finding 4).
+/// The deferred capture is what would overturn this; see the handler's doc
+/// comment.
+#[tokio::test]
+async fn terms_false_produces_no_terms_block() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=false&terms.fl=title").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a disabled component is not an error, got {body}"
+    );
+    assert!(
+        body.get("terms").is_none(),
+        "terms=false must suppress the terms block entirely, not render it \
+         empty, got {body}"
+    );
+}
+
+/// The same for an absent `terms` param — the component is off by default.
+#[tokio::test]
+async fn terms_absent_produces_no_terms_block() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(&app, "terms?terms.fl=title").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the endpoint still 200s with the component off, got {body}"
+    );
+    assert!(
+        body.get("terms").is_none(),
+        "with no terms param there must be no terms block, got {body}"
+    );
+    assert!(
+        body.get("responseHeader").is_some(),
+        "suppressing the terms block must not also suppress responseHeader, \
+         got {body}"
+    );
+}
+
+/// The case that must NOT be swept up by the gating above: `terms=true` with
+/// no `terms.fl` runs the component, which contributes an empty list. The
+/// block is present and empty. `src/coverage.rs`'s `terms.terms` response
+/// denominator probe issues exactly this request and requires `terms` to be an
+/// object, so this pins the distinction the gating fix has to preserve.
+#[tokio::test]
+async fn terms_true_without_fl_produces_an_empty_terms_object() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=true").await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        body.get("terms"),
+        Some(&json!({})),
+        "terms=true with no terms.fl must render an empty terms object, not \
+         omit the block, got {body}"
+    );
+}
+
+// --- non-text field ---------------------------------------------------------
+
+/// A `terms.fl` naming a declared but non-text field must 400 rather than
+/// enumerate the field's raw dictionary bytes.
+///
+/// An `int` field's term dictionary holds Tantivy's fixed-width
+/// order-preserving encoding, not UTF-8. Decoding it lossily returned
+/// replacement-character keys — and because distinct encoded terms can decode
+/// to the *same* replacement string, their unrelated document frequencies were
+/// summed into one `BTreeMap` key. That is a wrong answer served with a 200,
+/// which is worse than a refusal. The two docs below carry `views` values
+/// chosen to differ only in bytes that are not valid UTF-8 on their own, so a
+/// lossy implementation returns a garbage single-key list here rather than
+/// anything a caller could use.
+#[tokio::test]
+async fn terms_non_text_field_is_rejected_rather_than_lossily_decoded() {
+    let (app, _dir) = terms_app(&json!([
+        {"id": "n1", "body": "alpha", "views": 1},
+        {"id": "n2", "body": "beta", "views": 300},
+    ]))
+    .await;
+
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=views").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a non-text terms.fl must 400, not return replacement-character terms \
+         with a 200, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/error/code").and_then(Value::as_u64),
+        Some(400),
+        "got {body}"
+    );
+    let msg = body
+        .pointer("/error/msg")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("no /error/msg string in {body}"));
+    assert!(
+        msg.contains("views"),
+        "error.msg should name the offending field, got {msg:?}"
+    );
+    assert!(
+        body.get("terms").is_none(),
+        "a rejected field must not also render a terms block, got {body}"
+    );
+    assert!(
+        !body.to_string().contains('\u{fffd}'),
+        "no U+FFFD replacement character should reach the response at all, \
+         got {body}"
+    );
+}
+
+/// A `string` field, on the other hand, must still be enumerable: it is
+/// unanalyzed but its dictionary is raw UTF-8, and Solr's own TermsComponent
+/// enumerates a `StrField` happily. This is the boundary of the rejection
+/// above — a check written as "text_* only" instead of "UTF-8 only" would
+/// wrongly refuse here.
+#[tokio::test]
+async fn terms_string_field_is_still_enumerable() {
+    let (app, _dir) = terms_app(&json!([
+        {"id": "Zed", "body": "alpha"},
+        {"id": "abe", "body": "beta"},
+    ]))
+    .await;
+
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=id").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a string field's dictionary is UTF-8 and must be enumerable, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/terms/id"),
+        Some(&json!(["Zed", 1, "abe", 1])),
+        "a string field is unanalyzed, so its terms are the literal stored \
+         values, in byte-ascending order (uppercase before lowercase), got {body}"
     );
 }
 
