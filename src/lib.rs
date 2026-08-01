@@ -1125,7 +1125,9 @@ async fn admin_mbeans(
     //   "UPDATE.updateHandler.autoCommitMaxTime"     = "15000ms" (STRING)
     // i.e. the three counters are bare integers while the two time budgets are
     // unit-suffixed strings. Matching Solr is the contract, so this map does
-    // both.
+    // both. `autoCommitMaxTime` is captured-but-unserved: no `search_api_solr`
+    // consumer reads it (see the six-leaf list above), so only
+    // `softAutoCommitMaxTime` is emitted, and only when configured.
     let mut update_stats = Map::new();
     update_stats.insert(
         "UPDATE.updateHandler.docsPending".to_string(),
