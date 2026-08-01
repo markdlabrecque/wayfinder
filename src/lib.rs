@@ -185,7 +185,7 @@ const SELECT_PARAMS: &[&str] = &[
 /// answer: a client asking for `f.category.facet.limit=5` would get the global
 /// limit and no indication it was dropped. Upgrade path: implement the
 /// override where the global is read in `src/facet.rs` (the `facet.missing`
-/// resolution in `facet_fields` is the worked example — `Params::per_field`
+/// resolution in `facet_fields` is the worked example — `Params::per_field_bool`
 /// wins over the global unconditionally, finding 97), *then* add the base param
 /// name here in the same change. Adding a name here alone is the bug.
 const PER_FIELD_PARAMS: &[&str] = &["facet.missing"];
@@ -1801,7 +1801,15 @@ async fn update(
             .bool_or(key, default)
             .map_err(|e| e.envelope(Envelope::NoParams))
     };
-    let commit_requested = bool_param("commit", false)? || bool_param("softCommit", false)?;
+    // Bound separately and *then* OR-ed: writing this as
+    // `bool_param("commit", false)? || bool_param("softCommit", false)?`
+    // short-circuits, so `commit=true&softCommit=nope` would never parse
+    // `softCommit` at all and would 200 on an invalid boolean -- the exact
+    // silent acceptance issue #187 exists to remove. Every boolean this
+    // handler accepts is validated, whatever the others say.
+    let commit = bool_param("commit", false)?;
+    let soft_commit = bool_param("softCommit", false)?;
+    let commit_requested = commit || soft_commit;
     // `overwrite=false` skips the default replace-by-uniqueKey step
     // (finding 48b); Solr's default is `overwrite=true`.
     let overwrite = bool_param("overwrite", true)?;

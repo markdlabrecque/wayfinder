@@ -32,7 +32,7 @@ mod common;
 use axum::http::StatusCode;
 use serde_json::Value;
 
-use common::{assert_matches_fixture, fixture, get, indexed_app};
+use common::{assert_matches_fixture, fixture, get, indexed_app, request};
 
 /// `facet_counts.facet_fields.<label>` as the flat alternating array Solr
 /// uses, or `None` when the label is absent entirely. Mirrors
@@ -389,4 +389,167 @@ async fn omit_header_yes_suppresses_the_response_header() {
         "omitHeader=yes must suppress responseHeader entirely, got {body}"
     );
     assert_matches_fixture(body, "bool_omit_header_yes");
+}
+
+// --- unfixtured guards: every remaining boolean read, and every handler -----
+//
+// Nothing below has a Solr fixture, and that is deliberate rather than a gap.
+// Finding 109 pins the *rule*; these pin that each read site actually applies
+// it. Two of them exist because the code they guard is validation-only, which
+// `CLAUDE.md` requires be mutation-tested: deleting the guard must break a
+// test, not just fail to be exercised.
+//
+// The expected message is Solr's verbatim wording from the two captured error
+// fixtures (`invalid boolean value: <raw>`); the status is the 400 those
+// fixtures record. What is unfixtured is only *which param on which endpoint*,
+// not the shape of the answer.
+
+/// Asserts an invalid boolean anywhere answers Solr's 400 with the raw value
+/// named. `error.metadata` is not inspected here -- the two fixtured cases
+/// above already pin its shape, and these have no fixture to compare against.
+fn assert_invalid_bool_400(status: StatusCode, body: &Value, raw: &str, what: &str) {
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "{what}: an invalid boolean must be a 400; got {body}"
+    );
+    assert_eq!(
+        body.pointer("/error/msg").and_then(Value::as_str),
+        Some(format!("invalid boolean value: {raw}").as_str()),
+        "{what}: error.msg must name the invalid raw value verbatim; got {body}"
+    );
+    assert_eq!(
+        body.pointer("/error/code").and_then(Value::as_i64),
+        Some(400),
+        "{what}: error.code must be 400; got {body}"
+    );
+}
+
+/// **Regression test for a short-circuit bug.** `/update` reads `commit` and
+/// `softCommit` and treats either as "commit now". Written as
+/// `bool_or("commit")? || bool_or("softCommit")?` the `||` short-circuits, so
+/// with `commit=true` the second value is never parsed at all and
+/// `softCommit=nope` sails through with a 200 -- silently accepting an invalid
+/// boolean, the exact behaviour issue #187 exists to remove. Both must be
+/// validated regardless of the other's value, so both orderings are checked.
+#[tokio::test]
+async fn update_validates_both_commit_booleans_even_when_the_first_is_true() {
+    let (app, _dir) = indexed_app().await;
+    let body_json = r#"[{"id":"bool1","body":"hello"}]"#;
+
+    let (status, body) = request(
+        &app,
+        "POST",
+        "update?commit=true&softCommit=nope&wt=json",
+        Some(body_json),
+    )
+    .await;
+    assert_invalid_bool_400(status, &body, "nope", "update?commit=true&softCommit=nope");
+
+    // The mirror image: a valid `softCommit` must not excuse an invalid
+    // `commit` either.
+    let (status, body) = request(
+        &app,
+        "POST",
+        "update?commit=nope&softCommit=true&wt=json",
+        Some(body_json),
+    )
+    .await;
+    assert_invalid_bool_400(status, &body, "nope", "update?commit=nope&softCommit=true");
+}
+
+/// `/update`'s own booleans, each rejected on its own. `overwrite` is the one
+/// whose Solr default is `true`, so a defaulting bug there would be invisible
+/// without an explicit invalid-value case.
+#[tokio::test]
+async fn update_rejects_each_invalid_boolean() {
+    let (app, _dir) = indexed_app().await;
+    let body_json = r#"[{"id":"bool2","body":"hello"}]"#;
+    for (param, raw) in [
+        ("commit", "nope"),
+        ("softCommit", "maybe"),
+        ("overwrite", "1"),
+    ] {
+        let (status, body) = request(
+            &app,
+            "POST",
+            &format!("update?{param}={raw}&wt=json"),
+            Some(body_json),
+        )
+        .await;
+        assert_invalid_bool_400(status, &body, raw, &format!("update?{param}={raw}"));
+    }
+}
+
+/// `/mlt`'s two booleans. `mlt.match.include` is the other default-`true`
+/// param, same reasoning as `overwrite` above.
+#[tokio::test]
+async fn mlt_rejects_each_invalid_boolean() {
+    let (app, _dir) = indexed_app().await;
+    for (param, raw) in [("mlt.boost", "1"), ("mlt.match.include", "nope")] {
+        let (status, body) = get(
+            &app,
+            &format!("mlt?q=id:doc1&mlt.fl=body&{param}={raw}&wt=json"),
+        )
+        .await;
+        assert_invalid_bool_400(status, &body, raw, &format!("mlt?{param}={raw}"));
+    }
+}
+
+/// `/terms`'s own gate param.
+#[tokio::test]
+async fn terms_rejects_an_invalid_boolean() {
+    let (app, _dir) = indexed_app().await;
+    let (status, body) = get(&app, "terms?terms=nope&terms.fl=body&wt=json").await;
+    assert_invalid_bool_400(status, &body, "nope", "terms?terms=nope");
+}
+
+/// `/select`'s three gate params, each rejected on its own. `facet=1` is the
+/// fixtured case above; `stats` and `hl` are the same read site pattern with
+/// no fixture of their own.
+#[tokio::test]
+async fn select_rejects_each_invalid_boolean() {
+    let (app, _dir) = indexed_app().await;
+    for (param, raw) in [("facet", "1"), ("stats", "nope"), ("hl", "y")] {
+        let (status, body) = get(&app, &format!("select?q=*:*&rows=0&{param}={raw}&wt=json")).await;
+        assert_invalid_bool_400(status, &body, raw, &format!("select?{param}={raw}"));
+    }
+}
+
+/// **Mutation guard for the four entry-point `omitHeader` validations.**
+///
+/// `Params::omit_header` is called at render time and cannot fail, so an
+/// invalid value would otherwise be read as "keep the header" and answered
+/// 200 -- silently, on every one of these endpoints. The only thing making it
+/// a 400 is a `bool_or("omitHeader", …)` call at each handler's entry, which
+/// nothing else in the suite exercises: delete any one of the four and this
+/// test fails for that endpoint alone.
+///
+/// This is Wayfinder's documented divergence (finding 109): real Solr answers
+/// an invalid `omitHeader` with a Jetty *HTML* error page, because header
+/// suppression is decided before the JSON response writer exists. The status
+/// matches; only the body shape differs, which is why there is no fixture and
+/// no `manifest.tsv` row. The assertions below are therefore Wayfinder's own
+/// JSON envelope, not a captured Solr one.
+#[tokio::test]
+async fn every_handler_rejects_an_invalid_omit_header() {
+    let (app, _dir) = indexed_app().await;
+
+    let (status, body) = get(&app, "select?q=*:*&rows=0&omitHeader=1&wt=json").await;
+    assert_invalid_bool_400(status, &body, "1", "select?omitHeader=1");
+
+    let (status, body) = get(&app, "mlt?q=id:doc1&mlt.fl=body&omitHeader=1&wt=json").await;
+    assert_invalid_bool_400(status, &body, "1", "mlt?omitHeader=1");
+
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=body&omitHeader=1&wt=json").await;
+    assert_invalid_bool_400(status, &body, "1", "terms?omitHeader=1");
+
+    let (status, body) = request(
+        &app,
+        "POST",
+        "update?omitHeader=1&wt=json",
+        Some(r#"[{"id":"bool3","body":"hello"}]"#),
+    )
+    .await;
+    assert_invalid_bool_400(status, &body, "1", "update?omitHeader=1");
 }

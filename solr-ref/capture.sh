@@ -2338,14 +2338,20 @@ capx omit_header_update_error_true POST "$CORE/update?omitHeader=true&wt=json" '
 # page, not a JSON envelope. Wayfinder deliberately answers with its ordinary
 # JSON 400 there (documented divergence, see docs/solr-ref-findings.md).
 #
-# Reproduce (after recreating the opening schema/corpus on port 8996):
-# B='select?q=*:*&rows=0&facet=true&facet.field=category'
-# cap bool_facet_missing_upper_true "$B&facet.missing=TRUE&wt=json"
-# cap bool_facet_missing_yes        "$B&facet.missing=yes&wt=json"
-# cap bool_facet_missing_on         "$B&facet.missing=on&wt=json"
-# cap bool_facet_missing_no         "$B&facet.missing=no&wt=json"
-# cap bool_facet_missing_prefix     "$B&facet.missing=truestuff&wt=json"
-# cap bool_facet_missing_invalid    "$B&facet.missing=nope&wt=json"
-# cap bool_facet_on      'select?q=*:*&rows=0&facet=on&facet.field=category&wt=json'
-# cap bool_facet_invalid 'select?q=*:*&rows=0&facet=1&facet.field=category&wt=json'
-# cap bool_omit_header_yes 'select?q=*:*&rows=0&omitHeader=yes&wt=json'
+# The port-8996 container above is provenance only -- how these nine were
+# actually captured, without re-running this script wholesale. They are live
+# `cap` calls, not commented-out reproduction notes, because this script opens
+# with `rm -rf "$OUT"` and truncates manifest.tsv: as comments, the next full
+# re-run would silently delete all nine fixtures and their manifest rows. Every
+# one is an ordinary core-relative GET against the schema and corpus at the top
+# of this script, so a wholesale re-run reproduces them exactly.
+BOOL_BASE='select?q=*:*&rows=0&facet=true&facet.field=category'
+cap bool_facet_missing_upper_true "$BOOL_BASE&facet.missing=TRUE&wt=json"
+cap bool_facet_missing_yes        "$BOOL_BASE&facet.missing=yes&wt=json"
+cap bool_facet_missing_on         "$BOOL_BASE&facet.missing=on&wt=json"
+cap bool_facet_missing_no         "$BOOL_BASE&facet.missing=no&wt=json"
+cap bool_facet_missing_prefix     "$BOOL_BASE&facet.missing=truestuff&wt=json"
+cap bool_facet_missing_invalid    "$BOOL_BASE&facet.missing=nope&wt=json"
+cap bool_facet_on      'select?q=*:*&rows=0&facet=on&facet.field=category&wt=json'
+cap bool_facet_invalid 'select?q=*:*&rows=0&facet=1&facet.field=category&wt=json'
+cap bool_omit_header_yes 'select?q=*:*&rows=0&omitHeader=yes&wt=json'
