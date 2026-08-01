@@ -1,0 +1,17 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "q":"id:r6",
+      "fl":"id,title",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":0,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":3,
+    "params":{
+      "q":"id:r5",
+      "fl":"id,title,body",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"r5",
+      "body":"same id second",
+      "title":"golf"
+    }]
+  }
+}

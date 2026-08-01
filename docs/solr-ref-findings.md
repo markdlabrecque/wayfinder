@@ -1643,3 +1643,45 @@ existing ground truth rather than a fixture claim.
     is unimplemented and, deliberately, unasserted — no captured fixture pins either, and
     `hl.requireFieldMatch=true` currently produces `false`'s output silently rather than
     being rejected. Alongside `hl.maxAnalyzedChars`, these remain uncaptured for highlighting.
+
+## Findings from issue #154 (repeated `add` command keys in one `/update` body)
+
+Captured against a one-off `solr:9` (port 8992, `update9` core, same schema and `u1..u5`
+seed as `capture.sh`'s update9 block; the block is appended at the end of `capture.sh` and
+the container was removed afterwards). Fixtures `update_repeated_add_*.json` and their
+`update_select_after_repeated_add_*.json` corpus states, twelve `manifest-errors.tsv` rows
+(POSTs and their follow-up selects, never `manifest.tsv`).
+
+96. **Every occurrence of a repeated top-level command key executes, in body order, and a
+    malformed occurrence aborts the whole body.** Solr's JSON update format is a stream of
+    commands, not a map: `search_api_solr`'s real body
+    (`solr-ref/search-api/trace/00001.json`) repeats `add` once per document, six times.
+    Four things the capture settles:
+
+    - **Not last-wins.** `update_repeated_add_batch` sends two `add`s plus a `delete` and a
+      `commit` key; both `r1`/alpha and `r2`/bravo are indexed. A parse that goes through
+      `serde_json::Value` collapses the duplicate key to the last occurrence and silently
+      drops the rest — a 200 with a wrong answer, which is what Wayfinder did before this
+      issue.
+    - **Body order, not grouped by kind.** A `delete` *between* two adds sees the earlier
+      one (`update_repeated_add_delete_between`: `r3` is added then deleted, and is gone;
+      `r4` survives). A `delete` *before* an add of the same id does not consume it
+      (`update_repeated_add_delete_before`: `r4` is deleted then re-added, and survives with
+      the new title `echo`). An "all adds, then all deletes" execution order — Wayfinder's,
+      before this issue — loses that second doc. Wayfinder now executes the parsed command
+      list in order, coalescing only *consecutive* adds into one batch.
+    - **Two adds of the same id leave the last.** `update_repeated_add_same_id` leaves one
+      `r5`, body `same id second`. This falls out of in-order execution plus the ordinary
+      `overwrite=true` replace-by-uniqueKey, on both engines.
+    - **A bad command aborts everything before it.** A doc-less `add` is a 400 ("Missing
+      solr document at [66]") and the valid `add` that *preceded* it never lands
+      (`update_select_after_repeated_add_missing_doc`, `numFound` 0) even though the request
+      carried `?commit=true`; an unknown command key is the same ("Unknown command
+      'frobnicate' at [129]", both preceding adds lost). Wayfinder matches by validating the
+      whole body in `parse_update_commands` before executing any of it. Message text is
+      Wayfinder's own, per the `/update` error contract.
+
+    Ceiling: only the *top level* is duplicate-tolerant. A repeated key inside a command
+    value (`{"add":{"doc":{...},"doc":{...}}}`) still collapses to the last occurrence —
+    unobserved in any capture or trace, and Solr's own `JsonLoader` reads a single `doc`
+    per `add`. Marked `ponytail:` on `UpdateBody` in `src/lib.rs`.
