@@ -1944,20 +1944,35 @@ fn query_parse_error(e: anyhow::Error, params: &Params) -> WfError {
     }
 }
 
-/// Returns the raw Unicode-alphanumeric runs in `text`, retaining their byte
-/// ranges for Solr's `startOffset`/`endOffset` response fields.
-fn spellcheck_tokens(text: &str) -> Vec<(usize, usize, &str)> {
+/// Returns raw Unicode-alphanumeric runs with both Rust byte ranges (for
+/// slicing/collation) and Java UTF-16 code-unit offsets (for Solr's wire
+/// `startOffset`/`endOffset`; `spellcheck_unicode_offsets.json`).
+fn spellcheck_tokens(text: &str) -> Vec<(usize, usize, usize, usize, &str)> {
     let mut tokens = Vec::new();
     let mut start = None;
-    for (offset, ch) in text.char_indices() {
+    let mut utf16_offset = 0;
+    for (byte_offset, ch) in text.char_indices() {
         if ch.is_alphanumeric() {
-            start.get_or_insert(offset);
-        } else if let Some(start) = start.take() {
-            tokens.push((start, offset, &text[start..offset]));
+            start.get_or_insert((byte_offset, utf16_offset));
+        } else if let Some((byte_start, utf16_start)) = start.take() {
+            tokens.push((
+                byte_start,
+                byte_offset,
+                utf16_start,
+                utf16_offset,
+                &text[byte_start..byte_offset],
+            ));
         }
+        utf16_offset += ch.len_utf16();
     }
-    if let Some(start) = start {
-        tokens.push((start, text.len(), &text[start..]));
+    if let Some((byte_start, utf16_start)) = start {
+        tokens.push((
+            byte_start,
+            text.len(),
+            utf16_start,
+            utf16_offset,
+            &text[byte_start..],
+        ));
     }
     tokens
 }
@@ -1996,7 +2011,7 @@ fn spellcheck(index: &CoreIndex, params: &Params) -> anyhow::Result<Value> {
     // query runs, matches exact dictionary terms verbatim, then chooses one
     // Damerau candidate at edit distance <= 2 (term-ascending tie break).
     // Extend it only with a captured analyzer/ranking contract.
-    for (start, end, token) in spellcheck_tokens(text) {
+    for (byte_start, byte_end, offset_start, offset_end, token) in spellcheck_tokens(text) {
         if terms.contains_key(token) {
             continue;
         }
@@ -2011,13 +2026,20 @@ fn spellcheck(index: &CoreIndex, params: &Params) -> anyhow::Result<Value> {
             })
             .map(|(_, term)| term.clone());
         if let Some(candidate) = candidate {
-            corrections.push((start, end, token, candidate));
+            corrections.push((
+                byte_start,
+                byte_end,
+                offset_start,
+                offset_end,
+                token,
+                candidate,
+            ));
         }
     }
 
     let suggestions = if map {
         let mut suggestions = Map::new();
-        for (start, end, token, candidate) in &corrections {
+        for (_, _, start, end, token, candidate) in &corrections {
             suggestions.insert(
                 (*token).to_string(),
                 json!({
@@ -2031,7 +2053,7 @@ fn spellcheck(index: &CoreIndex, params: &Params) -> anyhow::Result<Value> {
         Value::Object(suggestions)
     } else {
         let mut suggestions = Vec::with_capacity(corrections.len() * 2);
-        for (start, end, token, candidate) in &corrections {
+        for (_, _, start, end, token, candidate) in &corrections {
             suggestions.push(json!(token));
             suggestions.push(json!({
                 "numFound": 1,
@@ -2046,10 +2068,10 @@ fn spellcheck(index: &CoreIndex, params: &Params) -> anyhow::Result<Value> {
     let collations = if params.bool_or("spellcheck.collate", false)? && !corrections.is_empty() {
         let mut corrected = String::with_capacity(text.len());
         let mut cursor = 0;
-        for (start, end, _, candidate) in &corrections {
-            corrected.push_str(&text[cursor..*start]);
+        for (byte_start, byte_end, _, _, _, candidate) in &corrections {
+            corrected.push_str(&text[cursor..*byte_start]);
             corrected.push_str(candidate);
-            cursor = *end;
+            cursor = *byte_end;
         }
         corrected.push_str(&text[cursor..]);
         if map {

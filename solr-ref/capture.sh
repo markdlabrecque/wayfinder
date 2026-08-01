@@ -2458,6 +2458,8 @@ capspell spellcheck_dictionary_en_first \
   "$SPELL_BASE&spellcheck.q=qwick&spellcheck.dictionary=en&spellcheck.dictionary=und&spellcheck.collate=true&json.nl=flat"
 capspell spellcheck_dictionary_und_first \
   "$SPELL_BASE&spellcheck.q=qwick&spellcheck.dictionary=und&spellcheck.dictionary=en&spellcheck.collate=true&json.nl=flat"
+capspell spellcheck_unicode_offsets \
+  "$SPELL_BASE&spellcheck.q=%C3%A9%20qwick&spellcheck.dictionary=en&spellcheck.collate=true&json.nl=flat"
 
 echo "captured issue #223 spellcheck fixtures from '$SPELL_CONTAINER' (port $SPELL_PORT)"
 docker rm -f "$SPELL_CONTAINER" >/dev/null

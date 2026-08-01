@@ -2079,7 +2079,8 @@ contains `quack`/`garden`. The self-contained setup is appended to `solr-ref/cap
 117. **Spellcheck named-list rendering follows `json.nl`, repeated dictionaries use the first
      requested dictionary, and a collation substitutes every misspelled token.** Under
      `json.nl=flat`, `suggestions` alternates each misspelled token with an object containing
-     `numFound`, byte `startOffset`/`endOffset`, and a suggestion string array; `collations`
+     `numFound`, UTF-16-code-unit `startOffset`/`endOffset`, and a suggestion string array;
+     `collations`
      is `["collation", "quick rocket"]`. Under `json.nl=map`, those become
      `{"qwick": {...}, "roket": {...}}` and `{"collation":"quick rocket"}`. With
      `spellcheck.dictionary=en&spellcheck.dictionary=und`, `qwick` becomes `quick`; reversing
@@ -2088,3 +2089,6 @@ contains `quack`/`garden`. The self-contained setup is appended to `solr-ref/cap
      string and no hit count when `spellcheck.collateExtendedResults` is not requested. Fixtures:
      `spellcheck_flat.json`, `spellcheck_map.json`,
      `spellcheck_dictionary_en_first.json`, and `spellcheck_dictionary_und_first.json`.
+     `spellcheck_unicode_offsets.json` resolves the offset unit directly: for `é qwick`, Solr
+     reports `qwick` at `startOffset:2,endOffset:7`, i.e. Java UTF-16 code units rather than
+     Rust UTF-8 byte positions (`3..8`).

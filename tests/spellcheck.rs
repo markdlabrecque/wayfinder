@@ -97,6 +97,18 @@ async fn spellcheck_map_named_list_includes_offsets_and_collation() {
 }
 
 #[tokio::test]
+async fn spellcheck_offsets_are_java_utf16_code_units_not_utf8_bytes() {
+    let (app, _dir) = spellcheck_223_app().await;
+    let actual = spellcheck_response(
+        &app,
+        "q=*:*&rows=0&wt=json&omitHeader=true&spellcheck=true&spellcheck.q=%C3%A9%20qwick&spellcheck.dictionary=en&spellcheck.collate=true&json.nl=flat",
+    )
+    .await;
+
+    common::assert_matches_fixture(actual, "spellcheck_unicode_offsets");
+}
+
+#[tokio::test]
 async fn first_repeated_spellcheck_dictionary_wins_when_en_is_first() {
     let (app, _dir) = spellcheck_223_app().await;
     let actual = spellcheck_response(

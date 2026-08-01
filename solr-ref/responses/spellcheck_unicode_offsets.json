@@ -1,0 +1,12 @@
+{
+  "response":{"numFound":2,"start":0,"numFoundExact":true,"docs":[]
+  },
+  "spellcheck":{
+    "suggestions":[
+      "qwick",{
+        "numFound":1,
+        "startOffset":2,
+        "endOffset":7,
+        "suggestion":["quick"]}],
+    "collations":[
+      "collation","é quick"]}}
