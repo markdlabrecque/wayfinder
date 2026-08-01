@@ -2,7 +2,7 @@
 //! core (PRD open question 1 — single-core-per-process, so there's exactly
 //! one of these per running `app()`).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -1377,6 +1377,17 @@ impl CoreIndex {
         })
     }
 
+    /// Whether this core can address `name` at all — the public face of
+    /// `field_target`, so callers outside this module (`lib.rs`'s
+    /// `check_terms_field`) test existence through the *same* static-before-
+    /// dynamic resolution the query path uses instead of growing a second,
+    /// drift-prone copy of the rule. True for a declared `[[fields]]` entry
+    /// and for a name only a `[[dynamic_fields]]` pattern matches; false for a
+    /// name matching neither.
+    pub fn resolves_field_name(&self, name: &str) -> bool {
+        self.field_target(name).is_some()
+    }
+
     /// One edismax clause's `qf`-wide query: `phrase_text` tokenized with
     /// each `qf` field's own indexing analyzer (a bare word normally
     /// tokenizes to exactly one term; a quoted multi-word phrase to more
@@ -2474,6 +2485,124 @@ impl CoreIndex {
             .sum()
     }
 
+    /// Every term in `field_name`'s **inverted index** term dictionary, with
+    /// its document frequency — Solr's TermsComponent (`/terms`, issue #155).
+    ///
+    /// Deliberately *not* `term_facet`: that runs a docValues
+    /// `TermsAggregation` over a fast column, which never sees the analyzed
+    /// tokens of a `text_en` field (`lazy` -> `lazi`, `archived` -> `archiv`).
+    /// The trace this endpoint matches
+    /// (`solr-ref/search-api/trace/00028.json`) reports stemmed terms, so the
+    /// term dictionary is the only source that can answer it.
+    ///
+    /// Two properties the ticket calls out, both encoded here:
+    ///
+    /// - **Doc frequencies sum across segments.** One term generally lives in
+    ///   several segments' dictionaries, each with its own local `doc_freq`;
+    ///   Solr reports the total, so the `BTreeMap` accumulates rather than
+    ///   overwrites.
+    /// - **Deleted documents still count.** `TermInfo::doc_freq` is the raw
+    ///   Lucene `docFreq`: deleting a document tombstones it in the segment's
+    ///   alive-docs bitmap without rewriting the postings, so the frequency
+    ///   only drops when a merge physically purges it. Solr's TermsComponent
+    ///   behaves the same way (it reads `docFreq`, not a live-docs-filtered
+    ///   count), so intersecting with `SegmentReader::alive_bitset` here would
+    ///   be a divergence, not a fix. `tests/terms.rs`'s
+    ///   `terms_doc_frequency_includes_deleted_docs_without_a_merge` guards it.
+    ///
+    /// Returned as a `BTreeMap` — unlimited and term-ascending. `terms.limit`
+    /// and `terms.sort` are response-shaping concerns and live in the handler,
+    /// which relies on the term-ascending iteration order for the
+    /// count-descending sort's tie-break.
+    ///
+    /// **Text fields only, enforced.** A term dictionary holds whatever bytes
+    /// the field's indexing wrote, and only a `string`/`text_*` field writes
+    /// UTF-8 there: a numeric or date field's terms are Tantivy's
+    /// order-preserving fixed-width encoding, and a JSON catch-all's are
+    /// path-prefixed and type-tagged. Decoding those lossily does not merely
+    /// render badly — two distinct encoded terms can collapse onto the same
+    /// replacement-character string and have their unrelated document
+    /// frequencies summed into one `BTreeMap` key, which is a wrong answer, not
+    /// an ugly one. So this errors on non-UTF-8 bytes rather than substituting
+    /// `U+FFFD`, and `lib.rs`'s `terms` handler refuses a non-text `terms.fl`
+    /// with a 400 before it ever gets here (`check_terms_field`, following
+    /// `stats::check_statable`'s precedent). The check here is the backstop that
+    /// makes the ceiling real for any other future caller.
+    ///
+    /// **Dynamic names resolve too**, through the same `field_target` the
+    /// `/select` path uses (issue #155's follow-up: `terms.fl=tm_X3b_en_title`
+    /// used to 400 as an undefined field even though `q=tm_X3b_en_title:lazy`
+    /// worked on the same core). A dynamic name has no term dictionary of its
+    /// own — every name matching a `[[dynamic_fields]]` rule shares the rule's
+    /// catch-all JSON container (`_dynamic_text`/`_dynamic`), and the *whole*
+    /// address lives inside each dictionary entry. Verified against
+    /// `tantivy` 0.26.1's own encoding, not assumed: a JSON field's dictionary
+    /// key is `Term::serialized_value_bytes()`, which for
+    /// `[type code=JSON][JSON path][JSON_END_OF_PATH][ValueBytes]`
+    /// (`schema/term.rs:298`) minus the leading type tag
+    /// (`TERM_TYPE_TAG_LEN = 1`) is
+    /// `<path><JSON_END_OF_PATH=0x00><Type::Str=b's'><term utf-8>`. So
+    /// `tm_X3b_en_title`'s `lazi` is stored as `tm_X3b_en_title\0slazi`.
+    ///
+    /// The prefix is therefore built by `term_for_target(target, "")` — the
+    /// exact same constructor the query path uses to look a term up, so the two
+    /// cannot drift — and matched **byte-for-byte including the terminating
+    /// `0x00` and `b's'`**. That anchoring is what keeps two names under one
+    /// rule apart: no other JSON path can produce those bytes at that offset,
+    /// since `0x00` terminates the path and cannot occur inside it. A prefix of
+    /// just the name would also match `tm_X3b_en_title_extra`; a split on the
+    /// first `0x00` without checking the path would match every field in the
+    /// container. `tests/terms.rs`'s
+    /// `terms_dynamic_fields_do_not_leak_across_the_shared_catch_all_container`
+    /// guards it.
+    ///
+    /// Dictionary keys are byte-ordered, so all of one path's entries are
+    /// contiguous: the scan seeks to `>= prefix` and stops at the first key
+    /// that is not prefixed, rather than walking the shared container's whole
+    /// vocabulary.
+    ///
+    /// ponytail: the whole dictionary is materialised in memory before the
+    /// handler truncates it to `terms.limit`. Ceiling: a field with a very
+    /// large vocabulary pays for every term on every request. Solr streams and
+    /// stops early. Revisit if `/terms` ever serves a real autocomplete load
+    /// (PRD v3's suggester work) rather than the module's handshake-sized
+    /// requests.
+    pub fn field_terms(&self, field_name: &str) -> Result<BTreeMap<String, u64>> {
+        let target = self
+            .field_target(field_name)
+            .ok_or_else(|| anyhow!("undefined field \"{field_name}\""))?;
+        let searcher = self.reader.searcher();
+        let mut totals: BTreeMap<String, u64> = BTreeMap::new();
+        // Empty for a static field, `<path>\0s` for a dynamic one — so the
+        // static case strips nothing and the dynamic case strips exactly the
+        // address Tantivy prepended.
+        let prefix: Vec<u8> = match &target {
+            FieldTarget::Static(_) => Vec::new(),
+            FieldTarget::Dynamic { .. } => self
+                .term_for_target(&target, "")
+                .serialized_value_bytes()
+                .to_vec(),
+        };
+        for segment_reader in searcher.segment_readers() {
+            let inverted = segment_reader.inverted_index(target.field())?;
+            let mut stream = inverted.terms().range().ge(&prefix).into_stream()?;
+            while stream.advance() {
+                let Some(rest) = stream.key().strip_prefix(prefix.as_slice()) else {
+                    // Keys are byte-ordered, so the prefixed run is over.
+                    break;
+                };
+                let term = std::str::from_utf8(rest).with_context(|| {
+                    format!(
+                        "field `{field_name}` has a term dictionary entry that is not UTF-8: \
+                         /terms can only enumerate a text field"
+                    )
+                })?;
+                *totals.entry(term.to_string()).or_insert(0) += u64::from(stream.value().doc_freq);
+            }
+        }
+        Ok(totals)
+    }
+
     /// Total bytes of this core's index directory.
     ///
     /// ponytail: a plain recursive `std::fs` walk of the data dir, summing
@@ -3001,6 +3130,84 @@ stored = true
             "with `no_merge` and one commit per doc the index must be \
              genuinely multi-segment, or this test cannot catch a hardcoded \
              count"
+        );
+    }
+
+    /// `field_terms`'s own UTF-8 backstop, tested directly rather than through
+    /// the handler.
+    ///
+    /// `lib.rs::check_terms_field` 400s a non-text `terms.fl` before
+    /// `field_terms` is ever called, so nothing on the HTTP path can reach
+    /// these bytes — which is exactly why this needs a unit test. Without one
+    /// the backstop is untested code that a later caller (a `/terms` that
+    /// grows `terms.raw`, a suggester, an admin page) could quietly reintroduce
+    /// the lossy decode behind. A numeric field's dictionary holds Tantivy's
+    /// fixed-width order-preserving encoding: `String::from_utf8_lossy` turned
+    /// that into `U+FFFD`-prefixed keys, and because distinct encoded terms can
+    /// decode to the *same* replacement string, their unrelated document
+    /// frequencies were summed onto one `BTreeMap` key. An error is the only
+    /// honest result.
+    #[test]
+    fn field_terms_refuses_a_non_utf8_term_dictionary() {
+        const NUMERIC_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "views"
+type = "int"
+stored = true
+fast = true
+"#;
+        let dir = TempDir::new().expect("create temp dir");
+        let schema_path = dir.path().join("schema.toml");
+        std::fs::write(&schema_path, NUMERIC_SCHEMA_TOML).expect("write schema.toml");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let index = CoreIndex::open(&schema_path, &data_dir, &ServerConfig::default())
+            .expect("open test index");
+        index
+            .add_documents(
+                &[
+                    json!({"id": "n1", "body": "alpha", "views": 1}),
+                    json!({"id": "n2", "body": "beta", "views": 300}),
+                ],
+                true,
+            )
+            .expect("add_documents");
+        index.commit().expect("commit");
+
+        // The text field still works, so this test is not just asserting that
+        // `field_terms` is broken for everything.
+        let text_terms = index.field_terms("body").expect("a text field enumerates");
+        assert_eq!(
+            text_terms.get("alpha").copied(),
+            Some(1),
+            "the text field must still enumerate normally: {text_terms:?}"
+        );
+
+        let err = index
+            .field_terms("views")
+            .expect_err("an int field's term dictionary is not UTF-8 and must error");
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("views") && chain.contains("UTF-8"),
+            "the error must name the field and say why, so a caller can tell \
+             this from a generic IO failure, got {chain:?}"
         );
     }
 
