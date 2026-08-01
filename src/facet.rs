@@ -202,9 +202,9 @@ fn facet_queries(
 /// dropped. `tag`/`ex` need multi-select faceting and inline `facet.*` params
 /// inside the block are adjacent to issue #140's `f.<field>.facet.*`, neither
 /// of which is captured here — so a request using them is answered as if they
-/// were absent rather than refused. Capture before relying on that. A `key`
-/// given twice takes the first, where Solr's map-based `parseLocalParams`
-/// would likely take the last — unverified, and issue #150 owns settling it.
+/// were absent rather than refused. Capture before relying on that. A repeated
+/// `key` is first-wins, matching Solr's `{!key=a key=b}category` capture
+/// (finding 108).
 ///
 fn split_facet_key(value: &str) -> (String, &str) {
     match local_params::parse_block(value) {

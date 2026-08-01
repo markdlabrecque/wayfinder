@@ -2117,3 +2117,19 @@ cape edismax_unquoted_multitoken 'select?q=quick%2Brocket&defType=edismax&qf=tit
 # manifest.tsv. The capture settles the suspected analyzer mismatch: Solr stems
 # `day` to `dai`, while Tantivy's English stemmer leaves `day` (issue #205).
 cap terms_body 'terms?terms=true&terms.fl=body&omitHeader=true&wt=json'
+
+# --- duplicate facet local-param keys (issue #150) --------------------------
+# Captured 2026-08-01 against a one-off `solr:9` container on port 8998
+# (`wayfinder-solr-150`, removed afterwards), with the tracer-bullet schema and
+# five-document corpus from the start of this script recreated verbatim. Only
+# this request was run; this script was NOT re-run wholesale.
+#
+# Contrary to the issue's source-based guess, Solr keeps the FIRST value when a
+# local-param key is repeated: `{!key=a key=b}category` labels category's counts
+# `a`, not `b`. Wayfinder's existing ordered-vector lookup already agrees; the
+# fixture and regression test pin that behavior against future map rewrites.
+# This is a core-relative GET with ordinary JSON, so its manifest.tsv row lets
+# the differential harness replay it.
+#
+# Reproduce (after recreating the opening schema/corpus on port 8998):
+# cap facet_local_params_duplicate_key 'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Da%20key%3Db%7Dcategory&wt=json'
