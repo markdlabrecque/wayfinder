@@ -621,6 +621,71 @@ async fn mbeans_index_size_tracks_real_on_disk_size_growth() {
     );
 }
 
+/// Independently reimplements `human_size`'s exact rendering
+/// (`src/admin_ui.rs`), rather than calling it: `human_size` is `pub(crate)`
+/// so an integration test in this crate cannot import it, and re-deriving
+/// the formula here is also what lets this test catch a divergence BETWEEN
+/// the two mbeans keys, not just a divergence from the trace (that pin lives
+/// in `src/admin_ui.rs::human_size_matches_trace_00025_21607_bytes_to_21_1_kb`
+/// instead, issue #168).
+fn expected_human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[0])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Endpoint-level companion to the `src/admin_ui.rs` unit pin (issue #168,
+/// point 3 of the task spec): the CLAIM this ticket hardens is a wire-format
+/// claim about `admin/mbeans` specifically -- that its served `INDEX.size`
+/// is the human-readable rendering of its served `INDEX.sizeInBytes` -- so
+/// this asserts that relationship end-to-end through the real handler,
+/// independent of the `src/admin_ui.rs` unit test asserting the function in
+/// isolation. A handler that computed `INDEX.size` from a stale/different
+/// byte count than the one it put in `INDEX.sizeInBytes` would pass the unit
+/// test (which calls `human_size` directly) but fail this one.
+#[tokio::test]
+async fn mbeans_index_size_string_matches_human_size_of_index_size_in_bytes() {
+    let dir = TempDir::new().expect("temp dir");
+    let core = "mbeans_size_consistency";
+    let app = build_mbeans_app(dir.path(), core, None).expect("app must build");
+    let (status, body) = post_m(
+        &app,
+        core,
+        "update?commit=true",
+        &json!([{"id": "c1", "body": "consistency check"}]).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "seed: {body}");
+
+    let (status, body) = get_m(&app, core, "admin/mbeans?stats=true&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let size_in_bytes = body
+        .pointer("/solr-mbeans/CORE/core/stats/INDEX.sizeInBytes")
+        .and_then(Value::as_u64)
+        .expect("INDEX.sizeInBytes must be a present u64");
+    let size_str = body
+        .pointer("/solr-mbeans/CORE/core/stats/INDEX.size")
+        .and_then(Value::as_str)
+        .expect("INDEX.size must be a present string");
+
+    assert_eq!(
+        size_str,
+        expected_human_size(size_in_bytes),
+        "INDEX.size must be the human-readable rendering of the SAME INDEX.sizeInBytes served \
+         alongside it, got INDEX.size={size_str} INDEX.sizeInBytes={size_in_bytes}"
+    );
+}
+
 // --- softAutoCommitMaxTime: config-driven "<N>ms" string, absent when unset -
 
 #[tokio::test]
@@ -734,6 +799,43 @@ async fn mbeans_strict_params_accepts_the_documented_allowlist() {
         status,
         StatusCode::OK,
         "strict_params=true must accept stats/wt/json.nl/cat/key, got: {body}"
+    );
+}
+
+/// Hardens `mbeans_strict_params_accepts_the_documented_allowlist` (issue
+/// #168, round-2 #158 review finding): that test only asserted 200 for
+/// `cat`/`key`, which a future implementation that actually filtered the
+/// mbean dump on those params could still pass while narrowing the served
+/// body. This asserts the served body is IDENTICAL with and without
+/// `cat`/`key` -- "accepted" must mean "accepted and ignored", not merely
+/// "does not 400".
+///
+/// Byte-for-byte (whole-body) equality is safe here because
+/// `responseHeader.QTime` in this handler is a hardcoded literal `0` (see
+/// `admin_mbeans` in `src/lib.rs`), not a real timer -- there is no other
+/// volatile field in this response to cause spurious jitter.
+#[tokio::test]
+async fn mbeans_cat_and_key_params_are_accepted_and_have_no_effect_on_the_body() {
+    let dir = TempDir::new().expect("temp dir");
+    let core = "mbeans_cat_key_noop";
+    let app = build_mbeans_app(dir.path(), core, Some(SOFT_AUTOCOMMIT_ON)).expect("app must build");
+
+    let (status, body_without) =
+        get_m(&app, core, "admin/mbeans?stats=true&wt=json&json.nl=map").await;
+    assert_eq!(status, StatusCode::OK, "body: {body_without}");
+
+    let (status, body_with) = get_m(
+        &app,
+        core,
+        "admin/mbeans?stats=true&wt=json&json.nl=map&cat=UPDATE&key=updateHandler",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body_with}");
+
+    assert_eq!(
+        body_with, body_without,
+        "cat=UPDATE&key=updateHandler must not narrow or otherwise alter the served body -- \
+         these params are accepted but must have no effect, got with={body_with} without={body_without}"
     );
 }
 
