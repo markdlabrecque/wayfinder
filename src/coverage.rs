@@ -652,11 +652,36 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
             let core_admin = probe.ok("content/admin/system?json.nl=flat").await;
             update && select && mlt && admin_info && core_admin
         }
-        "request.json-nl.repeated-map-and-flat" => {
-            probe
-                .ok("content/admin/mbeans?json.nl=flat&json.nl=map")
-                .await
-        }
+        // The request deliberately stays as captured-equivalent rather than
+        // byte-identical to the trace: it omits `stats=true` and sends the two
+        // `json.nl` values in the opposite order (`flat` before `map`; the
+        // trace has `map` first). Neither matters here -- `admin_mbeans` reads
+        // `json.nl` not at all, and `Params::get` is first-value-wins, so no
+        // ordering of the pair reaches different code -- and `stats` only
+        // controls a `stats` sub-object nested *inside* `solr-mbeans`, not the
+        // presence or shape of `solr-mbeans` itself.
+        //
+        // ponytail: asserting `solr-mbeans` is an object makes this item less
+        // wrong, not right. The name promises that a repeated
+        // `json.nl=map`+`json.nl=flat` resolves Solr's way (first value wins,
+        // so: map). This assertion cannot evidence that, because
+        // `admin_mbeans` renders `solr-mbeans` as an object unconditionally --
+        // it has no `flat` named-list variant to differ from -- so the check
+        // passes identically whether Wayfinder honours first-value-wins,
+        // ignores `json.nl`, or mishandles the repetition entirely. What it
+        // does buy over the previous bare-200 check is that the item can no
+        // longer read as covered purely because a route exists (which is how
+        // it flipped when #158 landed `GET /solr/{core}/admin/mbeans`).
+        // Ceiling -- no endpoint Wayfinder currently serves lets a repeated
+        // `json.nl` conflict change output shape in a way this contract item
+        // could probe. Upgrade path: #153 (repeated `json.nl` on `/select`,
+        // where `map` vs `flat` genuinely produce different renderings) is the
+        // probe target that would make this item honest; it is deferred
+        // pending #147.
+        "request.json-nl.repeated-map-and-flat" => probe
+            .response("content/admin/mbeans?json.nl=flat&json.nl=map")
+            .await
+            .is_some_and(|body| body.get("solr-mbeans").is_some_and(Value::is_object)),
         "request.timezone.utc" => {
             probe.ok("select?q=*:*&TZ=UTC").await
                 && probe.ok("mlt?q=id:doc1&mlt.fl=body&TZ=UTC").await
@@ -1482,6 +1507,127 @@ mod tests {
             "schema.fieldtypes.fieldTypes must require each entry's `name` to be a \
              non-empty string -- an entry naming itself `\"\"` is nothing \
              `isPartOfSchema()` can match, so it must not count as covered"
+        );
+    }
+
+    // Issue #167: `request.json-nl.repeated-map-and-flat`'s probe
+    // (`semantic_covered`, src/coverage.rs, the
+    // `"request.json-nl.repeated-map-and-flat" => probe.ok(...)` arm) only
+    // asserts an HTTP 200 on
+    // `content/admin/mbeans?json.nl=flat&json.nl=map`. It flipped to covered
+    // as a side effect of #158 routing `GET /solr/{core}/admin/mbeans` at
+    // all, with nothing verifying `solr-mbeans` is even present, let alone
+    // shaped as an object -- the shape the trace (`00025.json`) settled on.
+    // Same class of bug as #162 (an existence/200 check standing in for a
+    // shape check), same stub-router fix pattern: the real handler cannot be
+    // coaxed into emitting a non-object `solr-mbeans` (`admin_mbeans` in
+    // `src/lib.rs` builds it unconditionally, regardless of `json.nl` or
+    // `stats`), so this drives the real (private) `semantic_covered`
+    // function against a throwaway stub router serving the wrong shape at
+    // the same path `content/admin/mbeans` resolves to
+    // (`/solr/content/admin/mbeans`).
+    async fn mbeans_response_missing_solr_mbeans() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"responseHeader": {"status": 0, "QTime": 0}}))
+    }
+
+    async fn mbeans_response_solr_mbeans_array() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"solr-mbeans": []}))
+    }
+
+    async fn mbeans_response_solr_mbeans_null() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"solr-mbeans": null}))
+    }
+
+    async fn mbeans_response_solr_mbeans_object() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"solr-mbeans": {"CORE": {}, "UPDATE": {}}}))
+    }
+
+    fn mbeans_missing_probe() -> ProbeApp {
+        let app = Router::new().route(
+            "/solr/content/admin/mbeans",
+            get(mbeans_response_missing_solr_mbeans),
+        );
+        ProbeApp {
+            app,
+            _workspace: ProbeWorkspace::new(),
+        }
+    }
+
+    fn mbeans_array_probe() -> ProbeApp {
+        let app = Router::new().route(
+            "/solr/content/admin/mbeans",
+            get(mbeans_response_solr_mbeans_array),
+        );
+        ProbeApp {
+            app,
+            _workspace: ProbeWorkspace::new(),
+        }
+    }
+
+    fn mbeans_null_probe() -> ProbeApp {
+        let app = Router::new().route(
+            "/solr/content/admin/mbeans",
+            get(mbeans_response_solr_mbeans_null),
+        );
+        ProbeApp {
+            app,
+            _workspace: ProbeWorkspace::new(),
+        }
+    }
+
+    fn mbeans_object_probe() -> ProbeApp {
+        let app = Router::new().route(
+            "/solr/content/admin/mbeans",
+            get(mbeans_response_solr_mbeans_object),
+        );
+        ProbeApp {
+            app,
+            _workspace: ProbeWorkspace::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_map_and_flat_probe_rejects_a_response_missing_solr_mbeans() {
+        let probe = mbeans_missing_probe();
+        assert!(
+            !semantic_covered(&probe, "request.json-nl.repeated-map-and-flat").await,
+            "request.json-nl.repeated-map-and-flat must require `solr-mbeans` to \
+             be present in the response, not merely that the request 200s -- a \
+             200 with no `solr-mbeans` key at all must not count as covered"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_map_and_flat_probe_rejects_a_non_object_solr_mbeans_array() {
+        let probe = mbeans_array_probe();
+        assert!(
+            !semantic_covered(&probe, "request.json-nl.repeated-map-and-flat").await,
+            "request.json-nl.repeated-map-and-flat must require `solr-mbeans` to \
+             be a JSON object -- the shape the trace settled on -- not merely \
+             present; a JSON array must not count as covered"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_map_and_flat_probe_rejects_a_null_solr_mbeans() {
+        let probe = mbeans_null_probe();
+        assert!(
+            !semantic_covered(&probe, "request.json-nl.repeated-map-and-flat").await,
+            "request.json-nl.repeated-map-and-flat must require `solr-mbeans` to \
+             be a JSON object, not merely present -- JSON null must not count as \
+             covered"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_map_and_flat_probe_accepts_an_object_solr_mbeans() {
+        let probe = mbeans_object_probe();
+        assert!(
+            semantic_covered(&probe, "request.json-nl.repeated-map-and-flat").await,
+            "request.json-nl.repeated-map-and-flat must still count a 200 \
+             response whose `solr-mbeans` is a genuine JSON object as covered -- \
+             the tightened check must not reject the shape it is supposed to \
+             require"
         );
     }
 
