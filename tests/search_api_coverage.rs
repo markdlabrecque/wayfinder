@@ -1176,13 +1176,20 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
             // as a side effect. It is NOT owned by #153 (repeated `json.nl`
             // on `/select`) despite the name similarity -- its probe never
             // touches `/select`.
+            // Issue #143: "request.omitHeader" and "request.timezone.utc"
+            // are resolved -- `omitHeader`/`TZ` are registered in
+            // `SELECT_PARAMS`/`MLT_PARAMS` (so `strict_params = true` no
+            // longer 400s the exact query shape `search_api_solr` sends on
+            // essentially every request), and `/select`/`/mlt` now suppress
+            // `responseHeader` when `omitHeader=true`, matching every
+            // captured trace that sends it (`solr-ref/search-api/trace/00002`
+            // through `00022`). Removed from this list rather than left, per
+            // this file's own "self-expiring" convention.
             "mlt.filters",
             "mlt.fl.wildcard-plus-score",
             "mlt.match-include-and-offset",
             "mlt.maxntp",
             "request.json-nl.flat",
-            "request.omitHeader",
-            "request.timezone.utc",
             "select.facet.per-field-missing",
             "select.highlight.merge-contiguous",
             "select.highlight.require-field-match",
@@ -1263,8 +1270,13 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // (not named by the ticket, but its probe is gated on the same route --
     // see the comment on the request-semantics uncovered list above).
     // Denominator unchanged -- four previously-uncovered items now answered.
+    // 57/75 -> 59/75 when issue #143 registered `omitHeader`/`TZ` in
+    // `SELECT_PARAMS`/`MLT_PARAMS` and taught `/select`/`/mlt` to suppress
+    // `responseHeader` on `omitHeader=true`, flipping `request.omitHeader`
+    // and `request.timezone.utc`. Denominator unchanged -- both were already
+    // in the contract, just unmet.
     assert_eq!(
-        report.overall.fraction, "57/75",
+        report.overall.fraction, "59/75",
         "initial coverage fraction"
     );
 }
@@ -1292,8 +1304,9 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
 /// the assertion without also pointing the probe's request at a real field
 /// (as its sibling `terms.enumeration` request-semantic probe already does
 /// with `terms.fl=body`) flips `terms.terms` from covered to uncovered and
-/// drops the fraction to `56/75`. If this test goes red, that is the
-/// tightening missing its matching request fix, not a fixture to update.
+/// drops the fraction by one, to `58/75` against the `59/75` pinned below. If
+/// this test goes red, that is the tightening missing its matching request
+/// fix, not a fixture to update.
 #[tokio::test]
 async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_app() {
     let report = wayfinder::coverage_report().await;
@@ -1316,9 +1329,19 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
              probe requires its real leaf value, got item: {item}"
         );
     }
+    // The constant tracks landed features; the assertion's job is unchanged.
+    // It went 57/75 -> 59/75 when issue #143 landed `omitHeader`/`TZ`, which
+    // flipped exactly two *request_semantics* items to covered on their own
+    // merits: `request.omitHeader` and `request.timezone.utc`. The
+    // `response_fields` section this test actually guards is untouched at
+    // 13/15 across that change, which is the point -- bumping the number for a
+    // feature that genuinely adds coverage elsewhere is correct; bumping it
+    // because one of the three probes below stopped reaching real data is the
+    // failure this guards, and that would show up as `response_fields`
+    // dropping.
     assert_eq!(
         report["overall"]["fraction"],
-        Value::String("57/75".to_string()),
+        Value::String("59/75".to_string()),
         "tightening the three hollow-container probes must not, by itself, \
          change the coverage fraction -- if it drops, a probe's request (not \
          just its assertion) needs to change to reach real data, see \

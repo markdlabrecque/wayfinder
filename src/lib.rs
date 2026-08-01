@@ -132,9 +132,43 @@ const SELECT_PARAMS: &[&str] = &[
     "hl.simple.post",
     "hl.method",
     "wt",
+    // Envelope params `search_api_solr` sends on essentially every request
+    // (issue #143). `omitHeader=true` drops `responseHeader` — see
+    // `Params::omit_header`. `TZ` must not 400 under `strict_params = true`,
+    // since Solr accepts it; it is accepted and ignored.
+    //
+    // ponytail: `TZ` is inert *today*, not inherently. Wayfinder does have a
+    // date field type (`ResolvedType::Date` / `add_date_field`, `src/schema.rs`)
+    // and date-range faceting (`parse_date` / `parse_date_gap` /
+    // `RangeEnd::Date`, `src/facet.rs`), which are exactly what a timezone
+    // would bear on in Solr. It stays inert because of two narrower facts:
+    // `facet.range.start`/`end` must be literal RFC3339 instants — `parse_date`
+    // rejects `NOW` and every other date-math expression, and no date math
+    // exists anywhere else — and `parse_date_gap` refuses the calendar gaps
+    // `+1MONTH`/`+1YEAR` by name. What is left is fixed-length gaps walked over
+    // absolute instants, and those give the same bucket boundaries in every
+    // timezone.
+    //
+    // The ceiling ends the moment either fact does: if `NOW`/date-math parsing
+    // or MONTH/YEAR gaps land, `TZ` starts changing which bucket a document
+    // falls in, and silently ignoring it becomes a wrong answer rather than a
+    // no-op. Whoever lands either must thread `TZ` through to date parsing and
+    // gap walking here, not just add the feature.
+    "omitHeader",
+    "TZ",
 ];
-/// `commitWithin` / `overwrite` / `softCommit` landed with #9.
-const UPDATE_PARAMS: &[&str] = &["commit", "commitWithin", "overwrite", "softCommit", "wt"];
+/// `commitWithin` / `overwrite` / `softCommit` landed with #9. `omitHeader`
+/// landed with #143 — `search_api_solr` sends `omitHeader=false` on every
+/// `/update` (`solr-ref/search-api/trace/00001.json`). No `TZ`: the module
+/// never sends one here.
+const UPDATE_PARAMS: &[&str] = &[
+    "commit",
+    "commitWithin",
+    "overwrite",
+    "softCommit",
+    "omitHeader",
+    "wt",
+];
 const PING_PARAMS: &[&str] = &["wt"];
 /// `/admin/info/system` (server-level) and `<core>/admin/system`
 /// (core-scoped fallback) — issue #59's version-handshake endpoints.
@@ -225,6 +259,11 @@ const MLT_PARAMS: &[&str] = &[
     "mlt.boost",
     "mlt.interestingTerms",
     "wt",
+    // Issue #143, same envelope pair `/select` takes — `search_api_solr`
+    // sends `omitHeader=true&TZ=UTC` on `/mlt` too
+    // (`solr-ref/search-api/trace/00022.json`).
+    "omitHeader",
+    "TZ",
 ];
 
 /// `/terms` params in scope for issue #155 (Solr's TermsComponent). `terms`
@@ -1541,7 +1580,21 @@ fn parse_update_commands(body: &[u8]) -> Result<UpdateCommands, String> {
 /// The bare `{"responseHeader":{"status":0,"QTime":0}}` envelope every
 /// `/update` success answers with, for every command shape (finding 46) —
 /// never a `params` echo, never per-command keys.
-fn update_success() -> Response {
+///
+/// Under `omitHeader=true` that leaves `{}`: the bare envelope has no other
+/// key to survive the header's removal.
+///
+/// ponytail: unfixtured for `/update` specifically. `search_api_solr` only
+/// ever sends `omitHeader=false` here (`solr-ref/search-api/trace/00001.json`),
+/// so no capture shows `/update` under `omitHeader=true`. This generalizes
+/// from `/select`/`/mlt`/`/terms`, which all gate on the same param and are
+/// fixture-pinned; the alternative reading ("`/update` never suppresses") is
+/// possible but has nothing behind it. A capture of a real `solr:9`
+/// `/update?commit=true&omitHeader=true` settles it.
+fn update_success(params: &Params) -> Response {
+    if params.omit_header() {
+        return axum::Json(json!({})).into_response();
+    }
     axum::Json(json!({
         "responseHeader": {
             "status": 0,
@@ -1583,7 +1636,7 @@ async fn update(
         state.index.commit().map_err(|e| {
             WfError::internal("wayfinder::CommitError", e.to_string()).envelope(Envelope::NoParams)
         })?;
-        return Ok(update_success());
+        return Ok(update_success(&params));
     }
 
     // `overwrite=false` skips the default replace-by-uniqueKey step
@@ -1638,7 +1691,7 @@ async fn update(
         state.index.schedule_commit(ms);
     }
 
-    Ok(update_success())
+    Ok(update_success(&params))
 }
 
 /// Maps a `CoreIndex::parse_query` failure to the right `WfError` shape:
@@ -1955,10 +2008,17 @@ async fn select(
     response_header.insert("QTime".to_string(), json!(0));
     response_header.insert("params".to_string(), json!(params.echo()));
 
-    let mut body = json!({
-        "responseHeader": response_header,
-        "response": response,
-    });
+    // `omitHeader=true` drops the header and nothing else (issue #143); the
+    // `response` block and every optional block below are unaffected. See
+    // `Params::omit_header` for the ground truth and the error-path ceiling.
+    let mut body = if params.omit_header() {
+        json!({ "response": response })
+    } else {
+        json!({
+            "responseHeader": response_header,
+            "response": response,
+        })
+    };
 
     if let Some((facet_counts, _)) = facet_result {
         body["facet_counts"] = facet_counts;
@@ -2140,13 +2200,18 @@ async fn mlt(
         }
     };
 
-    let mut body = json!({
-        "responseHeader": {
-            "status": 0,
-            "QTime": 0,
-        },
-        "match": match_block,
-    });
+    // Issue #143: same suppression `/select` applies, on the same param.
+    let mut body = if params.omit_header() {
+        json!({ "match": match_block })
+    } else {
+        json!({
+            "responseHeader": {
+                "status": 0,
+                "QTime": 0,
+            },
+            "match": match_block,
+        })
+    };
     body["response"] = response_value;
 
     // Real Solr's `mlt.interestingTerms` value set is `none | list | details`
@@ -2292,7 +2357,7 @@ async fn terms(
     }
 
     let mut body = Map::new();
-    if params.get("omitHeader") != Some("true") {
+    if !params.omit_header() {
         body.insert(
             "responseHeader".to_string(),
             json!({

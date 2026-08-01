@@ -1564,3 +1564,21 @@ fragment" to be different answers at all.
     for any multi-token clause, which is right for finding 74's fixtures (all quoted) and
     wrong for a bare multi-token string; it now takes the quoted/unquoted distinction from
     the grammar's own `Delimiter`.
+
+## Findings from the issue #143 omitHeader/TZ capture
+
+Claiming finding 93 (94/95 not needed -- no further new Solr fact surfaced by this issue).
+
+No new fixtures were captured for this issue -- the fact below is read off the existing
+`search_api_solr` corpus, `solr-ref/search-api/trace/`, which already contains the
+evidence.
+
+93. **`omitHeader=true` yields no `responseHeader` key at all, not a present-and-empty one.**
+    Twenty of the twenty-eight `search_api_solr` traces send `omitHeader=true`
+    (`00002`-`00019`, `00021` on `/select`; `00022` on `/mlt`; `00028` on `/terms`), and every
+    one of those response bodies has no `responseHeader` key anywhere in the envelope -- not an
+    empty object, not a subset of the usual `status`/`QTime`/`params` fields, just absent. The
+    one `/update` trace that touches this param (`00001`) sends `omitHeader=false` and does
+    carry a `responseHeader`, so the corpus does not by itself show what `/update` does under
+    `omitHeader=true`; see the `ponytail:` on `update_success` in `src/lib.rs`. Nothing in this
+    corpus is a 4xx/5xx, so this finding is silent on error envelopes -- that gap is issue #179.
