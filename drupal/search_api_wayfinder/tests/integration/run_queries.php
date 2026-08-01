@@ -45,6 +45,30 @@ $pmm = \Drupal::service('plugin.manager.search_api.parse_mode');
 
 $exit_code = 0;
 
+// Wayfinder keeps its configured-core ping public, but all query endpoints
+// require the backend's credentials. Prove both contracts before the normal
+// authenticated Search API round trip below.
+$unauthenticated = new \Drupal\search_api_wayfinder\WayfinderClient(
+  \Drupal::service('http_client'),
+  'http://wayfinder:8983/solr/content',
+);
+if (!$unauthenticated->ping()) {
+  echo "AUTH: FAIL - unauthenticated client could not ping the public endpoint\n";
+  exit(1);
+}
+try {
+  $unauthenticated->select(['q' => '*:*']);
+  echo "AUTH: FAIL - unauthenticated select unexpectedly succeeded\n";
+  exit(1);
+}
+catch (\Drupal\search_api\SearchApiException $e) {
+  if ($e->getMessage() !== 'authentication required') {
+    echo "AUTH: FAIL - unauthenticated select message was: " . $e->getMessage() . "\n";
+    exit(1);
+  }
+}
+echo "AUTH: PASS - public ping and exact unauthenticated select failure verified\n";
+
 try {
   $query = $index->query();
   $query->setParseMode($pmm->createInstance('terms'));
@@ -75,4 +99,6 @@ catch (\Throwable $e) {
   $exit_code = 1;
 }
 
-exit($exit_code);
+if ($exit_code !== 0) {
+  throw new \RuntimeException('Search API round trip failed.');
+}

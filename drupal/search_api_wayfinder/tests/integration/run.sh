@@ -2,10 +2,10 @@
 # Integration verification for issue #80 (part of #57 M1 follow-up):
 # installs a real Drupal site with the search_api_wayfinder module under
 # test (backend plugin id "wayfinder", from M1/#75 -- no search_api_solr,
-# no Solarium, no connector plugin), points a Search API server directly at
-# a real Wayfinder instance built from this repo's `presets/search-api.toml`,
-# and drives a real index + fulltext search round trip through
-# WayfinderBackend::search().
+# no Solarium, no connector plugin), points an authenticated Search API server
+# directly at a real Wayfinder instance built from this repo's
+# `presets/search-api.toml`, and drives a real index + fulltext search round
+# trip through WayfinderBackend::search().
 #
 # Gated behind WAYFINDER_INTEGRATION=1, the same way tests/differential.rs
 # gates its live-Solr mode behind WAYFINDER_DIFF_SOLR=1: this harness is
@@ -138,12 +138,12 @@ docker exec wf80-drupal bash -lc "
 # async *scheduled* hard commit, not immediate -- so the just-indexed fields
 # are not yet visible to /select without this. Force a synchronous commit
 # straight to the wayfinder container so the round trip isn't racing it.
-curl -sf "http://localhost:18990/solr/content/update?commit=true" -H 'Content-Type: application/json' -d '{}' >/dev/null
+curl -sf --user operator:secret "http://localhost:18990/solr/content/update?commit=true" -H 'Content-Type: application/json' -d '{}' >/dev/null
 
 # Assert documents actually landed before handing off to run_queries.php,
 # so the "indexing succeeded" claim above is backed by real evidence, not
 # just this comment.
-num_found="$(curl -sf --get "http://localhost:18990/solr/content/select" \
+num_found="$(curl -sf --user operator:secret --get "http://localhost:18990/solr/content/select" \
   --data-urlencode 'q=*:*' \
   --data-urlencode 'fq=index_id:"wf80_index"' \
   --data-urlencode 'rows=0' \

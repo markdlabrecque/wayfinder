@@ -6,6 +6,7 @@ namespace Drupal\Tests\search_api_wayfinder\Unit;
 
 use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\Field\FieldStorageDefinitionInterface;
+use Drupal\Core\Form\FormState;
 use Drupal\Core\Messenger\MessengerInterface;
 use Drupal\Core\StringTranslation\TranslatableMarkup;
 use Drupal\Core\StringTranslation\TranslationInterface;
@@ -81,6 +82,108 @@ class WayfinderBackendTest extends TestCase {
         return $this->testClient;
       }
     };
+  }
+
+  /**
+   * @covers ::defaultConfiguration
+   */
+  public function testDefaultConfigurationHasEmptyTopLevelCredentials(): void {
+    $backend = new WayfinderBackend([], 'wayfinder', []);
+
+    $defaults = $backend->defaultConfiguration();
+    $this->assertArrayHasKey('username', $defaults);
+    $this->assertArrayHasKey('password', $defaults);
+    $this->assertSame('', $defaults['username']);
+    $this->assertSame('', $defaults['password']);
+  }
+
+  /**
+   * search_api_solr's BasicAuthTrait keeps the stored password in form state
+   * rather than rendering it back into the HTML form.
+   *
+   * @covers ::buildConfigurationForm
+   */
+  public function testCredentialFormUsesAPasswordInputWithoutPlaintextDefault(): void {
+    $backend = $this->createBackend(new Response(200, []), [
+      'username' => 'alice',
+      'password' => 'stored-secret',
+    ]);
+    $formState = new FormState();
+
+    $form = $backend->buildConfigurationForm([], $formState);
+
+    $this->assertArrayHasKey('username', $form);
+    $this->assertSame('textfield', $form['username']['#type']);
+    $this->assertArrayHasKey('password', $form);
+    $this->assertSame('password', $form['password']['#type']);
+    $this->assertArrayNotHasKey('#default_value', $form['password']);
+    $this->assertSame('stored-secret', $formState->get('password'));
+  }
+
+  /**
+   * An empty password field means "leave it unchanged" only when the
+   * username still names the same account; this preserves an existing secret
+   * without exposing it through #default_value.
+   *
+   * @covers ::validateConfigurationForm
+   */
+  public function testBlankPasswordPreservesStoredPasswordWhenUsernameIsUnchanged(): void {
+    $backend = $this->createBackend(new Response(200, []), [
+      'username' => 'alice',
+      'password' => 'stored-secret',
+    ]);
+    $formState = (new FormState())->set('password', 'stored-secret')->setValues([
+      'username' => 'alice',
+      'password' => '',
+    ]);
+    $form = [
+      'username' => ['#name' => 'username'],
+      'password' => ['#name' => 'password'],
+    ];
+
+    $backend->validateConfigurationForm($form, $formState);
+
+    $this->assertSame([], $formState->getErrors());
+    $this->assertSame('stored-secret', $formState->getValue('password'));
+  }
+
+  /**
+   * @dataProvider credentialValidationProvider
+   * @covers ::validateConfigurationForm
+   */
+  public function testCredentialValidationRejectsUnsafeOrIncompletePairs(string $username, string $password, bool $valid): void {
+    $backend = new WayfinderBackend([], 'wayfinder', []);
+    $formState = (new FormState())->setValues([
+      'username' => $username,
+      'password' => $password,
+    ]);
+    $form = [
+      'username' => ['#name' => 'username'],
+      'password' => ['#name' => 'password'],
+    ];
+
+    $backend->validateConfigurationForm($form, $formState);
+
+    if ($valid) {
+      $this->assertSame([], $formState->getErrors());
+    }
+    else {
+      $this->assertNotSame([], $formState->getErrors());
+    }
+  }
+
+  /**
+   * @return array<string, array{0: string, 1: string, 2: bool}>
+   */
+  public static function credentialValidationProvider(): array {
+    return [
+      'username contains colon' => ['alice:admin', 's3cr3t', FALSE],
+      'username contains ASCII control' => ["ali\tce", 's3cr3t', FALSE],
+      'password contains ASCII control' => ['alice', "s3cr3t\n", FALSE],
+      'username without password' => ['alice', '', FALSE],
+      'password without username' => ['', 's3cr3t', FALSE],
+      'valid non-ASCII credentials' => ['álïçé', 'sëcrêt', TRUE],
+    ];
   }
 
   private function mockIndex(string $indexId = 'my_index'): IndexInterface {

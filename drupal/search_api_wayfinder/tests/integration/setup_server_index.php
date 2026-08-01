@@ -43,6 +43,8 @@ $server = Server::create([
     'core' => 'content',
     'timeout' => 5,
     'commitWithin' => 1000,
+    'username' => 'operator',
+    'password' => 'secret',
   ],
   'status' => TRUE,
 ]);

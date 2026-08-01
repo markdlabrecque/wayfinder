@@ -23,6 +23,12 @@ search_api.backend.wayfinder:
     commitWithin:
       type: integer
       label: 'commitWithin (ms)'
+    username:
+      type: string
+      label: 'HTTP Basic authentication username'
+    password:
+      type: string
+      label: 'HTTP Basic authentication password'
     highlight:
       type: boolean
       label: 'Retrieve result highlighting from the server'
