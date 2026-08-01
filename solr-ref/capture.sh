@@ -1768,3 +1768,57 @@ echo "  (docker rm -f $FRAGSIZE_CONTAINER to stop)"
 # solr-ref/responses/edismax_qf_star_partial_invalid.json
 # curl -sg "$EDISMAX_SOLR/$EDISMAX_CORE/select?q=*:*&defType=edismax&qf=nosuchfield&fl=id&wt=json"
 # curl -sg "$EDISMAX_SOLR/$EDISMAX_CORE/select?q=*:*&defType=edismax&qf=title+nosuchfield&fl=id&wt=json"
+
+# --- facet.field local-params key prefix (issue #138) -----------------------
+# `search_api_solr` always sends facet.field={!key=X}field, and in every
+# captured module request X is *identical* to the field name -- so the module
+# traces alone cannot tell "uses the key" from "uses the field name". These
+# five were captured against a one-off solr:9 container (port 8994) with a
+# `content` core built from exactly the schema and corpus above, so the three
+# manifest.tsv rows are core-relative GETs the differential harness can replay
+# verbatim. The container was removed afterwards; re-take them the same way
+# rather than re-running this whole script.
+#
+#   FKEY_SOLR=http://localhost:8994/solr; FKEY_CORE=content
+#
+# What they settle, all four of the issue's open questions:
+#   1. The key is the response label: `{!key=mylabel}category` returns its
+#      counts under "mylabel", not "category" (facet_local_params_key.json).
+#      A key equal to the field name is the module's own shape and is a
+#      visual no-op (facet_local_params_key_same.json).
+#   2. `f.<field>.facet.*` overrides key off the *field*, not the local key:
+#      with `{!key=mylabel}category`, `f.category.facet.missing=true` appends
+#      the null bucket and `f.mylabel.facet.missing=true` does nothing.
+#      Fixtures facet_local_params_key_f_field.json / _f_key.json -- evidence
+#      for #140, which owns per-field overrides. Deliberately *not*
+#      manifest.tsv rows: Wayfinder does not implement `f.<field>.facet.*`
+#      yet, so a row would only buy an EXPECTED_DIVERGENCES entry in a file
+#      #140 is about to touch anyway.
+#   3/4. No captured module request puts a local-params prefix on
+#      `facet.query`, `facet.pivot`, or `fq` -- descoped, not generalised.
+# The unknown-field 400 names the *remainder*, not the key or the raw value:
+# msg "undefined field: \"nosuchfield\"" (facet_local_params_key_unknown.json).
+# cap facet_local_params_key         'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dmylabel%7Dcategory&wt=json'
+# cap facet_local_params_key_same    'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dcategory%7Dcategory&wt=json'
+# cap facet_local_params_key_unknown 'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dk%7Dnosuchfield&wt=json'
+# cap facet_local_params_key_f_field 'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dmylabel%7Dcategory&f.category.facet.missing=true&wt=json'
+# cap facet_local_params_key_f_key   'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dmylabel%7Dcategory&f.mylabel.facet.missing=true&wt=json'
+#
+# Three more, taken the same way (one-off solr:9, port 8993) after stage 1
+# flagged them as the assertions with no ground truth behind them:
+#   - facet_local_params_key_as_other_field.json: `{!key=body}category` labels
+#     the `category` counts "body". The key is *never* resolved as a field,
+#     even when it names a different declared one -- which is what makes
+#     "strip the prefix and use the field name" impossible to pass.
+#   - facet_local_params_key_unterminated.json: `{!key=mylabel category` (no
+#     closing brace) is a 400 SyntaxError, "Expected identifier at pos 22",
+#     *not* a field name taken verbatim.
+#   - facet_local_params_key_empty_remainder.json: `{!key=mylabel}` with
+#     nothing after the brace is `undefined field: ""` -- the empty remainder
+#     is what gets validated.
+# Wayfinder 400s on the latter two as well, though with its own message; the
+# differential harness tolerates `error.msg`, so their manifest rows pin the
+# status only.
+# cap facet_local_params_key_as_other_field  'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dbody%7Dcategory&wt=json'
+# cap facet_local_params_key_unterminated    'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dmylabel%20category&wt=json'
+# cap facet_local_params_key_empty_remainder 'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dmylabel%7D&wt=json'

@@ -1152,7 +1152,6 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
             "request.json-nl.repeated-map-and-flat",
             "request.omitHeader",
             "request.timezone.utc",
-            "select.facet.local-key",
             "select.facet.per-field-missing",
             "select.highlight.merge-contiguous",
             "select.highlight.require-field-match",
@@ -1199,8 +1198,14 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // `select.q.local-params-edismax.{and,or,single-term}` probes at once.
     // Denominator unchanged -- no new semantics, three previously-uncovered
     // ones now answered.
+    // 45/75 -> 46/75 when issue #138 taught `facet.field` the `{!key=X}` local
+    // key (`split_facet_key` in `src/facet.rs`), so the
+    // `select.facet.local-key` probe's `{!key=kind}category` now answers a
+    // `facet_counts.facet_fields.kind` bucket instead of a 400. Denominator
+    // unchanged -- no new semantics, one previously-uncovered one now
+    // answered.
     assert_eq!(
-        report.overall.fraction, "45/75",
+        report.overall.fraction, "46/75",
         "initial coverage fraction"
     );
 }
