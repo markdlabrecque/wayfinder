@@ -1354,25 +1354,26 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
 /// `content/admin/mbeans?json.nl=flat&json.nl=map` -- the same class of bug
 /// #162 fixed for three response-field probes, but here on a
 /// request-semantics probe. Tightening it to also require `solr-mbeans` to
-/// be a JSON object must not drop the fraction below `57/75`: unlike #162's
-/// `terms.terms` case, this probe's *request* already reaches the real,
-/// object-shaped data -- `admin_mbeans` in `src/lib.rs` builds `solr-mbeans`
-/// unconditionally, regardless of `json.nl`'s value, so the item stays
-/// covered against the real seeded app.
+/// be a JSON object, and conjoining a `/select` facet leg, must not drop the
+/// fraction below `59/75`: neither leg's *request* needs to change to reach
+/// real data -- `admin_mbeans` in `src/lib.rs` builds `solr-mbeans`
+/// unconditionally, and the seeded probe corpus already facets `category` --
+/// so the item stays covered against the real seeded app.
 ///
 /// This is deliberately a live regression guard rather than a red test, for
 /// the same reason #162's sibling guard is: `src/coverage.rs`'s own
-/// `#[cfg(test)]` unit tests already pin the failing half (a response
-/// missing `solr-mbeans`, or shaping it as a non-object, must read as
-/// uncovered) with a stub router, since the real app cannot be coaxed into
-/// omitting or misshaping `solr-mbeans` at this path.
+/// `#[cfg(test)]` unit tests already pin the failing halves (a response
+/// missing `solr-mbeans` or shaping it as a non-object; a `category` facet
+/// missing or rendered as `json.nl=flat`'s alternating array) with a stub
+/// router, since the real app cannot be coaxed into those shapes at these
+/// paths.
 ///
-/// This does **not** claim the tightened probe evidences repeated
-/// `json.nl=map`+`json.nl=flat` *semantics* -- `admin_mbeans` renders
-/// `solr-mbeans` as an object unconditionally, with no `flat` named-list
-/// variant to differ from, so this shape holds no matter what value(s)
-/// `json.nl` carries or whether repeated values are resolved Solr's way at
-/// all. See the handoff report for the open question this leaves.
+/// What this guard adds over the stubs is that it pins the probe's
+/// *requests*, not just its predicate. The stub routers match on path, so
+/// they stay green if the probe's query strings are stripped; the real app
+/// does not -- drop `json.nl=map&json.nl=flat` from the `/select` leg and
+/// `category` comes back as `json.nl`'s default flat array, uncovering the
+/// item and dropping the fraction here.
 #[tokio::test]
 async fn repeated_map_and_flat_stays_covered_against_the_real_seeded_app() {
     let report = wayfinder::coverage_report().await;
@@ -1390,9 +1391,14 @@ async fn repeated_map_and_flat_stays_covered_against_the_real_seeded_app() {
          real seeded app once its probe requires `solr-mbeans` to be a JSON \
          object, got item: {item}"
     );
+    // As with the sibling guard above, the constant tracks landed features
+    // and the assertion's job is unchanged: it went 57/75 -> 59/75 on
+    // `origin/main` when issue #143 landed `omitHeader`/`TZ`, which flipped
+    // `request.omitHeader` and `request.timezone.utc` on their own merits.
+    // This change is not what moved it.
     assert_eq!(
         report["overall"]["fraction"],
-        Value::String("57/75".to_string()),
+        Value::String("59/75".to_string()),
         "tightening this probe's assertion must not, by itself, change the \
          coverage fraction -- the real handler already emits an object-shaped \
          `solr-mbeans` regardless of `json.nl`, so nothing about the real \
