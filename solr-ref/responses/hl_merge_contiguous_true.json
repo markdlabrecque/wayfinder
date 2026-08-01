@@ -1,0 +1,31 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "hl.snippets":"5",
+      "q":"body:(alpha beta gamma)",
+      "hl.mergeContiguous":"true",
+      "hl":"true",
+      "fl":"id",
+      "hl.fragsize":"20",
+      "fq":"id:merge1",
+      "hl.fl":"body",
+      "hl.method":"original",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"merge1"
+    }]
+  },
+  "highlighting":{
+    "merge1":{
+      "body":["<em>alpha</em> one two three four five six seven eight nine ten eleven twelve <em>beta</em> thirteen"," twenty <em>gamma</em>"]
+    }
+  }
+}

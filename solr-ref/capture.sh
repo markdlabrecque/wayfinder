@@ -2273,3 +2273,21 @@ capx omit_header_update_error_true POST "$CORE/update?omitHeader=true&wt=json" '
 # whose differential runner requires JSON. Reproduce it with:
 # curl -sg "$SOLR/$CORE/select?q=nosuchfield:x&omitHeader=1&wt=json" \
 #   -o "$OUT/omit_header_invalid_one.html"
+
+# --- highlighting true paths (issue #181) ----------------------------------
+# Captured 2026-08-01 against a one-off `solr:9` container on port 9011
+# (`wayfinder-solr-181`, removed afterwards). The dedicated corpus makes each
+# true path visibly differ from its false control. These are deliberately not
+# manifest.tsv rows: the differential core does not contain these documents,
+# while focused fixture-backed tests recreate this exact schema and corpus.
+#
+# Reproduce:
+#   docker run -d --name wayfinder-solr-181 -p 9011:8983 solr:9 solr-precreate content
+#   curl "$SOLR/schema" -d '{"add-field":[{"name":"title","type":"text_en","indexed":true,"stored":true},{"name":"body","type":"text_en","indexed":true,"stored":true}]}'
+#   curl "$SOLR/update?commit=true" -d '[{"id":"rfm1","title":"quick launch","body":"quick fox"},{"id":"rfm2","title":"quiet launch","body":"quick fox"},{"id":"merge1","title":"merge probe","body":"alpha one two three four five six seven eight nine ten eleven twelve beta thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty gamma"}]'
+# where SOLR=http://localhost:9011/solr/content and both writes use
+# `Content-Type: application/json`. Then capture:
+#   select?q=title:quick%20OR%20body:fox&fl=id&sort=id%20asc&hl=true&hl.fl=title,body&hl.requireFieldMatch=false&wt=json
+#   select?q=title:quick%20OR%20body:fox&fl=id&sort=id%20asc&hl=true&hl.fl=title,body&hl.requireFieldMatch=true&wt=json
+#   select?q=body:(alpha%20beta%20gamma)&fq=id:merge1&fl=id&hl=true&hl.fl=body&hl.method=original&hl.fragsize=20&hl.snippets=5&hl.mergeContiguous=false&wt=json
+#   select?q=body:(alpha%20beta%20gamma)&fq=id:merge1&fl=id&hl=true&hl.fl=body&hl.method=original&hl.fragsize=20&hl.snippets=5&hl.mergeContiguous=true&wt=json

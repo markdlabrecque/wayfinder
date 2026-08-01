@@ -134,22 +134,11 @@ const SELECT_PARAMS: &[&str] = &[
     "hl.simple.pre",
     "hl.simple.post",
     "hl.method",
-    // Issue #139: every captured `search_api_solr` search sends both of
-    // these, always `false`. `false` is Solr's own documented default for
-    // both *and* already Wayfinder's unconditional behaviour, so this is an
-    // allowlist-only entry -- there is deliberately no knob behind it,
-    // because the `false` path has nothing to disable. `src/highlight.rs`
-    // applies no field-match filtering (a doc matching through a
-    // non-highlighted field still gets its finding-52 entry, which *is*
-    // `hl.requireFieldMatch=false`'s behaviour) and does no fragment merging
-    // (each `CoreIndex::highlight_field` fragment is emitted as its own
-    // snippet, which *is* `hl.mergeContiguous=false`'s behaviour).
-    // Implementing the `true` side of either would be real work, not a flag:
-    // `hl.requireFieldMatch=true` needs per-field query-term extraction so
-    // only terms targeting field F highlight F, and `hl.mergeContiguous=true`
-    // needs adjacent-fragment coalescing in `highlight_field`'s
-    // mask-and-resnippet loop. Neither has a captured fixture to derive an
-    // expected shape from, so neither is implemented or asserted.
+    // Issues #139/#181: the captured client sends both as false, Solr's
+    // defaults. Both false and true paths are implemented and fixture-backed:
+    // requireFieldMatch controls cross-field term extraction, while
+    // mergeContiguous controls original-highlighter fragment coalescing
+    // (findings 113-114).
     "hl.mergeContiguous",
     "hl.requireFieldMatch",
     "wt",

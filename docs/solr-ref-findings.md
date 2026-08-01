@@ -930,8 +930,8 @@ container at the top of `capture.sh`. All core-relative GETs, so all in `manifes
     assertion from; `hl_fragsize_small.json` is kept as the documented default-method surprise
     (a no-truncation control), not as a truncation assertion's source.
 
-Not yet captured for highlighting: `hl.maxAnalyzedChars`, `hl.requireFieldMatch`,
-`hl.highlightMultiTerm`, per-field `f.<field>.hl.*` overrides, and any field type other than
+Not yet captured for highlighting: `hl.maxAnalyzedChars`, `hl.highlightMultiTerm`,
+per-field `f.<field>.hl.*` overrides, and any field type other than
 `text_en` (a highlighted `string`/numeric/date field was not exercised — `category` above is
 requested but never actually matched, so its shape when it *does* highlight remains unseen).
 Also not captured: an `hl.fl` naming an undefined or non-text field. Wayfinder renders that as a
@@ -1696,13 +1696,12 @@ existing ground truth rather than a fixture claim.
     `StrField` divergence and the dynamic-field ceiling.
 
 95. **`hl.requireFieldMatch=false` and `hl.mergeContiguous=false` are Solr's own documented
-    defaults, so the captured traffic's explicit `false` asks for nothing.** Both are
-    allowlist-only in Wayfinder (`SELECT_PARAMS` in `src/lib.rs`): `src/highlight.rs` applies
-    no field-match filtering and does no fragment merging, so the `false` path is already its
-    unconditional behaviour and there is no knob behind either name. The `true` side of both
-    is unimplemented and, deliberately, unasserted — no captured fixture pins either, and
-    `hl.requireFieldMatch=true` currently produces `false`'s output silently rather than
-    being rejected. Alongside `hl.maxAnalyzedChars`, these remain uncaptured for highlighting.
+    defaults and are the values in every captured Search API request.** Issue #139 initially
+    allowlisted both on the mistaken premise that Wayfinder already behaved like those false
+    paths. Issue #181's discriminating captures corrected that premise: Wayfinder's existing
+    field-scoped term extraction actually matched `hl.requireFieldMatch=true`, while its
+    original-highlighter fragments did not exactly match either merge control. Findings
+    113-114 record the now-fixtured semantics and the implementation supports both values.
 
 ## Findings from issue #154 (repeated `add` command keys in one `/update` body)
 
@@ -1975,3 +1974,26 @@ response.
      are invalid likewise. The three JSON captures live in `manifest-errors.tsv`; the raw `1`
      response stays outside it because the differential harness intentionally parses that
      manifest as JSON.
+
+## Findings from issue #181 (highlighting true paths)
+
+Captured against a one-off `solr:9` container (port 9011, `wayfinder-solr-181`, removed after
+capture) with the dedicated three-document corpus recorded at the end of
+`solr-ref/capture.sh`. Fixtures: `hl_require_field_match_{false,true}.json` and
+`hl_merge_contiguous_{false,true}.json`.
+
+113. **`hl.requireFieldMatch=true` filters query terms per target field, rather than dropping
+     fields whose query clauses did not contribute to the document match.** For
+     `q=title:quick OR body:fox`, document `rfm1` still receives both `title` and `body`
+     snippets because both fields have query clauses. The discriminating change is inside the
+     body snippet: false highlights both `quick` and `fox`, while true leaves `quick` plain and
+     highlights only `fox`. Document `rfm2`, which matched only through `body:fox`, likewise
+     retains its body snippet with only `fox` marked. The true path is therefore field-scoped
+     query-term extraction, not document-level matched-clause filtering.
+
+114. **`hl.mergeContiguous=true` coalesces adjacent original-highlighter fragments until a
+     real gap remains.** With `hl.method=original`, `hl.fragsize=20`, and three spaced query
+     terms, false emits three snippets. True joins the first two into one continuous substring
+     (including all intervening text) and leaves the third separate because an unselected gap
+     remains. It does not concatenate snippets with a synthetic separator or merge every
+     fragment indiscriminately.

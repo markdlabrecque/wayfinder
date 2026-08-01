@@ -534,22 +534,9 @@ async fn hl_wildcard_fl_highlights_a_non_default_text_field() {
     );
 }
 
-/// Open question 2: is `hl.requireFieldMatch=false`/`hl.mergeContiguous=false`
-/// already Wayfinder's behaviour, making this an allowlist-only change?
-/// Solr's own documented default for both is `false`
-/// (`hl.requireFieldMatch`: a field highlights even without a query match in
-/// that field, unless `true`; `hl.mergeContiguous`: adjacent fragments are
-/// not merged, unless `true`) -- so the module's explicit `false` values
-/// never ask Wayfinder to do anything its current, unconditional behaviour
-/// does not already do: `hl_no_field_match_matches_fixture_and_has_empty_object_shape`
-/// above already pins that a doc matching through a non-highlighted field
-/// still gets an entry (i.e. `requireFieldMatch=false`'s behaviour), and
-/// `src/highlight.rs` has no fragment-merging logic to turn off in the first
-/// place. So this is an allowlist-only change for the `false` path: passing
-/// these params must be a no-op, not a behaviour change. (Open question 5,
-/// `hl.requireFieldMatch=true`'s real per-field filtering, has no captured
-/// fixture to derive an expected shape from and is not exercised here --
-/// see the handoff notes.)
+/// On a one-field query/corpus, explicitly selecting Solr's false defaults
+/// is observationally identical to omitting both params. The dedicated
+/// issue-#181 tests below discriminate each false and true path.
 #[tokio::test]
 async fn hl_require_field_match_and_merge_contiguous_false_are_no_ops() {
     let (app, _dir) = indexed_app().await;
@@ -599,7 +586,7 @@ async fn hl_search_api_solr_markers_round_trip() {
 /// captured `search_api_solr` request sends (`docs/solr-ref-findings.md`'s
 /// highlighting section; issue #139's brief), replayed end-to-end. Every
 /// individual piece is pinned by a narrower test above/in this file
-/// (`hl.fl=*`, the two now-allowlisted no-op params, `hl.fragsize=0`
+/// (`hl.fl=*`, both highlighting booleans on their false/default paths, `hl.fragsize=0`
 /// already covered by `hl_fragsize_zero_whole_field_matches_fixture`,
 /// `hl.snippets=3`, and the marker pair) -- this just confirms they compose
 /// without a 400 or a surprising interaction, using `long_field_app`'s
@@ -633,5 +620,223 @@ async fn hl_search_api_solr_request_shape_end_to_end() {
         body.pointer("/highlighting/long1/body/0"),
         Some(&Value::String(expected_snippet)),
         "got {body}"
+    );
+}
+
+// Dedicated schema and corpus from the issue #181 capture. The true paths
+// need a second text field and spaced matches, neither of which the shared
+// corpus supplies.
+const TRUE_PATHS_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "title"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+"#;
+
+async fn true_paths_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), TRUE_PATHS_SCHEMA_TOML).expect("app must build");
+    let docs = json!([
+        {"id":"rfm1","title":"quick launch","body":"quick fox"},
+        {"id":"rfm2","title":"quiet launch","body":"quick fox"},
+        {"id":"merge1","title":"merge probe","body":"alpha one two three four five six seven eight nine ten eleven twelve beta thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty gamma"},
+        {"id":"empty1","title":"emptyprobe","body":""}
+    ]);
+    let (status, body) = post_docs(&app, &docs).await;
+    assert_eq!(status, StatusCode::OK, "indexing must succeed, got {body}");
+    (app, dir)
+}
+
+#[tokio::test]
+async fn hl_true_paths_require_field_match_false_matches_fixture_highlighting_block() {
+    let (app, _dir) = true_paths_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=title:quick%20OR%20body:fox&fl=id&sort=id%20asc&hl=true\
+         &hl.fl=title,body&hl.requireFieldMatch=false&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    let expected = common::fixture("hl_require_field_match_false")
+        .pointer("/highlighting")
+        .cloned()
+        .expect("fixture carries a highlighting block");
+    assert_eq!(
+        body.pointer("/highlighting"),
+        Some(&expected),
+        "hl.requireFieldMatch=false must allow cross-field query terms, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn hl_true_paths_require_field_match_absent_defaults_to_false() {
+    let (app, _dir) = true_paths_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=title:quick%20OR%20body:fox&fl=id&sort=id%20asc&hl=true\
+         &hl.fl=title,body&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    let expected = common::fixture("hl_require_field_match_false")
+        .pointer("/highlighting")
+        .cloned()
+        .expect("fixture carries a highlighting block");
+    assert_eq!(
+        body.pointer("/highlighting"),
+        Some(&expected),
+        "absent hl.requireFieldMatch must use Solr's false default, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn hl_true_paths_require_field_match_matches_fixture_highlighting_block() {
+    let (app, _dir) = true_paths_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=title:quick%20OR%20body:fox&fl=id&sort=id%20asc&hl=true\
+         &hl.fl=title,body&hl.requireFieldMatch=true&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    let expected = common::fixture("hl_require_field_match_true")
+        .pointer("/highlighting")
+        .cloned()
+        .expect("fixture carries a highlighting block");
+    assert_eq!(
+        body.pointer("/highlighting"),
+        Some(&expected),
+        "hl.requireFieldMatch=true must filter query terms by highlighted field, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn hl_true_paths_merge_contiguous_false_matches_fixture_highlighting_block() {
+    let (app, _dir) = true_paths_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=body:(alpha%20beta%20gamma)&fq=id:merge1&fl=id&hl=true&hl.fl=body\
+         &hl.method=original&hl.fragsize=20&hl.snippets=5&hl.mergeContiguous=false&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    let expected = common::fixture("hl_merge_contiguous_false")
+        .pointer("/highlighting")
+        .cloned()
+        .expect("fixture carries a highlighting block");
+    assert_eq!(
+        body.pointer("/highlighting"),
+        Some(&expected),
+        "hl.mergeContiguous=false must preserve separate original-highlighter fragments, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn hl_true_paths_merge_contiguous_empty_field_is_not_a_panic() {
+    let (app, _dir) = true_paths_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=title:emptyprobe&fl=id&hl=true&hl.fl=body&hl.method=original\
+         &hl.requireFieldMatch=false&hl.mergeContiguous=true&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "empty highlighted fields must not panic, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/highlighting/empty1"),
+        Some(&json!({})),
+        "got {body}"
+    );
+}
+
+#[tokio::test]
+async fn hl_true_paths_merge_contiguous_matches_fixture_highlighting_block() {
+    let (app, _dir) = true_paths_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=body:(alpha%20beta%20gamma)&fq=id:merge1&fl=id&hl=true&hl.fl=body\
+         &hl.method=original&hl.fragsize=20&hl.snippets=5&hl.mergeContiguous=true&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    let expected = common::fixture("hl_merge_contiguous_true")
+        .pointer("/highlighting")
+        .cloned()
+        .expect("fixture carries a highlighting block");
+    assert_eq!(
+        body.pointer("/highlighting"),
+        Some(&expected),
+        "hl.mergeContiguous=true must merge adjacent original-highlighter fragments, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn hl_original_preserves_case_sensitive_custom_analyzer_terms() {
+    const SCHEMA: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[field_types]]
+name = "case_text"
+tokenizer = "simple"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+
+[[fields]]
+name = "title"
+type = "case_text"
+stored = true
+
+[[fields]]
+name = "body"
+type = "case_text"
+stored = true
+"#;
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), SCHEMA).expect("app must build");
+    let (status, body) = post_docs(
+        &app,
+        &json!([{"id":"case1","title":"Alpha","body":"Alpha"}]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "indexing must succeed, got {body}");
+
+    let (status, body) = get(
+        &app,
+        "select?q=title:Alpha&fl=id&hl=true&hl.fl=body&hl.method=original\
+         &hl.requireFieldMatch=false&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        body.pointer("/highlighting/case1/body/0"),
+        Some(&json!("<em>Alpha</em>")),
+        "original highlighting must preserve analyzer case, got {body}"
     );
 }
