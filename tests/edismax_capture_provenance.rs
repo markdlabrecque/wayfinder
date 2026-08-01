@@ -148,11 +148,23 @@ fn the_provenance_scanners_can_see_what_they_scan() {
         !f90.contains("91. ") && !f91.contains("92. ") && !f92.contains("93. "),
         "`finding` must stop at the next numbered entry"
     );
-    assert!(
-        f92.contains("not captured"),
-        "the phrase this file's expiry assertion keys on must be present in finding 92 today -- \
-         issue #147 exists precisely because finding 92 still flags itself as not captured:\n{f92}"
-    );
+    // Two assertions used to live here and just below: that finding 92 still
+    // said "not captured", and that `src/core_index.rs` still admitted
+    // "documentation-derived, not fixture-derived". They were *pre-capture
+    // staleness checks* -- each the exact negation of an expiry assertion in the
+    // two tests below -- so they could only hold while issue #147's captures
+    // were missing. The captures landed, and both were deleted rather than
+    // softened; keeping either would have made this file unsatisfiable, and
+    // editing the expiry assertions instead would have been the papering-over
+    // they exist to prevent.
+    //
+    // What survives is this test's actual job: proving the scanners are not
+    // blind. Every expiry assertion below is a *positive* "must contain the
+    // fixture name" check, so a scanner that silently returned an empty string
+    // would fail them rather than pass vacuously -- but only the assertions here
+    // pin that `finding` slices the right block and stops at the next numbered
+    // entry, and that `coverage_arm_preamble`'s window is wide enough to reach a
+    // provenance comment. Those cannot be inferred from the citations alone.
 
     let preamble = coverage_arm_preamble("select.q.local-params-edismax.and");
     assert!(
@@ -162,15 +174,23 @@ fn the_provenance_scanners_can_see_what_they_scan() {
          {preamble}"
     );
 
-    // And the phrase the `build_field_disjunction` expiry assertion keys on
-    // must be there to remove.
-    assert!(
-        CORE_INDEX.contains("documentation-derived, not fixture-derived"),
-        "src/core_index.rs no longer contains the self-flagged \"documentation-derived, not \
-         fixture-derived\" admission that this file's expiry assertion removes. If the comment was \
-         rewritten to cite a capture, that assertion is stale; if it was merely softened, the \
-         evidence gap was papered over."
-    );
+    // `LOCAL_PARAMS_TESTS` is the one scanned constant whose only expiry
+    // assertions are *negative* ("the guard must be gone"), which an empty
+    // `include_str!` would satisfy vacuously. Positive control, so the include
+    // is proven to be reading the real file: the two `numFound == 0` Shape-B
+    // tests findings 90/91 name as their guard are in there.
+    for present in [
+        "local_params_edismax_two_mandatory_terms_returns_zero",
+        "local_params_edismax_mandatory_terms_quick_fox_returns_zero",
+    ] {
+        assert!(
+            LOCAL_PARAMS_TESTS.contains(present),
+            "tests/local_params.rs scanned empty or lost `{present}`, one of the two \
+             `numFound == 0` Shape-B tests findings 90/91 name as their guard. That would make \
+             this file's \"the expiring guard is deleted\" assertions pass without reading \
+             anything."
+        );
+    }
 }
 
 /// The phrase-vs-OR capture must exist, and everything that currently rests on
