@@ -1239,7 +1239,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
             // false-positive green (same class as #162/#167), and the `/mlt`
             // probe's *request*, which omitted `mlt.mintf`/`mlt.mindf` and so
             // read uncovered purely because real Solr's defaults find no
-            // similar docs in this corpus (finding 55) -- a reason unrelated
+            // similar docs in this corpus (finding 64) -- a reason unrelated
             // to `fl`. Removed from this list rather than left, per this
             // file's own "self-expiring" convention.
             //

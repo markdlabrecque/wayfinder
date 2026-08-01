@@ -382,11 +382,23 @@ name = "featured"
 type = "string"
 stored = true
 fast = true
+
+# One stored dynamic rule, so the `fl=*,score` probes' real-app leg can tell a
+# full wildcard expansion from a declared-fields-only one. `render_doc` walks
+# declared `[[fields]]` and stored dynamic fields in two separate loops, and
+# `solr-ref/search-api/trace/00010.json` (real `fl=*,score`) returns both
+# classes -- with a declared-only schema here, a probe that fixed one loop and
+# not the other would still read covered.
+[[dynamic_fields]]
+pattern = "ss_*"
+type = "string"
+stored = true
+fast = true
 "#;
 
 const PROBE_DOCS: &str = r#"[
-  {"id":"doc1","body":"quick brown fox rocket","category":["animals","classic"],"rating":3,"created":"2024-01-02T00:00:00Z","featured":"true"},
-  {"id":"doc2","body":"quick fox rocket","category":["garden"],"rating":1,"created":"2024-01-01T00:00:00Z","featured":"false"},
+  {"id":"doc1","ss_sku":"sku-doc1","body":"quick brown fox rocket","category":["animals","classic"],"rating":3,"created":"2024-01-02T00:00:00Z","featured":"true"},
+  {"id":"doc2","ss_sku":"sku-doc2","body":"quick fox rocket","category":["garden"],"rating":1,"created":"2024-01-01T00:00:00Z","featured":"false"},
   {"id":"doc3","body":"slow turtle","category":["misc"],"rating":5,"created":"2024-01-03T00:00:00Z","featured":"true"},
   {"id":"facet","body":"facet probe","category":["a","b","c","d","e","f","g","h","i","j","k"],"rating":0,"created":"2024-01-04T00:00:00Z","featured":"z"},
   {"id":"mlt1","body":"the chef prepared a delicious pasta dish with fresh tomatoes and basil","category":["cooking","italian"],"rating":10,"created":"2024-02-01T00:00:00Z","featured":"m"},
@@ -399,11 +411,11 @@ const PROBE_DOCS: &str = r#"[
   {"id":"mlt8","body":"pruning rose bushes keeps the garden looking tidy","category":["gardening"],"rating":17,"created":"2024-02-08T00:00:00Z","featured":"m"},
   {"id":"mlt9","body":"composting kitchen scraps enriches garden soil naturally","category":["gardening"],"rating":18,"created":"2024-02-09T00:00:00Z","featured":"m"},
   {"id":"mlt10","body":"growing herbs like basil and rosemary indoors year round","category":["gardening","cooking"],"rating":19,"created":"2024-02-10T00:00:00Z","featured":"m"},
-  {"id":"mlt11","body":"astronomers observed a bright comet streaking across the night sky","category":["astronomy"],"rating":20,"created":"2024-02-11T00:00:00Z","featured":"m"},
-  {"id":"mlt12","body":"the telescope revealed distant galaxies and bright stars","category":["astronomy"],"rating":21,"created":"2024-02-12T00:00:00Z","featured":"m"},
-  {"id":"mlt13","body":"a lunar eclipse darkened the night sky for hours","category":["astronomy"],"rating":22,"created":"2024-02-13T00:00:00Z","featured":"m"},
-  {"id":"mlt14","body":"scientists study the orbit of planets around distant stars","category":["astronomy"],"rating":23,"created":"2024-02-14T00:00:00Z","featured":"m"},
-  {"id":"mlt15","body":"the night sky was clear enough to see the milky way","category":["astronomy"],"rating":24,"created":"2024-02-15T00:00:00Z","featured":"m"},
+  {"id":"mlt11","ss_sku":"sku-mlt11","body":"astronomers observed a bright comet streaking across the night sky","category":["astronomy"],"rating":20,"created":"2024-02-11T00:00:00Z","featured":"m"},
+  {"id":"mlt12","ss_sku":"sku-mlt12","body":"the telescope revealed distant galaxies and bright stars","category":["astronomy"],"rating":21,"created":"2024-02-12T00:00:00Z","featured":"m"},
+  {"id":"mlt13","ss_sku":"sku-mlt13","body":"a lunar eclipse darkened the night sky for hours","category":["astronomy"],"rating":22,"created":"2024-02-13T00:00:00Z","featured":"m"},
+  {"id":"mlt14","ss_sku":"sku-mlt14","body":"scientists study the orbit of planets around distant stars","category":["astronomy"],"rating":23,"created":"2024-02-14T00:00:00Z","featured":"m"},
+  {"id":"mlt15","ss_sku":"sku-mlt15","body":"the night sky was clear enough to see the milky way","category":["astronomy"],"rating":24,"created":"2024-02-15T00:00:00Z","featured":"m"},
   {"id":"mlt16","body":"hiking through the mountains offers stunning views of the valley","category":["outdoors"],"rating":25,"created":"2024-02-16T00:00:00Z","featured":"m"},
   {"id":"mlt17","body":"camping near the lake was peaceful and quiet at night","category":["outdoors"],"rating":26,"created":"2024-02-17T00:00:00Z","featured":"m"},
   {"id":"mlt18","body":"the river flows quietly through the quiet forest valley","category":["outdoors"],"rating":27,"created":"2024-02-18T00:00:00Z","featured":"m"},
@@ -604,11 +616,24 @@ impl ProbeApp {
 /// `baseline_path` supplies the expectation instead of a hardcoded field list
 /// that would drift from `PROBE_SCHEMA`.
 ///
-/// Compared in order, not as sets: doc keys come back in schema order for both
-/// requests (`select_fl_reversed.json` -- `fl` order is not doc key order), so
-/// ordered equality is free and pins that too. `score` is excluded from the
-/// comparison and checked separately, since the baseline request cannot carry it
-/// (`fl=score` is what turns scoring output on at all).
+/// Compared in order, not as sets, because ordered equality is free here -- but
+/// be clear about what that buys: it pins only that the *two responses agree
+/// with each other*, since both sides come from the implementation under test.
+/// It is not an ordering oracle. A symmetric fault that permuted doc keys the
+/// same way on both requests (e.g. reversing the declared-field iteration order
+/// in `CoreIndex::render_doc`) leaves this predicate reading covered and the
+/// coverage fraction unmoved. Solr's actual key order is pinned by the
+/// fixture-derived suites instead --
+/// `tests/json_key_order.rs::select_fl_reversed_fixture_discriminates_input_order_from_fl_order`
+/// (`fl` order is not doc key order), `tests/select_fl_wildcard.rs`'s
+/// `select_fl_star_alone_keeps_solrs_doc_key_order` /
+/// `select_fl_star_plus_score_puts_score_last` /
+/// `select_fl_star_plus_score_puts_score_after_dynamic_fields`, and
+/// `tests/search_api_preset.rs::preset_fl_star_plus_score_puts_score_last_after_every_dynamic_field`
+/// -- all of which compare against captured Solr rather than against another
+/// Wayfinder response. `score` is excluded from the comparison and checked
+/// separately, since the baseline request cannot carry it (`fl=score` is what
+/// turns scoring output on at all).
 async fn renders_every_stored_field_plus_score(
     probe: &ProbeApp,
     wildcard_path: &str,
@@ -2006,7 +2031,7 @@ mod tests {
     // than for the right reason: its query
     // (`mlt?q=id:mlt11&mlt.fl=body&fl=*,score`) omitted `mlt.mintf`/`mlt.mindf`,
     // and real Solr's defaults (mintf=2/mindf=5) return no similar docs at all
-    // against a 20-doc corpus (finding 55), so `/response/docs/0` did not
+    // against a 20-doc corpus (finding 64), so `/response/docs/0` did not
     // exist whatever `fl` did. Verified: `PROBE_DOCS` seeds exactly that
     // corpus, and the sibling `mlt.mintf`/`mlt.mindf` probes above pin
     // `numFound > 0` only with the thresholds loosened. So the request needs
@@ -2204,7 +2229,7 @@ mod tests {
 
     /// Models real Solr's *default* `mlt.mintf=2`/`mlt.mindf=5` against a
     /// 20-doc corpus: nothing is similar enough, so `response.docs` is empty
-    /// however good the `fl` handling is (finding 55). Loosened thresholds are
+    /// however good the `fl` handling is (finding 64). Loosened thresholds are
     /// what make the similar-docs set non-empty, so the probe must send them --
     /// otherwise `mlt.fl.wildcard-plus-score` reads uncovered for a reason that
     /// has nothing to do with `fl`, which is exactly how it read before #188.
@@ -2282,7 +2307,7 @@ mod tests {
         assert!(
             semantic_covered(&probe, "mlt.fl.wildcard-plus-score").await,
             "mlt.fl.wildcard-plus-score's query must send `mlt.mintf=1&mlt.mindf=1`. Against real \
-             Solr's defaults this corpus has no similar docs at all (finding 55), so with the \
+             Solr's defaults this corpus has no similar docs at all (finding 64), so with the \
              thresholds left at their defaults the item reads uncovered whatever `fl` does -- \
              which is how it read before #188, for a reason unrelated to the wildcard. This stub \
              honours `fl=*,score` perfectly and only withholds the similar-docs set until the \

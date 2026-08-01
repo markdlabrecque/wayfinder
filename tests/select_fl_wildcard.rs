@@ -80,6 +80,29 @@ fn doc_keys(text: &str, index: usize, what: &str) -> Vec<String> {
     KeyOrder::parse(text).keys_at(&format!("response.docs[{index}]"), what)
 }
 
+/// `response.docs[0]` keys of `solr-ref/search-api/trace/00010.json`, in
+/// captured order. That trace is a real Drupal `search_api_solr` `/select` with
+/// `fl=*,score` against a corpus full of *dynamic* fields, so unlike
+/// `select_all.json` / `mlt_fl_wildcard_score.json` (whose corpora have no
+/// dynamic fields at all) it is the one committed artifact that discriminates
+/// `score`-appended-last from `score`-before-the-dynamic-fields.
+///
+/// The trace stores the Solr response as a JSON *string* under
+/// `response.body`, so the order has to be recovered in two passes: parse the
+/// envelope for the string, then `KeyOrder::parse` the string itself.
+fn trace_00010_doc_keys() -> Vec<String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("solr-ref/search-api/trace/00010.json");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let trace: Value = serde_json::from_str(&text).expect("trace 00010 must be valid JSON");
+    let body = trace
+        .pointer("/response/body")
+        .and_then(Value::as_str)
+        .expect("trace 00010 must carry `response.body` as a string");
+    doc_keys(body, 0, "trace/00010 response body")
+}
+
 // --- `fl=*` alone ----------------------------------------------------------
 
 #[tokio::test]
@@ -172,6 +195,11 @@ async fn select_fl_star_plus_score_puts_score_last() {
     // likewise ends every doc with `score` -- Solr appends its pseudo-fields
     // after the real ones (finding 24). With the two internal fields Wayfinder
     // lacks removed, that is `select_all`'s key order with `score` appended.
+    //
+    // Note the limit of this corpus: it has no dynamic fields, so this test
+    // cannot tell "score last" from "score after the declared fields, before
+    // the dynamic ones". `select_fl_star_plus_score_puts_score_after_dynamic_fields`
+    // below is the one that discriminates.
     let mut expected = select_all_doc_keys(0);
     expected.push("score".to_string());
 
@@ -317,6 +345,54 @@ async fn select_fl_star_expands_stored_dynamic_fields_too() {
         "issue #188: `fl=*` must expand into stored *dynamic* fields too -- \
          `trace/00010.json` returns `ss_field_sku`/`sm_field_keywords`/... for `fl=*,score`. \
          `render_doc` filters its dynamic-field loop by literal `fl` name as well, got: {body}"
+    );
+}
+
+/// The non-vacuous version of `select_fl_star_plus_score_puts_score_last`.
+///
+/// That test runs against the canonical 5-doc corpus, which has **no dynamic
+/// fields**, so "score last" and "score after the declared fields but before
+/// the dynamic ones" are indistinguishable there — it passed on an
+/// implementation that inserted `score` between `render_doc`'s two loops.
+/// `WILDCARD_SCHEMA_TOML` is the only schema in this suite with a stored
+/// dynamic rule, so this is where the position is observable: pre-fix, this
+/// request rendered `["id", "score", "ss_field_sku"]`.
+#[tokio::test]
+async fn select_fl_star_plus_score_puts_score_after_dynamic_fields() {
+    // Ground truth for the rule, read out of the trace rather than asserted
+    // from memory: `score` is the final key, and the key immediately before it
+    // is a *dynamic* field (`ss_search_api_language`, matched by the preset's
+    // `ss_*` rule) — so the fixture really does discriminate the two placements.
+    let trace_keys = trace_00010_doc_keys();
+    assert_eq!(
+        trace_keys.last().map(String::as_str),
+        Some("score"),
+        "trace/00010.json must end its doc with `score`, got: {trace_keys:?}"
+    );
+    let before_score = trace_keys
+        .get(trace_keys.len() - 2)
+        .map(String::as_str)
+        .expect("trace doc must have more than one key");
+    assert!(
+        before_score.starts_with("ss_"),
+        "vacuity guard: the key before `score` in trace/00010.json must be a dynamic-rule field, \
+         or the trace would not discriminate score-last from score-before-dynamic-fields; got \
+         {before_score:?} in {trace_keys:?}"
+    );
+
+    let (app, _dir) = wildcard_app().await;
+    let (status, text) = get_text(&app, CORE, "select?q=id:d1&fl=*,score&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "got {text}");
+    assert_eq!(
+        doc_keys(&text, 0, "wildcard-schema fl=*,score response"),
+        vec![
+            "id".to_string(),
+            "ss_field_sku".to_string(),
+            "score".to_string()
+        ],
+        "`fl=*,score` must render the declared stored fields, then the stored dynamic fields, \
+         then `score` last (`solr-ref/search-api/trace/00010.json`) -- not `score` between the \
+         two, got: {text}"
     );
 }
 
