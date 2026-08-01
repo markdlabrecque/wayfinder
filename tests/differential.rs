@@ -631,6 +631,59 @@ async fn fragsize_app() -> (Router, TempDir) {
     (app, dir)
 }
 
+/// Issue #223's configured-spellchecker capture uses two dictionaries with
+/// deliberately different nearby terms, so repeated-dictionary precedence is
+/// visible. This mirrors `tests/spellcheck.rs` and the appended capture block.
+const SPELLCHECK_223_SCHEMA_TOML: &str = r#"
+[core]
+name = "spellcheck_223"
+unique_key = "id"
+default_field = "spellcheck_en"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "spellcheck_en"
+type = "text_en"
+stored = true
+multi_valued = true
+
+[[fields]]
+name = "spellcheck_und"
+type = "text_en"
+stored = true
+multi_valued = true
+"#;
+
+async fn spellcheck_223_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), SPELLCHECK_223_SCHEMA_TOML)
+        .expect("spellcheck app must build");
+    let (status, body) = common::request_full(
+        &app,
+        "POST",
+        "spellcheck_223/update?commit=true",
+        Some(
+            r#"[
+                {"id":"s1","spellcheck_en":["quick quick quick rocket rocket"],"spellcheck_und":["quack quack quack garden"]},
+                {"id":"s2","spellcheck_en":["quick brown fox"],"spellcheck_und":["quack garden"]}
+            ]"#,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the spellcheck_223 corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
 /// Ratified, **permanent** divergences from captured Solr behaviour — the
 /// opposite of `EXPECTED_DIVERGENCES` below, which is a self-expiring to-do
 /// list for unbuilt features. Every entry here cites the PRD/findings
@@ -1759,8 +1812,8 @@ fn live_solr_matches_committed_query_set() {
 /// Selects the app for `entry` by its URL's leading core segment and
 /// returns `(app, request_url)`, where `request_url` has that segment
 /// rewritten to `content` for every core except `sortdebt`, `stats`,
-/// `version99`, and `fragsize104` (which keep their own names — see the module
-/// comment above).
+/// `version99`, `fragsize104`, and `spellcheck_223` (which keep their own
+/// names — see the module comment above).
 /// An unrecognised segment is returned unrewritten against `content_app`.
 #[allow(clippy::too_many_arguments)] // one hermetic app per manifest-errors core
 fn app_and_request_url<'a>(
@@ -1774,6 +1827,7 @@ fn app_and_request_url<'a>(
     stats_app: &'a Router,
     version99_app: &'a Router,
     fragsize_app: &'a Router,
+    spellcheck_app: &'a Router,
 ) -> (&'a Router, String) {
     match entry.url.split_once('/') {
         Some(("content", rest)) => (content_app, format!("content/{rest}")),
@@ -1785,6 +1839,7 @@ fn app_and_request_url<'a>(
         Some(("stats", _)) => (stats_app, entry.url.clone()),
         Some(("version99", _)) => (version99_app, entry.url.clone()),
         Some(("fragsize104", _)) => (fragsize_app, entry.url.clone()),
+        Some(("spellcheck_223", _)) => (spellcheck_app, entry.url.clone()),
         _ => (content_app, entry.url.clone()),
     }
 }
@@ -1822,6 +1877,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let (stats_app, _stats_dir) = stats_app().await;
     let (version99_app, _version99_dir) = version99_app().await;
     let (fragsize_app, _fragsize_dir) = fragsize_app().await;
+    let (spellcheck_app, _spellcheck_dir) = spellcheck_223_app().await;
 
     let mut ran = 0usize;
     let mut diffed = 0usize;
@@ -1844,6 +1900,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
             &stats_app,
             &version99_app,
             &fragsize_app,
+            &spellcheck_app,
         );
         // `update_select_commitwithin_visible` follows a `commitWithin=500`
         // row with no settle delay in this hermetic replay, unlike
