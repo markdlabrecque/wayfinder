@@ -11,6 +11,9 @@ use serde_json::{Map, Value, json};
 #[derive(Debug, Clone)]
 pub struct Params {
     pairs: Vec<(String, String)>,
+    /// Only endpoints that allowlist `omitHeader` may let it affect an
+    /// envelope. This keeps an unsupported spelling inert on admin routes.
+    omit_header_allowed: bool,
 }
 
 impl Params {
@@ -26,7 +29,17 @@ impl Params {
             };
             pairs.push((decode(key), decode(value)));
         }
-        Params { pairs }
+        Params {
+            pairs,
+            omit_header_allowed: false,
+        }
+    }
+
+    /// Enables `omitHeader` envelope handling for an endpoint that implements
+    /// and allowlists the parameter.
+    pub fn allow_omit_header(mut self) -> Self {
+        self.omit_header_allowed = true;
+        self
     }
 
     /// First value for `key`, if present.
@@ -62,9 +75,13 @@ impl Params {
         self.pairs.iter().map(|(k, _)| k.as_str())
     }
 
-    /// Whether Solr's validated `omitHeader` value suppresses `responseHeader`.
+    /// Whether this endpoint's `omitHeader` policy suppresses `responseHeader`.
+    ///
+    /// An unsupported parameter remains inert, including on an error path. On
+    /// a supporting endpoint an invalid value also suppresses the header: the
+    /// validation error is Wayfinder's deliberate headerless JSON divergence.
     pub fn omit_header(&self) -> bool {
-        matches!(self.parse_omit_header(), Ok(true))
+        self.omit_header_allowed && !matches!(self.parse_omit_header(), Ok(false))
     }
 
     /// Validates Solr 9.10.1's `omitHeader` vocabulary: `true`/`yes`/`on`

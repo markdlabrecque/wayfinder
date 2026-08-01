@@ -1784,7 +1784,7 @@ async fn update(
     body: axum::body::Bytes,
 ) -> Result<Response, WfError> {
     check_update_method(&method)?;
-    let params = Params::parse(query.as_deref().unwrap_or(""));
+    let params = Params::parse(query.as_deref().unwrap_or("")).allow_omit_header();
     // `/update` errors carry a responseHeader but no params echo — Solr does
     // not echo params on this endpoint (`err_update_bad_json.json`).
     let update_err = |class: &'static str, msg: String| {
@@ -1937,7 +1937,7 @@ async fn select(
     AxPath(core): AxPath<String>,
     RawQuery(query): RawQuery,
 ) -> Result<Response, WfError> {
-    let params = Params::parse(query.as_deref().unwrap_or(""));
+    let params = Params::parse(query.as_deref().unwrap_or("")).allow_omit_header();
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, SELECT_PARAMS, &params)?;
     let sort = check_sort(&state, &params)?;
@@ -2259,7 +2259,7 @@ async fn mlt(
     AxPath(core): AxPath<String>,
     RawQuery(query): RawQuery,
 ) -> Result<Response, WfError> {
-    let params = Params::parse(query.as_deref().unwrap_or(""));
+    let params = Params::parse(query.as_deref().unwrap_or("")).allow_omit_header();
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, MLT_PARAMS, &params)?;
 
@@ -2595,7 +2595,7 @@ async fn terms(
     AxPath(core): AxPath<String>,
     RawQuery(query): RawQuery,
 ) -> Result<Response, WfError> {
-    let params = Params::parse(query.as_deref().unwrap_or(""));
+    let params = Params::parse(query.as_deref().unwrap_or("")).allow_omit_header();
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, TERMS_PARAMS, &params)?;
     check_terms_json_nl(&params).map_err(|e| e.with_params(&params))?;
