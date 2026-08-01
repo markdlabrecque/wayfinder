@@ -53,6 +53,7 @@ use tantivy::{DateTime, Term};
 
 use crate::config::ServerConfig;
 use crate::core_index::CoreIndex;
+use crate::local_params;
 use crate::params::Params;
 use crate::schema::{ValueKind, WayfinderSchema};
 
@@ -179,9 +180,61 @@ fn facet_queries(
     Ok(Value::Object(out))
 }
 
+/// Splits one `facet.field` value into `(response label, field to facet on)`.
+///
+/// `{!key=mylabel}category` counts `category` and labels the bucket `mylabel`
+/// (issue #138, `facet_local_params_key.json`). The key is *only* a label: it
+/// is never resolved as a field, not even when it names another declared field
+/// — `{!key=body}category` is a 200 carrying `category`'s counts under `body`,
+/// although `body` is not itself facetable
+/// (`facet_local_params_key_as_other_field.json`).
+///
+/// Everything that is not a parseable block is its own label and field,
+/// byte-for-byte. That is what keeps the un-prefixed path untouched, and it is
+/// also why an unterminated `{!key=mylabel category` 400s: `parse_block`
+/// reports "not a block", the whole value stays a field name, and no such
+/// field exists (`facet_local_params_key_unterminated.json` — Solr 400s there
+/// too, as a block syntax error). A block with nothing after it yields the
+/// empty field name, which is the token the 400 then names, matching
+/// `facet_local_params_key_empty_remainder.json`'s `undefined field: ""`.
+///
+/// ponytail: `key` is the only local param read; every other one is parsed and
+/// dropped. `tag`/`ex` need multi-select faceting and inline `facet.*` params
+/// inside the block are adjacent to issue #140's `f.<field>.facet.*`, neither
+/// of which is captured here — so a request using them is answered as if they
+/// were absent rather than refused. Capture before relying on that. A `key`
+/// given twice takes the first, where Solr's map-based `parseLocalParams`
+/// would likely take the last — unverified, and issue #150 owns settling it.
+///
+/// ponytail: **colliding labels collapse.** Two values whose labels are equal
+/// (`{!key=x}category` plus `{!key=x}id`, or `{!key=id}category` plus a bare
+/// `id`) both `insert` into the same `facet_fields` key below, so the last write
+/// wins and one requested facet vanishes with no error and no warning. Solr's
+/// `NamedList` is a list of pairs and can emit the same name twice; the `Map`
+/// here is `serde_json`'s `preserve_order` `IndexMap`, which keeps insertion
+/// order (so ordering itself is faithful) but cannot hold a duplicate key at
+/// all. `facet_queries` above already collapses identically on two equal
+/// `facet.query` values, so this is a pre-existing shape in this file rather
+/// than a regression this change introduces — but the prefix makes it much
+/// easier to hit, since a client picks the labels. Nothing captured sends a
+/// collision, and the honest fix (emit duplicates, or refuse the request)
+/// depends on which of those Solr actually does; capture it before choosing.
+/// Issue #149 owns that capture, for both `facet.field` and `facet.query`.
+fn split_facet_key(value: &str) -> (String, &str) {
+    match local_params::parse_block(value) {
+        Some((local, consumed)) => {
+            let field = &value[consumed..];
+            let label = local.get("key").unwrap_or(field).to_string();
+            (label, field)
+        }
+        None => (value.to_string(), value),
+    }
+}
+
 /// `facet.field`, repeatable — one key per field, each counted independently
-/// (`facet_multi_field.json`). Returns the sub-object plus any
-/// `responseHeader.warnings` earned along the way.
+/// (`facet_multi_field.json`). Each value may carry a `{!key=...}` local-params
+/// prefix, which relabels its bucket (see `split_facet_key`). Returns the
+/// sub-object plus any `responseHeader.warnings` earned along the way.
 fn facet_fields(
     index: &CoreIndex,
     config: &ServerConfig,
@@ -227,7 +280,10 @@ fn facet_fields(
 
     let mut out = Map::new();
     let mut warnings = Vec::new();
-    for field_name in fields {
+    for value in fields {
+        // The label reaches the response envelope; the field reaches
+        // resolution, validation and every error message (issue #138).
+        let (label, field_name) = split_facet_key(value);
         check_facetable(&index.wf_schema, field_name, true)?;
         // The Tantivy column to actually aggregate over: `field_name` itself
         // for a static field, or the catch-all JSON path for a field that
@@ -281,7 +337,7 @@ fn facet_fields(
             buckets.push((None, absent as u64));
         }
 
-        out.insert(field_name.to_string(), render_buckets(&buckets, nl));
+        out.insert(label, render_buckets(&buckets, nl));
     }
     Ok((Value::Object(out), warnings))
 }
@@ -703,5 +759,97 @@ fn check_facetable(schema: &WayfinderSchema, field_name: &str, allow_dynamic: bo
         None => bail!("can not facet on undefined field: {field_name}"),
         Some(false) => bail!("can not facet on a field w/o fast values (docValues): {field_name}"),
         Some(true) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mutation-test gap closed here (issue #138): replacing `parse_block` with
+    /// a `split('}')`-style prefix strip passes every request-level test in
+    /// `tests/facet_local_params_key.rs`, because none of them sends a value
+    /// that contains a `}` *without* being a well-formed block. These cases do.
+    /// A value that is not a `{!...}` block is a field name byte-for-byte —
+    /// `parse_block` requires the `{!` sigil and a closing `}`, and Solr only
+    /// treats a value as local params under the same condition — so a `}` in
+    /// ordinary text must not be mistaken for a block terminator.
+    #[test]
+    fn a_value_that_is_not_a_block_is_its_own_label_and_field() {
+        for value in [
+            "category",
+            // A stray `}` mid-value: a `split('}')` strip would facet on
+            // `egory` (or label the bucket `cat`) instead of refusing the whole
+            // string as an undefined field.
+            "cat}egory",
+            "}category",
+            "category}",
+            // Not a block: `{` without the `!` sigil (Tantivy range syntax).
+            "{a TO b}",
+            // A block sigil with no closing brace is not a block either, which
+            // is what makes `facet_local_params_key_unterminated.json`'s 400
+            // fall out of the undefined-field path.
+            "{!key=mylabel category",
+        ] {
+            assert_eq!(
+                split_facet_key(value),
+                (value.to_string(), value),
+                "`{value}` is not a local-params block, so it must pass through untouched"
+            );
+        }
+    }
+
+    /// The block grammar, not a brace scan: a `}` inside a quoted local-param
+    /// value does not end the block, so the field is what follows the *real*
+    /// terminator. Pins that `split_facet_key` inherits
+    /// `local_params::parse_block`'s quoting rules rather than reimplementing a
+    /// looser scan.
+    #[test]
+    fn a_quoted_brace_inside_the_block_does_not_end_it() {
+        assert_eq!(
+            split_facet_key("{!key='a} b'}category"),
+            ("a} b".to_string(), "category")
+        );
+    }
+
+    /// The three shapes the fixtures pin, at the unit level: a differing key, a
+    /// key equal to the field, and a key naming another declared field (which
+    /// is still only a label).
+    #[test]
+    fn the_key_is_the_label_and_the_remainder_is_the_field() {
+        assert_eq!(
+            split_facet_key("{!key=mylabel}category"),
+            ("mylabel".to_string(), "category")
+        );
+        assert_eq!(
+            split_facet_key("{!key=category}category"),
+            ("category".to_string(), "category")
+        );
+        assert_eq!(
+            split_facet_key("{!key=body}category"),
+            ("body".to_string(), "category")
+        );
+    }
+
+    /// `facet_local_params_key_empty_remainder.json`: the parsed empty
+    /// remainder is what gets validated, so the field must be `""` — not the
+    /// key, and not the raw value.
+    #[test]
+    fn a_block_with_no_remainder_yields_the_empty_field_name() {
+        assert_eq!(
+            split_facet_key("{!key=mylabel}"),
+            ("mylabel".to_string(), "")
+        );
+    }
+
+    /// A block carrying no `key` at all falls back to the field name as its own
+    /// label, so `{!ex=tagname}category` still buckets under `category` rather
+    /// than under the raw value. Unfixtured — see `split_facet_key`'s ponytail.
+    #[test]
+    fn a_block_without_a_key_labels_with_the_field_name() {
+        assert_eq!(
+            split_facet_key("{!ex=tagname}category"),
+            ("category".to_string(), "category")
+        );
     }
 }
