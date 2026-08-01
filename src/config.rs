@@ -8,10 +8,13 @@
 //! ignores unknown params, findings fact 8), which is what `strict_params`
 //! flips for development.
 
+use std::fmt;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tantivy::IndexSettings;
 use tantivy::merge_policy::{LogMergePolicy, MergePolicy, NoMergePolicy};
 use tantivy::store::Compressor;
@@ -28,6 +31,86 @@ pub struct ServerConfig {
     pub resources: Resources,
     pub commit: Commit,
     pub admin: Admin,
+    #[serde(skip)]
+    pub auth: Option<AuthConfig>,
+}
+
+/// Optional HTTP Basic credentials. Only a SHA-256 digest is retained after
+/// parsing so neither the username nor password can be emitted by accidental
+/// config debug output.
+#[derive(Clone)]
+pub struct AuthConfig {
+    credential_digest: [u8; 32],
+}
+
+impl AuthConfig {
+    pub(crate) fn matches(&self, presented: &[u8]) -> bool {
+        let presented_digest = Sha256::digest(presented);
+        self.credential_digest
+            .as_slice()
+            .ct_eq(presented_digest.as_slice())
+            .into()
+    }
+}
+
+impl fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthConfig").finish_non_exhaustive()
+    }
+}
+
+impl AuthConfig {
+    fn from_credentials(username: &str, password: &str) -> Result<Self> {
+        if username.is_empty() || password.is_empty() {
+            bail!("auth.username and auth.password must both be non-empty");
+        }
+        if username.contains(':') {
+            bail!("auth.username must not contain `:`");
+        }
+        if has_ascii_control(username) || has_ascii_control(password) {
+            bail!("auth.username and auth.password must not contain ASCII control characters");
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(username.as_bytes());
+        hasher.update(b":");
+        hasher.update(password.as_bytes());
+        Ok(Self {
+            credential_digest: hasher.finalize().into(),
+        })
+    }
+}
+
+/// Parses the separately extracted `[auth]` table without passing credential
+/// values through serde's diagnostics, which may render their values.
+fn parse_auth(value: toml::Value) -> Result<AuthConfig> {
+    let table = value
+        .as_table()
+        .ok_or_else(|| anyhow::anyhow!("auth must be a table"))?;
+
+    for key in table.keys() {
+        if key != "username" && key != "password" {
+            bail!("unknown auth key `{key}`");
+        }
+    }
+
+    let username = table
+        .get("username")
+        .ok_or_else(|| anyhow::anyhow!("auth.username is required"))?
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("auth.username must be a string"))?;
+    let password = table
+        .get("password")
+        .ok_or_else(|| anyhow::anyhow!("auth.password is required"))?
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("auth.password must be a string"))?;
+
+    AuthConfig::from_credentials(username, password)
+}
+
+/// RFC 7617 forbids control characters in both components of Basic credentials.
+fn has_ascii_control(value: &str) -> bool {
+    value.bytes().any(|byte| byte <= 0x1f || byte == 0x7f)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -185,7 +268,19 @@ impl ServerConfig {
     }
 
     pub fn parse(raw: &str) -> Result<ServerConfig> {
-        let config: ServerConfig = toml::from_str(raw).context("parsing server config TOML")?;
+        // Parse without deserializing first: TOML's source-aware syntax errors
+        // include excerpts of `raw`, which could disclose configured credentials.
+        // Deserializing the value afterward retains useful unknown-field names.
+        let mut value: toml::Value =
+            toml::from_str(raw).map_err(|_| anyhow::anyhow!("invalid server config TOML"))?;
+        let auth = value
+            .as_table_mut()
+            .expect("a TOML document is always a table")
+            .remove("auth")
+            .map(parse_auth)
+            .transpose()?;
+        let mut config: ServerConfig = value.try_into().context("parsing server config TOML")?;
+        config.auth = auth;
         config.validate()?;
         Ok(config)
     }
@@ -315,5 +410,95 @@ mod tests {
         let settings = config.index_settings().expect("settings");
         assert_eq!(settings.docstore_compression, Compressor::None);
         assert_eq!(settings.docstore_blocksize, 8192);
+    }
+
+    #[test]
+    fn auth_rejects_invalid_rfc_7617_credentials() {
+        for config in [
+            "[auth]\nusername = \"\"\npassword = \"secret\"\n",
+            "[auth]\nusername = \"operator\"\npassword = \"\"\n",
+            "[auth]\nusername = \"operator:name\"\npassword = \"secret\"\n",
+            "[auth]\nusername = \"operator\\u0000\"\npassword = \"secret\"\n",
+            "[auth]\nusername = \"operator\"\npassword = \"secret\\u007f\"\n",
+        ] {
+            ServerConfig::parse(config).expect_err("invalid Basic credentials must be rejected");
+        }
+    }
+
+    #[test]
+    fn auth_allows_a_colon_in_the_password() {
+        let config = ServerConfig::parse(
+            "[auth]\nusername = \"operator\"\npassword = \"secret:with:colons\"\n",
+        )
+        .expect("an RFC 7617 password may contain colons");
+        assert!(
+            config
+                .auth
+                .as_ref()
+                .expect("[auth] must be present")
+                .matches(b"operator:secret:with:colons")
+        );
+    }
+
+    #[test]
+    fn auth_rejects_non_string_credentials_without_echoing_them() {
+        let numeric_sentinel = "8675309123456789";
+        let err = ServerConfig::parse(&format!(
+            "[auth]\nusername = \"operator\"\npassword = {numeric_sentinel}\n"
+        ))
+        .expect_err("numeric passwords must be rejected");
+        let message = format!("{err:#}");
+        assert!(message.contains("auth.password must be a string"));
+        assert!(
+            !message.contains(numeric_sentinel),
+            "semantic errors must not echo credential values: {message}"
+        );
+
+        let err = ServerConfig::parse(
+            "[auth]\nusername = \"operator\"\npassword = 1979-05-27T07:32:00Z\n",
+        )
+        .expect_err("datetime passwords must be rejected");
+        assert!(format!("{err:#}").contains("auth.password must be a string"));
+    }
+
+    #[test]
+    fn auth_must_be_a_table() {
+        let err =
+            ServerConfig::parse("auth = \"operator:secret\"\n").expect_err("auth must be a table");
+        assert!(format!("{err:#}").contains("auth must be a table"));
+    }
+
+    #[test]
+    fn auth_requires_exactly_username_and_password() {
+        let err = ServerConfig::parse("[auth]\nusername = \"operator\"\n")
+            .expect_err("auth.password is required");
+        assert!(format!("{err:#}").contains("auth.password is required"));
+
+        let sentinel = "AUTH_UNKNOWN_SECRET_MUST_NOT_LEAK";
+        let err = ServerConfig::parse(&format!(
+            "[auth]\nusername = \"operator\"\npassword = \"secret\"\ntoken = \"{sentinel}\"\n"
+        ))
+        .expect_err("unknown auth keys must be rejected");
+        let message = format!("{err:#}");
+        assert!(message.contains("unknown auth key `token`"));
+        assert!(
+            !message.contains(sentinel),
+            "unknown-key errors must not echo credential values: {message}"
+        );
+    }
+
+    #[test]
+    fn syntax_errors_do_not_echo_credentials() {
+        let sentinel = "AUTH_PARSE_SECRET_MUST_NOT_LEAK";
+        let err = ServerConfig::parse(&format!(
+            "[auth]\nusername = \"operator\"\npassword = \"{sentinel}\"\nnot valid TOML"
+        ))
+        .expect_err("invalid TOML must fail");
+        let message = format!("{err:#}");
+        assert!(message.contains("invalid server config TOML"));
+        assert!(
+            !message.contains(sentinel),
+            "syntax errors must not echo credential values: {message}"
+        );
     }
 }

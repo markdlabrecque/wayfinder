@@ -261,10 +261,21 @@ chosen. Nothing may be added here without the same two things.
    matching `omit_header_error_true.json`, `omit_header_error_yes.json`, and
    `omit_header_update_error_true.json`. (issue #179; finding 112)
 
+9. **An authentication failure returns Wayfinder's JSON `WfError` envelope, where Solr's auth
+   filter returned Jetty HTML.** The issue #229 BasicAuthPlugin capture (finding 118) shows
+   unauthenticated and wrong-credential `/solr/admin/info/system` requests returning 401 Jetty
+   HTML, while a correct credential returns 200; both 401s carry `WWW-Authenticate: Basic
+   realm="solr"`. Wayfinder matches the 401 and challenge realm but returns its normal JSON error
+   envelope. This is the same client-facing choice as divergences 1 and 8: Wayfinder's response
+   surface is JSON-only and its clients parse JSON, so reproducing a servlet-container fallback
+   would add a second error format solely for authentication failures. (issue #229; finding 118)
+
 Note that divergence 3 is a difference from the *configset* the reference fixtures were captured
 against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, 4, 6, 7,
 and 8 are differences from Solr proper. Divergence 5 is a deliberate config choice plus inherent
-host non-reproducibility, not a Solr-behaviour disagreement.
+host non-reproducibility, not a Solr-behaviour disagreement. Divergence 9 is a
+difference from Solr's auth-filter/container error body, while retaining its 401 and Basic
+challenge realm.
 
 ### How this is verified
 
@@ -802,9 +813,10 @@ own scoping pass if ever pursued):
   start on an incompatible schema change; a UI that could trigger one is a different, much larger
   feature.
 - Document edit/delete from the UI (the update pipeline stays API-only).
-- Authentication/authorization. Solr's own admin UI has none by default either — this phase matches
-  that posture and documents it as a deployment responsibility (reverse proxy / firewall / network
-  policy), not something Wayfinder arbitrates. Flagged as a risk below, not silently assumed away.
+- Fine-grained authorization and user/role administration remain out of scope for the dashboard.
+  The phase originally left all authentication to deployment infrastructure, but issue #229 later
+  added optional server-wide HTTP Basic authentication. When configured, it protects the admin UI
+  alongside the Solr routes; only the two explicit health paths remain public.
 - Multi-instance/cluster views. Out of scope for the same reason SolrCloud is (§1 non-goals) — one
   process, one core.
 

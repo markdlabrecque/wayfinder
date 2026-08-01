@@ -2092,3 +2092,21 @@ contains `quack`/`garden`. The self-contained setup is appended to `solr-ref/cap
      `spellcheck_unicode_offsets.json` resolves the offset unit directly: for `é qwick`, Solr
      reports `qwick` at `startOffset:2,endOffset:7`, i.e. Java UTF-16 code units rather than
      Rust UTF-8 byte positions (`3..8`).
+
+## Finding from issue #229 (HTTP Basic authentication)
+
+118. **The issue #229 premise was wrong: Solr's BasicAuthPlugin failure body was not a JSON
+     envelope.** Captured 2026-08-01 from a cloud-mode `solr:9` container with BasicAuthPlugin
+     enabled by `auth enable operator:secret/blockUnknown`. An unauthenticated request to
+     `/solr/admin/info/system` returned HTTP 401 with Jetty HTML whose message was
+     `Authentication failed, Response code: 401`; the same request with a wrong credential
+     returned HTTP 401 Jetty HTML `Bad credentials`. Both responses included
+     `WWW-Authenticate: Basic realm="solr"`. A request with the correct `operator:secret`
+     credential returned HTTP 200.
+
+     The ticket claimed Solr returned a JSON error envelope for auth failures. This capture
+     corrects that premise: the auth filter answered before Solr's JSON response writer. Wayfinder
+     deliberately matches the 401 and challenge realm but returns its JSON `WfError` envelope;
+     that ratified divergence is PRD §2, divergence 9. It follows the same JSON-only client
+     response-surface decision as divergences 1 and 8 rather than adding Jetty HTML solely for
+     authentication failures.
