@@ -8,10 +8,13 @@
 //! ignores unknown params, findings fact 8), which is what `strict_params`
 //! flips for development.
 
+use std::fmt;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tantivy::IndexSettings;
 use tantivy::merge_policy::{LogMergePolicy, MergePolicy, NoMergePolicy};
 use tantivy::store::Compressor;
@@ -28,6 +31,60 @@ pub struct ServerConfig {
     pub resources: Resources,
     pub commit: Commit,
     pub admin: Admin,
+    pub auth: Option<AuthConfig>,
+}
+
+/// Optional HTTP Basic credentials. Only a SHA-256 digest is retained after
+/// parsing so neither the username nor password can be emitted by accidental
+/// config debug output.
+#[derive(Clone)]
+pub struct AuthConfig {
+    credential_digest: [u8; 32],
+}
+
+impl AuthConfig {
+    pub(crate) fn matches(&self, presented: &[u8]) -> bool {
+        let presented_digest = Sha256::digest(presented);
+        self.credential_digest
+            .as_slice()
+            .ct_eq(presented_digest.as_slice())
+            .into()
+    }
+}
+
+impl fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthConfig").finish_non_exhaustive()
+    }
+}
+
+impl<'de> Deserialize<'de> for AuthConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawAuthConfig {
+            username: String,
+            password: String,
+        }
+
+        let raw = RawAuthConfig::deserialize(deserializer)?;
+        if raw.username.is_empty() || raw.password.is_empty() {
+            return Err(serde::de::Error::custom(
+                "auth.username and auth.password must both be non-empty",
+            ));
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(raw.username.as_bytes());
+        hasher.update(b":");
+        hasher.update(raw.password.as_bytes());
+        Ok(Self {
+            credential_digest: hasher.finalize().into(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

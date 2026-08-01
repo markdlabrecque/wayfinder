@@ -47,8 +47,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, Path as AxPath, RawQuery, State};
-use axum::http::{Method, Request, StatusCode};
+use axum::extract::{DefaultBodyLimit, Path as AxPath, RawQuery, Request, State};
+use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, get};
 use http_body_util::BodyExt;
@@ -58,7 +59,9 @@ use tantivy::query::{EmptyQuery, Occur, Query, QueryClone};
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::TraceLayer;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use collector::{SortClause, SortKey};
+use config::AuthConfig;
 use core_index::CoreIndex;
 use error::{Envelope, WfError};
 use params::Params;
@@ -413,6 +416,7 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
     // the request-body cap that axum's `Bytes`/`Json` extractors otherwise
     // enforce at a bare, hardcoded 2MB via `DefaultBodyLimit`.
     let max_body_size = config.resources.max_body_size;
+    let auth = config.auth.clone();
     let state = Arc::new(AppState {
         core_name,
         index,
@@ -470,6 +474,7 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
     let shutdown = ShutdownHandle(Arc::clone(&state));
     let router = router
         .with_state(state)
+        .layer(middleware::from_fn_with_state(auth, authenticate))
         .layer(CatchPanicLayer::custom(handle_panic))
         .layer(DefaultBodyLimit::max(max_body_size))
         .layer(
@@ -497,6 +502,64 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
                 ),
         );
     Ok(AppServer { router, shutdown })
+}
+
+/// Enforces optional HTTP Basic authentication before any application route.
+/// The two health checks remain public so orchestration can distinguish an
+/// unavailable process from unavailable credentials.
+async fn authenticate(
+    State(auth): State<Option<AuthConfig>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if auth
+        .as_ref()
+        .is_none_or(|_| public_auth_path(request.uri().path()))
+    {
+        return next.run(request).await;
+    }
+
+    let valid = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(basic_credentials)
+        .is_some_and(|credentials| auth.as_ref().is_some_and(|auth| auth.matches(&credentials)));
+
+    if valid {
+        next.run(request).await
+    } else {
+        let mut response = WfError::new(
+            StatusCode::UNAUTHORIZED,
+            "wayfinder::AuthenticationError",
+            "authentication required",
+        )
+        .envelope(Envelope::NoParams)
+        .into_response();
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            HeaderValue::from_static("Basic realm=\"solr\""),
+        );
+        response
+    }
+}
+
+fn public_auth_path(path: &str) -> bool {
+    path == "/ui/ping"
+        || matches!(
+            path.split('/').collect::<Vec<_>>().as_slice(),
+            ["", "solr", core, "admin", "ping"] if !core.is_empty()
+        )
+}
+
+fn basic_credentials(header: &str) -> Option<Vec<u8>> {
+    let mut parts = header.split_ascii_whitespace();
+    let scheme = parts.next()?;
+    let payload = parts.next()?;
+    if !scheme.eq_ignore_ascii_case("basic") || parts.next().is_some() {
+        return None;
+    }
+    STANDARD.decode(payload).ok()
 }
 
 /// Test-only handler behind the `test-support` feature (see `build()`): an
