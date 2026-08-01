@@ -30,6 +30,8 @@ RUN set -eu; \
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY templates ./templates
+COPY coverage ./coverage
 
 RUN cargo build --release --target "$(cat /tmp/rust_target)" \
     && cp "target/$(cat /tmp/rust_target)/release/wayfinder" /wayfinder-bin
