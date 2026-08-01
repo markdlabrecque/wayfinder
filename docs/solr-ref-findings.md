@@ -1773,7 +1773,11 @@ counts producing an identical result to the unmodified baseline, which is the re
 for `search_api_solr`'s Drupal field bodies — but real Solr's own `mlt.maxntp` genuinely
 narrows results at a low-enough value (confirmed live: `mlt.maxntp=1` against `mlt11` drops
 the astronomy-cluster match count from 4 to 0), so accepted-and-ignore is a real capability
-gap, not a safe no-op in general the way `TZ`/`bf` are.
+gap, not a safe no-op in general the way `TZ`/`bf` are. It is therefore **descoped from #141
+to issue #189**: `mlt.maxntp` is deliberately left out of `MLT_PARAMS`, so `strict_params =
+true` keeps 400ing it rather than answering the wrong question quietly, and
+`tests/mlt.rs::mlt_maxntp_stays_rejected_until_issue_189_implements_it` is the expiring guard
+that fails the moment it is allowlisted. `mlt_maxntp_noop.json` stays committed for #189.
 
 Also confirmed: the `fl=*,score` gap is not `/mlt`-specific. `mlt_fl_wildcard_score.json`
 shows real Solr returning every stored/docValues field plus `score` for `fl=*,score`, but
@@ -1784,4 +1788,7 @@ inferred) returns only `score`, dropping every other field, even though a captur
 real Solr returning everything. The existing `select.fl.wildcard-plus-score` coverage probe
 (`src/coverage.rs`) only asserts `score` is present, not that other fields survive, so it is a
 false-positive green today. The fix belongs in `render_doc` (shared by `/select` and `/mlt`),
-not `/mlt`'s handler alone.
+not `/mlt`'s handler alone, so it is **descoped from #141 to issue #188**. Two expiring guards
+pin the gap meanwhile: `tests/mlt.rs::mlt_fl_wildcard_plus_score_still_drops_every_field_until_issue_188`
+and the `mlt_fl_wildcard_score` entry in that file's `MLT_EXPECTED_DIVERGENCES`, both of which
+fail as soon as `render_doc` learns `*`. The fixture stays committed for #188.

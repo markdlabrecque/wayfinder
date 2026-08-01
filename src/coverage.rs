@@ -1060,10 +1060,29 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
                 )
                 .await
         }
+        // Three legs, because a 200 alone proves only that `fq` is
+        // allowlisted, not that it filters (issue #141, finding 98). The
+        // unfiltered leg establishes a non-empty similar-docs set; the
+        // filtered leg (`category:animals` matches only `doc1`, which shares
+        // no vocabulary with the astronomy cluster) must empty it; and the
+        // seed doc must survive the same filter, since `fq` scopes
+        // `response` only and never `match`.
         "mlt.filters" => {
-            probe
-                .ok("mlt?q=id:mlt11&mlt.fl=body&fq=category:animals")
-                .await
+            let unfiltered = probe
+                .number(
+                    "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1",
+                    "/response/numFound",
+                )
+                .await;
+            let filtered = probe
+                .response("mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:animals")
+                .await;
+            unfiltered.is_some_and(|count| count > 0)
+                && filtered.is_some_and(|body| {
+                    body.pointer("/response/numFound") == Some(&Value::from(0))
+                        && body.pointer("/match/docs/0/id")
+                            == Some(&Value::String("mlt11".to_string()))
+                })
         }
         "mlt.mintf" => {
             let loose = probe
@@ -1126,10 +1145,36 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
                 .zip(boosted)
                 .is_some_and(|(plain, weighted)| !plain.is_empty() && plain != weighted)
         }
+        // Both params, each against the shape it actually changes (issue
+        // #141, findings 99/100): `mlt.match.include=false` must drop the
+        // `match` key outright where the explicit-`true` request keeps one
+        // (sent explicitly, not omitted, so a gate keyed on the param's mere
+        // presence rather than its value reads as uncovered here),
+        // and `mlt.match.offset=1` must seed from the *second* `q` hit --
+        // `q=category:astronomy` resolves `mlt11`..`mlt15`, so offset 0 and
+        // offset 1 name different docs and `match.start` echoes the offset.
+        // A bare 200 would read the same whether either param were honoured
+        // or merely allowlisted.
         "mlt.match-include-and-offset" => {
-            probe
-                .ok("mlt?q=id:doc1&mlt.fl=body&mlt.match.include=false&mlt.match.offset=0")
+            let included = probe
+                .response("mlt?q=id:mlt11&mlt.fl=body&mlt.match.include=true&mlt.match.offset=0")
                 .await
+                .is_some_and(|body| {
+                    body.pointer("/match/docs/0/id") == Some(&Value::String("mlt11".to_string()))
+                        && body.pointer("/match/start") == Some(&Value::from(0))
+                });
+            let excluded = probe
+                .response("mlt?q=id:mlt11&mlt.fl=body&mlt.match.include=false")
+                .await
+                .is_some_and(|body| body.get("match").is_none() && body.get("response").is_some());
+            let offset = probe
+                .response("mlt?q=category:astronomy&mlt.fl=body&mlt.match.offset=1")
+                .await
+                .is_some_and(|body| {
+                    body.pointer("/match/docs/0/id") == Some(&Value::String("mlt12".to_string()))
+                        && body.pointer("/match/start") == Some(&Value::from(1))
+                });
+            included && excluded && offset
         }
         "mlt.interesting-terms-none" => {
             let (status, body) = probe
