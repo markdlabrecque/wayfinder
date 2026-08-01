@@ -2302,7 +2302,9 @@ async fn mlt(
     // ponytail: an offset past the last hit resolves no seed at all here (so
     // `match.docs` is empty and `response` is `null`, finding 54's shape). No
     // fixture pins real Solr's out-of-range behaviour; the ceiling is the
-    // in-range case the capture covers.
+    // in-range case the capture covers, and
+    // `tests/mlt.rs::mlt_match_offset_past_the_last_hit_resolves_no_seed` pins
+    // this choice so it cannot drift to `.or(hits.first())` or a clamp.
     let match_offset: usize = params
         .get("mlt.match.offset")
         .and_then(|s| s.parse().ok())

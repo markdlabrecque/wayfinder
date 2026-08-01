@@ -704,6 +704,30 @@ async fn mlt_malformed_fq_is_a_400_not_a_silently_dropped_filter() {
         Some(400),
         "the no-seed error envelope must carry the 400 code, got: {body}"
     );
+
+    // Strongest form of the same claim: no `q` param at all. Mutation-tested:
+    // gating the parse loop on `params.get("q").is_some()` survived the whole
+    // suite until this case existed, because every other case sends a `q`.
+    let (status, body) = get(&app, "mlt?mlt.fl=body&fq=category:[unclosed&wt=json").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a malformed fq must 400 even with no `q` param at all, got: {body}"
+    );
+
+    // Every `fq` is validated, not just the first. Mutation-tested: swallowing
+    // the parse error for all but the first `fq` survived the suite until this
+    // case existed, since the multi-fq test above sends two *valid* filters.
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:animals&fq=category:[unclosed&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a malformed *second* fq must 400 just like a malformed first one, got: {body}"
+    );
 }
 
 // --- issue #141: mlt.match.include=false drops the match key entirely -----
