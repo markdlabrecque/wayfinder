@@ -935,14 +935,14 @@ fn check_params(state: &AppState, allowed: &[&str], params: &Params) -> Result<(
     // `omitHeader` under their default non-strict parameter policy.
     if allowed.contains(&"omitHeader") {
         params.validate_omit_header().map_err(|value| {
-            WfError::bad_request(
-                "wayfinder::InvalidParam",
-                format!(
-                    "invalid omitHeader value `{value}`; expected true, yes, on, false, no, or off"
-                ),
-            )
-            .with_params(params)
-            .suppress_response_header()
+            // Solr's own wording, from the Jetty page issue #179 captured for
+            // `omitHeader=1` (`omit_header_invalid_one.html`: `msg=invalid
+            // boolean value: 1`) — the same message every other invalid
+            // boolean gets, since it is the same `StrUtils.parseBool` failure
+            // (issue #187, finding 113).
+            WfError::bad_request("wayfinder::InvalidParam", params::invalid_bool_msg(value))
+                .with_params(params)
+                .suppress_response_header()
         })?;
     }
     if !state.config.strict_params {

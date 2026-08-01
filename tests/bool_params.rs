@@ -394,7 +394,7 @@ async fn omit_header_yes_suppresses_the_response_header() {
 // --- unfixtured guards: every remaining boolean read, and every handler -----
 //
 // Nothing below has a Solr fixture, and that is deliberate rather than a gap.
-// Finding 109 pins the *rule*; these pin that each read site actually applies
+// Finding 113 pins the *rule*; these pin that each read site actually applies
 // it. Two of them exist because the code they guard is validation-only, which
 // `CLAUDE.md` requires be mutation-tested: deleting the guard must break a
 // test, not just fail to be exercised.
@@ -525,7 +525,7 @@ async fn select_rejects_each_invalid_boolean() {
 /// nothing else in the suite exercises: delete any one of the four and this
 /// test fails for that endpoint alone.
 ///
-/// This is Wayfinder's documented divergence (finding 109): real Solr answers
+/// This is Wayfinder's documented divergence (finding 113): real Solr answers
 /// an invalid `omitHeader` with a Jetty *HTML* error page, because header
 /// suppression is decided before the JSON response writer exists. The status
 /// matches; only the body shape differs, which is why there is no fixture and
