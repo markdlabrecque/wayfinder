@@ -1,7 +1,7 @@
 //! Shared test helpers for the tracer-bullet integration suite.
 //!
 //! Builds a `wayfinder::app` in-process (no network, no spawned binary) against
-//! the three-field tracer-bullet schema (PRD §7), indexes the same 5-doc
+//! the shared tracer-bullet schema (PRD §7), indexes the same 5-doc
 //! corpus used to capture `solr-ref/responses/*.json`, and provides thin
 //! request/response helpers plus fixture-comparison normalisation.
 //!
@@ -30,7 +30,8 @@ use tower::ServiceExt;
 pub const CORE: &str = "content";
 
 /// The tracer-bullet schema per PRD §7: `id` (string, fast, stored, unique key),
-/// `body` (text_en, stored), `category` (string, fast, multi_valued, stored).
+/// `body` (text_en, stored), `category` (string, fast, multi_valued, stored),
+/// and `views` (int, fast, not stored).
 ///
 /// `id` is `fast = true` to mirror the reference Solr, not as a convenience:
 /// Solr's `_default` configset gives its `string` type `docValues="true"`, so
@@ -67,6 +68,14 @@ type = "string"
 stored = true
 fast = true
 multi_valued = true
+
+# Unstored and absent from the corpus, so this declaration cannot change any
+# tracer-bullet response fixture; it exists only to distinguish numeric schema
+# resolution from a local-params response label (issue #150).
+[[fields]]
+name = "views"
+type = "int"
+fast = true
 "#;
 
 /// The exact 5-doc corpus indexed by `solr-ref/capture.sh`, so fixture JSON

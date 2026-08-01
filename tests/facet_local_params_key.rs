@@ -479,3 +479,58 @@ async fn a_prefix_with_an_empty_remainder_400s_on_the_empty_field_name() {
         "an empty remainder must not fabricate a bucket labelled with the key; got {body}"
     );
 }
+
+// --- 9. schema resolution always uses the faceted field -------------------
+
+/// `views` is a numeric fast field in the shared schema, while `category` is
+/// text. The local `key` is only a response label, so `{!key=views}category`
+/// must use `category`'s text kind when deciding whether the Points-based
+/// warning applies. Looking up the label instead would spuriously warn even
+/// though the facet itself and its bucket label still look correct.
+#[tokio::test]
+async fn a_numeric_key_does_not_make_a_text_facet_points_based() {
+    let (app, _dir) = indexed_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dviews%7Dcategory&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        facet_bucket(&body, "views").as_deref(),
+        Some(fixture_bucket("facet_basic", "category").as_slice()),
+        "the numeric key labels category's text buckets without changing the faceted field; got {body}"
+    );
+    assert!(
+        body.pointer("/responseHeader/warnings").is_none(),
+        "a text facet must not gain a Points-based warning because its response label is numeric; got {body}"
+    );
+}
+
+// --- 10. duplicate local-param keys ---------------------------------------
+
+/// `facet_local_params_duplicate_key` records real Solr treating
+/// `{!key=a key=b}category` as first-wins. The whole-envelope comparison pins
+/// the captured wire response; the explicit absence check ensures a parser
+/// cannot silently select the second key while coincidentally preserving `a`.
+#[tokio::test]
+async fn duplicate_local_param_keys_are_first_wins_matching_the_fixture() {
+    let (app, _dir) = indexed_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Da%20key%3Db%7Dcategory&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        facet_bucket(&body, "a").as_deref(),
+        Some(fixture_bucket("facet_local_params_duplicate_key", "a").as_slice()),
+        "the first local-param key must label category's captured buckets; got {body}"
+    );
+    assert_eq!(
+        facet_bucket(&body, "b"),
+        None,
+        "the second duplicate key must not become a response label; got {body}"
+    );
+    assert_matches_fixture(body, "facet_local_params_duplicate_key");
+}
