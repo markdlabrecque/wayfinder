@@ -7,6 +7,9 @@ for the supported TLS deployment model.
 
 ## Running
 
+For production layouts, systemd and Docker Compose examples, security boundaries, backup/restore,
+Drupal reindexing, and upgrades, see the [operator runbook](docs/operations.md).
+
 ```sh
 wayfinder <schema.toml> <data-dir> [bind-addr]     # bind-addr defaults to 127.0.0.1:8983
 ```
