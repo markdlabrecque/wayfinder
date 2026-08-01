@@ -364,55 +364,9 @@ async fn strict_params_accepts_every_implemented_highlight_param() {
 // `hl.simple.pre`/`hl.simple.post`. `hl.fl=*` appears in 19 of the 28 traces
 // under `solr-ref/search-api/trace/`.
 //
-// **Open question 1 (`hl.fl=*`'s expansion):** the captured traces alone
-// cannot fully disambiguate "every *text*-typed field" from "the query's
-// `qf`/`df` set", because every text field the traced `search_api_solr`
-// schema ever populates (`tm_X3b_en_body`, `tm_X3b_en_title`) is also always
-// part of that query's `qf` -- see `solr-ref/search-api/trace/00002.json`
-// (`hl.fl=%2A` alongside a `q` built directly from
-// `tm_X3b_en_body`/`tm_X3b_und_body`/`tm_X3b_en_title`/`tm_X3b_und_title`,
-// with the response's `highlighting` block keying only the two `en_` fields
-// -- but that document simply has no `und_` fields stored at all, so their
-// absence proves nothing either way) and every `q=*:*` trace with
-// `hl.fl=*` (e.g. `00013.json`) has no term overlap in any field, so every
-// doc's entry is `{}` regardless of which fields the wildcard resolved to.
-// Two facts settle it anyway, independent of that ambiguity:
-//   (a) The traced core *does* set a `df`, to `id`
-//       (`solr-ref/search-api/configset/solrconfig_extra.xml:113`, the
-//       `<requestHandler name="/select">` defaults block -- not
-//       `solrconfig_query.xml`, which is the file it would be natural to
-//       look in). So a real `df` is in force on every one of these requests,
-//       and yet no wildcard trace ever keys `highlighting` on `id`. That is
-//       *stronger* than an absent `df` would have been: the fallback
-//       candidate exists and is still never used, which rules the "defaults
-//       to df" reading out rather than merely leaving it untested. See
-//       finding 94 in `docs/solr-ref-findings.md`.
-//   (b) Real Solr's own wildcard expansion (`DefaultSolrHighlighter`'s
-//       `getHighlightFields`, `SolrPluginUtils.expandWildcardsInField`)
-//       matches `*` against the schema's field *names*, not the query's
-//       `qf`/`df` set -- fields that come back from that expansion but
-//       cannot be analyzed (non-text) simply never produce a snippet, which
-//       is indistinguishable on the wire from "no term overlap" (finding
-//       52's `{}` shape covers both). That silent-skip, not a 400, is the
-//       behaviour worth pinning: Wayfinder's own explicit-field path 400s a
-//       named non-text `hl.fl` field
-//       (`hl_non_text_field_is_400`/`hl_undefined_field_is_400_...` above),
-//       so a naive `*` expansion that ran every schema field through that
-//       same check would 400 on any schema carrying a field that check
-//       rejects -- e.g. `numeric_app`'s `views` (long).
-//
-//       Note this check does *not* reject `common::SCHEMA_TOML`'s `category`:
-//       `string` resolves to `ResolvedType::Str`, which maps to
-//       `ValueKind::Text` (`src/schema.rs:414`), so `check_highlightable`
-//       returns `Ok` for it and `hl.fl=category` is a 200 that really does
-//       emit `{"doc4":{"category":["<em>animals</em>"]}}`. Wayfinder's
-//       wildcard exclusion of `string`/`keyword` is therefore a deliberate
-//       divergence from its own explicit-field path, not a 400 being dodged
-//       -- see `highlightable_fields`' doc comment in `src/highlight.rs`.
-// So: `hl.fl=*` expands to every *highlightable* (analyzed text) field in the
-// schema, never errors on a schema that also has non-text fields, and never
-// surfaces a non-analyzed field in `highlighting` even when that field is the
-// one that actually matched the base query.
+// The dedicated `hl_wildcard_stored_string` Solr capture settles the
+// previously ambiguous stored-string case: `hl.fl=*` includes `category` and
+// yields the same snippets as explicit `hl.fl=category` for this request.
 
 /// The baseline case: `common::SCHEMA_TOML` has exactly one text field
 /// (`body`, also `default_field`), so `hl.fl=*` must reproduce `hl_basic`'s
@@ -439,63 +393,44 @@ async fn hl_wildcard_fl_matches_hl_basic_fixtures_highlighting_block() {
     );
 }
 
-/// **Pins an inference, not a captured shape.** No fixture discriminates
-/// this: the traced corpus never runs a query term that matches a stored
-/// `StrField`'s value under `hl.fl=*` (finding 94's closing note --
-/// `sm_context_tags` is the only genuinely stored non-`tm_` field in those
-/// docs, and no captured `q` ever hits one of its values). What real Solr
-/// would emit here is therefore unsettled by ground truth; this test pins
-/// *Wayfinder's* deliberate divergence, and it is the only thing that does.
-///
-/// The query is `q=category:animals` -- the term is in `q`, deliberately not
-/// in an `fq`. That distinction is the whole point. With the term in an `fq`
-/// the highlighter sees no query term for `category` at all, so `{}`-per-doc
-/// comes out whether or not the wildcard swept `category` up, and the test
-/// would pass against an implementation that included `StrField`s. With the
-/// term in `q` the two behaviours separate:
-///
-/// - today (`is_raw_string` excluded from the expansion set):
-///   `{"doc1":{},"doc4":{}}`
-/// - dropping only that filter, i.e. matching Solr's StrField-inclusive
-///   stored-field set: `{"doc1":{},"doc4":{"category":["<em>animals</em>"]}}`
-///
-/// so asserting no doc carries a `category` key is what makes the exclusion
-/// testable at all. (`category` is genuinely highlightable by the
-/// explicit-field path -- `hl.fl=category` on this same query is a 200 that
-/// emits that very snippet -- so this is not the wildcard dodging a 400.)
-/// The `{}`-per-doc shape itself still matches `hl_no_field_match`'s
-/// captured block, which is asserted against the fixture rather than a
-/// literal.
+/// Ground truth from `hl_wildcard_stored_string`: a wildcard field list
+/// includes the matching stored string field. The explicit request is the
+/// paired equivalence check, so both spellings keep the same `/highlighting`.
 #[tokio::test]
-async fn hl_wildcard_fl_does_not_error_on_a_matched_non_text_field() {
+async fn hl_wildcard_fl_matches_stored_string_fixture_and_explicit_field() {
     let (app, _dir) = indexed_app().await;
-    let (status, body) = get(&app, "select?q=category:animals&hl=true&hl.fl=*&wt=json").await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "hl.fl=* must not 400 just because a non-analyzed field (category) is \
-         what actually matched the base query, got {body}"
-    );
-    let highlighting = body
-        .pointer("/highlighting")
-        .and_then(Value::as_object)
-        .unwrap_or_else(|| panic!("response carries a highlighting block, got {body}"));
-    for (doc, entry) in highlighting {
-        assert!(
-            entry.get("category").is_none(),
-            "hl.fl=* must never surface the non-analyzed `category` field, but \
-             `{doc}` carries one -- the wildcard expansion has stopped \
-             filtering out raw string fields, got {body}"
-        );
-    }
-    let expected = common::fixture("hl_no_field_match")
+    let expected = common::fixture("hl_wildcard_stored_string")
         .pointer("/highlighting")
         .cloned()
-        .expect("hl_no_field_match fixture carries a highlighting block");
+        .expect("hl_wildcard_stored_string fixture carries a highlighting block");
+
+    let (wildcard_status, wildcard) =
+        get(&app, "select?q=category:animals&hl=true&hl.fl=*&wt=json").await;
     assert_eq!(
-        body.pointer("/highlighting"),
+        wildcard_status,
+        StatusCode::OK,
+        "hl.fl=* must succeed, got {wildcard}"
+    );
+    assert_eq!(
+        wildcard.pointer("/highlighting"),
         Some(&expected),
-        "hl.fl=* must reproduce hl_no_field_match's {{}}-per-doc shape, got {body}"
+        "hl.fl=* must include stored string `category`, matching the Solr fixture, got {wildcard}"
+    );
+
+    let (explicit_status, explicit) = get(
+        &app,
+        "select?q=category:animals&hl=true&hl.fl=category&wt=json",
+    )
+    .await;
+    assert_eq!(
+        explicit_status,
+        StatusCode::OK,
+        "explicit hl.fl=category must succeed, got {explicit}"
+    );
+    assert_eq!(
+        explicit.pointer("/highlighting"),
+        Some(&expected),
+        "wildcard and explicit hl.fl=category must produce the same highlighting, got {explicit}"
     );
 }
 
@@ -595,7 +530,7 @@ async fn hl_wildcard_fl_highlights_a_non_default_text_field() {
     );
     assert!(
         !entry.contains_key("category"),
-        "category is non-text and must never appear as a highlighting key, got {entry:?}"
+        "category has no `zephyr` overlap and must be absent, not `[]`, got {entry:?}"
     );
 }
 

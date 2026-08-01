@@ -2225,3 +2225,12 @@ if [ "$extract_select_status" != 200 ]; then
 fi
 cap_extract extract_corrupt_pdf 500 \
   'extractOnly=true&extractFormat=text&resource.name=broken.pdf&wt=json' broken.pdf
+
+# --- hl.fl=* over a stored string field (issue #184) ------------------------
+# Captured 2026-08-01 against a clean one-off `solr:9` container on port 8999
+# (`wayfinder-solr-184`), with the tracer-bullet schema and five-document corpus
+# from the start of this script recreated verbatim. This request discriminates
+# wildcard inclusion from exclusion: `category` is stored, and its `animals`
+# value is also the query term. Solr keys both matching docs' highlighting on
+# `category`, exactly as it does when `hl.fl=category` is explicit.
+cap hl_wildcard_stored_string 'select?q=category%3Aanimals&hl=true&hl.fl=%2A&wt=json'
