@@ -2064,6 +2064,23 @@ impl CoreIndex {
     /// restricted to `fl` (schema field names) if given. Unknown `fl` fields
     /// are silently dropped (findings fact 6); fields with no stored value
     /// are omitted entirely, never emitted as `null`/`[]`.
+    ///
+    /// `*` in `fl` is a wildcard over every *stored* field — declared and
+    /// dynamic alike — not a literal field name (issue #188;
+    /// `solr-ref/responses/mlt_fl_wildcard_score.json`,
+    /// `solr-ref/search-api/trace/00010.json`). It composes with named fields
+    /// (naming a field the wildcard already covers is a no-op) and with
+    /// `score`, and never widens the set beyond what an absent `fl` returns.
+    ///
+    /// Key order is schema order — declared `[[fields]]` first, then stored
+    /// dynamic fields — with `score` appended *last*, after the dynamic fields
+    /// (`solr-ref/search-api/trace/00010.json`). `fl`'s own member order never
+    /// drives it (`solr-ref/responses/select_fl_reversed.json`).
+    ///
+    /// ponytail: `*` is the only glob understood. Solr also accepts a partial
+    /// pattern (`fl=ss_*`, `fl=*_txt`) and the wildcard is per-`fl`-member
+    /// there; here anything other than a bare `*` stays a literal name. No
+    /// captured fixture sends a partial pattern.
     pub fn render_doc(
         &self,
         addr: DocAddress,
@@ -2073,12 +2090,17 @@ impl CoreIndex {
         let searcher = self.reader.searcher();
         let doc: TantivyDocument = searcher.doc(addr)?;
 
+        // An absent `fl` and an `fl` containing `*` want the same field set, so
+        // both loops below ask this rather than matching literal names.
+        let wants =
+            |name: &str| fl.is_none_or(|fl| fl.iter().any(|want| want == "*" || want == name));
+
         let wanted: Vec<&schema::FieldConfig> = self
             .wf_schema
             .fields
             .iter()
             .filter(|f| f.stored)
-            .filter(|f| fl.is_none_or(|fl| fl.iter().any(|name| name == &f.name)))
+            .filter(|f| wants(&f.name))
             .collect();
 
         let mut out = Map::new();
@@ -2098,27 +2120,6 @@ impl CoreIndex {
             }
         }
 
-        // `score` only appears when `fl` explicitly names it, matching Solr:
-        // requesting `fl=score` is what turns scoring output on at all, so a
-        // caller passing a `Some(score)` without asking for it must still see
-        // it omitted.
-        //
-        // ponytail: positioned here — after the schema-declared stored fields,
-        // before the dynamic fields below — on an unverified assumption that
-        // this matches Solr's own key order. No captured fixture actually
-        // discriminates score-before-dynamic-fields from score-appended-last,
-        // since no scored fixture (`select_term_scored.json`,
-        // `select_quick_scored.json`) has a dynamic field. Finding 24
-        // (`docs/solr-ref-findings.md`) is evidence pointing the other way:
-        // Solr appends its own pseudo-fields (`_version_`, `_root_`) at the
-        // end in `select_all.json`, and `score` is itself a pseudo-field, so
-        // "appended last" may be the more faithful placement. Revisit if a
-        // fixture with `fl=score,<dynamic field>` ever gets captured.
-        if let Some(score) = score.filter(|_| fl.is_some_and(|fl| fl.iter().any(|f| f == "score")))
-        {
-            out.insert("score".to_string(), json!(score));
-        }
-
         // Stored dynamic fields come back as top-level keys, the way Solr
         // returns its own dynamic fields — the `_dynamic*` containers are an
         // implementation detail and never appear in a response.
@@ -2135,13 +2136,34 @@ impl CoreIndex {
                         .wf_schema
                         .match_dynamic(&name)
                         .is_some_and(|rule| rule.stored);
-                    if !stored || fl.is_some_and(|fl| !fl.iter().any(|want| want == &name)) {
+                    if !stored || !wants(&name) {
                         continue;
                     }
                     out.insert(name, serde_json::to_value(&v)?);
                 }
             }
         }
+
+        // `score` only appears when `fl` explicitly names it, matching Solr:
+        // requesting `fl=score` is what turns scoring output on at all, so a
+        // caller passing a `Some(score)` without asking for it must still see
+        // it omitted.
+        //
+        // Positioned last — after the dynamic-field loop above, not between it
+        // and the schema-declared fields — because that is what captured Solr
+        // does. `solr-ref/search-api/trace/00010.json` is a real `fl=*,score`
+        // `/select` response over a corpus full of dynamic fields, and its doc
+        // key order ends `..., "sm_field_keywords", "hash", "timestamp",
+        // "ss_search_api_language", "score"`: `score` after every dynamic
+        // field. That agrees with finding 24 (`docs/solr-ref-findings.md`) —
+        // Solr appends its pseudo-fields (`_version_`, `_root_`, and `score`
+        // itself) at the end — and with `mlt_fl_wildcard_score.json`, where
+        // `score` follows `_version_`/`_root_`.
+        if let Some(score) = score.filter(|_| fl.is_some_and(|fl| fl.iter().any(|f| f == "score")))
+        {
+            out.insert("score".to_string(), json!(score));
+        }
+
         Ok(Value::Object(out))
     }
 
@@ -3101,8 +3123,28 @@ stored = true
         );
     }
 
+    /// `score` goes last, after the stored *dynamic* fields.
+    ///
+    /// History: this was
+    /// `render_doc_orders_score_after_stored_fields_and_before_dynamic_fields`,
+    /// added by `1511137 feat(schema): complete the v1 schema layer` as a
+    /// characterization test pinning the pre-#188 order — `score` inserted
+    /// between the declared-field loop and the dynamic-field loop. That
+    /// placement was explicitly flagged as an unverified assumption (the
+    /// `ponytail:` comment that used to sit at the insertion point said no
+    /// captured fixture discriminated the two placements, since no scored
+    /// fixture had a dynamic field).
+    ///
+    /// `solr-ref/search-api/trace/00010.json` overturns it: a real `fl=*,score`
+    /// `/select` response whose doc keys end `..., "sm_field_keywords", "hash",
+    /// "timestamp", "ss_search_api_language", "score"` — `score` after every
+    /// dynamic field. #188 is what first makes `fl=*` reach the dynamic loop,
+    /// so it is the first change for which the position is observable. The
+    /// assertion is inverted rather than deleted, so the decision the earlier
+    /// commit made on purpose stays visible and stays pinned in its corrected
+    /// form.
     #[test]
-    fn render_doc_orders_score_after_stored_fields_and_before_dynamic_fields() {
+    fn render_doc_orders_score_last_after_dynamic_fields() {
         let (_dir, index) = open_test_index();
         let (score, addr) = indexed_scored_hit(&index);
 
@@ -3123,9 +3165,9 @@ stored = true
         let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            vec!["id", "body", "score", "extra_s"],
-            "`score` must sit immediately after the schema-declared stored \
-             fields and before any dynamic-field keys"
+            vec!["id", "body", "extra_s", "score"],
+            "`score` must be appended last, after every dynamic-field key \
+             (`solr-ref/search-api/trace/00010.json`)"
         );
     }
 

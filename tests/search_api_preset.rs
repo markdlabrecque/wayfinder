@@ -918,3 +918,65 @@ async fn stored_fields_are_returned_and_unstored_fields_are_not() {
          exception in schema_extra_fields.xml) and must not be echoed back: {doc}"
     );
 }
+
+// -- retrieval: `fl=*,score`, the request every Drupal search sends ------------
+
+/// `fl=*,score` is what `search_api_solr` sends on **every** search: all 21
+/// `/select` traces under `solr-ref/search-api/trace/` carry
+/// `fl=%2A%2Cscore` verbatim and nothing else. This is therefore the
+/// production-shaped end of issue #188's wildcard expansion, run against the
+/// real preset rather than a purpose-built two-field schema.
+///
+/// What it pins is *key order*: `solr-ref/search-api/trace/00010.json`'s doc
+/// keys end `..., "sm_field_keywords", "hash", "timestamp",
+/// "ss_search_api_language", "score"` — `score` appended last, after every
+/// dynamic field. `tests/select_fl_wildcard.rs`'s corpus-level tests mostly run
+/// against schemas with at most one dynamic field; here the preset puts ~20
+/// dynamic-rule fields in the doc, so an implementation that inserted `score`
+/// between the declared `[[fields]]` and the dynamic ones (what #188 shipped
+/// before review) lands it at position 7 of 26 and fails loudly.
+#[tokio::test]
+async fn preset_fl_star_plus_score_puts_score_last_after_every_dynamic_field() {
+    let (app, _dir) = preset_app_with_doc().await;
+    let (status, text) =
+        common::key_order::get_text(&app, common::CORE, "select?q=id:doc1&fl=*,score&wt=json")
+            .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+
+    let keys = common::key_order::KeyOrder::parse(&text)
+        .keys_at("response.docs[0]", "preset fl=*,score response");
+
+    // The preset's statically declared `[[fields]]`; everything else in the doc
+    // came from a `[[dynamic_fields]]` rule.
+    let declared: Vec<String> = load_preset()
+        .fields
+        .iter()
+        .map(|f| f.name.clone())
+        .collect();
+    let dynamic_keys: Vec<&String> = keys
+        .iter()
+        .filter(|k| *k != "score" && !declared.contains(k))
+        .collect();
+    assert!(
+        dynamic_keys.len() > 1,
+        "vacuity guard: this doc must carry several dynamic-rule fields, or `score` last and \
+         `score` before the dynamic fields would be indistinguishable; got {keys:?}"
+    );
+
+    assert_eq!(
+        keys.last().map(String::as_str),
+        Some("score"),
+        "`fl=*,score` must append `score` after every other key, dynamic fields included \
+         (`solr-ref/search-api/trace/00010.json`), got: {text}"
+    );
+    let score_at = keys
+        .iter()
+        .position(|k| k == "score")
+        .expect("`score` must be present at all under fl=*,score");
+    assert_eq!(
+        score_at,
+        keys.len() - 1,
+        "`score` must be the final key, not sit at index {score_at} of {}: {keys:?}",
+        keys.len()
+    );
+}

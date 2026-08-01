@@ -5,7 +5,7 @@
 //! (`solr-ref/capture.sh`'s MLT block, container `wayfinder-solr-6`, port
 //! 8993) — the canonical 5-doc tracer-bullet corpus has too little shared
 //! vocabulary for MLT term statistics to mean anything (`docs/solr-ref-findings.md`
-//! finding 55). Nothing here is derived from what Wayfinder happens to
+//! finding 64). Nothing here is derived from what Wayfinder happens to
 //! produce.
 //!
 //! Scope, per the issue: `q` (selects the source doc), `mlt.fl`, `mlt.mintf`,
@@ -272,7 +272,7 @@ async fn mlt_route_exists_and_returns_200_for_a_known_doc() {
 #[tokio::test]
 async fn mlt_baseline_matches_fixture_including_degenerate_empty_result() {
     // Real Solr's default mintf=2/mindf=5 thresholds are too strict for a
-    // 20-doc corpus (finding 55): even mlt1/mlt2's near-duplicate vocabulary
+    // 20-doc corpus (finding 64): even mlt1/mlt2's near-duplicate vocabulary
     // does not clear mindf=5, so `response` is legitimately an empty result
     // object here, not a bug in the fixture.
     let (app, _dir) = mlt_app().await;
@@ -294,7 +294,7 @@ async fn mlt_fl_restricted_to_one_field_matches_fixture() {
 #[tokio::test]
 async fn mlt_mintf_mindf_maxdf_tuning_matches_ranked_fixture() {
     // Loosening mintf/mindf from the too-strict defaults surfaces 4 real
-    // matches from the astronomy cluster (finding 55/56) — compared by
+    // matches from the astronomy cluster (finding 64) — compared by
     // ranked-id list per PRD §8 ("compare ranked ID lists, not just result
     // sets"), reusing tests/differential.rs's own machinery
     // (`common::diff::diff_ranked_ids`) rather than inventing a second one.
@@ -472,7 +472,7 @@ async fn mlt_interesting_terms_key_absent_by_default() {
 async fn mlt_interesting_terms_details_matches_fixture() {
     // finding 53: `mlt.interestingTerms=details` adds a bare top-level
     // `interestingTerms` array (empty here, since this particular query's
-    // result set is also empty per finding 55) sibling to `match`/`response`.
+    // result set is also empty per finding 64) sibling to `match`/`response`.
     let (app, _dir) = mlt_app().await;
     let (status, body) = get(
         &app,
@@ -908,34 +908,34 @@ async fn mlt_json_nl_flat_renders_interesting_terms_as_the_default_array() {
     assert_matches_mlt_fixture(body, "mlt_interesting_terms_details");
 }
 
-// --- issue #188 (descoped from #141): `fl=*` is not a wildcard yet ---------
+// --- issue #188 (descoped from #141): `fl=*` is a wildcard ------------------
 
-/// Expiring guard, not a feature test. `fl=*,score` on real Solr returns
-/// every stored/docValues field *and* `score`
-/// (`solr-ref/responses/mlt_fl_wildcard_score.json`,
-/// `solr-ref/search-api/trace/00010.json`) — `*` is a wildcard, not a literal
-/// field name. `CoreIndex::render_doc` treats `fl` as a literal allowlist
-/// with no `*` handling at all, so `fl=*,score` returns *only* `score` and
-/// drops every real field. That is a `render_doc` gap shared with `/select`
-/// (verified there directly, same result), so it was descoped from #141 into
-/// **issue #188** rather than patched on `/mlt`'s handler alone.
+/// `fl=*,score` on real Solr returns every stored/docValues field *and*
+/// `score` (`solr-ref/responses/mlt_fl_wildcard_score.json`, the ground truth
+/// here; `solr-ref/search-api/trace/00010.json` is the `/select`-side witness
+/// for the same shape) — `*` is a wildcard, not a literal field name.
 ///
-/// This pins the broken behaviour deliberately, so it deletes itself: the
-/// moment #188 teaches `render_doc` about `*`, `body` starts coming back and
-/// this test fails, naming itself and the `MLT_EXPECTED_DIVERGENCES` entry
-/// for `mlt_fl_wildcard_score` as the two things to remove. The fixture stays
-/// committed for #188 to build against — and the manifest loop compares it
-/// with BM25 score magnitudes blanked (see `SCORE_MAGNITUDE_EXEMPT` there),
-/// so removing the entry leaves a real, passing fixture comparison rather
-/// than a permanent ratified-divergence failure.
+/// `CoreIndex::render_doc` treated `fl` as a literal allowlist with no `*`
+/// handling at all, so `fl=*,score` returned *only* `score` and dropped every
+/// real field. That is a `render_doc` gap shared with `/select`, which is why
+/// it was descoped from #141 into **issue #188** and fixed in `render_doc`
+/// rather than in `/mlt`'s handler: the `/select` half is
+/// `tests/select_fl_wildcard.rs`.
 ///
-/// Note for #188: the `mlt.fl.wildcard-plus-score` coverage probe
-/// (`src/coverage.rs`) asserts only that `/response/docs/0/score` exists, so
-/// it cannot see this bug either — it is uncovered today only because that
-/// query's default `mlt.mintf`/`mlt.mindf` return no similar docs at all.
-/// Tightening the probe belongs with the fix.
+/// `assert_matches_mlt_fixture_ignoring_score_magnitude`, not
+/// `assert_matches_mlt_fixture`: this request asks for `score`, and Tantivy's
+/// BM25 magnitude is PRD ratified-divergence 4, which #188 does not change.
+/// Doc set, ranking order and every non-score field still have to match the
+/// fixture exactly.
+///
+/// This replaces #141's expiring guard
+/// (`mlt_fl_wildcard_plus_score_still_drops_every_field_until_issue_188`),
+/// deleted along with `mlt_fl_wildcard_score`'s `MLT_EXPECTED_DIVERGENCES`
+/// entry. The fixture stays in the manifest loop's `SCORE_MAGNITUDE_EXEMPT`
+/// set for the ratified-divergence reason above, which is unrelated to the
+/// wildcard.
 #[tokio::test]
-async fn mlt_fl_wildcard_plus_score_still_drops_every_field_until_issue_188() {
+async fn mlt_fl_wildcard_plus_score_returns_every_stored_field_plus_score() {
     let (app, _dir) = mlt_app().await;
     let (status, body) = get(
         &app,
@@ -943,22 +943,58 @@ async fn mlt_fl_wildcard_plus_score_still_drops_every_field_until_issue_188() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    // Named up front so a failure says "the wildcard is still being treated as
+    // a literal field name" rather than dumping a whole-envelope diff.
     let seed = body
         .pointer("/match/docs/0")
-        .expect("the seed doc must still be resolved and rendered");
-    assert!(
-        seed.get("body").is_none() && seed.get("id").is_none(),
-        "issue #188 has landed `fl` wildcard support. Replace this guard with a real fixture \
-         assertion -- `assert_matches_mlt_fixture_ignoring_score_magnitude(body, \
-         \"mlt_fl_wildcard_score\")`, NOT `assert_matches_mlt_fixture`: this request sends \
-         `fl=*,score` and BM25 magnitude is PRD ratified-divergence 4, which #188 does not \
-         change. Then drop `mlt_fl_wildcard_score` from MLT_EXPECTED_DIVERGENCES, leaving it in \
-         the manifest loop's `SCORE_MAGNITUDE_EXEMPT` set for the same reason. Got: {body}"
-    );
+        .expect("the seed doc must still be resolved and rendered")
+        .clone();
+    for field in ["id", "body", "category"] {
+        assert!(
+            seed.get(field).is_some(),
+            "issue #188: `fl=*,score` must expand `*` to every stored field, so `{field}` must \
+             be present on the seed doc (`mlt_fl_wildcard_score.json`), got: {body}"
+        );
+    }
     assert!(
         seed.get("score").is_some(),
-        "`score` is the one `fl=*,score` element `render_doc` does understand today, got: {body}"
+        "`fl=*,score` must still carry `score` alongside the expanded fields, got: {body}"
     );
+    assert_matches_mlt_fixture_ignoring_score_magnitude(body, "mlt_fl_wildcard_score");
+}
+
+/// The key *order* half, which `assert_matches_mlt_fixture_ignoring_score_magnitude`
+/// structurally cannot see: `serde_json` is built with `preserve_order`, but its
+/// `Map` still compares as a map regardless of key order (see
+/// `tests/common/mod.rs::normalize_envelope`'s doc comment). So the order has
+/// to be read off the raw response text.
+///
+/// `mlt_fl_wildcard_score.json` renders each doc as
+/// `id, body, category, _version_, _root_, score` — schema order, then the
+/// internal fields Wayfinder lacks, then `score` last (finding 24: Solr
+/// appends its pseudo-fields after the real ones). `assert_same_key_order`
+/// already ignores `_version_`/`_root_` inside `response.docs[*]`/`match.docs[*]`,
+/// so the expectation reduces to "every stored field in schema order, then
+/// `score`".
+#[tokio::test]
+async fn mlt_fl_wildcard_plus_score_matches_the_fixture_doc_key_order() {
+    let expected = common::key_order::fixture_key_order("mlt_fl_wildcard_score")
+        .keys_at("response.docs[0]", "mlt_fl_wildcard_score doc keys");
+    assert!(
+        !common::key_order::is_alphabetical(&expected),
+        "vacuity guard: the fixture's doc key order ({expected:?}) must not be alphabetical, or \
+         `actual == fixture` would prove nothing about ordering"
+    );
+
+    let (app, _dir) = mlt_app().await;
+    let (status, text) = get_text(
+        &app,
+        CORE,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fl=*,score&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {text}");
+    assert_same_key_order(&text, "mlt_fl_wildcard_score");
 }
 
 // --- issue #189 (descoped from #141): mlt.maxntp has no Tantivy knob -------
@@ -1074,12 +1110,13 @@ fn manifest_path() -> PathBuf {
 /// `tests/differential.rs::EXPECTED_DIVERGENCES`: an entry whose fixture
 /// *starts* matching fails the loop below, so the entry cannot rot into a
 /// permanently green lie — the row must be removed when its issue lands.
-const MLT_EXPECTED_DIVERGENCES: &[(&str, &str)] = &[(
-    "mlt_fl_wildcard_score",
-    "issue #188: `CoreIndex::render_doc` has no `fl` wildcard support, so `fl=*,score` returns \
-     only `score` and drops every other field — a gap shared with `/select`, descoped from #141. \
-     See `mlt_fl_wildcard_plus_score_still_drops_every_field_until_issue_188` above.",
-)];
+///
+/// Currently empty: the last entry, `mlt_fl_wildcard_score`, was removed when
+/// issue #188 taught `CoreIndex::render_doc` about `fl=*` — the row now matches
+/// its fixture (modulo the blanked BM25 magnitudes `SCORE_MAGNITUDE_EXEMPT`
+/// below still allows), and `mlt_fl_wildcard_plus_score_returns_every_stored_field_plus_score`
+/// asserts it directly.
+const MLT_EXPECTED_DIVERGENCES: &[(&str, &str)] = &[];
 
 #[tokio::test]
 async fn hermetic_mlt_manifest_entries_match_committed_fixtures() {
@@ -1111,13 +1148,15 @@ async fn hermetic_mlt_manifest_entries_match_committed_fixtures() {
         // `assert_matches_mlt_fixture_ignoring_score_magnitude` documents
         // above (PRD ratified-divergence 4).
         //
-        // `mlt_fl_wildcard_score` has to be in this set for its
-        // `MLT_EXPECTED_DIVERGENCES` entry to be able to *expire*: score
-        // magnitude is a permanent divergence issue #188 can never fix, so
-        // without blanking, that entry's diff list would stay non-empty
-        // forever and the loop would go on reading "still diverging" long
-        // after the wildcard gap it names had closed. Blanked, the entry
-        // tracks exactly the `fl=*` gap and nothing else.
+        // `mlt_fl_wildcard_score` stays in this set after issue #188 for the
+        // same reason it was put here: BM25 score magnitude is a permanent
+        // divergence #188 does not change, so without blanking this row could
+        // never match its fixture at all. Blanked, it is an ordinary
+        // non-diverging row -- which is exactly why its
+        // `MLT_EXPECTED_DIVERGENCES` entry was able to expire when the
+        // wildcard landed. Do NOT widen this set to cover any other row: the
+        // narrow membership is what keeps the loop able to see a real
+        // regression.
         //
         // For `mlt_fl_rows_start` the real (un-blanked) `maxScore` semantics
         // are still checked directly, so this loop can't be fooled by a
