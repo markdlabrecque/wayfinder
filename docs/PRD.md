@@ -428,11 +428,37 @@ Lucene min/max selector for multi-valued fields, and missing values last in both
 
 Not a Tantivy feature, but *composition* of Tantivy primitives rather than missing capability:
 `qf` is a set of per-field `BoostQuery` clauses, `pf` a phrase clause over the same fields,
-`tie` dis-max tie-breaking across the per-field scorers, `boost` a multiplicative wrapper.
+`tie` dis-max tie-breaking across the per-field scorers, `boost` a multiplicative wrapper around
+the composed query — for a constant multiplier only, see below.
 
-- **In:** `defType`, `q`, `qf`, `pf`, `mm`, `tie`, `boost`, `bq`, quoted phrases, `+`/`-`.
-- **Out:** `bf` function queries, `pf2`/`pf3`, `ps`, `stopwords`, `lowercaseOperators`, the
-  full Solr function-query syntax.
+- **In:** `defType`, `q`, `qf`, `pf`, `mm`, `tie`, `bq`, quoted phrases, `+`/`-`, and `boost`
+  restricted to a constant numeric multiplier.
+- **Out:** `pf2`/`pf3`, `ps`, `stopwords`, `lowercaseOperators`. `bf` and the full Solr
+  function-query syntax are **not** a second, independent v1 exclusion: their single
+  disposition is the **v4** "Function queries (`bf`, `{!func}`)" line in the phase table
+  below. v1 has no function-query evaluator at all, so a function-query argument is
+  accepted-and-ignored rather than rejected (findings 75 and 83).
+
+**`boost` is constant-only, deliberately.** Real Solr's `boost` is a *function-query* parameter,
+not a plain float (finding 83, `docs/solr-ref-findings.md`), and Wayfinder implements no
+function-query evaluator. Only the constant-numeric form (`boost=2.5`) is therefore applied; a
+function-query form such as `boost=recip(rord(title),1,1000,1000)` parses to no boost and is
+ignored, the same accept-and-ignore treatment `bf` gets, and lands properly with **v4**'s
+function queries. Listing `boost` as flatly **In** would overstate what v1 does.
+
+**The Out items are ratified by the v1.5 capture, not merely undemanded (issue #136).** Across
+the 28 committed Drupal traces in `solr-ref/search-api/trace/`, client usage of `bf`, `pf2`,
+`pf3`, `ps`, `stopwords` and `lowercaseOperators` is **zero** — the module's whole edismax
+surface is `{!edismax qf='...'}` inside `q`, and it emits none of `mm`, `tie`, `pf`, `bq`, or
+`boost` either, all of which v1 already implements. (The edismax *param* `stopwords` is what is
+descoped; the analyzer *filter* of the same name is implemented and appears in captured schema
+responses.) None of the six appears in the `captured_parameters` denominator in
+`coverage/search_api_coverage_contract.json`, so building any of them moves the coverage
+fraction by zero. Per the capture's role as a scoping input that decides what to build (see "Why
+the capture moved to its own phase" below), zero usage plus zero coverage movement is a positive
+reason to keep them out. `tests/edismax_descope_guard.rs` is the expiring guard: it fails the day
+a new trace or a regenerated coverage contract mentions any of the six, which is the signal to
+revisit this descope (issue #136) rather than silently keep it.
 
 `mm` is the hardest single piece — the grammar accepts absolute counts, percentages, and
 conditional lists (`2<-1 5<80%`). Implement it fully; it is a small self-contained parser.
