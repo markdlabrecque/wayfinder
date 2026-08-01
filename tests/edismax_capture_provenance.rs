@@ -148,16 +148,32 @@ fn finding(number: u32) -> String {
         .join("\n")
 }
 
-/// The 30 source lines immediately preceding a coverage probe's match arm --
-/// where `src/coverage.rs` puts every probe's provenance comment.
+/// A coverage probe's own provenance comment -- the comment block
+/// `src/coverage.rs` puts immediately above the probe's match arm.
+///
+/// Bounded by the *previous* arm rather than by a line count. A fixed window
+/// would have to be wide enough for the longest comment and would then spill
+/// into the neighbouring probe's comment, letting a citation that belongs to
+/// the neighbour satisfy "this probe cites the fixture" -- the vacuity this
+/// file exists to rule out. So: cut at the previous `" =>"` arm boundary, then
+/// keep only the trailing run of comment lines, which drops the previous arm's
+/// body and leaves exactly this arm's own block.
 fn coverage_arm_preamble(item_id: &str) -> String {
     let arm = format!("\"{item_id}\" =>");
     let head = COVERAGE
         .split_once(&arm)
         .unwrap_or_else(|| panic!("src/coverage.rs has no `{arm}` probe arm"))
         .0;
-    let lines: Vec<&str> = head.lines().collect();
-    lines[lines.len().saturating_sub(30)..].join("\n")
+    let after_previous_arm = head.rsplit_once("\" =>").map_or(head, |(_, tail)| tail);
+    // `trim_end` drops the arm's own indentation, which `split_once` leaves as a
+    // trailing whitespace-only line -- otherwise the trailing comment run is
+    // empty and every citation assertion would be checking nothing.
+    let lines: Vec<&str> = after_previous_arm.trim_end().lines().collect();
+    let block_start = lines
+        .iter()
+        .rposition(|line| !line.trim_start().starts_with("//"))
+        .map_or(0, |at| at + 1);
+    lines[block_start..].join("\n")
 }
 
 /// Blindness control. Every citation assertion in this file sits *after* a
@@ -206,15 +222,21 @@ fn the_provenance_scanners_can_see_what_they_scan() {
     // fixture name" check, so a scanner that silently returned an empty string
     // would fail them rather than pass vacuously -- but only the assertions here
     // pin that `finding` slices the right block and stops at the next numbered
-    // entry, and that `coverage_arm_preamble`'s window is wide enough to reach a
-    // provenance comment. Those cannot be inferred from the citations alone.
+    // entry, and that `coverage_arm_preamble` returns this arm's own comment
+    // block and stops at the previous arm. Those cannot be inferred from the
+    // citations alone.
 
     let preamble = coverage_arm_preamble("select.q.local-params-edismax.and");
     assert!(
-        preamble.contains("select.q.plain-query"),
-        "the 30 lines before the `select.q.local-params-edismax.and` arm should reach its \
-         neighbouring probe, so a provenance comment added above the arm lands inside the window:\n\
-         {preamble}"
+        !preamble.is_empty(),
+        "`coverage_arm_preamble` returned nothing for `select.q.local-params-edismax.and`, so \
+         every \"this probe cites the fixture\" assertion below would be checking an empty string"
+    );
+    assert!(
+        !preamble.contains("select.q.plain-query"),
+        "`coverage_arm_preamble` must stop at the previous arm boundary: it reached the \
+         neighbouring `select.q.plain-query` probe's comment, so that probe's citations could \
+         satisfy an assertion about this one:\n{preamble}"
     );
 
     // `LOCAL_PARAMS_TESTS` is the one scanned constant whose only expiry
