@@ -157,13 +157,17 @@ async fn select_omit_header_true_suppresses_response_header() {
 }
 
 /// `omitHeader=true` must suppress the header only — the `response` block
-/// underneath it must be byte-for-byte the same content real Solr returns
-/// for the identical query with the header present (`select_all.json`).
+/// underneath it must be the same content real Solr returns for the identical
+/// query with the header present (`select_all.json`), modulo the standard
+/// `normalize_envelope` allowances (`_version_`/`_root_`, which Wayfinder has
+/// no equivalent of by an explicit default-`fl` decision — findings fact 9,
+/// PRD section 7).
 #[tokio::test]
 async fn select_omit_header_true_leaves_response_block_unaffected() {
     let (app, _dir) = indexed_app().await;
     let (_status, body) = get(&app, "select?q=*:*&rows=10&omitHeader=true&wt=json").await;
-    let expected = fixture("select_all");
+    let body = common::normalize_envelope(body);
+    let expected = common::normalize_envelope(fixture("select_all"));
     assert_eq!(
         body.get("response"),
         expected.get("response"),
