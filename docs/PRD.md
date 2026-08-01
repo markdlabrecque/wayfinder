@@ -521,9 +521,10 @@ conditional lists (`2<-1 5<80%`). Implement it fully; it is a small self-contain
 | **POC** | The tracer bullet, §6 |
 | **v1** | The table above + edismax + the differential harness |
 | **v1.5 — the capture** | The `search_api_solr` contract capture (§2), pulled ahead of the rest of v2: generated config set + HTTP trace of a real Drupal site, frozen as fixtures, plus the coverage denominator computed from them |
-| **v2 — Search API** | `search_api_wayfinder` connector module (issue #57, done), `search-api.toml` preset (done), `/admin/system` version handshake (done). `/admin/luke`, `/terms`, `/admin/mbeans` explicitly descoped — see below. |
+| **v2 — Search API** | `search_api_wayfinder` connector module (issue #57, done), `search-api.toml` preset (done), `/admin/system` version handshake (done). `/admin/luke`, `/terms`, `/admin/mbeans` were descoped here and are now back in scope under v2.75 — see below. |
 | **v2.5 — Admin web UI** | A read-only operator dashboard, server-rendered by the same binary. Tracer bullet (core view, issue #94) done. See below. |
-| **v3** | Result caches + autowarm, spellcheck/suggester (the module's autocomplete path: `spellcheck.*`, `suggest`, `terms`), grouping (`group=true` — see note below on why "collapse" left this line), `_version_` (issue TBD — scope narrowed, see below) |
+| **v2.75 — the contract's remaining endpoints** | The four endpoints in the coverage denominator that Wayfinder does not yet serve: `/terms` (#155), `/schema/fieldtypes` (#156), `/admin/luke` (#157), `/admin/mbeans` (#158). Completing them closes the endpoints bucket. See below. |
+| **v3** | Result caches + autowarm, spellcheck/suggester (the module's autocomplete path: `spellcheck.*`, `suggest`; `terms` moved earlier to v2.75), grouping (`group=true` — see note below on why "collapse" left this line), `_version_` (issue TBD — scope narrowed, see below) |
 | **v4** | Function queries (`bf`, `{!func}`) — client-evidenced: the module's `BoostMoreRecent` processor emits `product(…,recip(ms(…)))` — spatial (`{!geofilt}`, `bbox`, `{!frange}geodist()`, heatmap facets), snapshot-based read replicas |
 | **Solr 9.x parity** | Solr features with zero client evidence, deliberately unscheduled — the table below. |
 | **Deep roadmap** | Distributed / sharded search, SolrCloud. The majority of Solr's complexity and directly opposed to the operational-simplicity goal. |
@@ -552,6 +553,38 @@ autocomplete/suggester path (`search_api_autocomplete`, not installed in the cap
 and `admin/mbeans` back Search API's own schema-browsing/server-stats admin screens — none of the
 three sit on the query or index path v1-v2 already cover. Revisit if a later phase adds server-side
 support for any of them; until then this is a recorded, deliberate gap, not an open PRD commitment.
+
+**v2.75: that revisit condition has fired, and the gap is now being closed.** The descope above
+was conditional on the server not exposing these endpoints, which is a circular reason once the
+question becomes whether the server should. Four endpoints in the coverage denominator remain
+unserved — `terms` (#155), `schema/fieldtypes` (#156), `admin/luke` (#157), `admin/mbeans` (#158)
+— and all four are now in scope. This does not reopen the general rule: they are in because the
+capture shows the module calling them, which is exactly §5's client-evidence test, and the rest
+of Solr's admin and schema surface stays on the parity roadmap.
+
+`schema/fieldtypes` is the one whose absence does active harm rather than leaving a screen blank.
+The module's `getSchemaLanguageStatistics()` catches the 404 per language and degrades to
+"unsupported", so a working Wayfinder currently reports every language as unsupported on Drupal's
+server-status screen.
+
+**Deliberate divergence: three of the four answer with an honest subset.** Solr's `admin/luke`
+(7.5 KB), `admin/mbeans` (48 KB) and `schema/fieldtypes` (24 KB) responses are mostly Lucene and
+JVM identity — analyzer chain classes, per-field index flag strings like `ITS-----OF-----`,
+directory implementation names, heap accounting, per-handler timers. Wayfinder has no such
+internals, and the client reads a handful of leaves from each: one field from `luke`
+(`index.numDocs`), six from `mbeans`, and field-type *names* only from `fieldtypes`. Wayfinder
+therefore serves real values where a real consumer exists and static plausible placeholders
+elsewhere, following the precedent `/admin/info/system` already set, and omits the Lucene-internal
+keys rather than fabricating them. This is a recorded divergence from captured Solr behaviour, not
+a bug: none of the three carries a `solr-ref/manifest.tsv` row, because a differential-harness row
+could only ever be a permanent `EXPECTED_DIVERGENCES` entry. `terms` is the exception — it is real
+index data Wayfinder genuinely has, so it is expected to match, and a manifest row for it is a
+legitimate follow-up once a capture against the differential core exists.
+
+The honesty constraint cuts both ways. `schema/fieldtypes` must list exactly the languages
+Wayfinder really stems (the 16 in `schema.rs`'s `LANGUAGES`), because the module turns a name in
+that list into a green "supported" row. Padding it would convert today's misreport-downward into a
+misreport-upward, which is worse: nobody investigates green.
 
 **The coverage instrument.** The capture yields the denominator: the set of params, endpoints,
 and response fields the module can emit across its configured features. Coverage is the fraction
