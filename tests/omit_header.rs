@@ -23,23 +23,18 @@
 //!    on `/select`; `00022` on `/mlt`) has a response body with no
 //!    top-level `responseHeader` key. `00001` (`/update`) sends
 //!    `omitHeader=false` and its response *does* carry `responseHeader`.
-//! 2. **Open question 1 (error responses) is NOT settled by the fixtures.**
-//!    Every one of the 28 captured `search_api_solr` traces is a 200; none
-//!    combines `omitHeader=true` with an error. `solr-ref/manifest.tsv` and
-//!    `solr-ref/manifest-errors.tsv` likewise have no row using `omitHeader`
-//!    at all. This file therefore does not assert anything about
-//!    `omitHeader` on error responses in either direction — see the
-//!    module-level note in `src/error.rs` (left for the implementor to add)
-//!    for the scope limit this implies: `WfError`'s envelope construction is
-//!    out of scope for this ticket, and success-path suppression must not
-//!    be threaded into it without new fixture evidence.
-//! 3. **Open question 2: no `EXPECTED_DIVERGENCES`/`ACCEPTED_DIVERGENCES`
-//!    entry exists for this anywhere in `tests/differential.rs`.** Grepping
-//!    `solr-ref/manifest.tsv` and `solr-ref/manifest-errors.tsv` for
-//!    `omitHeader` returns nothing — the differential harness is green on
-//!    this today because it never exercises `omitHeader` at all, not
-//!    because a normaliser masks the divergence. That said, this *is* a real
-//!    coverage gap in the compatibility evidence: `src/coverage.rs`'s
+//! 2. **Issue #179 settles error responses from real Solr 9.10.1.**
+//!    `omit_header_error_true.json` and `omit_header_update_error_true.json`
+//!    show `omitHeader=true` suppressing `responseHeader` on both `/select`'s
+//!    params-echoing error and `/update`'s no-params error. The corresponding
+//!    rows in `manifest-errors.tsv` keep both paths in the differential gate.
+//! 3. **No `EXPECTED_DIVERGENCES` entry masks the implemented behavior.** The
+//!    JSON error fixtures are ordinary differential rows. The one deliberate
+//!    exception is invalid boolean syntax: Solr fails before its JSON writer
+//!    and returns Jetty HTML, while Wayfinder keeps its JSON-only contract;
+//!    PRD ratified divergence 8 records that choice and the dedicated test
+//!    below guards the status, JSON content type, and headerless shape.
+//!    `src/coverage.rs`'s
 //!    `"request.omitHeader"`/`"request.timezone.utc"` runtime probes
 //!    (exercised under `strict_params = true`) already exist and already
 //!    check exactly this, and were carried on `tests/search_api_coverage.rs`'s
@@ -404,4 +399,213 @@ async fn admin_luke_omit_header_is_not_a_registered_param_and_leaves_the_envelop
         "admin/luke must not suppress responseHeader -- omitHeader is out of this ticket's \
          scope for admin endpoints (no trace ever sends it there), got {body}"
     );
+}
+
+/// An unsupported `omitHeader` must not gain effect merely because strict mode
+/// turns it into an error on an admin endpoint.
+#[tokio::test]
+async fn admin_luke_strict_unknown_omit_header_error_retains_header() {
+    let (app, _dir) = indexed_app_with_config(Some("strict_params = true\n")).await;
+    let (status, body) = get(&app, "admin/luke?omitHeader=true&wt=json").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got {body}");
+    assert!(body.get("responseHeader").is_some(), "got {body}");
+}
+
+/// Core validation runs before endpoint parameter validation. Even there, an
+/// admin endpoint's unsupported omitHeader parameter must remain inert.
+#[tokio::test]
+async fn admin_luke_unknown_core_omit_header_error_retains_header() {
+    let (app, _dir) = indexed_app().await;
+    let req = Request::builder()
+        .uri("/solr/nosuch/admin/luke?omitHeader=true&wt=json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.expect("must not fail");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body must be readable");
+    let body: Value = serde_json::from_slice(&bytes).expect("body must be valid JSON");
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "got {body}");
+    assert!(body.get("responseHeader").is_some(), "got {body}");
+}
+
+// --- error envelopes and boolean vocabulary (issue #179) -------------------
+
+/// Ground truth: `omit_header_error_true.json` is Solr 9.10.1's 400 response
+/// to this request. `omitHeader` removes only the envelope header: the error
+/// block and HTTP status remain intact.
+#[tokio::test]
+async fn select_error_omit_header_true_suppresses_header_and_retains_error() {
+    let (app, _dir) = indexed_app().await;
+    let (status, body) = get(&app, "select?q=nosuchfield:x&omitHeader=true&wt=json").await;
+
+    let expected = fixture("omit_header_error_true");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got {body}");
+    assert!(
+        body.get("responseHeader").is_none(),
+        "omitHeader=true must suppress responseHeader, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/error/code"),
+        expected.pointer("/error/code"),
+        "omitHeader=true must retain the fixture error code, got {body}"
+    );
+}
+
+/// Ground truth: `omit_header_error_yes.json` captures the accepted `yes`
+/// alias. Finding 112 further establishes case-insensitive `true` and `on`.
+#[tokio::test]
+async fn select_error_omit_header_accepts_yes_true_and_on_case_insensitively() {
+    let (app, _dir) = indexed_app().await;
+    let expected = fixture("omit_header_error_yes");
+
+    for value in ["yes", "TRUE", "oN"] {
+        let (status, body) = get(
+            &app,
+            &format!("select?q=nosuchfield:x&omitHeader={value}&wt=json"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "omitHeader={value}: {body}"
+        );
+        assert!(
+            body.get("responseHeader").is_none(),
+            "omitHeader={value} must suppress responseHeader, got {body}"
+        );
+        assert_eq!(
+            body.pointer("/error/code"),
+            expected.pointer("/error/code"),
+            "omitHeader={value} must retain the fixture error code, got {body}"
+        );
+    }
+}
+
+/// Finding 112's false vocabulary leaves the normal error envelope intact.
+#[tokio::test]
+async fn select_error_omit_header_false_no_and_off_retain_header() {
+    let (app, _dir) = indexed_app().await;
+    let expected_error_code = fixture("omit_header_error_true")["error"]["code"].clone();
+
+    for value in ["false", "NO", "oFf"] {
+        let (status, body) = get(
+            &app,
+            &format!("select?q=nosuchfield:x&omitHeader={value}&wt=json"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "omitHeader={value}: {body}"
+        );
+        assert_eq!(
+            body.pointer("/error/code"),
+            Some(&expected_error_code),
+            "omitHeader={value} must retain the fixture error code, got {body}"
+        );
+        assert!(
+            body.get("responseHeader").is_some(),
+            "omitHeader={value} must retain responseHeader, got {body}"
+        );
+    }
+}
+
+/// Ground truth: `omit_header_update_error_true.json` proves suppression also
+/// applies to `/update`'s normally header-bearing, no-params error envelope.
+#[tokio::test]
+async fn update_error_omit_header_true_suppresses_header_and_retains_error() {
+    let (app, _dir) = indexed_app().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/solr/{CORE}/update?omitHeader=true&wt=json"))
+        .header("content-type", "application/json")
+        .body(Body::from("{not json"))
+        .unwrap();
+    let resp = app.oneshot(req).await.expect("must not fail");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body must be readable");
+    let body: Value = serde_json::from_slice(&bytes).expect("body must be valid JSON");
+    let expected = fixture("omit_header_update_error_true");
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got {body}");
+    assert!(
+        body.get("responseHeader").is_none(),
+        "omitHeader=true must suppress /update error responseHeader, got {body}"
+    );
+    assert_eq!(body.pointer("/error/code"), expected.pointer("/error/code"));
+}
+
+/// Validation follows core routing. Before `check_params` runs, an invalid
+/// omitHeader value must not act like true and suppress an unknown-core error.
+#[tokio::test]
+async fn invalid_omit_header_is_inert_before_select_and_update_validation() {
+    let (app, _dir) = indexed_app().await;
+
+    let select = Request::builder()
+        .uri("/solr/nosuch/select?q=*:*&omitHeader=1&wt=json")
+        .body(Body::empty())
+        .unwrap();
+    let update = Request::builder()
+        .method("POST")
+        .uri("/solr/nosuch/update?omitHeader=1&wt=json")
+        .header("content-type", "application/json")
+        .body(Body::from("[]"))
+        .unwrap();
+
+    for req in [select, update] {
+        let resp = app.clone().oneshot(req).await.expect("must not fail");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body must be readable");
+        let body: Value = serde_json::from_slice(&bytes).expect("body must be valid JSON");
+        assert_eq!(status, StatusCode::NOT_FOUND, "got {body}");
+        assert!(body.get("responseHeader").is_some(), "got {body}");
+    }
+}
+
+/// Ground truth: `omit_header_invalid_one.html` is Solr 9.10.1's HTTP 400
+/// for `omitHeader=1`; `t` is invalid too. PRD divergence 8 deliberately keeps
+/// Wayfinder's error JSON rather than reproducing Jetty HTML.
+#[tokio::test]
+async fn select_invalid_omit_header_values_return_headerless_json_400() {
+    let (app, _dir) = indexed_app().await;
+
+    for value in ["1", "t"] {
+        let req = Request::builder()
+            .uri(format!(
+                "/solr/{CORE}/select?q=*:*&omitHeader={value}&wt=json"
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.expect("must not fail");
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body must be readable");
+        let body: Value = serde_json::from_slice(&bytes).expect("body must be valid JSON");
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "omitHeader={value}: {body}"
+        );
+        assert!(
+            content_type.starts_with("application/json"),
+            "Wayfinder's JSON-only divergence must return JSON, got {content_type}"
+        );
+        assert!(body.get("responseHeader").is_none(), "got {body}");
+        assert_eq!(body.pointer("/error/code"), Some(&serde_json::json!(400)));
+    }
 }

@@ -2252,3 +2252,24 @@ cap dotted_dynamic_basic       'select?q=tm_X3b_en_a.b:gamma&fl=id&sort=id+asc&w
 cap dotted_dynamic_leading     'select?q=tm_X3b_en_.leading:gamma&fl=id&sort=id+asc&wt=json'
 cap dotted_dynamic_trailing    'select?q=tm_X3b_en_trailing.:gamma&fl=id&sort=id+asc&wt=json'
 cap dotted_dynamic_consecutive 'select?q=tm_X3b_en_a..b:gamma&fl=id&sort=id+asc&wt=json'
+
+# --- omitHeader on errors and boolean spellings (issue #179) ---------------
+# Captured 2026-08-01 against `solr:9.10.1` in a clean one-off container
+# (`wayfinder-solr-179`, port 9010, removed afterwards). No schema or corpus is
+# needed: querying an undefined field supplies the stable 400. All three JSON
+# rows belong in manifest-errors.tsv because they are error responses, even though
+# they are core-relative GETs.
+#
+# `true` settles this issue's original question: Solr suppresses
+# `responseHeader` on errors too. `yes` proves omitHeader uses Solr's
+# case-insensitive true/yes/on boolean vocabulary rather than exact `true`.
+capx omit_header_error_true GET "$CORE/select?q=nosuchfield:x&omitHeader=true&wt=json"
+capx omit_header_error_yes  GET "$CORE/select?q=nosuchfield:x&omitHeader=yes&wt=json"
+capx omit_header_update_error_true POST "$CORE/update?omitHeader=true&wt=json" '{not json'
+#
+# The issue comment's claim that Solr also accepts `1` and `t` is wrong for
+# Solr 9.10.1: both fail before the JSON response writer with Jetty HTML and
+# `invalid boolean value`. Preserve the raw `1` evidence outside the manifest,
+# whose differential runner requires JSON. Reproduce it with:
+# curl -sg "$SOLR/$CORE/select?q=nosuchfield:x&omitHeader=1&wt=json" \
+#   -o "$OUT/omit_header_invalid_one.html"

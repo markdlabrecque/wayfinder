@@ -41,6 +41,8 @@ pub enum Envelope {
 #[derive(Default)]
 struct ErrorExtra {
     params: Value,
+    /// `WithParams` errors use the same envelope switch as successes.
+    omit_header: bool,
     /// Issue #35: some errors are detected only after the base query has
     /// already run, so Solr's own fixture for them carries the base query's
     /// `response` block alongside `error` (e.g. `facet_unknown_field.json`).
@@ -92,14 +94,24 @@ impl WfError {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, class, msg)
     }
 
-    /// Attaches the request params for the `WithParams` envelope.
+    /// Attaches request state for a header-bearing envelope. `NoParams` uses
+    /// only `omitHeader`; it never renders the echoed params.
     pub fn with_params(mut self, params: &Params) -> Self {
         self.extra.params = params.echo();
+        self.extra.omit_header = params.omit_header();
         self
     }
 
     pub fn envelope(mut self, envelope: Envelope) -> Self {
         self.envelope = envelope;
+        self
+    }
+
+    /// Explicitly suppresses `responseHeader`, independent of parsed request
+    /// parameters. Used for invalid `omitHeader` values, whose validation
+    /// error intentionally remains headerless JSON.
+    pub fn suppress_response_header(mut self) -> Self {
+        self.extra.omit_header = true;
         self
     }
 
@@ -139,17 +151,23 @@ impl IntoResponse for WfError {
         };
         let body = match self.envelope {
             Envelope::Bare => json!({ "error": error }),
+            Envelope::NoParams if self.extra.omit_header => json!({ "error": error }),
             Envelope::NoParams => json!({
                 "responseHeader": { "status": code, "QTime": 0 },
                 "error": error,
             }),
-            Envelope::WithParams => match self.extra.response {
-                Some(response) => json!({
+            Envelope::WithParams => match (self.extra.omit_header, self.extra.response) {
+                (true, Some(response)) => json!({
+                    "response": response,
+                    "error": error,
+                }),
+                (true, None) => json!({ "error": error }),
+                (false, Some(response)) => json!({
                     "responseHeader": { "status": code, "QTime": 0, "params": self.extra.params },
                     "response": response,
                     "error": error,
                 }),
-                None => json!({
+                (false, None) => json!({
                     "responseHeader": { "status": code, "QTime": 0, "params": self.extra.params },
                     "error": error,
                 }),

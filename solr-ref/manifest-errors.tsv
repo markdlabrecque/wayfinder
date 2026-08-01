@@ -136,3 +136,6 @@ update_repeated_add_missing_doc	400	POST	update9/update?commit=true&wt=json	{"ad
 update_select_after_repeated_add_missing_doc	200	GET	update9/select?q=id:r6&fl=id,title&wt=json		http://localhost:8992/solr
 update_repeated_add_unknown_key	400	POST	update9/update?commit=true&wt=json	{"add":{"doc":{"id":"r7","body":"valid","title":"india"}},"add":{"doc":{"id":"r8","body":"valid","title":"juliett"}},"frobnicate":{}}	http://localhost:8992/solr
 update_select_after_repeated_add_unknown_key	200	GET	update9/select?q=id:r7+OR+id:r8&fl=id,title&sort=id+asc&wt=json		http://localhost:8992/solr
+omit_header_error_true	400	GET	content/select?q=nosuchfield:x&omitHeader=true&wt=json	
+omit_header_error_yes	400	GET	content/select?q=nosuchfield:x&omitHeader=yes&wt=json	
+omit_header_update_error_true	400	POST	content/update?omitHeader=true&wt=json	{not json

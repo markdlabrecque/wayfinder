@@ -935,6 +935,21 @@ fn check_sort(state: &AppState, params: &Params) -> Result<Vec<SortClause>, WfEr
 /// `PER_FIELD_PARAMS` and `allowed` (issue #140). The shape has to be matched
 /// rather than listed, since `<field>` is any field name the schema resolves.
 fn check_params(state: &AppState, allowed: &[&str], params: &Params) -> Result<(), WfError> {
+    // Validate only endpoints that implement this envelope parameter. Keeping
+    // it inside the allowlist boundary lets admin endpoints continue ignoring
+    // `omitHeader` under their default non-strict parameter policy.
+    if allowed.contains(&"omitHeader") {
+        params.validate_omit_header().map_err(|value| {
+            WfError::bad_request(
+                "wayfinder::InvalidParam",
+                format!(
+                    "invalid omitHeader value `{value}`; expected true, yes, on, false, no, or off"
+                ),
+            )
+            .with_params(params)
+            .suppress_response_header()
+        })?;
+    }
     if !state.config.strict_params {
         return Ok(());
     }
@@ -1770,11 +1785,13 @@ async fn update(
     body: axum::body::Bytes,
 ) -> Result<Response, WfError> {
     check_update_method(&method)?;
-    let params = Params::parse(query.as_deref().unwrap_or(""));
+    let params = Params::parse(query.as_deref().unwrap_or("")).allow_omit_header();
     // `/update` errors carry a responseHeader but no params echo — Solr does
     // not echo params on this endpoint (`err_update_bad_json.json`).
     let update_err = |class: &'static str, msg: String| {
-        WfError::bad_request(class, msg).envelope(Envelope::NoParams)
+        WfError::bad_request(class, msg)
+            .with_params(&params)
+            .envelope(Envelope::NoParams)
     };
     check_core(&state, &core, &params, Envelope::NoParams)?;
     check_params(&state, UPDATE_PARAMS, &params).map_err(|e| e.envelope(Envelope::NoParams))?;
@@ -1792,7 +1809,9 @@ async fn update(
             ));
         }
         state.index.commit().map_err(|e| {
-            WfError::internal("wayfinder::CommitError", e.to_string()).envelope(Envelope::NoParams)
+            WfError::internal("wayfinder::CommitError", e.to_string())
+                .with_params(&params)
+                .envelope(Envelope::NoParams)
         })?;
         return Ok(update_success(&params));
     }
@@ -1851,6 +1870,7 @@ async fn update(
                 flush_adds!();
                 state.index.commit().map_err(|e| {
                     WfError::internal("wayfinder::CommitError", e.to_string())
+                        .with_params(&params)
                         .envelope(Envelope::NoParams)
                 })?;
             }
@@ -1869,7 +1889,9 @@ async fn update(
         params.get("commit") == Some("true") || params.get("softCommit") == Some("true");
     if commit_now {
         state.index.commit().map_err(|e| {
-            WfError::internal("wayfinder::CommitError", e.to_string()).envelope(Envelope::NoParams)
+            WfError::internal("wayfinder::CommitError", e.to_string())
+                .with_params(&params)
+                .envelope(Envelope::NoParams)
         })?;
     }
     // `commitWithin=<ms>` schedules a commit at most that many ms out — also
@@ -1915,7 +1937,7 @@ async fn select(
     AxPath(core): AxPath<String>,
     RawQuery(query): RawQuery,
 ) -> Result<Response, WfError> {
-    let params = Params::parse(query.as_deref().unwrap_or(""));
+    let params = Params::parse(query.as_deref().unwrap_or("")).allow_omit_header();
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, SELECT_PARAMS, &params)?;
     let sort = check_sort(&state, &params)?;
@@ -2237,7 +2259,7 @@ async fn mlt(
     AxPath(core): AxPath<String>,
     RawQuery(query): RawQuery,
 ) -> Result<Response, WfError> {
-    let params = Params::parse(query.as_deref().unwrap_or(""));
+    let params = Params::parse(query.as_deref().unwrap_or("")).allow_omit_header();
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, MLT_PARAMS, &params)?;
 
@@ -2558,22 +2580,16 @@ async fn mlt(
 /// *defined but non-text* field is a 400 the same way — see
 /// `check_terms_field`.
 ///
-/// ponytail: no `solr-ref/manifest.tsv` row, so the differential harness does
-/// not cover this endpoint yet. Ceiling named because it is a real gap: the
-/// capture needs the differential core, and it is likely to surface analyzer
-/// differences between Wayfinder's `text_en` chain and Solr's — the captured
-/// `solr-ref/search-api/configset` uses `StandardTokenizerFactory`, a
-/// `LengthFilterFactory min="2"`, a `WordDelimiterGraphFilterFactory`, and an
-/// `accents_en.txt` mapping char filter that Wayfinder has no counterpart for.
-/// None of those is a verified finding yet, so none is recorded as one; the
-/// capture is what would settle them, and any diff it shows is a finding to
-/// escalate, not to normalise away.
+/// `terms_body.json` and its `solr-ref/manifest.tsv` row cover this endpoint
+/// in the differential harness. The one captured analyzer difference is
+/// explicit and narrowly guarded under issue #205: Solr's `text_en` emits
+/// `dai` where Tantivy emits `day` (finding 103).
 async fn terms(
     State(state): State<Arc<AppState>>,
     AxPath(core): AxPath<String>,
     RawQuery(query): RawQuery,
 ) -> Result<Response, WfError> {
-    let params = Params::parse(query.as_deref().unwrap_or(""));
+    let params = Params::parse(query.as_deref().unwrap_or("")).allow_omit_header();
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, TERMS_PARAMS, &params)?;
     check_terms_json_nl(&params).map_err(|e| e.with_params(&params))?;

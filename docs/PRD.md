@@ -250,10 +250,21 @@ chosen. Nothing may be added here without the same two things.
    coalescing duplicate identical `facet.query` values, which Wayfinder matches. (issue #149;
    finding 102)
 
+8. **An invalid `omitHeader` value returns Wayfinder's JSON error envelope, where Solr returns
+   Jetty HTML.** `omit_header_invalid_one.html` shows `omitHeader=1&wt=json` failing before Solr's
+   JSON response writer runs, with HTTP 400 and `invalid boolean value: 1` embedded in an HTML
+   page. Wayfinder matches the 400 and rejects the same vocabulary, but keeps the response in its
+   normal headerless JSON error shape. This is the same client-facing choice as divergence 1:
+   clients parse JSON, Wayfinder supports only `wt=json`, and reproducing a servlet container's
+   fallback HTML would add a second error format solely for parser failures. Valid
+   `omitHeader=true`/`yes`/`on` still suppresses `responseHeader` on success and error envelopes,
+   matching `omit_header_error_true.json`, `omit_header_error_yes.json`, and
+   `omit_header_update_error_true.json`. (issue #179; finding 112)
+
 Note that divergence 3 is a difference from the *configset* the reference fixtures were captured
-against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, 4, 6, and 7
-are differences from Solr proper. Divergence 5 is a deliberate config choice plus inherent host
-non-reproducibility, not a Solr-behaviour disagreement.
+against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, 4, 6, 7,
+and 8 are differences from Solr proper. Divergence 5 is a deliberate config choice plus inherent
+host non-reproducibility, not a Solr-behaviour disagreement.
 
 ### How this is verified
 
