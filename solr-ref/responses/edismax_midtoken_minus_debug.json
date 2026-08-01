@@ -1,0 +1,96 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":6,
+    "params":{
+      "q":"state-of-the-art",
+      "defType":"edismax",
+      "qf":"title body",
+      "fl":"id",
+      "sort":"id asc",
+      "wt":"json",
+      "debugQuery":"true"
+    }
+  },
+  "response":{
+    "numFound":0,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "debug":{
+    "rawquerystring":"state-of-the-art",
+    "querystring":"state-of-the-art",
+    "parsedquery":"+DisjunctionMaxQuery(((title:state title:art) | (body:state body:art)))",
+    "parsedquery_toString":"+((title:state title:art) | (body:state body:art))",
+    "explain":{ },
+    "QParser":"ExtendedDismaxQParser",
+    "altquerystring":null,
+    "boost_queries":null,
+    "parsed_boost_queries":[ ],
+    "boostfuncs":null,
+    "timing":{
+      "time":6.0,
+      "prepare":{
+        "time":1.0,
+        "query":{
+          "time":1.0
+        },
+        "facet":{
+          "time":0.0
+        },
+        "facet_module":{
+          "time":0.0
+        },
+        "mlt":{
+          "time":0.0
+        },
+        "highlight":{
+          "time":0.0
+        },
+        "stats":{
+          "time":0.0
+        },
+        "expand":{
+          "time":0.0
+        },
+        "terms":{
+          "time":0.0
+        },
+        "debug":{
+          "time":0.0
+        }
+      },
+      "process":{
+        "time":4.0,
+        "query":{
+          "time":3.0
+        },
+        "facet":{
+          "time":0.0
+        },
+        "facet_module":{
+          "time":0.0
+        },
+        "mlt":{
+          "time":0.0
+        },
+        "highlight":{
+          "time":0.0
+        },
+        "stats":{
+          "time":0.0
+        },
+        "expand":{
+          "time":0.0
+        },
+        "terms":{
+          "time":0.0
+        },
+        "debug":{
+          "time":0.0
+        }
+      }
+    }
+  }
+}

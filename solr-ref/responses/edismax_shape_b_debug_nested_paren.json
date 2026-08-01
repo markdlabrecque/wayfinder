@@ -1,0 +1,19 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":2,
+    "params":{
+      "q":"({!edismax qf='title body'}(+\"quick\" +\"fox\"))",
+      "df":"id",
+      "fl":"id",
+      "sort":"id asc",
+      "wt":"json",
+      "debugQuery":"true"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.parser.ParseException"],
+    "msg":"org.apache.solr.search.SyntaxError: Cannot parse '({!edismax qf='title body'}(+\"quick\" +\"fox\"))': Encountered \" \")\" \") \"\" at line 1, column 44.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <LPARAMS> ...\n    \"filter(\" ...\n    <NUMBER> ...\n    ",
+    "code":400
+  }
+}

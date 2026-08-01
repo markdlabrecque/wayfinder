@@ -75,6 +75,14 @@ const SHAPE_B_DEBUG_FIXTURES: [&str; 2] = [
     "edismax_shape_b_debug_parsedquery_paren_terminated",
 ];
 
+/// Issue #197 closes finding 92's residual inference for `-`, independently of
+/// #147's capture of the analogous `+` form.
+const MIDTOKEN_MINUS_DEBUG_FIXTURE: &str = "edismax_midtoken_minus_debug";
+
+/// Issue #197 closes finding 91's residual inference that whitespace ends the
+/// bound run even inside a nested parenthesised expression.
+const SHAPE_B_NESTED_PAREN_DEBUG_FIXTURE: &str = "edismax_shape_b_debug_nested_paren";
+
 const CORE_INDEX: &str = include_str!("../src/core_index.rs");
 const COVERAGE: &str = include_str!("../src/coverage.rs");
 const LOCAL_PARAMS_SRC: &str = include_str!("../src/local_params.rs");
@@ -500,5 +508,54 @@ fn shape_b_debugquery_captures_back_the_binding_rule_in_findings_90_and_91() {
          expiring guard for this gap and only scans the manifests, so it cannot see a capture that \
          is deliberately not a manifest row -- it would stay green forever. The capture exists: \
          delete the guard."
+    );
+}
+
+/// Issue #197(a): finding 92 generalises #147's captured mid-token `+` result
+/// to `-`, but the motivating `state-of-the-art` form needs its own evidence.
+#[test]
+fn midtoken_minus_capture_backs_finding_92() {
+    assert!(
+        fixture_exists(MIDTOKEN_MINUS_DEBUG_FIXTURE),
+        "solr-ref/responses/{MIDTOKEN_MINUS_DEBUG_FIXTURE}.json does not exist, so finding 92's \
+         claim that `-` is an ordinary term character mid-token still rests on the Lucene grammar"
+    );
+    assert!(
+        cites(CAPTURE_SH, MIDTOKEN_MINUS_DEBUG_FIXTURE),
+        "solr-ref/capture.sh must record the commented debugQuery capture command for \
+         `{MIDTOKEN_MINUS_DEBUG_FIXTURE}`"
+    );
+    let f92 = finding(92);
+    assert!(
+        cites(&f92, MIDTOKEN_MINUS_DEBUG_FIXTURE),
+        "finding 92 must cite `{MIDTOKEN_MINUS_DEBUG_FIXTURE}` as direct evidence for the \
+         `state-of-the-art` / mid-token `-` claim:\n{f92}"
+    );
+}
+
+/// Issue #197(b): finding 91 says whitespace terminates at any paren depth,
+/// while #147's whitespace capture only exercised depth zero.
+#[test]
+fn nested_paren_shape_b_capture_backs_finding_91() {
+    assert!(
+        fixture_exists(SHAPE_B_NESTED_PAREN_DEBUG_FIXTURE),
+        "solr-ref/responses/{SHAPE_B_NESTED_PAREN_DEBUG_FIXTURE}.json does not exist, so finding \
+         91's any-paren-depth whitespace rule remains inferred"
+    );
+    assert!(
+        cites(CAPTURE_SH, SHAPE_B_NESTED_PAREN_DEBUG_FIXTURE),
+        "solr-ref/capture.sh must record the commented nested-paren Shape-B capture command for \
+         `{SHAPE_B_NESTED_PAREN_DEBUG_FIXTURE}`"
+    );
+    assert!(
+        cites(LOCAL_PARAMS_SRC, SHAPE_B_NESTED_PAREN_DEBUG_FIXTURE),
+        "src/local_params.rs must cite `{SHAPE_B_NESTED_PAREN_DEBUG_FIXTURE}` and stop calling \
+         the now-captured nested-paren behavior an unverified ponytail ceiling"
+    );
+    let f91 = finding(91);
+    assert!(
+        cites(&f91, SHAPE_B_NESTED_PAREN_DEBUG_FIXTURE),
+        "finding 91 must cite `{SHAPE_B_NESTED_PAREN_DEBUG_FIXTURE}` as direct evidence that \
+         whitespace terminates the bound run below depth zero:\n{f91}"
     );
 }

@@ -2291,3 +2291,26 @@ capx omit_header_update_error_true POST "$CORE/update?omitHeader=true&wt=json" '
 #   select?q=title:quick%20OR%20body:fox&fl=id&sort=id%20asc&hl=true&hl.fl=title,body&hl.requireFieldMatch=true&wt=json
 #   select?q=body:(alpha%20beta%20gamma)&fq=id:merge1&fl=id&hl=true&hl.fl=body&hl.method=original&hl.fragsize=20&hl.snippets=5&hl.mergeContiguous=false&wt=json
 #   select?q=body:(alpha%20beta%20gamma)&fq=id:merge1&fl=id&hl=true&hl.fl=body&hl.method=original&hl.fragsize=20&hl.snippets=5&hl.mergeContiguous=true&wt=json
+
+# --- edismax residual grammar evidence (issue #197) -------------------------
+# Captured 2026-08-01 against the existing edismax block's real `solr:9`
+# container (`wayfinder-solr-7`, port 8994), `content` core, schema, and 10-doc
+# corpus. These are commented one-off commands rather than `cape` calls:
+# Wayfinder emits no `debug` section, and the nested request intentionally 400s,
+# so neither belongs in manifest.tsv's differential whole-body sweep.
+#
+# 1. Finding 92 previously generalised the captured mid-token `+` grammar fact
+#    to `-`. The motivating form from #137 now has direct parse-tree evidence:
+#      parsedquery = +DisjunctionMaxQuery(((title:state title:art) | (body:state body:art)))
+#    Exactly one dismax clause spans both analysed tokens; the two hyphens did
+#    not split `state-of-the-art` into separate query clauses.
+# curl -sg 'http://localhost:8994/solr/content/select?q=state-of-the-art&defType=edismax&qf=title+body&debugQuery=true&fl=id&sort=id+asc&wt=json' \
+#   -o solr-ref/responses/edismax_midtoken_minus_debug.json
+#
+# 2. Finding 91's whitespace terminator had only been captured at bound-run
+#    paren depth zero. Here the run starts `(+"quick"`, so its first whitespace
+#    is at depth one. Real Solr answers 400: cutting there hands the outer parser
+#    the unbalanced remainder `+"fox"))`. A depth-zero-only rule would instead
+#    bind the complete balanced `(+"quick" +"fox")` expression and return 200.
+# curl -sg 'http://localhost:8994/solr/content/select?q=(%7B!edismax+qf%3D%27title+body%27%7D(%2B%22quick%22+%2B%22fox%22))&df=id&debugQuery=true&fl=id&sort=id+asc&wt=json' \
+#   -o solr-ref/responses/edismax_shape_b_debug_nested_paren.json
