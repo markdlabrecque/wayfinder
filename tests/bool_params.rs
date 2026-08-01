@@ -58,6 +58,124 @@ fn fixture_bucket(fixture_name: &str, label: &str) -> Vec<Value> {
     })
 }
 
+/// Asserts an *error* response against its fixture.
+///
+/// The seven success cases in this file use `common::assert_matches_fixture`,
+/// which compares the whole envelope. The two error cases cannot: Solr's
+/// `error.metadata` carries Java class names
+/// (`org.apache.solr.common.SolrException`), while Wayfinder deliberately
+/// emits its own honest analogues (`wayfinder::InvalidBoolean`,
+/// `wayfinder::FacetError`) -- `src/error.rs` documents those values as
+/// outside the comparison contract, `tests/differential.rs`'s normaliser drops
+/// `error.metadata` outright, and `tests/error_shapes.rs` compares its *shape*
+/// only. Matching the fixture wholesale would mean impersonating Solr's Java
+/// class names, so this pins everything the fixture actually proves and
+/// relaxes only the two metadata *values*.
+///
+/// Checked against the fixture: HTTP status, `responseHeader.status`, the
+/// `responseHeader.params` echo, the presence *and* contents of the `response`
+/// block (the error-timing split this file exists to cover), `error.msg`
+/// verbatim, `error.code`, and `error.metadata`'s shape -- a four-element flat
+/// array whose keys match and whose values are non-empty strings.
+fn assert_error_matches_fixture(status: StatusCode, body: &Value, fixture_name: &str) {
+    let expected = fixture(fixture_name);
+
+    let want_code = expected["error"]["code"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("fixture {fixture_name} has no error.code"));
+    assert_eq!(
+        status.as_u16() as i64,
+        want_code,
+        "HTTP status must equal the fixture's error.code ({fixture_name}); got {body}"
+    );
+    assert_eq!(
+        body["error"]["code"].as_i64(),
+        Some(want_code),
+        "error.code must match the fixture ({fixture_name}); got {body}"
+    );
+    assert_eq!(
+        body.pointer("/responseHeader/status")
+            .and_then(Value::as_i64),
+        expected
+            .pointer("/responseHeader/status")
+            .and_then(Value::as_i64),
+        "responseHeader.status must match the fixture ({fixture_name}); got {body}"
+    );
+
+    // The params echo is compared in full -- `serde_json`'s `Map` equality is
+    // order-independent, so Solr's own key ordering does not have to be
+    // reproduced, but every key and raw string value does.
+    assert_eq!(
+        body.pointer("/responseHeader/params"),
+        expected.pointer("/responseHeader/params"),
+        "responseHeader.params must match the fixture ({fixture_name}); got {body}"
+    );
+
+    // Presence *and* contents of the `response` block: this is the error-timing
+    // split (pre-query `facet` has none, post-query `facet.missing` carries the
+    // base query's real hits). No `_version_`/`_root_` normalisation is needed
+    // -- both fixtures were captured with `rows=0`, so `docs` is empty.
+    assert_eq!(
+        body.get("response"),
+        expected.get("response"),
+        "the `response` block must match the fixture exactly, presence included \
+         ({fixture_name}); got {body}"
+    );
+
+    assert_eq!(
+        body.pointer("/error/msg").and_then(Value::as_str),
+        expected.pointer("/error/msg").and_then(Value::as_str),
+        "error.msg must match the fixture verbatim ({fixture_name}); got {body}"
+    );
+
+    // metadata: flat alternating array, same length, same keys; the values are
+    // Java class names in Solr and Wayfinder-honest strings here, so they are
+    // asserted non-empty rather than compared (same contract as
+    // `tests/error_shapes.rs`).
+    let want_meta = expected["error"]["metadata"]
+        .as_array()
+        .unwrap_or_else(|| panic!("fixture {fixture_name} has no error.metadata array"));
+    let got_meta = body["error"]["metadata"].as_array().unwrap_or_else(|| {
+        panic!("{fixture_name}: error.metadata must be a flat array; got {body}")
+    });
+    assert_eq!(
+        got_meta.len(),
+        want_meta.len(),
+        "error.metadata length must match the fixture ({fixture_name}); got {body}"
+    );
+    for (i, want) in want_meta.iter().enumerate().step_by(2) {
+        assert_eq!(
+            got_meta[i].as_str(),
+            want.as_str(),
+            "error.metadata key at index {i} must match the fixture ({fixture_name}); got {body}"
+        );
+        assert!(
+            got_meta[i + 1].as_str().is_some_and(|v| !v.is_empty()),
+            "error.metadata value at index {} must be a non-empty string ({fixture_name}); \
+             got {body}",
+            i + 1
+        );
+    }
+
+    // Nothing beyond the keys the fixture itself has may appear.
+    let want_keys: Vec<&str> = expected
+        .as_object()
+        .expect("fixture must be a JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let got_keys: Vec<&str> = body
+        .as_object()
+        .expect("response must be a JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        got_keys, want_keys,
+        "the envelope's top-level keys, in order, must match the fixture ({fixture_name})"
+    );
+}
+
 // --- facet.missing: true-family values (start-with, case-insensitive) ------
 
 /// `facet.missing=TRUE` (uppercase) must still add the null bucket -- the
@@ -189,7 +307,11 @@ async fn facet_missing_nope_is_invalid_and_the_response_block_survives() {
         Some("invalid boolean value: nope"),
         "error.msg must name the invalid raw value verbatim; got {body}"
     );
-    assert_matches_fixture(body, "bool_facet_missing_invalid");
+    // Not `assert_matches_fixture`: the fixture's `error.metadata` holds Solr's
+    // Java class names, which Wayfinder deliberately does not impersonate --
+    // see `assert_error_matches_fixture`'s doc comment. Everything else,
+    // including the `response` block this test is about, is still compared.
+    assert_error_matches_fixture(status, &body, "bool_facet_missing_invalid");
 }
 
 // --- facet: the true-family value that is not the exact word `true` --------
@@ -243,7 +365,11 @@ async fn facet_equals_1_is_invalid_and_the_envelope_has_no_response_block() {
         Some("invalid boolean value: 1"),
         "error.msg must name the invalid raw value verbatim; got {body}"
     );
-    assert_matches_fixture(body, "bool_facet_invalid");
+    // Not `assert_matches_fixture`: the fixture's `error.metadata` holds Solr's
+    // Java class names, which Wayfinder deliberately does not impersonate --
+    // see `assert_error_matches_fixture`'s doc comment. The absent `response`
+    // block this test is about is still compared against the fixture's.
+    assert_error_matches_fixture(status, &body, "bool_facet_invalid");
 }
 
 // --- omitHeader: a true-family value that is not the literal `true` --------
