@@ -135,6 +135,14 @@ mlt_fl_rows_start	200	mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fl=id,s
 mlt_interesting_terms_details	200	mlt?q=id:mlt1&mlt.fl=body&mlt.interestingTerms=details&wt=json
 mlt_no_interesting_terms	200	mlt?q=id:mlt20&mlt.fl=body&wt=json
 mlt_nonexistent_doc	200	mlt?q=id:nosuchdoc&mlt.fl=body&wt=json
+mlt_fq_scope	200	mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:astronomy&wt=json
+mlt_fq_seed_not_filtered	200	mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:cooking&wt=json
+mlt_fq_multiple_and	200	mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:astronomy&fq=category:outdoors&wt=json
+mlt_match_include_false	200	mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.match.include=false&wt=json
+mlt_match_offset	200	mlt?q=category:astronomy&mlt.fl=body&mlt.match.offset=1&wt=json
+mlt_json_nl_map_empty_terms	200	mlt?q=id:mlt1&mlt.fl=body&mlt.interestingTerms=details&json.nl=map&wt=json
+mlt_fl_wildcard_score	200	mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fl=*,score&wt=json
+mlt_maxntp_noop	200	mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&mlt.maxntp=5000&wt=json
 edismax_basic	200	select?q=rocket&defType=edismax&qf=title+body&fl=id&wt=json
 edismax_qf_equal	200	select?q=rocket+launch+success&defType=edismax&qf=title+body&fl=id&wt=json
 edismax_qf_boost_title	200	select?q=rocket+launch+success&defType=edismax&qf=title^10+body&fl=id&wt=json

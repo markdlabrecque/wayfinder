@@ -569,6 +569,221 @@ async fn mlt_specific_params_are_not_rejected_as_unknown() {
     );
 }
 
+#[tokio::test]
+async fn mlt_issue_141_params_are_not_rejected_as_unknown() {
+    // Issue #141's five params (`fq`, `mlt.maxntp`, `mlt.match.include`,
+    // `mlt.match.offset`, `json.nl`) are absent from `MLT_PARAMS` today, so
+    // this must 400 under strict_params until they are registered — same
+    // guard as `mlt_specific_params_are_not_rejected_as_unknown` above, kept
+    // separate so a reviewer can see exactly which params this issue adds.
+    let dir = TempDir::new().expect("temp dir");
+    let schema_path = dir.path().join("schema.toml");
+    std::fs::write(&schema_path, MLT_SCHEMA_TOML).expect("write schema.toml");
+    let config_path = dir.path().join("wayfinder.toml");
+    std::fs::write(&config_path, "strict_params = true\n").expect("write wayfinder.toml");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    let app =
+        wayfinder::app_with_config(&schema_path, &data_dir, &config_path).expect("app must build");
+    let (status, body) = common::post_docs(&app, &mlt_corpus()).await;
+    assert_eq!(status, StatusCode::OK, "indexing must succeed, got {body}");
+
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:astronomy&\
+         mlt.maxntp=5000&mlt.match.include=false&mlt.match.offset=0&json.nl=flat&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "fq/mlt.maxntp/mlt.match.include/mlt.match.offset/json.nl must be registered params on \
+         /mlt, not rejected under strict_params (issue #141): {body}"
+    );
+}
+
+// --- issue #141: fq scopes the similar-docs result set, not seed resolution -
+
+#[tokio::test]
+async fn mlt_fq_narrows_the_similar_docs_result_set() {
+    // finding 98: fq=category:astronomy narrows the unfiltered astronomy
+    // cluster (mlt13, mlt15, mlt12, mlt17 — see mlt_mintf_mindf_maxdf) down
+    // to 3, dropping mlt17 (the one non-astronomy doc in that set).
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:astronomy&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_matches_mlt_fixture(body, "mlt_fq_scope");
+}
+
+#[tokio::test]
+async fn mlt_fq_does_not_restrict_which_document_q_resolves_as_seed() {
+    // finding 98: fq=category:cooking excludes mlt11's own category
+    // (astronomy) — real Solr still resolves `match.docs[0]` to mlt11. `fq`
+    // only ever filters `response` (the similar-docs set), never the seed
+    // resolution driven by `q` alone.
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:cooking&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.pointer("/match/docs/0/id").and_then(Value::as_str),
+        Some("mlt11"),
+        "fq must not exclude the seed doc from `match`, even when the seed doc itself fails the \
+         filter, got: {body}"
+    );
+    assert_matches_mlt_fixture(body, "mlt_fq_seed_not_filtered");
+}
+
+#[tokio::test]
+async fn mlt_multiple_fq_params_and_together() {
+    // finding 98: two fq params that no single doc satisfies both of
+    // (astronomy AND outdoors) must empty `response` to 0 — same AND
+    // semantics as /select's fq (CLAUDE.md's `parse_query`/`filter_queries`
+    // loop in `select`).
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:astronomy&\
+         fq=category:outdoors&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_matches_mlt_fixture(body, "mlt_fq_multiple_and");
+}
+
+// --- issue #141: mlt.match.include=false drops the match key entirely -----
+
+#[tokio::test]
+async fn mlt_match_include_false_omits_the_match_key_entirely() {
+    // finding 100: mlt.match.include=false removes `match` from the envelope
+    // outright — not an empty-and-present object. `response` is unaffected.
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.match.include=false&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.get("match").is_none(),
+        "mlt.match.include=false must omit `match` entirely, got: {body}"
+    );
+    assert_matches_mlt_fixture(body, "mlt_match_include_false");
+}
+
+// --- issue #141: mlt.match.offset picks a different seed document ---------
+
+#[tokio::test]
+async fn mlt_match_offset_selects_the_nth_match_as_seed() {
+    // finding 99: q=category:astronomy resolves 5 docs; mlt.match.offset=1
+    // picks the *second* one (mlt12, doc order) as the seed, not the first
+    // (mlt11, offset 0/absent) — and match.start reflects the offset (1),
+    // not the usual 0.
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=category:astronomy&mlt.fl=body&mlt.match.offset=1&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.pointer("/match/docs/0/id").and_then(Value::as_str),
+        Some("mlt12"),
+        "mlt.match.offset=1 must pick the second q-match (mlt12) as the seed doc, got: {body}"
+    );
+    assert_eq!(
+        body.pointer("/match/start").and_then(Value::as_u64),
+        Some(1),
+        "match.start must reflect mlt.match.offset, got: {body}"
+    );
+    assert_matches_mlt_fixture(body, "mlt_match_offset");
+}
+
+// --- issue #141: json.nl reshapes interestingTerms's container ------------
+
+#[tokio::test]
+async fn mlt_json_nl_map_renders_interesting_terms_as_object_when_empty() {
+    // finding 101: real Solr's default rendering of an empty interestingTerms
+    // set is `[ ]` (json.nl=flat, the default — see
+    // mlt_interesting_terms_details.json); json.nl=map renders the same
+    // empty set as `{ }` instead. Wayfinder's interestingTerms is always `[]`
+    // today regardless of json.nl, so this must diverge until json.nl is
+    // threaded into that rendering.
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt1&mlt.fl=body&mlt.interestingTerms=details&json.nl=map&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.get("interestingTerms").is_some_and(Value::is_object),
+        "json.nl=map must render an empty interestingTerms set as `{{}}`, not `[]`, got: {body}"
+    );
+    assert_matches_mlt_fixture(body, "mlt_json_nl_map_empty_terms");
+}
+
+// --- issue #141: fl=*,score must still return every other field -----------
+
+#[tokio::test]
+async fn mlt_fl_wildcard_plus_score_returns_every_field_plus_score() {
+    // finding: `fl=*,score` on real Solr returns every stored/docValues
+    // field *and* score (solr-ref/search-api/trace/00010.json,
+    // mlt_fl_wildcard_score.json) — `*` is a wildcard, not a literal field
+    // name. `render_doc`'s `fl` allowlist has no `*` handling today, so a
+    // request for `fl=*,score` currently returns only `score`, dropping
+    // every real field. This is a `render_doc` gap shared with `/select`,
+    // not `/mlt`-specific — see docs/solr-ref-findings.md's issue #141
+    // section.
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fl=*,score&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.pointer("/match/docs/0/body").and_then(Value::as_str),
+        Some("astronomers observed a bright comet streaking across the night sky"),
+        "fl=*,score must still return `body` (and every other stored field) alongside `score`, \
+         got: {body}"
+    );
+    assert_matches_mlt_fixture_ignoring_score_magnitude(body, "mlt_fl_wildcard_score");
+}
+
+// --- issue #141: mlt.maxntp has no Tantivy-side knob to bind to ------------
+
+#[tokio::test]
+async fn mlt_maxntp_does_not_change_the_result_at_a_realistic_value() {
+    // Tantivy 0.26.1's `MoreLikeThis` struct has no maxNumTokensParsed-style
+    // field (verified by reading
+    // tantivy-0.26.1/src/query/more_like_this/more_like_this.rs directly —
+    // only min/max doc/term frequency, max_query_terms, min/max word length,
+    // boost_factor, stop_words) — so this param can only ever be
+    // accepted-and-ignored, the same as `bf` (issue #108). This pins the
+    // realistic case (a value far above any real body's token count, which
+    // is what `search_api_solr`'s Drupal field bodies will always hit): the
+    // result must be identical to the unmodified baseline. It does *not*
+    // claim parity at every value — real Solr's own `mlt.maxntp` genuinely
+    // narrows results at a low-enough value (docs/solr-ref-findings.md,
+    // issue #141 section), which Wayfinder has no way to reproduce.
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&mlt.maxntp=5000&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_matches_mlt_fixture(body, "mlt_maxntp_noop");
+}
+
 // --- overwritten docs must not desync doc_freq vs. alive-doc count ---------
 
 #[tokio::test]

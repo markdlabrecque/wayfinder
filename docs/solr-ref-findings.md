@@ -1718,3 +1718,70 @@ all five bodies are asserted whole against these fixtures by `assert_matches_fix
     `{!key=...}` response label -- it is the field
     (`facet_local_params_key_f_field.json`/`_f_key.json`) -- so this issue's captures only needed
     to add the true/false precedence and the unrelated-field-name cases.
+
+## Findings from the issue #141 MLT-refinements capture
+
+Claiming findings 98-101. This block was written against 94-97 and has been renumbered twice:
+issue #139 landed 94/95 first, then issue #154 took 96 and issue #140 took 97.
+
+One-off `solr:9` container (port 8996, `wayfinder-solr-141`, removed after capture), same
+schema and 20-doc corpus as the issue #6 MLT block (`solr-ref/capture.sh`) -- reindexed
+identically, no new fields. Fixtures: `mlt_fq_scope.json`, `mlt_fq_seed_not_filtered.json`,
+`mlt_fq_multiple_and.json`, `mlt_match_include_false.json`, `mlt_match_offset.json`,
+`mlt_json_nl_map_empty_terms.json`, `mlt_fl_wildcard_score.json`, `mlt_maxntp_noop.json`.
+
+98. **`fq` on `/mlt` filters only the similar-docs result set (`response`), never the seed-doc
+    resolution (`match`).** `mlt_fq_scope.json` (`q=id:mlt11&fq=category:astronomy`, loosened
+    `mlt.mintf=1&mlt.mindf=1`) narrows the astronomy cluster's 4 unfiltered matches
+    (`mlt_mintf_mindf_maxdf.json`: mlt13, mlt15, mlt12, mlt17) to 3, dropping mlt17
+    (`category:outdoors`) — `fq` genuinely restricts the similar-docs set. But
+    `mlt_fq_seed_not_filtered.json` (`q=id:mlt11&fq=category:cooking` — mlt11 itself is
+    `category:astronomy`, which the filter excludes) still resolves `match.docs[0]` to mlt11:
+    the filter has no bearing on which document `q` picks as the seed, only on what comes back
+    as "similar". `mlt_fq_multiple_and.json` confirms multiple `fq` params still AND together
+    on this path, the same as `/select` (`fq=category:astronomy&fq=category:outdoors` — no doc
+    is both — empties `response` to 0).
+99. **`mlt.match.offset` changes *which* document is resolved as the seed, and is reflected in
+    `match.start` — not cosmetic.** `mlt_match_offset.json` (`q=category:astronomy&mlt.match.offset=1`,
+    5 total matches for `q`) resolves `match.docs[0]` to mlt12 (the *second* match in doc order),
+    not mlt11 (the first, which is what offset 0/absent always picks) — and `match.start` is `1`,
+    not the usual `0`. Every existing MLT fixture has `match.start: 0` because none of them set
+    this param; this is the first evidence that field is not a hardcoded constant.
+100. **`mlt.match.include=false` drops the `match` key from the envelope entirely — not an
+    empty-and-present object.** `mlt_match_include_false.json`: same query as the
+    `mlt_mintf_mindf_maxdf` baseline, `mlt.match.include=false` added, and the body has no
+    `match` key at all (`{responseHeader, response}`), while `response` is unaffected.
+101. **`json.nl` reaches `/mlt` only through `interestingTerms`'s container shape, and only when
+    it is empty that the difference is visible with Wayfinder's current (always-empty)
+    rendering.** `mlt_json_nl_map_empty_terms.json` (`q=id:mlt1`, real Solr defaults — genuinely
+    0 interesting terms per finding 55/64 — `mlt.interestingTerms=details&json.nl=map`) renders
+    `interestingTerms` as `{ }`, not the default `flat` shape's `[ ]`
+    (`mlt_interesting_terms_details.json`, same query minus `json.nl`, is `[ ]`). This is why
+    `json.nl` cannot be filed as purely-cosmetic accepted-and-ignore the way `TZ`/`bf` are: a
+    non-empty term set under `json.nl=map` would presumably render as a real key/value map
+    (unverified — no fixture here has a non-empty term set to confirm the populated shape), but
+    even the empty case already diverges by container type.
+
+Also confirmed directly from source, no capture needed: Tantivy 0.26.1's
+`tantivy::query::more_like_this::MoreLikeThis` struct
+(`~/.cargo/registry/src/*/tantivy-0.26.1/src/query/more_like_this/more_like_this.rs`) has
+exactly these knobs — `min_doc_frequency`, `max_doc_frequency`, `min_term_frequency`,
+`max_query_terms`, `min_word_length`, `max_word_length`, `boost_factor`, `stop_words` — and
+nothing resembling Lucene's `maxNumTokensParsed`. `mlt.maxntp` cannot be implemented against
+this API; `mlt_maxntp_noop.json` pins a value (`5000`) far above this corpus's real token
+counts producing an identical result to the unmodified baseline, which is the realistic case
+for `search_api_solr`'s Drupal field bodies — but real Solr's own `mlt.maxntp` genuinely
+narrows results at a low-enough value (confirmed live: `mlt.maxntp=1` against `mlt11` drops
+the astronomy-cluster match count from 4 to 0), so accepted-and-ignore is a real capability
+gap, not a safe no-op in general the way `TZ`/`bf` are.
+
+Also confirmed: the `fl=*,score` gap is not `/mlt`-specific. `mlt_fl_wildcard_score.json`
+shows real Solr returning every stored/docValues field plus `score` for `fl=*,score`, but
+Wayfinder's `CoreIndex::render_doc` treats `fl` as a literal field-name allowlist with no `*`
+wildcard handling at all — `fl=*,score` on **`/select` today** (verified directly, not just
+inferred) returns only `score`, dropping every other field, even though a captured
+`search_api_solr` fixture (`solr-ref/search-api/trace/00010.json`, `fl=*,score`) already shows
+real Solr returning everything. The existing `select.fl.wildcard-plus-score` coverage probe
+(`src/coverage.rs`) only asserts `score` is present, not that other fields survive, so it is a
+false-positive green today. The fix belongs in `render_doc` (shared by `/select` and `/mlt`),
+not `/mlt`'s handler alone.

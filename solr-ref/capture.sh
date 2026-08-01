@@ -1938,3 +1938,66 @@ echo "  (docker rm -f $FRAGSIZE_CONTAINER to stop)"
 # cap facet_missing_field_override_alone                             'select?q=*:*&rows=0&facet=true&facet.field=category&f.category.facet.missing=true&wt=json'
 # cap facet_missing_field_override_unrelated_field_no_effect         'select?q=*:*&rows=0&facet=true&facet.field=category&f.body.facet.missing=true&wt=json'
 # cap facet_missing_field_override_mixed_multi_field                 'select?q=*:*&rows=0&facet=true&facet.field=category&facet.field=id&facet.missing=true&f.category.facet.missing=false&wt=json'
+
+# --- MLT refinements: fq, mlt.match.include/offset, json.nl, fl=*,score (issue #141) ---
+# `search_api_solr` sends five params `MLT_PARAMS` did not allowlist. These
+# eight fixtures answer the open questions and pin ground truth for each,
+# captured against a one-off `solr:9` container (port 8996, `wayfinder-solr-141`,
+# removed afterwards) running the *same* schema/corpus as the MLT block above
+# (own container because that one was not left running) -- reindexed with the
+# exact same 20-doc corpus, no schema changes (fq/match tests reuse the
+# existing `category` field rather than adding a new one).
+#
+# What they settle, mapped to the issue's five open questions:
+#   1. `fq` on `/mlt` filters the *similar-docs* result set (`response`) only
+#      -- it does NOT restrict which document `q` resolves as the seed
+#      (`match`). `mlt_fq_scope.json` (fq=category:astronomy narrows the
+#      astronomy cluster's 4 matches to 3, dropping mlt17/outdoors);
+#      `mlt_fq_seed_not_filtered.json` (fq=category:cooking, which excludes
+#      mlt11's own category, still resolves `match` to mlt11 -- only
+#      `response` empties out); `mlt_fq_multiple_and.json` confirms two `fq`
+#      params AND together (astronomy AND outdoors matches nothing, same as
+#      `/select`).
+#   2. Confirmed by reading Tantivy 0.26.1's `MoreLikeThis` struct source
+#      directly (no capture needed): it has no maxNumTokensParsed-equivalent
+#      field at all. `mlt_maxntp_noop.json` captures `mlt.maxntp=5000` (a
+#      value far above this corpus's token counts) producing the exact same
+#      result as the baseline `mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10` query --
+#      real Solr *can* narrow results with a low `mlt.maxntp`, so
+#      accepted-and-ignore is a real capability gap, not a safe no-op in
+#      general; this fixture only pins the realistic case where the corpus's
+#      real Lucene token count sits under the value sent.
+#   3. `fl=*,score` on `/mlt`: `mlt_fl_wildcard_score.json` shows real Solr
+#      returning *every* stored/docValues field plus `score` -- confirming the
+#      same wildcard-`fl` gap already exists on `/select` (see the closing
+#      note of the issue #141 findings block): Wayfinder's `render_doc` treats `fl` as a literal field-name
+#      allowlist, so `*` matches no real field and every field but `score`
+#      gets dropped. Not `/mlt`-specific.
+#   4. `mlt.match.include=false`: `mlt_match_include_false.json` shows the
+#      `match` key is dropped from the envelope entirely -- not an
+#      empty-and-present object.
+#   5. `mlt.match.offset` is load-bearing, not cosmetic: `mlt_match_offset.json`
+#      (`q=category:astronomy&mlt.match.offset=1`) resolves the *second*
+#      match (mlt12) as the seed doc, not the first (mlt11) -- and
+#      `match.start` reflects the offset (1), not always 0.
+#   6. `json.nl` on `/mlt` only has anything to bite on when
+#      `mlt.interestingTerms` is also requested and empty:
+#      `mlt_json_nl_map_empty_terms.json` (`json.nl=map`, degenerate 0-term
+#      doc) shows `interestingTerms` rendered as `{}`, not the default `[]`
+#      -- so it is not purely cosmetic either, though the effect is narrow
+#      (Wayfinder's `interestingTerms` is always `[]` today regardless of the
+#      real term count -- a pre-existing, separate gap, findings 62/#141).
+#
+# Reproduce (one-off, not run by this script):
+#   docker run -d --name wayfinder-solr-141 -p 8996:8983 solr:9 solr-precreate content
+#   curl "$SOLR/schema" -d '{"add-field":[{"name":"body","type":"text_en","indexed":true,"stored":true},{"name":"category","type":"string","indexed":true,"stored":true,"docValues":true,"multiValued":true}]}'
+#   curl "$SOLR/config" -d '{"add-requesthandler":{"name":"/mlt","class":"solr.MoreLikeThisHandler"}}'
+#   # then index the MLT block's own 20-doc corpus (identical to above) and:
+# capm mlt_fq_scope               'mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:astronomy&wt=json'
+# capm mlt_fq_seed_not_filtered   'mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:cooking&wt=json'
+# capm mlt_fq_multiple_and        'mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:astronomy&fq=category:outdoors&wt=json'
+# capm mlt_match_include_false    'mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.match.include=false&wt=json'
+# capm mlt_match_offset           'mlt?q=category:astronomy&mlt.fl=body&mlt.match.offset=1&wt=json'
+# capm mlt_json_nl_map_empty_terms 'mlt?q=id:mlt1&mlt.fl=body&mlt.interestingTerms=details&json.nl=map&wt=json'
+# capm mlt_fl_wildcard_score      'mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fl=%2A%2Cscore&wt=json'
+# capm mlt_maxntp_noop            'mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&mlt.maxntp=5000&wt=json'
