@@ -673,6 +673,15 @@ async fn mbeans_index_size_string_matches_human_size_of_index_size_in_bytes() {
         .pointer("/solr-mbeans/CORE/core/stats/INDEX.sizeInBytes")
         .and_then(Value::as_u64)
         .expect("INDEX.sizeInBytes must be a present u64");
+    // Below 1024 bytes `human_size` takes its `unit == 0` branch and the
+    // decimal formatting this test exists to compare is never exercised. Fail
+    // loudly if a future change shrinks the seeded index under that, rather
+    // than staying silently green on a comparison that stopped meaning
+    // anything.
+    assert!(
+        size_in_bytes >= 1024,
+        "seeded index must exceed 1 KB for the precision branch to be compared, got {size_in_bytes}"
+    );
     let size_str = body
         .pointer("/solr-mbeans/CORE/core/stats/INDEX.size")
         .and_then(Value::as_str)

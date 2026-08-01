@@ -376,8 +376,9 @@ mod tests {
     /// numbers come from the fixture, not from running this function and
     /// reading back whatever it happens to produce (issue #168, hardening a
     /// round-2 #158 review finding: no test previously pinned this exact
-    /// pair, so a rounding regression -- e.g. `"{value:.0}"` instead of
-    /// `"{value:.1}"` -- could ship without any test catching it).
+    /// pair). A rounding regression would not have gone unnoticed --
+    /// `human_size_steps_up_by_1024` already catches `"{value:.0}"` -- so what
+    /// this adds is the fixture tie, not the regression net.
     #[test]
     fn human_size_matches_trace_00025_21607_bytes_to_21_1_kb() {
         assert_eq!(human_size(21607), "21.1 KB");
