@@ -1924,3 +1924,17 @@ Search-API-shaped `ExtractingRequestHandler`. Fixtures: `extract_plain_text_xml.
      attributes. A malformed PDF returns the normal HTTP/error-code 500 envelope. The multipart
      fixtures stay out of `manifest-errors.tsv` until its JSON-body-only runner and Wayfinder's
      absent route are extended; exact reproduction is appended to `capture.sh`.
+
+## Finding from issue #184 (`hl.fl=*` over a stored string field)
+
+Captured against a clean one-off `solr:9` container (port 8999,
+`wayfinder-solr-184`) with the tracer-bullet schema and five-document corpus from
+`solr-ref/capture.sh` recreated verbatim. Fixture: `hl_wildcard_stored_string.json`.
+
+110. **`hl.fl=*` and an explicit `hl.fl=category` both highlight a stored `string`
+     field whose value contains the query term.** For `q=category:animals`, wildcard
+     expansion returns `category:["<em>animals</em>"]` under both matching documents,
+     just as the explicit path does. Solr's `StrField` is therefore not merely present
+     in the wildcard expansion set and then silently skipped: it produces a snippet on
+     the wire. Wayfinder's issue #139 exclusion of raw strings is a real unintended
+     divergence, not an equivalent implementation choice.
