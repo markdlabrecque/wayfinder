@@ -1372,7 +1372,7 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
 /// #162 fixed for three response-field probes, but here on a
 /// request-semantics probe. Tightening it to also require `solr-mbeans` to
 /// be a JSON object, and conjoining a `/select` facet leg, must not drop the
-/// fraction below `59/75`: neither leg's *request* needs to change to reach
+/// fraction below `62/75`: neither leg's *request* needs to change to reach
 /// real data -- `admin_mbeans` in `src/lib.rs` builds `solr-mbeans`
 /// unconditionally, and the seeded probe corpus already facets `category` --
 /// so the item stays covered against the real seeded app.
@@ -1411,11 +1411,13 @@ async fn repeated_map_and_flat_stays_covered_against_the_real_seeded_app() {
     // As with the sibling guard above, the constant tracks landed features
     // and the assertion's job is unchanged: it went 57/75 -> 59/75 on
     // `origin/main` when issue #143 landed `omitHeader`/`TZ`, which flipped
-    // `request.omitHeader` and `request.timezone.utc` on their own merits.
-    // This change is not what moved it.
+    // `request.omitHeader` and `request.timezone.utc` on their own merits,
+    // and 59/75 -> 62/75 when issue #139 landed `hl.fl=*` expansion plus the
+    // `hl.mergeContiguous`/`hl.requireFieldMatch` allowlisting. Neither
+    // change is what moved it.
     assert_eq!(
         report["overall"]["fraction"],
-        Value::String("59/75".to_string()),
+        Value::String("62/75".to_string()),
         "tightening this probe's assertion must not, by itself, change the \
          coverage fraction -- the real handler already emits an object-shaped \
          `solr-mbeans` regardless of `json.nl`, so nothing about the real \
