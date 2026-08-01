@@ -592,6 +592,17 @@ async fn terms_non_text_field_is_rejected_rather_than_lossily_decoded() {
         msg.contains("views"),
         "error.msg should name the offending field, got {msg:?}"
     );
+    assert_eq!(
+        body.pointer("/error/metadata/3").and_then(Value::as_str),
+        Some("wayfinder::TermsUnsupportedField"),
+        "a declared non-text field must be rejected as non-text, not \
+         coincidentally as undefined, got {body}"
+    );
+    assert!(
+        msg.contains("non-text field"),
+        "error.msg should say the field is non-text, not merely undefined, \
+         got {msg:?}"
+    );
     assert!(
         body.get("terms").is_none(),
         "a rejected field must not also render a terms block, got {body}"
@@ -872,6 +883,12 @@ async fn terms_dynamic_name_matching_no_rule_is_still_a_400() {
         msg.contains("zz_no_such_prefix"),
         "error.msg should name the offending field, got {msg:?}"
     );
+    assert_eq!(
+        body.pointer("/error/metadata/3").and_then(Value::as_str),
+        Some("wayfinder::UndefinedField"),
+        "a name matching no rule must be rejected as undefined, not merely as \
+         some other 400 (e.g. non-text), got {body}"
+    );
     assert!(
         body.get("terms").is_none(),
         "an undefined field must not silently render an empty terms block, got {body}"
@@ -909,6 +926,17 @@ async fn terms_dynamic_field_of_non_text_type_is_rejected() {
     assert!(
         msg.contains("is_weight"),
         "error.msg should name the offending field, got {msg:?}"
+    );
+    assert_eq!(
+        body.pointer("/error/metadata/3").and_then(Value::as_str),
+        Some("wayfinder::TermsUnsupportedField"),
+        "a dynamically-resolved non-text field must be rejected as non-text, \
+         not coincidentally as undefined, got {body}"
+    );
+    assert!(
+        msg.contains("non-text field"),
+        "error.msg should say the field is non-text, not merely undefined, \
+         got {msg:?}"
     );
     assert!(
         body.get("terms").is_none(),
