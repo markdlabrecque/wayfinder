@@ -35,6 +35,15 @@ way — Solr ignores unknown ones, and so does Wayfinder unless you set
 # Turn it on in development to find params Wayfinder does not implement yet.
 strict_params = false
 
+# Optional HTTP Basic authentication. Omitting [auth] leaves every route open,
+# preserving the default behaviour. If [auth] is present, both values are
+# required, non-empty, and valid Basic-credential components: username cannot
+# contain `:`; neither value may contain ASCII control characters. A password
+# may contain `:`.
+# [auth]
+# username = "operator"
+# password = "replace-with-a-secret"
+
 [indexing]
 # IndexWriter arena size in bytes, across all writer threads. The main
 # indexing-throughput lever. Tantivy requires ~15 MB per writer thread.
@@ -57,8 +66,7 @@ merge_policy = "log"
 # Solr has no equivalent request cap, so an over-limit request is clamped to
 # this value rather than rejected -- a clamp keeps a working client working.
 rows_limit = 10000
-# Hard cap on `facet.limit`. Parsed and exposed; applied once `facet.limit`
-# itself lands (that param is not implemented yet).
+# Hard cap on `facet.limit`. Requests above it are clamped, not rejected.
 facet_limit_max = 1000
 
 [resources]
@@ -77,23 +85,48 @@ searcher_pool_size = 1
 max_body_size = 10000000
 
 [commit]
-# Hard-commit thresholds. Parsed and exposed; the update pipeline that consumes
-# them is not built yet, so they currently have no effect.
+# Hard-commit thresholds. Either commits and makes pending writes visible when
+# its threshold is reached; omit either setting to disable that trigger.
 # autocommit_max_docs = 10000
 # autocommit_max_time = 60000
+
+[admin]
+# Version reported by /solr/admin/info/system and /solr/<core>/admin/system.
+reported_solr_version = "9.0.0"
 ```
 
 No heap tuning knob exists, by design: Tantivy is mmap-based and the OS page
 cache does the work Solr's heap sizing does. The absence is a feature.
 
+### Authentication and health checks
+
+Without `[auth]`, Wayfinder remains open as it was before authentication existed.
+With `[auth]`, HTTP Basic authentication protects the Solr wire routes and the
+admin UI, including `/update`, `/select`, the other core/admin endpoints, and
+`/ui` pages. The only unauthenticated exceptions are exactly these public health
+checks, where `<configured-core>` is the core name in the schema:
+
+- `/solr/<configured-core>/admin/ping`
+- `/ui/ping`
+
+A ping for a different core, or a longer look-alike path, is protected.
+
+**Security warning:** HTTP Basic authentication is plaintext-equivalent: it
+base64-encodes credentials but does not encrypt them. Use it only on loopback or
+a private, trusted network, or behind TLS termination. The two public ping paths
+also disclose health without credentials; restrict network access if that is not
+acceptable.
+
 ### Which knobs are live today
 
 | Live | Parsed and exposed, not yet acted on |
 |---|---|
-| `strict_params`, `query.rows_limit` | `query.time_allowed` |
-| `indexing.writer_heap`, `writer_threads`, `merge_policy` (+ its params) | `query.facet_limit_max` |
-| `resources.doc_store_compression`, `doc_store_blocksize`, `max_body_size` | `commit.autocommit_max_docs`, `autocommit_max_time` |
-| | `resources.searcher_pool_size` (no Tantivy equivalent) |
+| `strict_params`, `auth.username`/`auth.password` | `query.time_allowed` |
+| `indexing.writer_heap`, `writer_threads`, `merge_policy` (+ its params) | `resources.searcher_pool_size` (no Tantivy equivalent) |
+| `query.rows_limit`, `query.facet_limit_max` | |
+| `resources.doc_store_compression`, `doc_store_blocksize`, `max_body_size` | |
+| `commit.autocommit_max_docs`, `autocommit_max_time` | |
+| `admin.reported_solr_version` | |
 
 ## Tests
 
