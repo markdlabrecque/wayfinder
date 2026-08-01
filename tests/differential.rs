@@ -1186,6 +1186,27 @@ fn load_manifest_parses_every_line_of_the_real_manifest() {
 }
 
 #[test]
+fn manifest_covers_terms_but_deliberately_excludes_admin_mbeans() {
+    let entries = load_manifest(&manifest_path());
+
+    assert!(
+        entries.iter().any(|entry| {
+            entry.name == "terms_body"
+                && entry.status == 200
+                && entry.path == "terms?terms=true&terms.fl=body&omitHeader=true&wt=json"
+        }),
+        "/terms returns real index data and must have differential coverage"
+    );
+    assert!(
+        entries
+            .iter()
+            .all(|entry| !entry.path.starts_with("admin/mbeans")),
+        "/admin/mbeans deliberately serves an honest subset and must not become a permanently \
+         waived whole-response differential row (PRD section 5, v2.75)"
+    );
+}
+
+#[test]
 fn load_manifest_skips_blanks_and_comments_and_tolerates_trailing_columns() {
     let dir = tempfile::TempDir::new().expect("create temp dir");
     let path = dir.path().join("manifest.tsv");
@@ -1375,6 +1396,43 @@ const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[
     ),
 ];
 
+const TERMS_BODY_ANALYZER_DIVERGENCE_REASON: &str = "issue #205: Solr stems `day` to `dai`, while Tantivy leaves `day`; the exact single \
+     term-value difference is allowed until the versioned analyzer contract is fixed";
+
+fn is_exact_terms_body_analyzer_divergence(diffs: &[Diff]) -> bool {
+    diffs
+        == [Diff {
+            path: "terms.body[14]".to_string(),
+            expected: "\"dai\"".to_string(),
+            actual: "\"day\"".to_string(),
+        }]
+}
+
+#[test]
+fn terms_body_analyzer_waiver_rejects_every_unrelated_diff() {
+    let expected = Diff {
+        path: "terms.body[14]".to_string(),
+        expected: "\"dai\"".to_string(),
+        actual: "\"day\"".to_string(),
+    };
+    assert!(is_exact_terms_body_analyzer_divergence(
+        std::slice::from_ref(&expected,)
+    ));
+    assert!(!is_exact_terms_body_analyzer_divergence(&[]));
+    assert!(!is_exact_terms_body_analyzer_divergence(&[
+        expected.clone(),
+        Diff {
+            path: "terms.body[15]".to_string(),
+            expected: "1".to_string(),
+            actual: "2".to_string(),
+        },
+    ]));
+    assert!(!is_exact_terms_body_analyzer_divergence(&[Diff {
+        actual: "\"days\"".to_string(),
+        ..expected
+    }]));
+}
+
 /// The `EXPECTED_DIVERGENCES` reason for `name`, or `None` if `name` is not
 /// in the list. Every entry has a mandatory reason by construction (the list
 /// is `&[(&str, &str)]`) — this just looks one up by name.
@@ -1554,6 +1612,26 @@ async fn hermetic_whole_query_set_matches_committed_fixtures() {
             );
             if !report.diffs.is_empty() {
                 eprintln!("  diffs: {:?}", report.diffs);
+            }
+
+            if entry.name == "terms_body" {
+                if report.diffs.is_empty() {
+                    failures.push(format!(
+                        "terms_body now matches: {TERMS_BODY_ANALYZER_DIVERGENCE_REASON}; remove \
+                         its narrow waiver and close #205"
+                    ));
+                } else if is_exact_terms_body_analyzer_divergence(&report.diffs) {
+                    eprintln!(
+                        "  (narrow expected divergence: {TERMS_BODY_ANALYZER_DIVERGENCE_REASON})"
+                    );
+                } else {
+                    failures.push(format!(
+                        "terms_body has diffs outside its one narrowly allowed analyzer value: \
+                         {:?}",
+                        report.diffs
+                    ));
+                }
+                continue;
             }
 
             match divergence_reason {

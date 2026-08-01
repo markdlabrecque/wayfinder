@@ -2109,3 +2109,11 @@ cape edismax_unquoted_multitoken 'select?q=quick%2Brocket&defType=edismax&qf=tit
 # cap facet_collision_field_map  'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dx%7Dcategory&facet.field=%7B%21key%3Dx%7Did&json.nl=map&wt=json'
 # cap facet_collision_query_flat 'select?q=*:*&rows=0&facet=true&facet.query=category%3Aanimals&facet.query=category%3Aanimals&wt=json'
 # cap facet_collision_query_map  'select?q=*:*&rows=0&facet=true&facet.query=category%3Aanimals&facet.query=category%3Aanimals&json.nl=map&wt=json'
+
+# --- /terms differential coverage (issue #169) -----------------------------
+# Captured 2026-08-01 against solr:9.10.1 on a clean `content` core with the
+# tracer-bullet schema and five-document corpus from the start of this script.
+# Unlike `/admin/mbeans`, this endpoint reports real index data and belongs in
+# manifest.tsv. The capture settles the suspected analyzer mismatch: Solr stems
+# `day` to `dai`, while Tantivy's English stemmer leaves `day` (issue #205).
+cap terms_body 'terms?terms=true&terms.fl=body&omitHeader=true&wt=json'

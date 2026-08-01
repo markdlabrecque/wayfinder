@@ -17,8 +17,9 @@
 //!   - `solr-mbeans.CORE.core.stats["INDEX.size"]`
 //!
 //! No `solr-ref/manifest.tsv` row exists for this endpoint (deliberate, per
-//! the issue: "48 KB of Java internals cannot be matched honestly") so the
-//! differential harness does not enforce exact wire-format fidelity here.
+//! issue #169 and PRD section 5 v2.75: "48 KB of Java internals cannot be
+//! matched honestly"). The differential manifest guard pins that exclusion so
+//! this endpoint cannot acquire a permanently waived whole-response row.
 //! Everything BUT the six leaves above ("bean list" shape, `CONTAINER`,
 //! `ADMIN`, `QUERY`, `CACHE`, per-handler timers, Java class names) is a
 //! static, commented placeholder per the `admin_info_jvm_system_security()`

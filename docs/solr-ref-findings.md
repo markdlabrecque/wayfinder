@@ -1873,3 +1873,20 @@ Fixtures: `facet_collision_field_flat.json`, `facet_collision_field_map.json`,
      because its differential harness parses bodies into `serde_json::Value`, which would
      discard one duplicate and report a false-positive match; dedicated tests inspect those
      fixtures as raw text.
+
+## Finding from issue #169 (`/terms` differential coverage)
+
+Captured 2026-08-01 against `solr:9.10.1` on a clean `content` core with the
+tracer-bullet schema and five-document corpus from `solr-ref/capture.sh`.
+Fixture: `terms_body.json`.
+
+103. **The canonical differential core has one real `text_en` stemming divergence: Solr
+     emits `dai`, while Wayfinder emits `day`.** The request
+     (`terms?terms=true&terms.fl=body&omitHeader=true&wt=json`) returns the same ten terms in
+     the same count-descending, term-ascending order with the same frequencies except for that
+     spelling: Solr stems the corpus token `day` to `dai`; Tantivy's English stemmer leaves it
+     as `day`. This is not the Search API configset's hypothesized char-filter,
+     length-filter, or word-delimiter mismatch: the differential core uses `_default`'s
+     `text_en`. `terms_body` therefore has a narrow, exact-diff waiver under follow-up #205:
+     only `terms.body[14]` changing from `"dai"` to `"day"` is allowed. Its self-expiring guard
+     fails when that mismatch disappears, and any additional response difference fails now.
