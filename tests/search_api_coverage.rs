@@ -1129,7 +1129,6 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         None,
         None,
         &[
-            "GET /solr/{core}/schema/fieldtypes",
             "GET /solr/{core}/admin/luke",
             "GET /solr/{core}/admin/mbeans",
             "GET /solr/{core}/terms",
@@ -1174,7 +1173,6 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         &[
             "select.spellcheck.suggestions",
             "select.spellcheck.collations",
-            "schema.fieldtypes.fieldTypes",
             "admin.luke.index",
             "admin.mbeans.solr-mbeans",
             "terms.terms",
@@ -1204,8 +1202,17 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // `facet_counts.facet_fields.kind` bucket instead of a 400. Denominator
     // unchanged -- no new semantics, one previously-uncovered one now
     // answered.
+    // 46/75 -> 48/75 when issue #156 implemented `GET
+    // /solr/{core}/schema/fieldtypes` (resolving #142 as In), flipping two
+    // entries at once: the endpoint itself, now wired in
+    // `search_api_routes!`, and the `schema.fieldtypes.fieldTypes` response
+    // field, whose probe now gets an array derived from the live
+    // `WayfinderSchema`. Denominator unchanged -- the endpoint and the field
+    // were already in the contract, just unmet. The rest of Solr's Schema API
+    // is deliberately absent from the contract (PRD section 5 parity
+    // roadmap), so this does not open a `/schema/*` family.
     assert_eq!(
-        report.overall.fraction, "46/75",
+        report.overall.fraction, "48/75",
         "initial coverage fraction"
     );
 }
