@@ -682,6 +682,28 @@ async fn mlt_malformed_fq_is_a_400_not_a_silently_dropped_filter() {
         Some(400),
         "the error envelope must carry the 400 code, got: {body}"
     );
+
+    // The same malformed filter must still 400 when `q` resolves *no* seed
+    // doc — the `fq` parse deliberately sits outside the `q` arm in
+    // `src/lib.rs::mlt`, and nothing else in this suite exercises that.
+    // Mutation-tested: wrapping the parse loop in `if !hits.is_empty()`
+    // survived the entire suite until this case existed, silently downgrading
+    // a malformed filter to a 200-with-null-response whenever `q` missed.
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:nosuchdoc&mlt.fl=body&fq=category:[unclosed&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a malformed fq must 400 even when `q` resolves no seed doc, got: {body}"
+    );
+    assert_eq!(
+        body.pointer("/error/code").and_then(Value::as_u64),
+        Some(400),
+        "the no-seed error envelope must carry the 400 code, got: {body}"
+    );
 }
 
 // --- issue #141: mlt.match.include=false drops the match key entirely -----
@@ -773,6 +795,45 @@ async fn mlt_match_offset_selects_the_nth_match_as_seed() {
     assert_matches_mlt_fixture(body, "mlt_match_offset");
 }
 
+#[tokio::test]
+async fn mlt_match_offset_past_the_last_hit_resolves_no_seed() {
+    // Pins *Wayfinder's chosen* behaviour, not captured Solr: no fixture
+    // covers an out-of-range `mlt.match.offset`, and the `ponytail:` on
+    // `src/lib.rs::mlt` names that as the ceiling. Without this test the
+    // ceiling is unenforceable — both "fall back to the top hit"
+    // (`.or(hits.first())`) and "clamp to the last hit" survive the whole
+    // suite, and each would answer a different question silently.
+    //
+    // The chosen behaviour is no seed at all, which is finding 54's existing
+    // "q matched nothing" shape: `match.numFound` still reports the real hit
+    // count for `q`, `match.docs` is empty, and `response` is the bare JSON
+    // `null`. If a capture ever contradicts this, the fixture wins and this
+    // test is what will have to change.
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=category:astronomy&mlt.fl=body&mlt.match.offset=99&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.pointer("/match/numFound").and_then(Value::as_u64),
+        Some(5),
+        "match.numFound must still be q's real hit count, got: {body}"
+    );
+    assert_eq!(
+        body.pointer("/match/docs").and_then(Value::as_array),
+        Some(&Vec::new()),
+        "an out-of-range mlt.match.offset must resolve no seed doc — not the first hit, not the \
+         last — got: {body}"
+    );
+    assert_eq!(
+        body.get("response"),
+        Some(&Value::Null),
+        "with no seed resolved, `response` is the bare null of finding 54, got: {body}"
+    );
+}
+
 // --- issue #141: json.nl reshapes interestingTerms's container ------------
 
 #[tokio::test]
@@ -837,9 +898,12 @@ async fn mlt_json_nl_flat_renders_interesting_terms_as_the_default_array() {
 ///
 /// This pins the broken behaviour deliberately, so it deletes itself: the
 /// moment #188 teaches `render_doc` about `*`, `body` starts coming back and
-/// this test fails, naming itself and the
-/// `MLT_EXPECTED_DIVERGENCES` entry for `mlt_fl_wildcard_score` as the two
-/// things to remove. The fixture stays committed for #188 to build against.
+/// this test fails, naming itself and the `MLT_EXPECTED_DIVERGENCES` entry
+/// for `mlt_fl_wildcard_score` as the two things to remove. The fixture stays
+/// committed for #188 to build against — and the manifest loop compares it
+/// with BM25 score magnitudes blanked (see `SCORE_MAGNITUDE_EXEMPT` there),
+/// so removing the entry leaves a real, passing fixture comparison rather
+/// than a permanent ratified-divergence failure.
 ///
 /// Note for #188: the `mlt.fl.wildcard-plus-score` coverage probe
 /// (`src/coverage.rs`) asserts only that `/response/docs/0/score` exists, so
@@ -860,8 +924,12 @@ async fn mlt_fl_wildcard_plus_score_still_drops_every_field_until_issue_188() {
         .expect("the seed doc must still be resolved and rendered");
     assert!(
         seed.get("body").is_none() && seed.get("id").is_none(),
-        "issue #188 has landed `fl` wildcard support — delete this guard, restore the fixture \
-         assertion, and drop `mlt_fl_wildcard_score` from MLT_EXPECTED_DIVERGENCES. Got: {body}"
+        "issue #188 has landed `fl` wildcard support. Replace this guard with a real fixture \
+         assertion -- `assert_matches_mlt_fixture_ignoring_score_magnitude(body, \
+         \"mlt_fl_wildcard_score\")`, NOT `assert_matches_mlt_fixture`: this request sends \
+         `fl=*,score` and BM25 magnitude is PRD ratified-divergence 4, which #188 does not \
+         change. Then drop `mlt_fl_wildcard_score` from MLT_EXPECTED_DIVERGENCES, leaving it in \
+         the manifest loop's `SCORE_MAGNITUDE_EXEMPT` set for the same reason. Got: {body}"
     );
     assert!(
         seed.get("score").is_some(),
@@ -1012,15 +1080,30 @@ async fn hermetic_mlt_manifest_entries_match_committed_fixtures() {
             continue;
         }
 
-        // `mlt_fl_rows_start` is the one manifest row requesting `fl=score`;
-        // its BM25 magnitude is exempt from exact comparison for the same
-        // ratified reason `assert_matches_mlt_fixture_ignoring_score_magnitude`
-        // documents above (PRD ratified-divergence 4). The real (un-blanked)
-        // `maxScore` semantics are still checked directly, so this loop
-        // can't be fooled by a regression that blanking alone would hide.
-        let (expected, actual) = if entry.name == "mlt_fl_rows_start" {
+        // The two manifest rows requesting a `score` in `fl`
+        // (`mlt_fl_rows_start`'s `fl=id,score`, `mlt_fl_wildcard_score`'s
+        // `fl=*,score`). Their BM25 magnitudes are exempt from exact
+        // comparison for the same ratified reason
+        // `assert_matches_mlt_fixture_ignoring_score_magnitude` documents
+        // above (PRD ratified-divergence 4).
+        //
+        // `mlt_fl_wildcard_score` has to be in this set for its
+        // `MLT_EXPECTED_DIVERGENCES` entry to be able to *expire*: score
+        // magnitude is a permanent divergence issue #188 can never fix, so
+        // without blanking, that entry's diff list would stay non-empty
+        // forever and the loop would go on reading "still diverging" long
+        // after the wildcard gap it names had closed. Blanked, the entry
+        // tracks exactly the `fl=*` gap and nothing else.
+        //
+        // For `mlt_fl_rows_start` the real (un-blanked) `maxScore` semantics
+        // are still checked directly, so this loop can't be fooled by a
+        // regression that blanking alone would hide.
+        const SCORE_MAGNITUDE_EXEMPT: &[&str] = &["mlt_fl_rows_start", "mlt_fl_wildcard_score"];
+        let (expected, actual) = if SCORE_MAGNITUDE_EXEMPT.contains(&entry.name.as_str()) {
             let normalized_actual = normalize_mlt(actual);
-            assert_mlt_fl_rows_start_maxscore_semantics(&normalized_actual);
+            if entry.name == "mlt_fl_rows_start" {
+                assert_mlt_fl_rows_start_maxscore_semantics(&normalized_actual);
+            }
             (
                 blank_bm25_score_magnitudes(normalize_mlt(fixture(&entry.name))),
                 blank_bm25_score_magnitudes(normalized_actual),
