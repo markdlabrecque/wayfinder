@@ -46,8 +46,17 @@ feeds the roadmap rather than only the test suite. §2 explains how the two cont
 ### Non-goals
 
 - SolrCloud, ZooKeeper, distributed/sharded search.
-- Data Import Handler, Streaming Expressions, SQL interface, Tika/`/extract`.
+- Data Import Handler, Streaming Expressions, SQL interface.
 - XML anything — not `schema.xml`, not `solrconfig.xml`, not `wt=xml`. See §3.
+
+Document extraction was originally part of the second bullet as “Tika/`/extract`.” Issue #171
+revisited that decision because the vendored `search_api_solr` client has a concrete
+`extractContentFromFile()` path to `/update/extract`, even though the captured site did not have
+an attachments integration configured to exercise it. The revised boundary admits extraction to
+the roadmap **only as an in-process Rust feature with no JVM, Tika server, sidecar, or separately
+operated service**. Well-maintained Rust parsing crates are ordinary implementation dependencies,
+not third-party runtime services; hand-writing PDF and Office parsers is not a goal. OCR remains
+out of scope: image-only documents may validly yield no text.
 
 ---
 
@@ -536,6 +545,7 @@ conditional lists (`2<-1 5<80%`). Implement it fully; it is a small self-contain
 | **v2 — Search API** | `search_api_wayfinder` connector module (issue #57, done), `search-api.toml` preset (done), `/admin/system` version handshake (done). `/admin/luke`, `/terms`, `/admin/mbeans` were descoped here and are now back in scope under v2.75 — see below. |
 | **v2.5 — Admin web UI** | A read-only operator dashboard, server-rendered by the same binary. Tracer bullet (core view, issue #94) done. See below. |
 | **v2.75 — the contract's remaining endpoints** | The four endpoints in the coverage denominator that Wayfinder does not yet serve: `/terms` (#155), `/schema/fieldtypes` (#156), `/admin/luke` (#157), `/admin/mbeans` (#158). Completing them closes the endpoints bucket. See below. |
+| **Document extraction — staged** | First the client-evidenced `extractOnly=true` path for plain text and HTML, behind request/concurrency/output limits; then DOCX/PPTX and spreadsheet/ODF/RTF families; PDF only after a separate parser-quality and cancellation decision. See below. |
 | **v3** | Result caches + autowarm, spellcheck/suggester (the module's autocomplete path: `spellcheck.*`, `suggest`; `terms` moved earlier to v2.75), grouping (`group=true` — see note below on why "collapse" left this line), `_version_` (issue TBD — scope narrowed, see below) |
 | **v4** | Function queries (`bf`, `{!func}`) — client-evidenced: the module's `BoostMoreRecent` processor emits `product(…,recip(ms(…)))` — spatial (`{!geofilt}`, `bbox`, `{!frange}geodist()`, heatmap facets), snapshot-based read replicas |
 | **Solr 9.x parity** | Solr features with zero client evidence, deliberately unscheduled — the table below. |
@@ -658,6 +668,44 @@ Notes on deferred items:
   Collapse/Expand component (`fq={!collapse}` + `expand=true`), which the client never sends —
   Collapse/Expand moved to the Solr 9.x parity table below.
 
+### Document extraction — accepted direction, staged delivery
+
+The evidence is source-level rather than trace-level. The vendored
+`SearchApiSolrBackend::extractContentFromFile()` constructs a Solarium Extract query, sets
+`extractOnly=true`, chooses XML or text extraction, uploads the file, and reads the extracted
+content. None of the 28 captured Search API requests calls `/update/extract`, because the capture
+site did not configure an attachments integration. This is still a real client emission path,
+but it weights the initial wire scope toward `extractOnly` rather than Solr Cell's much broader
+server-side indexing surface.
+
+The retained tracer bullet is therefore a multipart `POST /solr/{core}/update/extract` for plain
+text and HTML, returning the captured `extractOnly=true` envelope. A following slice may apply
+`literal.<field>` and `fmap.<from>` and feed the existing update pipeline; those params are not
+required by the evidenced client path. The proposed format order is:
+
+1. Plain text and HTML, including charset decoding and a budgeted incremental HTML token sink
+   rather than an unbounded DOM.
+2. DOCX and PPTX through bounded ZIP + streaming XML; XLSX and ODS through a spreadsheet reader;
+   then ODT/ODP and RTF.
+3. PDF in its own issue. PDF text fidelity (font encodings, CMaps, ligatures, layout) and opaque
+   parser CPU behaviour make it qualitatively riskier than zipped XML. Image-only PDF OCR is out.
+
+Resource limits are an architecture prerequisite, not a post-launch hardening task. At minimum:
+request bytes, concurrent extraction count, extracted-character count, archive entry count,
+per-entry and cumulative uncompressed bytes, and compression ratio. Extraction must run off the
+async request executor. An HTTP timeout around a blocking in-process parser is not cancellation —
+the work continues after the response — so formats whose parser cannot enforce a cooperative
+budget, especially PDF, do not ship until that limitation is explicitly resolved. Metadata starts
+narrowly with stable keys needed by the envelope (`resourceName`, detected content type, and the
+format's title/author when reliable); unknown metadata is dropped unless a later indexing slice
+maps it through `fmap`/`uprefix`.
+
+Issue #171's dependency survey recommends maintained, permissively licensed Rust crates rather
+than hand-written format implementations: `chardetng` + `encoding_rs`, `html5ever`, `zip` +
+`quick-xml`, `calamine`, and `rtf-parser`; `pdf-extract`/`lopdf` remain candidates for the separate
+PDF issue. Exact versions, licenses, evidence, captures, and rejected alternatives are recorded in
+`docs/reports/2026-08-01-text-extraction-exploration.md`.
+
 ### Solr 9.x parity roadmap — zero client evidence, deliberately unscheduled
 
 The remainder of Solr 9.x's feature surface, checked against the same evidence base as the
@@ -684,11 +732,10 @@ a new client whose capture shows real usage, the same bar every descope above al
 | Atomic updates & optimistic concurrency (`set`/`inc`/…, `versions=true`, 409-on-stale) | Already descoped with evidence in the v3 `_version_` subsection; listed here so the parity picture is complete in one place. |
 
 Features that are *also* client-unused but already ruled out as §1 non-goals — SolrCloud,
-streaming expressions, the SQL interface, Tika `/extract`, XML/javabin response writers — stay
-non-goals rather than moving here: a non-goal is a stronger statement than unscheduled. Tika is
-the one a Drupal site *can* exercise (`search_api_attachments` can extract via Solr's
-`/update/extract`), so it is a knowing gap, not an oversight: that module's local-extraction
-alternatives cover the need without Wayfinder shipping a document-parsing stack.
+streaming expressions, the SQL interface, and XML/javabin response writers — stay non-goals rather
+than moving here: a non-goal is a stronger statement than unscheduled. `/update/extract` is no
+longer in that list: issue #171 found a direct emission path in the vendored client source and the
+staged in-process boundary is recorded above.
 
 This table is scoped to features a single-node Solr 9.x serves on the wire. It does not
 enumerate operational subsystems with no Wayfinder analogue (replication handler, CDCR, metrics

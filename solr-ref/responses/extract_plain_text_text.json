@@ -1,0 +1,8 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":3
+  },
+  "file":"\n\n\n\n\n\n\n\n\n\n\n\n\nHello plain text.\nSecond line.\n\n",
+  "file_metadata":["resourceName",["sample.txt","sample.txt"],"Content-Type",["application/octet-stream","text/plain; charset=ISO-8859-1"],"stream_name",["file","file"],"stream_source_info",["sample.txt","sample.txt"],"stream_size",["31","31"],"stream_content_type",["application/octet-stream","application/octet-stream"],"X-Parsed-By",["org.apache.tika.parser.DefaultParser","org.apache.tika.parser.csv.TextAndCSVParser"],"Content-Encoding",["ISO-8859-1"]]
+}
