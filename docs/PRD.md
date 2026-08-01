@@ -411,6 +411,15 @@ the library, not a compromise.
 Scoping rule for v1: **ship what Tantivy supports natively; roadmap the rest.** One
 deliberate exception, called out below.
 
+Scoping rule from v2 onward: **ship what `search_api_solr` demonstrably uses; everything else
+Solr 9.x offers is unscheduled, on the Solr 9.x parity roadmap below.** The evidence base is
+the v1.5 capture (`coverage/search_api_coverage_contract.json`) plus the vendored module source
+(`coverage/search_api_solr_4.4.0_source`) for features the capture site did not have configured
+(autocomplete, spatial, grouping). This generalises calls the PRD had been making one at a time —
+the edismax six-param descope (issue #136), the `terms`/`admin/luke`/`admin/mbeans` descope
+(issue #57), the `_version_` narrowing — into the default rule, so each future descope no longer
+needs its own argument from first principles, only its evidence.
+
 ### v1 — native Tantivy capability
 
 | Feature | Tantivy primitive |
@@ -514,8 +523,9 @@ conditional lists (`2<-1 5<80%`). Implement it fully; it is a small self-contain
 | **v1.5 — the capture** | The `search_api_solr` contract capture (§2), pulled ahead of the rest of v2: generated config set + HTTP trace of a real Drupal site, frozen as fixtures, plus the coverage denominator computed from them |
 | **v2 — Search API** | `search_api_wayfinder` connector module (issue #57, done), `search-api.toml` preset (done), `/admin/system` version handshake (done). `/admin/luke`, `/terms`, `/admin/mbeans` explicitly descoped — see below. |
 | **v2.5 — Admin web UI** | A read-only operator dashboard, server-rendered by the same binary. Tracer bullet (core view, issue #94) done. See below. |
-| **v3** | Result caches + autowarm, spellcheck/suggester, grouping/collapse, `_version_` (issue TBD — scope narrowed, see below) |
-| **v4** | Function queries (`bf`, `{!func}`), spatial, snapshot-based read replicas |
+| **v3** | Result caches + autowarm, spellcheck/suggester (the module's autocomplete path: `spellcheck.*`, `suggest`, `terms`), grouping (`group=true` — see note below on why "collapse" left this line), `_version_` (issue TBD — scope narrowed, see below) |
+| **v4** | Function queries (`bf`, `{!func}`) — client-evidenced: the module's `BoostMoreRecent` processor emits `product(…,recip(ms(…)))` — spatial (`{!geofilt}`, `bbox`, `{!frange}geodist()`, heatmap facets), snapshot-based read replicas |
+| **Solr 9.x parity** | Solr features with zero client evidence, deliberately unscheduled — the table below. |
 | **Deep roadmap** | Distributed / sharded search, SolrCloud. The majority of Solr's complexity and directly opposed to the operational-simplicity goal. |
 
 **Why the capture moved to its own phase.** `search_api_solr` is not merely the motivating
@@ -558,7 +568,47 @@ Notes on deferred items:
   fuzzy support give a foundation, not the component.
 - **Atomic updates + `_version_`** — narrowed by evidence to just `_version_`; see the "v3 —
   `_version_`" subsection below.
-- **Grouping / collapse** — no native equivalent; needs a custom collector.
+- **Grouping** — no native equivalent; needs a custom collector. This line originally said
+  "grouping/collapse", but the module's `collapse`-named identifiers (`setGrouping()`'s
+  `$collapse_field` loop) drive Solr *grouping* (`group=true&group.field=…`), not the
+  Collapse/Expand component (`fq={!collapse}` + `expand=true`), which the client never sends —
+  Collapse/Expand moved to the Solr 9.x parity table below.
+
+### Solr 9.x parity roadmap — zero client evidence, deliberately unscheduled
+
+The remainder of Solr 9.x's feature surface, checked against the same evidence base as the
+descopes above: zero hits in the coverage contract's parameter denominator, and zero emission
+sites in the module source — both the vendored 4.4.0 core (`coverage/search_api_solr_4.4.0_source`)
+and upstream's submodules (autocomplete, admin, devel), swept for each row below. None of these
+has a phase. The only reason any of them would ever be built is **Solr 9.x wire parity as a goal
+in itself** — which §2 explicitly says it is not ("an adoption mechanism, not the product") — or
+a new client whose capture shows real usage, the same bar every descope above already carries.
+
+| Solr 9.x feature | Note |
+|---|---|
+| JSON Request API / JSON Facet API | The module speaks classic `facet.*` params exclusively; `json.facet` appears nowhere in its source. |
+| `facet.pivot`, `facet.interval` | Only field, query, and heatmap faceting is emitted. `facet.range` is equally unemitted, but v1 already shipped it — kept as surplus, not unshipped. |
+| Collapse & Expand (`fq={!collapse}`, `expand=true`) | The module's "collapse" identifiers drive Solr grouping (`group=true`), which stays in v3. |
+| Query Elevation (`/elevate`) | Relevance tweaks travel as `bq`/`boost` function queries; no elevation params. |
+| Block join / nested documents (`{!parent}`, `{!child}`) | The module indexes flat documents; even date ranges are a custom field type, not child docs. `_root_` remains envelope-shape only (§2 fact 8). |
+| Realtime Get (`/get`) | |
+| TermVector component (`/tvrh`) | |
+| `cursorMark` deep paging | Pagination is plain `start`/`rows`. |
+| Learning to Rank (`{!ltr}`) | |
+| Result clustering (Carrot2) | |
+| Tagger handler (`/tag`) | |
+| Atomic updates & optimistic concurrency (`set`/`inc`/…, `versions=true`, 409-on-stale) | Already descoped with evidence in the v3 `_version_` subsection; listed here so the parity picture is complete in one place. |
+
+Features that are *also* client-unused but already ruled out as §1 non-goals — SolrCloud,
+streaming expressions, the SQL interface, Tika `/extract`, XML/javabin response writers — stay
+non-goals rather than moving here: a non-goal is a stronger statement than unscheduled. Tika is
+the one a Drupal site *can* exercise (`search_api_attachments` can extract via Solr's
+`/update/extract`), so it is a knowing gap, not an oversight: that module's local-extraction
+alternatives cover the need without Wayfinder shipping a document-parsing stack.
+
+This table is scoped to features a single-node Solr 9.x serves on the wire. It does not
+enumerate operational subsystems with no Wayfinder analogue (replication handler, CDCR, metrics
+API, security plugins) — those fall under §1 non-goals or §5's deep roadmap wholesale.
 
 ### v2.5 — Admin web UI
 
