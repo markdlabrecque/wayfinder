@@ -106,6 +106,11 @@ list `GET /solr/{core}/schema/fieldtypes` reports: `string`, `keyword`, `text_ge
 language above. The internal tokenizer identity `text_en` registers under is reserved alongside
 them, for the same reason.
 
+`_version_` is always reserved as an internal `[[fields]]` name. When the schema declares any
+`[[dynamic_fields]]` rule, `_dynamic` and `_dynamic_text` are reserved too: Wayfinder creates
+those catch-all fields implicitly, so declaring either explicitly would collide with them. Without
+dynamic rules no catch-all is created, and those two names remain valid static fields.
+
 Note `boolean` is deliberately *not* reserved: Wayfinder has no boolean field type, so nothing
 resolves that name and a chain called `boolean` shadows nothing. This is not an oversight in
 the list — if a boolean built-in is ever added, the name becomes reserved with it.

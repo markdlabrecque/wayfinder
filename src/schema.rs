@@ -608,6 +608,22 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     {
         bail!("field `{VERSION_FIELD}` is reserved for Wayfinder's internal version field");
     }
+    // Any dynamic rule makes the builder allocate these catch-all fields
+    // implicitly. Reserving their names against explicit `[[fields]]`
+    // declarations in that case keeps an operator typo from reaching Tantivy's
+    // duplicate-field panic (issue #194). Without dynamic rules no implicit
+    // field exists, so these names remain valid static fields.
+    if !parsed.dynamic_fields.is_empty()
+        && let Some(field) = parsed
+            .fields
+            .iter()
+            .find(|field| matches!(field.name.as_str(), DYNAMIC_FIELD | DYNAMIC_TEXT_FIELD))
+    {
+        bail!(
+            "field `{}` is reserved for Wayfinder's dynamic-field storage",
+            field.name
+        );
+    }
     // Every name `resolve_type` resolves to a built-in is reserved (issue
     // #170). `resolve_type` checks `[[field_types]]` *before* its built-in
     // match arms, so a custom chain named `double` silently retypes every

@@ -879,6 +879,57 @@ kind = "lowercase"
     }
 }
 
+// --- dynamic catch-all field names are reserved (issue #194) ----------------
+
+/// `_dynamic` and `_dynamic_text` are implicitly created whenever the schema
+/// declares a `[[dynamic_fields]]` rule. Declaring either name as a static
+/// field must return an ordinary load error instead of reaching Tantivy's
+/// duplicate-field panic. Iterating both names is the mutation guard: removing
+/// either reservation makes this test panic or unexpectedly load that schema.
+#[test]
+fn dynamic_catch_all_field_names_are_reserved_when_dynamic_rules_exist() {
+    for name in [schema::DYNAMIC_FIELD, schema::DYNAMIC_TEXT_FIELD] {
+        let toml = format!(
+            r#"{FULL_SCHEMA_TOML}
+[[fields]]
+name = "{name}"
+type = "string"
+stored = true
+"#
+        );
+        let (_dir, path) = write_schema(&toml);
+        let err = schema::load(&path)
+            .expect_err("a static field may not use a dynamic catch-all field name");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(name) && msg.contains("reserved"),
+            "load must fail with a reserved-name error naming `{name}`, got: {msg}"
+        );
+    }
+}
+
+/// Without dynamic rules Wayfinder creates no catch-all fields, so these names
+/// cannot collide and retain their pre-existing meaning as ordinary static
+/// fields. This keeps the panic fix scoped to schemas that can trigger it.
+#[test]
+fn dynamic_catch_all_names_still_load_as_static_fields_without_dynamic_rules() {
+    for name in [schema::DYNAMIC_FIELD, schema::DYNAMIC_TEXT_FIELD] {
+        let toml = format!(
+            r#"{}
+[[fields]]
+name = "{name}"
+type = "string"
+stored = true
+"#,
+            schema_without_dynamic_fields()
+        );
+        let (_dir, path) = write_schema(&toml);
+        let wf = schema::load(&path)
+            .expect("a catch-all name without dynamic rules must remain a valid static field");
+        assert!(wf.field(name).is_some(), "`{name}` must resolve normally");
+    }
+}
+
 // --- duplicate [[fields]] names (issue #173) ---------------------------------
 //
 // Corrected premise. Issue #173 states that two `[[fields]]` entries sharing a
