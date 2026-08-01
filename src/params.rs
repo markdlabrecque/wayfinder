@@ -77,11 +77,10 @@ impl Params {
 
     /// Whether this endpoint's `omitHeader` policy suppresses `responseHeader`.
     ///
-    /// An unsupported parameter remains inert, including on an error path. On
-    /// a supporting endpoint an invalid value also suppresses the header: the
-    /// validation error is Wayfinder's deliberate headerless JSON divergence.
+    /// An unsupported parameter or invalid value remains inert. Invalid values
+    /// are explicitly suppressed by their validation-error policy instead.
     pub fn omit_header(&self) -> bool {
-        self.omit_header_allowed && !matches!(self.parse_omit_header(), Ok(false))
+        self.omit_header_allowed && matches!(self.parse_omit_header(), Ok(true))
     }
 
     /// Validates Solr 9.10.1's `omitHeader` vocabulary: `true`/`yes`/`on`

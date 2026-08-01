@@ -947,6 +947,7 @@ fn check_params(state: &AppState, allowed: &[&str], params: &Params) -> Result<(
                 ),
             )
             .with_params(params)
+            .suppress_response_header()
         })?;
     }
     if !state.config.strict_params {
@@ -1793,8 +1794,7 @@ async fn update(
             .envelope(Envelope::NoParams)
     };
     check_core(&state, &core, &params, Envelope::NoParams)?;
-    check_params(&state, UPDATE_PARAMS, &params)
-        .map_err(|e| e.with_params(&params).envelope(Envelope::NoParams))?;
+    check_params(&state, UPDATE_PARAMS, &params).map_err(|e| e.envelope(Envelope::NoParams))?;
 
     // GET carries no body (finding 47): it is not a method error, but a
     // *content-stream* one — 400 "missing content stream" unless the only

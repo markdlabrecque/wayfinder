@@ -107,6 +107,14 @@ impl WfError {
         self
     }
 
+    /// Explicitly suppresses `responseHeader`, independent of parsed request
+    /// parameters. Used for invalid `omitHeader` values, whose validation
+    /// error intentionally remains headerless JSON.
+    pub fn suppress_response_header(mut self) -> Self {
+        self.extra.omit_header = true;
+        self
+    }
+
     /// Attaches a `response` block, rendered between `responseHeader` and
     /// `error` (`WithParams` envelope only — see the module docs on issue
     /// #35).
