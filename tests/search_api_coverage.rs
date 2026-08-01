@@ -17,6 +17,21 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+/// The overall coverage fraction every test in this file pins.
+///
+/// Single-sourced deliberately. Three separate tests assert it, and when it
+/// used to be three separate literals every feature branch that moved the
+/// numerator conflicted with every sibling in three places at once -- four of
+/// the ten issues in the #139..#154 batch hit this, and one of them merged a
+/// red `main` because a second literal had appeared while the branch was in
+/// flight. Landing a feature now edits one line here plus the changelog in
+/// `frozen_capture_derived_contract_matches_the_committed_denominator`.
+///
+/// Derive the new value from `cargo run -- coverage --format json`. Never
+/// hand-compute it: the numerator has moved for reasons no ticket named more
+/// than once in this repo's history.
+const EXPECTED_FRACTION: &str = "66/75";
+
 const CONTRACT: &str = include_str!("../coverage/search_api_coverage_contract.json");
 const SOURCE_EVIDENCE: &str =
     include_str!("../coverage/search_api_solr_4.4.0_source_evidence.json");
@@ -1345,7 +1360,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // other two entries did NOT flip and were descoped:
     // `mlt.fl.wildcard-plus-score` to #188 and `mlt.maxntp` to #189.
     assert_eq!(
-        report.overall.fraction, "66/75",
+        report.overall.fraction, EXPECTED_FRACTION,
         "initial coverage fraction"
     );
 }
@@ -1355,7 +1370,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
 /// (`is_object()`/`is_array()`), not that a real client consumer could read
 /// anything out of it. Tightening those three predicates to require their
 /// real leaf (`index.numDocs` as a u64; a non-empty term/frequency pair; a
-/// non-empty name list) must not drop the fraction below `66/75` -- these
+/// non-empty name list) must not drop the fraction below `EXPECTED_FRACTION` -- these
 /// three items are covered *today*, against the real seeded corpus
 /// (`ProbeApp::PROBE_DOCS`) driving the real routed handlers, and a
 /// tightened probe must still see real, non-hollow data at each of them.
@@ -1375,7 +1390,8 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
 /// the assertion without also pointing the probe's request at a real field
 /// (as its sibling `terms.enumeration` request-semantic probe already does
 /// with `terms.fl=body`) flips `terms.terms` from covered to uncovered and
-/// drops the fraction by one, to `65/75` against the `66/75` pinned below. If
+/// drops the fraction by one, i.e. one below the `EXPECTED_FRACTION` pinned
+/// below. If
 /// this test goes red, that is the tightening missing its matching request
 /// fix, not a fixture to update.
 #[tokio::test]
@@ -1428,7 +1444,7 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
     // *request_semantics* items, `response_fields` still 13/15.
     assert_eq!(
         report["overall"]["fraction"],
-        Value::String("66/75".to_string()),
+        Value::String(EXPECTED_FRACTION.to_string()),
         "tightening the three hollow-container probes must not, by itself, \
          change the coverage fraction -- if it drops, a probe's request (not \
          just its assertion) needs to change to reach real data, see \
@@ -1442,7 +1458,7 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
 /// #162 fixed for three response-field probes, but here on a
 /// request-semantics probe. Tightening it to also require `solr-mbeans` to
 /// be a JSON object, and conjoining a `/select` facet leg, must not drop the
-/// fraction below `66/75`: neither leg's *request* needs to change to reach
+/// fraction below `EXPECTED_FRACTION`: neither leg's *request* needs to change to reach
 /// real data -- `admin_mbeans` in `src/lib.rs` builds `solr-mbeans`
 /// unconditionally, and the seeded probe corpus already facets `category` --
 /// so the item stays covered against the real seeded app.
@@ -1496,7 +1512,7 @@ async fn repeated_map_and_flat_stays_covered_against_the_real_seeded_app() {
     // doing.
     assert_eq!(
         report["overall"]["fraction"],
-        Value::String("66/75".to_string()),
+        Value::String(EXPECTED_FRACTION.to_string()),
         "tightening this probe's assertion must not, by itself, change the \
          coverage fraction -- the real handler already emits an object-shaped \
          `solr-mbeans` regardless of `json.nl`, so nothing about the real \
