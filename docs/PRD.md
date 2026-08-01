@@ -938,6 +938,10 @@ Scoped to v1 features. Server TOML plus per-request params where Solr has them.
   JSON bodies.
 - No heap tuning, by design. Tantivy is mmap-based; the OS page cache does the work Solr's
   heap sizing does. The absence is a feature and should be documented as one.
+- No native TLS termination. Wayfinder serves HTTP on loopback or a trusted private network;
+  non-colocated deployments terminate TLS at an established reverse proxy. Certificate issuance,
+  renewal, reload, and protocol policy stay outside the search process, preserving operational
+  simplicity without inventing a second certificate lifecycle. See `docs/deployment.md`.
 
 **Admin (config only, no per-request equivalent):**
 - `reported_solr_version` — the `lucene.solr-spec-version` served by `/admin/info/system` and
