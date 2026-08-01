@@ -581,6 +581,24 @@ could only ever be a permanent `EXPECTED_DIVERGENCES` entry. `terms` is the exce
 index data Wayfinder genuinely has, so it is expected to match, and a manifest row for it is a
 legitimate follow-up once a capture against the differential core exists.
 
+Two further `admin/mbeans` specifics, recorded here rather than left to code comments (issue
+#158). First, `UPDATE.updateHandler.softAutoCommitMaxTime` is a key the client *does* read, and
+Wayfinder matches Solr's wire form exactly: the string `"<N>ms"` built from the configured
+millisecond value, and no key at all when soft autocommit is unset. Both halves come from the
+capture and the consumer, not from convenience. `solr-ref/search-api/trace/00025.json` renders it
+as the string `"5000ms"` (with `autoCommitMaxTime` alongside it as `"15000ms"`), so a bare integer
+would be a divergence; and the `-1` an earlier draft of this paragraph promised for the unset case
+is the *Drupal module's own* default for a missing key, never a value Solr puts on the wire — the
+`isset($update_handler_stats['UPDATE.updateHandler.softAutoCommitMaxTime'])` guard around
+`$max_time = -1` in `coverage/search_api_solr_4.4.0_source/src/SolrConnector/SolrConnectorPluginBase.php:781-798`
+only fires because Solr omits the key entirely when soft autocommit is off, which is what Wayfinder
+does too. Second, this handler treats `stats` as truthy on a
+`true` *prefix* rather than the usual exact `== "true"`: the captured request
+(`solr-ref/search-api/trace/00025.json`) sends `stats=true?omitHeader=false`, because the module
+concatenates a handler string that already carries a query onto Solarium's params, and the
+captured response shows Solr honoured it. Exact equality would answer the real client with an
+empty status report.
+
 The honesty constraint cuts both ways. `schema/fieldtypes` must list exactly the languages
 Wayfinder really stems, which is the 18 in `schema.rs`'s `LANGUAGES` table (English plus 17
 non-English `text_<code>` presets) -- not the 16 an earlier draft of this section and issue #156
