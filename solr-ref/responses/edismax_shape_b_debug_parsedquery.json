@@ -1,0 +1,91 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "q":"({!edismax qf='title body'}+\"quick\" +\"rocket\")",
+      "df":"id",
+      "fl":"id",
+      "sort":"id asc",
+      "wt":"json",
+      "debugQuery":"true"
+    }
+  },
+  "response":{
+    "numFound":0,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "debug":{
+    "rawquerystring":"({!edismax qf='title body'}+\"quick\" +\"rocket\")",
+    "querystring":"({!edismax qf='title body'}+\"quick\" +\"rocket\")",
+    "parsedquery":"(+(+DisjunctionMaxQuery((title:quick | body:quick)))) +id:rocket",
+    "parsedquery_toString":"(+(+(title:quick | body:quick))) +id:rocket",
+    "explain":{ },
+    "QParser":"LuceneQParser",
+    "timing":{
+      "time":1.0,
+      "prepare":{
+        "time":0.0,
+        "query":{
+          "time":0.0
+        },
+        "facet":{
+          "time":0.0
+        },
+        "facet_module":{
+          "time":0.0
+        },
+        "mlt":{
+          "time":0.0
+        },
+        "highlight":{
+          "time":0.0
+        },
+        "stats":{
+          "time":0.0
+        },
+        "expand":{
+          "time":0.0
+        },
+        "terms":{
+          "time":0.0
+        },
+        "debug":{
+          "time":0.0
+        }
+      },
+      "process":{
+        "time":0.0,
+        "query":{
+          "time":0.0
+        },
+        "facet":{
+          "time":0.0
+        },
+        "facet_module":{
+          "time":0.0
+        },
+        "mlt":{
+          "time":0.0
+        },
+        "highlight":{
+          "time":0.0
+        },
+        "stats":{
+          "time":0.0
+        },
+        "expand":{
+          "time":0.0
+        },
+        "terms":{
+          "time":0.0
+        },
+        "debug":{
+          "time":0.0
+        }
+      }
+    }
+  }
+}

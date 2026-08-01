@@ -171,3 +171,4 @@ facet_local_params_key_unknown	400	select?q=*:*&rows=0&facet=true&facet.field=%7
 facet_local_params_key_as_other_field	200	select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dbody%7Dcategory&wt=json
 facet_local_params_key_unterminated	400	select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dmylabel%20category&wt=json
 facet_local_params_key_empty_remainder	400	select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dmylabel%7D&wt=json
+edismax_unquoted_multitoken	200	select?q=quick%2Brocket&defType=edismax&qf=title+body&fl=id&sort=id+asc&wt=json

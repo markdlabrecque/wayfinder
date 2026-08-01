@@ -1,0 +1,32 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":19,
+    "params":{
+      "q":"quick+rocket",
+      "defType":"edismax",
+      "qf":"title body",
+      "fl":"id",
+      "sort":"id asc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":6,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"eA"
+    },{
+      "id":"eB"
+    },{
+      "id":"eC"
+    },{
+      "id":"eD"
+    },{
+      "id":"pA"
+    },{
+      "id":"pB"
+    }]
+  }
+}
