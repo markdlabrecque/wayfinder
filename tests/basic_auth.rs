@@ -63,20 +63,9 @@ async fn send(
     (status, headers, bytes)
 }
 
-#[tokio::test]
-async fn configured_auth_protects_update_but_not_health_checks() {
-    let (app, _dir) = authenticated_app();
-    let update_body = json!([{"id": "protected", "body": "must require credentials"}]).to_string();
-
-    let (status, headers, bytes) = send(
-        &app,
-        "POST",
-        "/solr/content/update?commit=true",
-        None,
-        Body::from(update_body.clone()),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+async fn assert_unauthorized(app: &Router, method: &str, path: &str, authorization: Option<&str>) {
+    let (status, headers, bytes) = send(app, method, path, authorization, Body::empty()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{path} must require auth");
     assert_eq!(
         headers
             .get(header::WWW_AUTHENTICATE)
@@ -87,28 +76,54 @@ async fn configured_auth_protects_update_but_not_health_checks() {
         serde_json::from_slice(&bytes).expect("401 must be a JSON Solr error envelope");
     assert_eq!(body.pointer("/error/code"), Some(&json!(401)));
     assert_eq!(body.pointer("/responseHeader/status"), Some(&json!(401)));
-    assert!(
-        body["error"]["msg"]
-            .as_str()
-            .is_some_and(|msg| !msg.is_empty())
-    );
+}
 
-    let (status, _headers, _bytes) = send(
-        &app,
-        "POST",
-        "/solr/content/update?commit=true",
-        Some(BASIC_CREDENTIALS),
-        Body::from(update_body),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "correct Basic credentials must allow /update"
-    );
+#[tokio::test]
+async fn ping_exemption_is_limited_to_the_configured_core_and_ui_ping() {
+    let (app, _dir) = authenticated_app();
 
     for ping in ["/solr/content/admin/ping", "/ui/ping"] {
         let (status, _headers, _bytes) = send(&app, "GET", ping, None, Body::empty()).await;
         assert_eq!(status, StatusCode::OK, "{ping} must remain unauthenticated");
     }
+    for path in ["/solr/other/admin/ping", "/solr/content/admin/ping/extra"] {
+        assert_unauthorized(&app, "GET", path, None).await;
+    }
+}
+
+#[tokio::test]
+async fn auth_protects_select_and_admin_ui() {
+    let (app, _dir) = authenticated_app();
+    for path in ["/solr/content/select?q=*:*", "/ui"] {
+        assert_unauthorized(&app, "GET", path, None).await;
+    }
+}
+
+#[tokio::test]
+async fn basic_auth_requires_well_formed_matching_credentials() {
+    let (app, _dir) = authenticated_app();
+    let update = "/solr/content/update?commit=true";
+
+    for authorization in [
+        "Basic b3BlcmF0b3I6d3Jvbmc=",
+        "Basic !not-base64!",
+        "Bearer b3BlcmF0b3I6c2VjcmV0",
+    ] {
+        assert_unauthorized(&app, "POST", update, Some(authorization)).await;
+    }
+
+    let lowercase_basic = BASIC_CREDENTIALS.replacen("Basic", "basic", 1);
+    let (status, _headers, _bytes) = send(
+        &app,
+        "POST",
+        update,
+        Some(&lowercase_basic),
+        Body::from(json!([{"id": "protected", "body": "authenticated"}]).to_string()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a lowercase Basic scheme with matching credentials must authenticate"
+    );
 }

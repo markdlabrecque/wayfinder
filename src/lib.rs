@@ -119,6 +119,12 @@ impl AppServer {
     }
 }
 
+#[derive(Clone)]
+struct Authentication {
+    auth: Option<AuthConfig>,
+    core_name: String,
+}
+
 /// Request params Wayfinder implements today. Only consulted when
 /// `strict_params` is on — by default unknown params are ignored, as Solr does
 /// (findings fact 8).
@@ -416,7 +422,10 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
     // the request-body cap that axum's `Bytes`/`Json` extractors otherwise
     // enforce at a bare, hardcoded 2MB via `DefaultBodyLimit`.
     let max_body_size = config.resources.max_body_size;
-    let auth = config.auth.clone();
+    let authentication = Authentication {
+        auth: config.auth.clone(),
+        core_name: core_name.clone(),
+    };
     let state = Arc::new(AppState {
         core_name,
         index,
@@ -474,7 +483,7 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
     let shutdown = ShutdownHandle(Arc::clone(&state));
     let router = router
         .with_state(state)
-        .layer(middleware::from_fn_with_state(auth, authenticate))
+        .layer(middleware::from_fn_with_state(authentication, authenticate))
         .layer(CatchPanicLayer::custom(handle_panic))
         .layer(DefaultBodyLimit::max(max_body_size))
         .layer(
@@ -508,13 +517,12 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
 /// The two health checks remain public so orchestration can distinguish an
 /// unavailable process from unavailable credentials.
 async fn authenticate(
-    State(auth): State<Option<AuthConfig>>,
+    State(authentication): State<Authentication>,
     request: Request,
     next: Next,
 ) -> Response {
-    if auth
-        .as_ref()
-        .is_none_or(|_| public_auth_path(request.uri().path()))
+    if authentication.auth.is_none()
+        || public_auth_path(request.uri().path(), &authentication.core_name)
     {
         return next.run(request).await;
     }
@@ -524,7 +532,12 @@ async fn authenticate(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(basic_credentials)
-        .is_some_and(|credentials| auth.as_ref().is_some_and(|auth| auth.matches(&credentials)));
+        .is_some_and(|credentials| {
+            authentication
+                .auth
+                .as_ref()
+                .is_some_and(|auth| auth.matches(&credentials))
+        });
 
     if valid {
         next.run(request).await
@@ -544,12 +557,8 @@ async fn authenticate(
     }
 }
 
-fn public_auth_path(path: &str) -> bool {
-    path == "/ui/ping"
-        || matches!(
-            path.split('/').collect::<Vec<_>>().as_slice(),
-            ["", "solr", core, "admin", "ping"] if !core.is_empty()
-        )
+fn public_auth_path(path: &str, core_name: &str) -> bool {
+    path == "/ui/ping" || path == format!("/solr/{core_name}/admin/ping")
 }
 
 fn basic_credentials(header: &str) -> Option<Vec<u8>> {

@@ -76,6 +76,16 @@ impl<'de> Deserialize<'de> for AuthConfig {
                 "auth.username and auth.password must both be non-empty",
             ));
         }
+        if raw.username.contains(':') {
+            return Err(serde::de::Error::custom(
+                "auth.username must not contain `:`",
+            ));
+        }
+        if has_ascii_control(&raw.username) || has_ascii_control(&raw.password) {
+            return Err(serde::de::Error::custom(
+                "auth.username and auth.password must not contain ASCII control characters",
+            ));
+        }
 
         let mut hasher = Sha256::new();
         hasher.update(raw.username.as_bytes());
@@ -85,6 +95,11 @@ impl<'de> Deserialize<'de> for AuthConfig {
             credential_digest: hasher.finalize().into(),
         })
     }
+}
+
+/// RFC 7617 forbids control characters in both components of Basic credentials.
+fn has_ascii_control(value: &str) -> bool {
+    value.bytes().any(|byte| byte <= 0x1f || byte == 0x7f)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -242,7 +257,12 @@ impl ServerConfig {
     }
 
     pub fn parse(raw: &str) -> Result<ServerConfig> {
-        let config: ServerConfig = toml::from_str(raw).context("parsing server config TOML")?;
+        // Parse without deserializing first: TOML's source-aware syntax errors
+        // include excerpts of `raw`, which could disclose configured credentials.
+        // Deserializing the value afterward retains useful unknown-field names.
+        let value: toml::Value =
+            toml::from_str(raw).map_err(|_| anyhow::anyhow!("invalid server config TOML"))?;
+        let config: ServerConfig = value.try_into().context("parsing server config TOML")?;
         config.validate()?;
         Ok(config)
     }
@@ -372,5 +392,48 @@ mod tests {
         let settings = config.index_settings().expect("settings");
         assert_eq!(settings.docstore_compression, Compressor::None);
         assert_eq!(settings.docstore_blocksize, 8192);
+    }
+
+    #[test]
+    fn auth_rejects_invalid_rfc_7617_credentials() {
+        for config in [
+            "[auth]\nusername = \"\"\npassword = \"secret\"\n",
+            "[auth]\nusername = \"operator\"\npassword = \"\"\n",
+            "[auth]\nusername = \"operator:name\"\npassword = \"secret\"\n",
+            "[auth]\nusername = \"operator\\u0000\"\npassword = \"secret\"\n",
+            "[auth]\nusername = \"operator\"\npassword = \"secret\\u007f\"\n",
+        ] {
+            ServerConfig::parse(config).expect_err("invalid Basic credentials must be rejected");
+        }
+    }
+
+    #[test]
+    fn auth_allows_a_colon_in_the_password() {
+        let config = ServerConfig::parse(
+            "[auth]\nusername = \"operator\"\npassword = \"secret:with:colons\"\n",
+        )
+        .expect("an RFC 7617 password may contain colons");
+        assert!(
+            config
+                .auth
+                .as_ref()
+                .expect("[auth] must be present")
+                .matches(b"operator:secret:with:colons")
+        );
+    }
+
+    #[test]
+    fn syntax_errors_do_not_echo_credentials() {
+        let sentinel = "AUTH_PARSE_SECRET_MUST_NOT_LEAK";
+        let err = ServerConfig::parse(&format!(
+            "[auth]\nusername = \"operator\"\npassword = \"{sentinel}\"\nnot valid TOML"
+        ))
+        .expect_err("invalid TOML must fail");
+        let message = format!("{err:#}");
+        assert!(message.contains("invalid server config TOML"));
+        assert!(
+            !message.contains(sentinel),
+            "syntax errors must not echo credential values: {message}"
+        );
     }
 }
