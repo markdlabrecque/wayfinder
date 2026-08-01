@@ -1537,6 +1537,25 @@ const SHAPE_B_DEBUG_PAREN_PATH: &str = "select?q=(%7B!edismax+qf%3D%27title+body
 /// The decoded `q` of `SHAPE_B_DEBUG_PAREN_PATH`.
 const SHAPE_B_DEBUG_PAREN_Q: &str = "({!edismax qf='title body'}+\"quick\")";
 
+/// `UNQUOTED_MULTITOKEN_FIXTURE`'s request again, captured with
+/// `debugQuery=true`.
+///
+/// The `numFound` capture settles phrase-vs-OR, but it takes the step *before*
+/// that on trust: that `quick+rocket` is **one** clause whose analysis yields
+/// two tokens (`+` being an ordinary term character mid-token in Lucene's
+/// `_TERM_CHAR` set) rather than two clauses. That step is what generalises the
+/// result to issue #137's actual `state-of-the-art` case, and reading the
+/// grammar is exactly the kind of inference issue #147 exists to replace with a
+/// capture. Solr's own parse tree discriminates the two directly -- see
+/// `unquoted_multitoken_debug_parsedquery_shows_one_clause_over_both_tokens`.
+const UNQUOTED_MULTITOKEN_DEBUG_FIXTURE: &str = "edismax_unquoted_multitoken_debug";
+
+/// The request `UNQUOTED_MULTITOKEN_DEBUG_FIXTURE` must be captured from:
+/// `UNQUOTED_MULTITOKEN_PATH` plus `debugQuery=true`. Not a `manifest.tsv` row,
+/// for the same reason as `SHAPE_B_DEBUG_PATH` -- Wayfinder implements no
+/// `debug` section.
+const UNQUOTED_MULTITOKEN_DEBUG_PATH: &str = "select?q=quick%2Brocket&defType=edismax&qf=title+body&debugQuery=true&fl=id&sort=id+asc&wt=json";
+
 fn fixture_file(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("solr-ref/responses")
@@ -1668,6 +1687,102 @@ async fn unquoted_multitoken_clause_matches_committed_capture() {
     );
 }
 
+/// Solr's own parse tree must show `quick+rocket` as **one** clause spanning
+/// both analysed tokens, not two clauses -- the `_TERM_CHAR` step that
+/// `unquoted_multitoken_clause_matches_committed_capture`'s `numFound` cannot
+/// see, and the step that generalises the phrase-vs-OR result to issue #137's
+/// actual `state-of-the-art` case.
+///
+/// The discriminator is structural and sharp: edismax fans **each clause** out
+/// over `qf` as its own `DisjunctionMaxQuery`. So one clause carrying two tokens
+/// gives exactly one `DisjunctionMaxQuery` with both tokens inside it, while two
+/// clauses give two, one per token. Counting them separates the readings without
+/// depending on how Lucene prints a disjunction.
+///
+/// Fixture-only by design: Wayfinder implements no `debug` section, so there is
+/// nothing on its side to compare a parse tree against. The behavioural half of
+/// this capture is `unquoted_multitoken_clause_matches_committed_capture`, which
+/// replays the same request (minus `debugQuery`) against Wayfinder; the
+/// `numFound` cross-check below is what pins the two captures to the same
+/// request and corpus.
+#[tokio::test]
+async fn unquoted_multitoken_debug_parsedquery_shows_one_clause_over_both_tokens() {
+    let expected = require_capture(
+        UNQUOTED_MULTITOKEN_DEBUG_FIXTURE,
+        UNQUOTED_MULTITOKEN_DEBUG_PATH,
+    );
+
+    let raw = expected
+        .pointer("/debug/rawquerystring")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            panic!(
+                "fixture `{UNQUOTED_MULTITOKEN_DEBUG_FIXTURE}` must be captured with \
+                 `debugQuery=true` -- there is no `debug.rawquerystring` in it: {expected}"
+            )
+        });
+    assert_eq!(
+        raw, "quick+rocket",
+        "the capture must be the parse of the unquoted multi-token query this test reasons about, \
+         with a literal `+` mid-token (`%2B`, not `+`-as-space)"
+    );
+
+    // Same request, same corpus as the `numFound` capture: if these disagree,
+    // one of the two was taken against something else and neither is evidence
+    // about the other's claim.
+    let plain = require_capture(UNQUOTED_MULTITOKEN_FIXTURE, UNQUOTED_MULTITOKEN_PATH);
+    assert_eq!(
+        num_found(&expected),
+        num_found(&plain),
+        "the `debugQuery=true` capture and the `numFound` capture must be the same request against \
+         the same corpus.\ndebug: {expected}\nplain: {plain}"
+    );
+
+    let parsed = expected
+        .pointer("/debug/parsedquery")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            panic!(
+                "fixture `{UNQUOTED_MULTITOKEN_DEBUG_FIXTURE}` has no `debug.parsedquery`: \
+                 {expected}"
+            )
+        });
+
+    assert_eq!(
+        parsed.matches("DisjunctionMaxQuery").count(),
+        1,
+        "Solr's parsedquery has {n} `DisjunctionMaxQuery` nodes, not 1. edismax fans each clause \
+         out over `qf` as its own disjunction, so two of them means Solr read `quick+rocket` as \
+         **two** clauses and the `_TERM_CHAR` reading (finding 92: `+` is an ordinary term \
+         character mid-token, so this is one clause analysing to two tokens) is wrong. That would \
+         make `build_field_disjunction`'s whole clause-splitting account wrong too -- escalate with \
+         this fixture rather than relaxing the assertion: {parsed}",
+        n = parsed.matches("DisjunctionMaxQuery").count(),
+    );
+
+    // ...and that single disjunction carries *both* tokens on each `qf` field,
+    // which is what "one clause, two tokens" means concretely.
+    for field in ["title", "body"] {
+        for token in ["quick", "rocket"] {
+            assert!(
+                parsed.contains(&format!("{field}:{token}")),
+                "`{field}:{token}` is absent from Solr's single `DisjunctionMaxQuery`, so that \
+                 disjunction does not span both analysed tokens over both `qf` fields: {parsed}"
+            );
+        }
+    }
+
+    // The OR reading again, this time read off the structure rather than off a
+    // count: with `autoGeneratePhraseQueries` on, each field's side of the
+    // disjunction would be a `PhraseQuery`, printed `title:"quick rocket"`.
+    assert!(
+        !parsed.contains("\"quick rocket\""),
+        "Solr's parsedquery builds a phrase for the unquoted multi-token clause, so \
+         `build_field_disjunction`'s boolean-OR reading is wrong -- fix the implementation and \
+         escalate, do not relax this assertion: {parsed}"
+    );
+}
+
 /// Solr's own `parsedquery` for a Shape-B inline nested query must show the
 /// `+` binding only the next run -- the rule `local_params::bound_token_len`
 /// implements and findings 90/91 record from `numFound` consistency alone.
@@ -1757,8 +1872,10 @@ async fn shape_b_debug_parsedquery_shows_the_plus_binding_only_the_next_run() {
 /// parser with nothing at all to close the `(` it already opened. Three
 /// observables separate the two, all of them read out of the fixture:
 ///
-/// 1. Solr answered **200** with a parse tree at all, rather than erroring on
-///    an unbalanced paren.
+/// 1. Solr answered **200** with a parse tree at all. Weak on its own, and
+///    deliberately not leaned on: edismax has an escape-and-retry fallback on
+///    parse failure, so a 200 does not by itself prove nothing went wrong. It is
+///    context for 2a/2b/3, which carry the argument regardless.
 /// 2. `parsedquery` is exactly the `qf` fan-out over `quick` — the `)` was
 ///    consumed as the outer paren's closer, so no `df` clause and no stray
 ///    term came from it.

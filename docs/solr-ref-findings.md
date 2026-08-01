@@ -1590,7 +1590,20 @@ fragment" to be different answers at all.
     issue #137's `{!edismax}quick+rocket` probe. This matters because `+` and `-` are
     ordinary term characters *mid-token* in Lucene's
     `_TERM_CHAR` set, so `quick+rocket` is **one** clause whose analysis yields two terms --
-    not two clauses. Wayfinder's `build_field_disjunction` previously made a `PhraseQuery`
+    not two clauses. **That step is captured too, not read off the grammar**: the same request
+    with `debugQuery=true`, `solr-ref/responses/edismax_unquoted_multitoken_debug.json`, parses to
+    `+DisjunctionMaxQuery(((title:quick title:rocket) | (body:quick body:rocket)))` -- exactly
+    **one** `DisjunctionMaxQuery` spanning both analysed tokens. edismax fans each clause out over
+    `qf` as its own disjunction, so a two-clause reading would have produced two of them
+    (`+(DisjunctionMaxQuery((title:quick | body:quick)) DisjunctionMaxQuery((title:rocket | body:rocket)))`);
+    counting them discriminates the readings directly. It also shows the OR structurally rather
+    than only through a count: inside each `qf` field the two tokens are a SHOULD pair
+    (`(title:quick title:rocket)`), not a `PhraseQuery`. This matters because it is the step that
+    generalises the answer past this one query to issue #137's actual `state-of-the-art` case.
+    Like the two Shape-B debug captures it is deliberately **not** a `manifest.tsv` row (Wayfinder
+    emits no `debug` section); the command is commented at the end of `solr-ref/capture.sh` and
+    `tests/edismax.rs::unquoted_multitoken_debug_parsedquery_shows_one_clause_over_both_tokens`
+    asserts on it. Wayfinder's `build_field_disjunction` previously made a `PhraseQuery`
     for any multi-token clause, which is right for finding 74's fixtures (all quoted) and
     wrong for a bare multi-token string; it now takes the quoted/unquoted distinction from
     the grammar's own `Delimiter`.

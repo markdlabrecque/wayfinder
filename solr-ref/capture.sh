@@ -2054,3 +2054,35 @@ cape edismax_unquoted_multitoken 'select?q=quick%2Brocket&defType=edismax&qf=tit
 #    unbalanced `)`, and no `id:` clause came out of it either.
 # curl -sg 'http://localhost:8994/solr/content/select?q=(%7B!edismax+qf%3D%27title+body%27%7D%2B%22quick%22)&df=id&debugQuery=true&fl=id&sort=id+asc&wt=json' \
 #   -o solr-ref/responses/edismax_shape_b_debug_parsedquery_paren_terminated.json
+
+# --- edismax: `quick+rocket` is ONE clause, not two (issue #147, round 2) -----
+# Capture 1 above settles phrase-vs-OR by `numFound` alone, which leaves the step
+# *before* it -- "`quick+rocket` is one clause whose analysis yields two tokens",
+# the `_TERM_CHAR` reading -- resting on the Lucene grammar rather than on a
+# fixture. That step is what generalises the result to issue #137's actual
+# `state-of-the-art` case, so it gets its own capture: capture 1's request again,
+# with `debugQuery=true`. Captured 2026-08-01 against a real `solr:9` with the
+# edismax block above verbatim (same `wayfinder-solr-7` container on port 8994,
+# same `content` core, same `title`/`body` text_en schema, same 10-doc corpus),
+# running only this one request -- this script was NOT re-run wholesale.
+#
+# Captured:
+#   numFound             = 6 (eA eB eC eD pA pB), identical to capture 1
+#   parsedquery          = +DisjunctionMaxQuery(((title:quick title:rocket) | (body:quick body:rocket)))
+#   parsedquery_toString = +((title:quick title:rocket) | (body:quick body:rocket))
+#   QParser              = ExtendedDismaxQParser
+# Exactly ONE `DisjunctionMaxQuery`, spanning both tokens. Two clauses would have
+# produced two of them, one per token
+# (`+(DisjunctionMaxQuery((title:quick | body:quick)) DisjunctionMaxQuery((title:rocket | body:rocket)))`),
+# so this discriminates the `_TERM_CHAR` reading from the two-clause one directly.
+# It also shows the phrase-vs-OR answer structurally rather than only through a
+# count: inside each `qf` field the two tokens are a SHOULD pair
+# (`(title:quick title:rocket)`), not a `PhraseQuery`.
+#
+# Deliberately NOT a `cape` call / manifest.tsv row, for the same reason as
+# captures 2/3 above: Wayfinder emits no `debug` section at all, so the
+# whole-body sweeps could only pass by widening a normaliser over a real
+# capability gap. Checked directly by
+# `tests/edismax.rs::unquoted_multitoken_debug_parsedquery_shows_one_clause_over_both_tokens`.
+# curl -sg 'http://localhost:8994/solr/content/select?q=quick%2Brocket&defType=edismax&qf=title+body&debugQuery=true&fl=id&sort=id+asc&wt=json' \
+#   -o solr-ref/responses/edismax_unquoted_multitoken_debug.json
