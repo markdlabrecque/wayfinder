@@ -5,7 +5,7 @@
 //! (`solr-ref/capture.sh`'s MLT block, container `wayfinder-solr-6`, port
 //! 8993) — the canonical 5-doc tracer-bullet corpus has too little shared
 //! vocabulary for MLT term statistics to mean anything (`docs/solr-ref-findings.md`
-//! finding 55). Nothing here is derived from what Wayfinder happens to
+//! finding 64). Nothing here is derived from what Wayfinder happens to
 //! produce.
 //!
 //! Scope, per the issue: `q` (selects the source doc), `mlt.fl`, `mlt.mintf`,
@@ -272,7 +272,7 @@ async fn mlt_route_exists_and_returns_200_for_a_known_doc() {
 #[tokio::test]
 async fn mlt_baseline_matches_fixture_including_degenerate_empty_result() {
     // Real Solr's default mintf=2/mindf=5 thresholds are too strict for a
-    // 20-doc corpus (finding 55): even mlt1/mlt2's near-duplicate vocabulary
+    // 20-doc corpus (finding 64): even mlt1/mlt2's near-duplicate vocabulary
     // does not clear mindf=5, so `response` is legitimately an empty result
     // object here, not a bug in the fixture.
     let (app, _dir) = mlt_app().await;
@@ -294,7 +294,7 @@ async fn mlt_fl_restricted_to_one_field_matches_fixture() {
 #[tokio::test]
 async fn mlt_mintf_mindf_maxdf_tuning_matches_ranked_fixture() {
     // Loosening mintf/mindf from the too-strict defaults surfaces 4 real
-    // matches from the astronomy cluster (finding 55/56) — compared by
+    // matches from the astronomy cluster (finding 64) — compared by
     // ranked-id list per PRD §8 ("compare ranked ID lists, not just result
     // sets"), reusing tests/differential.rs's own machinery
     // (`common::diff::diff_ranked_ids`) rather than inventing a second one.
@@ -472,7 +472,7 @@ async fn mlt_interesting_terms_key_absent_by_default() {
 async fn mlt_interesting_terms_details_matches_fixture() {
     // finding 53: `mlt.interestingTerms=details` adds a bare top-level
     // `interestingTerms` array (empty here, since this particular query's
-    // result set is also empty per finding 55) sibling to `match`/`response`.
+    // result set is also empty per finding 64) sibling to `match`/`response`.
     let (app, _dir) = mlt_app().await;
     let (status, body) = get(
         &app,

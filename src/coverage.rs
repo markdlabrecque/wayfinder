@@ -2045,13 +2045,27 @@ mod tests {
     // literally -- which pre-#188 `render_doc` already answered correctly --
     // and every assertion would still pass.
 
-    /// `doc1` as `PROBE_DOCS` seeds it, field by field in `PROBE_SCHEMA`
-    /// declaration order. That order is the contract: real Solr renders doc
-    /// keys in schema order, not `fl` order
+    /// `doc1`'s *declared* fields as `PROBE_DOCS` seeds them, field by field in
+    /// `PROBE_SCHEMA`'s `[[fields]]` declaration order. That order is the
+    /// contract: real Solr renders doc keys in schema order, not `fl` order
     /// (`solr-ref/responses/select_fl_reversed.json`), and `fl=*` must produce
     /// every one of them (`select_all.json`, and
     /// `solr-ref/responses/mlt_fl_wildcard_score.json` for the `,score`
     /// composition).
+    ///
+    /// `doc1`'s dynamic-rule field `ss_sku` (matched by `PROBE_SCHEMA`'s `ss_*`
+    /// rule) is deliberately absent. That rule exists so the *real-app* leg of
+    /// the `fl=*,score` probes can tell a full wildcard expansion from a
+    /// declared-fields-only one, since `render_doc` walks declared and dynamic
+    /// fields in two separate loops. These stub handlers model `fl` semantics,
+    /// not `render_doc`'s loop structure: a partial expansion is expressed by
+    /// passing `render_probe_doc` a subset of these names as
+    /// `wildcard_fields` (`&["id"]` in
+    /// `select_wildcard_plus_score_probe_rejects_a_partial_wildcard_expansion`),
+    /// which discriminates without needing a second field class. Expected and
+    /// actual bodies on the stub leg both derive from this one list, so it
+    /// stays self-consistent; adding `ss_sku` here would change nothing the
+    /// probes assert.
     fn probe_stored_fields() -> Vec<(&'static str, Value)> {
         vec![
             ("id", serde_json::json!("doc1")),
