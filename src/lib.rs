@@ -150,6 +150,12 @@ const SCHEMA_FIELDTYPES_PARAMS: &[&str] = &["wt", "json.nl"];
 /// selection), and are accepted-and-ignored on purpose: 400ing a param Solr
 /// serves would be a worse divergence than answering the full response.
 const ADMIN_LUKE_PARAMS: &[&str] = &["wt", "json.nl", "numTerms", "show", "fl"];
+/// `<core>/admin/mbeans` (issue #158). `stats` is the only one that changes
+/// the response; `wt`/`json.nl` are the usual writer params, and `cat`/`key`
+/// are Solr's bean-selection filters, accepted-and-ignored (see
+/// `admin_mbeans`) so a client that sends them does not 400 under
+/// `strict_params`.
+const MBEANS_PARAMS: &[&str] = &["stats", "wt", "json.nl", "cat", "key"];
 /// `/mlt` params in scope for issue #6 (PRD §5's MoreLikeThis row). `q`
 /// selects the source doc with the same query-parsing semantics as
 /// `/select`'s `q` (hence `df` alongside it); `fl`/`rows`/`start` page the
@@ -184,6 +190,7 @@ macro_rules! search_api_routes {
             ("/solr/{core}/admin/system", core_admin_system, any_method),
             ("/solr/{core}/schema/fieldtypes", schema_fieldtypes, any_method),
             ("/solr/{core}/admin/luke", admin_luke, any_method),
+            ("/solr/{core}/admin/mbeans", admin_mbeans, any_method),
         }
     };
 }
@@ -1027,6 +1034,135 @@ async fn core_admin_system(
         "jvm": jvm,
         "security": security,
         "system": system,
+    });
+    Ok(axum::Json(body).into_response())
+}
+
+/// `/solr/{core}/admin/mbeans` -- the JMX-bean dump `search_api_solr`'s
+/// "Solr server status" report reads (issue #158, reversing #57's descope for
+/// this endpoint).
+///
+/// Ground truth is `solr-ref/search-api/trace/00025.json`: 48 KB of real
+/// `solr:9` output, of which `SolrConnectorPluginBase::getStatsSummary()`
+/// (`coverage/search_api_solr_4.4.0_source/src/SolrConnector/SolrConnectorPluginBase.php`,
+/// ~L775-820) reads exactly six leaves on its Solr >= 7.0 branch -- the branch
+/// that applies, since `config.admin.reported_solr_version` reports 9.x:
+///
+/// - `solr-mbeans.UPDATE.updateHandler.stats["UPDATE.updateHandler.docsPending"]`
+/// - `...["UPDATE.updateHandler.softAutoCommitMaxTime"]`
+/// - `...["UPDATE.updateHandler.deletesById"]`
+/// - `...["UPDATE.updateHandler.deletesByQuery"]`
+/// - `solr-mbeans.CORE.core.stats["CORE.coreName"]`
+/// - `solr-mbeans.CORE.core.stats["INDEX.size"]`
+///
+/// All six are real state here, not placeholders: `docsPending` is the very
+/// counter `autocommit_max_docs` acts on (`CoreIndex::pending_docs`), the two
+/// delete figures are process-lifetime counters bumped inside
+/// `CoreIndex::delete_by_ids`/`delete_by_query`, `INDEX.size` is
+/// `disk_size_bytes()` through `admin_ui::human_size` (whose spelling matches
+/// Solr's byte-for-byte), and `CORE.coreName` is the configured core name.
+/// The pre-7.0 `UPDATEHANDLER.*` key spellings are deliberately not
+/// implemented, nor is `getIndexSize()`'s `/replication` fallback.
+///
+/// Everything ELSE in the captured 48 KB -- `CONTAINER`, `ADMIN`, `QUERY`,
+/// `CACHE`, per-handler request timers, Java class names, JVM/filesystem
+/// figures -- has no consumer, so this handler emits only the two categories
+/// the six leaves live in, with static plausible `class`/`description`
+/// strings, following the `admin_info_jvm_system_security()` precedent. There
+/// is deliberately no `solr-ref/manifest.tsv` row: 48 KB of Java internals
+/// cannot be matched honestly, and PRD section 5's v2.75 block is the record
+/// of that (so the differential harness does not enforce byte fidelity here).
+///
+/// `cat`/`key` are accepted and ignored.
+/// ponytail: real Solr uses them to filter the dump down to one category or
+/// bean; Wayfinder always returns its whole (two-category) dump. Ceiling -- a
+/// client that filters gets a superset, never a missing bean, and the one
+/// real consumer sends neither.
+async fn admin_mbeans(
+    State(state): State<Arc<AppState>>,
+    AxPath(core): AxPath<String>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, WfError> {
+    let params = Params::parse(query.as_deref().unwrap_or(""));
+    check_core(&state, &core, &params, Envelope::WithParams)?;
+    check_params(&state, MBEANS_PARAMS, &params)?;
+
+    // Deliberate deviation from this crate's usual `== Some("true")` test.
+    // The captured request path is verbatim
+    // `admin/mbeans?stats=true?omitHeader=false&json.nl=map&json.nl=flat&wt=json`
+    // -- `search_api_solr` concatenates a handler string that already carries a
+    // query onto Solarium's own params -- so `stats` arrives with the raw value
+    // `true?omitHeader=false`, and the captured RESPONSE shows Solr honoured
+    // it anyway (`UPDATE.updateHandler.stats` is present with real values).
+    // A strict equality check would answer that live client with a bean list
+    // and no stats, i.e. an empty status report.
+    // ponytail: a truthy-*prefix* test, not Solr's real param parsing (which
+    // splits the glued query out into separate params). Ceiling -- `stats=true`
+    // and `stats=false` behave exactly as documented, and anything starting
+    // `true` counts as on; Wayfinder does not recover the `omitHeader=false`
+    // that got glued on, and does not honour it.
+    let want_stats = params.get("stats").is_some_and(|v| v.starts_with("true"));
+
+    // `json.nl` needs no handling beyond being allowed: `Params::get` already
+    // returns the FIRST value for a repeated key, which is what the trace
+    // shows Solr doing (`json.nl=map` before `json.nl=flat` came back as a
+    // map), and `solr-mbeans` is an object here unconditionally -- Wayfinder
+    // has no `flat` named-list rendering for it to differ from.
+
+    let update_stats = json!({
+        "UPDATE.updateHandler.docsPending": state.index.pending_docs(),
+        "UPDATE.updateHandler.deletesById": state.index.deletes_by_id(),
+        "UPDATE.updateHandler.deletesByQuery": state.index.deletes_by_query(),
+        // Wayfinder's `autocommit_max_time` is already in ms, which is the
+        // unit this key reports. `-1` when unset, matching the consumer's own
+        // `$max_time = -1` initialisation.
+        //
+        // Documented cosmetic divergence: real Solr renders this as the STRING
+        // `"5000ms"` (trace `00025.json`). Wayfinder reports a bare integer,
+        // consistent with the three counters beside it. The only consumer does
+        // `(int) $value`, which reads either identically, and no manifest row
+        // pins this endpoint's bytes.
+        "UPDATE.updateHandler.softAutoCommitMaxTime":
+            state.config.commit.autocommit_max_time.map_or(-1i64, |ms| ms as i64),
+    });
+    let size_bytes = state.index.disk_size_bytes();
+    let core_stats = json!({
+        "CORE.coreName": state.core_name,
+        "INDEX.size": admin_ui::human_size(size_bytes),
+        // Not read by any client; included because it is the same real figure
+        // unrounded, exactly as `/ui/stats` shows it.
+        "INDEX.sizeInBytes": size_bytes,
+    });
+
+    let mut update_handler = Map::new();
+    update_handler.insert(
+        "class".to_string(),
+        json!("org.apache.solr.update.DirectUpdateHandler2"),
+    );
+    update_handler.insert(
+        "description".to_string(),
+        json!("Update handler that efficiently directly updates the on-disk main lucene index"),
+    );
+    let mut core_bean = Map::new();
+    core_bean.insert("class".to_string(), json!(state.core_name));
+    core_bean.insert("description".to_string(), json!("SolrCore"));
+    // The `stats` sub-object appears only under `stats=true` -- without it Solr
+    // returns the bean list alone, and the coverage probe for
+    // `admin.mbeans.solr-mbeans` GETs the endpoint with no `stats` at all.
+    if want_stats {
+        update_handler.insert("stats".to_string(), update_stats);
+        core_bean.insert("stats".to_string(), core_stats);
+    }
+
+    let body = json!({
+        "responseHeader": {
+            "status": 0,
+            "QTime": 0,
+        },
+        "solr-mbeans": {
+            "CORE": { "core": core_bean },
+            "UPDATE": { "updateHandler": update_handler },
+        },
     });
     Ok(axum::Json(body).into_response())
 }

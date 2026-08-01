@@ -581,6 +581,17 @@ could only ever be a permanent `EXPECTED_DIVERGENCES` entry. `terms` is the exce
 index data Wayfinder genuinely has, so it is expected to match, and a manifest row for it is a
 legitimate follow-up once a capture against the differential core exists.
 
+Two further `admin/mbeans` specifics, recorded here rather than left to code comments (issue
+#158). First, `UPDATE.updateHandler.softAutoCommitMaxTime` is a key the client *does* read, and
+Solr renders it as the string `"5000ms"`; Wayfinder reports a bare integer of milliseconds (`-1`
+when unset), consistent with the three counters beside it and with the consumer's own `(int)`
+cast and `$max_time = -1` initialisation. Second, this handler treats `stats` as truthy on a
+`true` *prefix* rather than the usual exact `== "true"`: the captured request
+(`solr-ref/search-api/trace/00025.json`) sends `stats=true?omitHeader=false`, because the module
+concatenates a handler string that already carries a query onto Solarium's params, and the
+captured response shows Solr honoured it. Exact equality would answer the real client with an
+empty status report.
+
 The honesty constraint cuts both ways. `schema/fieldtypes` must list exactly the languages
 Wayfinder really stems, which is the 18 in `schema.rs`'s `LANGUAGES` table (English plus 17
 non-English `text_<code>` presets) -- not the 16 an earlier draft of this section and issue #156

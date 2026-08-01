@@ -570,6 +570,22 @@ pub struct CoreIndex {
     /// before writer insertion, and intentionally are not update-response or
     /// optimistic-concurrency semantics.
     version_source: AtomicI64,
+    /// Process-lifetime delete counters, for
+    /// `UPDATE.updateHandler.deletesById` / `.deletesByQuery` on
+    /// `/admin/mbeans` (issue #158). Deliberately not persisted: Solr's own
+    /// figures reset on core reload too, so a fresh process starting at 0 is
+    /// the matching behaviour, not a gap.
+    ///
+    /// `deletes_by_id` counts *ids*, not calls -- Solr's JSON update loader
+    /// turns `{"delete": ["a","b"]}` into one `DeleteUpdateCommand` per id, so
+    /// a two-id body moves the real counter by two.
+    ///
+    /// `Relaxed`: these are display-only monotonic counters read by a
+    /// different request than the one that bumped them, with no other memory
+    /// ordered against them -- so the cost on the update path is a bare
+    /// `lock xadd`, no fences.
+    deletes_by_id: AtomicU64,
+    deletes_by_query: AtomicU64,
 }
 
 impl CoreIndex {
@@ -735,7 +751,29 @@ impl CoreIndex {
             autocommit_max_docs: config.commit.autocommit_max_docs,
             autocommit_max_time_ms: config.commit.autocommit_max_time,
             version_source: AtomicI64::new(version_seed()),
+            deletes_by_id: AtomicU64::new(0),
+            deletes_by_query: AtomicU64::new(0),
         })
+    }
+
+    /// Uncommitted docs added since the last commit -- the same counter
+    /// `autocommit_max_docs` is driven by, exposed rather than duplicated, so
+    /// `UPDATE.updateHandler.docsPending` (`/admin/mbeans`, issue #158) can
+    /// never disagree with the threshold the core actually acts on.
+    pub fn pending_docs(&self) -> u64 {
+        self.state.pending_docs.load(Ordering::Relaxed)
+    }
+
+    /// Ids deleted by `delete_by_ids` over this process's lifetime
+    /// (`UPDATE.updateHandler.deletesById`).
+    pub fn deletes_by_id(&self) -> u64 {
+        self.deletes_by_id.load(Ordering::Relaxed)
+    }
+
+    /// Delete-by-query calls over this process's lifetime
+    /// (`UPDATE.updateHandler.deletesByQuery`).
+    pub fn deletes_by_query(&self) -> u64 {
+        self.deletes_by_query.load(Ordering::Relaxed)
     }
 
     /// Adds documents from a Solr-style JSON array-of-docs body. Returns the
@@ -848,6 +886,11 @@ impl CoreIndex {
         for id in ids {
             writer.delete_term(Term::from_field_text(unique_key_field, id));
         }
+        // One atomic add for the whole batch, not one per id: the counter is
+        // per-id in value (matching Solr, whose loader raises one command per
+        // id) without paying a per-id atomic on the update path.
+        self.deletes_by_id
+            .fetch_add(ids.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -863,6 +906,9 @@ impl CoreIndex {
             .lock()
             .expect("index writer mutex poisoned");
         writer.delete_query(parsed)?;
+        // After the writer accepted it, not before: a query that failed to
+        // parse (the `?` above) never became a delete, so it must not count.
+        self.deletes_by_query.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 

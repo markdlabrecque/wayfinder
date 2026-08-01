@@ -78,7 +78,12 @@ pub fn render_core_page(
 /// ponytail: one decimal place, binary steps, no locale awareness. Ceiling:
 /// purely cosmetic — the exact byte count is rendered alongside it, so
 /// nothing downstream parses this string.
-fn human_size(bytes: u64) -> String {
+///
+/// `pub(crate)` since issue #158: `/admin/mbeans`'s `INDEX.size` is the same
+/// rendering, and real Solr's spelling matches this one exactly (trace
+/// `00025.json` reports `21607` bytes as `"21.1 KB"`), so the wire format gets
+/// this function rather than a second formatter that could drift from it.
+pub(crate) fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
     let mut unit = 0;
