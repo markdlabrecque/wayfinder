@@ -1157,9 +1157,6 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
             "select.highlight.merge-contiguous",
             "select.highlight.require-field-match",
             "select.highlight.wildcard-fields",
-            "select.q.local-params-edismax.and",
-            "select.q.local-params-edismax.or",
-            "select.q.local-params-edismax.single-term",
             "select.spellcheck.collate",
             "select.spellcheck.dictionaries",
             "select.spellcheck.enable",
@@ -1197,8 +1194,13 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // `hl.fragsize=0`, and taught `src/highlight.rs` to produce it (finding
     // 81) in the same change -- so the entry stays covered and the fraction
     // stays 42/75.
+    // 42/75 -> 45/75 when issue #137 landed inline `{!edismax qf='...'}`
+    // local-params parsing in `q` (`src/local_params.rs`), flipping all three
+    // `select.q.local-params-edismax.{and,or,single-term}` probes at once.
+    // Denominator unchanged -- no new semantics, three previously-uncovered
+    // ones now answered.
     assert_eq!(
-        report.overall.fraction, "42/75",
+        report.overall.fraction, "45/75",
         "initial coverage fraction"
     );
 }

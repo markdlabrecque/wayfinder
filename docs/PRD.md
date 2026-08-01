@@ -210,8 +210,27 @@ chosen. Nothing may be added here without the same two things.
    indexes into it (finding 78) — getting it wrong breaks the client, not just cosmetics.
    (issue #59)
 
+6. **A local-params block in `q` naming any query parser other than `edismax` is a hard 400, where
+   Solr parses it.** Real Solr registers a parser per type, so `{!lucene}quick`, `{!term f=id}doc1`
+   and `{!func}...` all parse; Wayfinder recognises `{!edismax ...}` only and answers everything
+   else with a `SyntaxError` 400 in the Solr error envelope. The evidence is the v1.5 capture rather
+   than a per-shape fixture, and that is stated plainly here because the rule above demands it: the
+   only local-params types the captured client ever sends are `{!edismax qf='...'}` in `q` (7 traces)
+   and `{!key=...}` in `facet.field` (2 traces) across the 28 committed traces in
+   `solr-ref/search-api/trace/`, so no fixture exercises `{!lucene}`/`{!term}`/`{!func}` at all and
+   real Solr's answers for them are documented, not captured. Two reasons this is the right call
+   anyway. First, **it is not a regression and this PR did not introduce it**: before issue #137,
+   `q={!lucene}quick` already 400d, because `tantivy::query_grammar::parse_query` rejects the raw
+   `{!` string outright (`{` opens an exclusive range in Tantivy's grammar) — issue #137 changed the
+   error *message*, not the status. Second, `{!func}` is **v4** scope (§5's phase table, "Function
+   queries (`bf`, `{!func}`)") and v1 has no function-query evaluator, so a `{!func}` block that
+   parsed into something would silently half-work — the accept-and-ignore treatment `bf` gets is
+   defensible for an optional relevance-tuning param and indefensible for the query itself. A 400
+   is the honest answer until the parser it names exists. (issue #137's open question 5; findings
+   90-92)
+
 Note that divergence 3 is a difference from the *configset* the reference fixtures were captured
-against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, and 4 are
+against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, 4, and 6 are
 differences from Solr proper. Divergence 5 is a deliberate config choice plus inherent host
 non-reproducibility, not a Solr-behaviour disagreement.
 
@@ -459,6 +478,29 @@ the capture moved to its own phase" below), zero usage plus zero coverage moveme
 reason to keep them out. `tests/edismax_descope_guard.rs` is the expiring guard: it fails the day
 a new trace or a regenerated coverage contract mentions any of the six, which is the signal to
 revisit this descope (issue #136) rather than silently keep it.
+
+**The client's own `{!edismax}`-inside-`q` shape is reproduced bug-compatibly, low recall included
+(issue #137).** `search_api_solr` does not send `defType=edismax`; it sends the whole query as
+`q=({!edismax qf='...'}+"quick" +"rocket")`. The captured `/select` handler defaults
+(`solr-ref/search-api/configset/solrconfig_extra.xml`) are `defType=lucene`, `df=id`, so the
+**outer** parser is lucene and `{!edismax ...}` is an *inline nested query*, not a position-0
+local-params block that would re-select the parser for the whole `q`. Solr binds only the **next
+whitespace-delimited run** of characters after `}` to the nested parser — also terminated by a `)`
+that closes a paren opened *before* the run, which matters because every captured `q` wraps the
+whole query in `(...)` (finding 91) — and the remainder is parsed by the outer lucene parser
+against `df=id` and matches nothing. Wayfinder reproduces that binding rule **including its
+low-recall outcome**: traces 00004/00008 (`+"quick" +"fox"`) return `numFound: 0` even though the
+document `entity:node/1` contains both terms, because `+"fox"` never reaches edismax. Findings 90,
+91 and 92 and the per-trace `numFound` table in finding 90 carry the evidence; all seven captured
+Shape-B traces fit this model and only this model.
+
+That is **deliberate fidelity, not a defect.** Matching captured Solr is the contract (§2), and the
+"obviously more useful" high-recall reading — hand the whole remainder to edismax — would be a
+**divergence**, so it could only ship after being ratified in §2's list with a fixture behind it.
+Issue #137's own title ("so keyword search works") is wrong-premised on this point and is recorded
+as such: keyword search does not start working for a Shape-B client, it starts failing the way real
+Solr fails, and the fix belongs upstream in `search_api_solr`. The two `numFound == 0` assertions in
+`tests/local_params.rs` are the guard against a later well-meaning rewrite to high recall.
 
 `mm` is the hardest single piece — the grammar accepts absolute counts, percentages, and
 conditional lists (`2<-1 5<80%`). Implement it fully; it is a small self-contained parser.

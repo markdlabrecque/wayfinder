@@ -33,6 +33,7 @@ pub mod edismax;
 mod error;
 mod facet;
 mod highlight;
+mod local_params;
 mod params;
 mod query;
 pub mod schema;
