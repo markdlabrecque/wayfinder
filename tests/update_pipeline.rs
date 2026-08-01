@@ -816,3 +816,172 @@ async fn autocommit_max_time_arms_even_when_a_later_doc_in_the_batch_is_invalid(
          its autocommit_max_time deadline armed and become visible: {body}"
     );
 }
+
+// --- issue #154: repeated `add` command keys in one body -------------------
+//
+// `search_api_solr`'s real `/update` body (`solr-ref/search-api/trace/00001.json`)
+// is Solr's *command* JSON format with the top-level `add` key repeated once
+// per document — six times in that trace, no `delete`/`commit` keys at all
+// (that capture's `commit` came from `commitWithin` on the query string).
+// `serde_json::Value`'s object map collapses duplicate keys to the last
+// occurrence (verified empirically: parsing
+// `{"add":{"doc":{"id":"first"}},"add":{"doc":{"id":"second"}}}` as a
+// `Value` yields only `"second"`), so `parse_update_commands`'s current
+// `Value`-based parse — which the function's own doc comment says is
+// deliberately "out of scope" for this exact shape — drops every add but
+// the last. These tests pin the fix: every `add` in a body must survive,
+// not just the last (or the first).
+//
+// No fixture in `solr-ref/responses/` repeats a command key: the existing
+// `update_add_commit.json` / `update_mixed_commands.json` / etc. fixtures
+// are all single-command bodies. Trace 00001 is the client evidence for the
+// "many repeated `add`, nothing else" shape; there is no captured fixture at
+// all for a body that combines repeated `add` keys with a `delete` or
+// `commit` key in the same object (the coverage probe's
+// `{"add":...,"add":...,"commit":{}}` is a synthetic shape, not something
+// `search_api_solr` or a `solr-ref/responses/*.json` fixture is known to
+// send this way) — see the handoff for what that means for scope here.
+
+/// Three duplicate `add` keys, no other command key, mirroring trace 00001's
+/// shape (repeated `add`, nothing else) with a distinguishing `title` per
+/// doc so a parser that keeps only one occurrence — first OR last — fails,
+/// and a parser that cross-contaminates fields between docs also fails.
+#[tokio::test]
+async fn repeated_add_command_keys_index_every_doc_not_just_one() {
+    let (app, _dir) = update9_app().await;
+
+    let body = r#"{"add":{"doc":{"id":"u9","body":"first added","title":"alpha"}},"add":{"doc":{"id":"u10","body":"second added","title":"bravo"}},"add":{"doc":{"id":"u11","body":"third added","title":"charlie"}}}"#;
+    let (status, body) = post9(&app, "update?commit=true&wt=json", body).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a repeated-add command body must be accepted, got: {body}"
+    );
+
+    // Each doc individually findable, with its own (not another add's)
+    // field content — this is what tells apart "kept only the last add"
+    // (u9/u10 vanish), "kept only the first add" (u10/u11 vanish), and
+    // "cross-contaminated fields" (e.g. u9 stored with title "charlie")
+    // from the correct "all three, each with its own fields" outcome.
+    for (id, want_title) in [("u9", "alpha"), ("u10", "bravo"), ("u11", "charlie")] {
+        let (status, body) = get9(&app, &format!("select?q=id:{id}&wt=json")).await;
+        assert_eq!(status, StatusCode::OK, "select for {id}: {body}");
+        assert_eq!(
+            body.pointer("/response/numFound"),
+            Some(&json!(1)),
+            "doc {id} from a repeated-add body must be indexed exactly once: {body}"
+        );
+        assert_eq!(
+            body.pointer("/response/docs/0/title/0")
+                .or_else(|| body.pointer("/response/docs/0/title")),
+            Some(&json!(want_title)),
+            "doc {id} must keep its own title, not another add's: {body}"
+        );
+    }
+
+    // The corpus is the u1..u5 seed plus these three adds — a doc-count
+    // check that fails just as hard if only one of the three landed.
+    let (status, body) = get9(&app, "select?q=*:*&rows=0&wt=json").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.pointer("/response/numFound"),
+        Some(&json!(8)),
+        "seed corpus (5) + all three repeated adds (3) = 8: {body}"
+    );
+}
+
+/// The exact shape `src/coverage.rs`'s `update.json-command-add-batch` probe
+/// sends: two duplicate `add` keys followed by a trailing `commit` command
+/// key in the same object, with no `?commit=true` query param — the probe's
+/// own two `numFound == 1` assertions are the discriminating check (a
+/// last-add-wins or first-add-wins parser satisfies at most one of them).
+/// This body's combination of repeated `add` with a `commit` key is not
+/// itself backed by a `solr-ref/responses/` fixture or by trace 00001 (which
+/// has no command-body `commit` key at all) — see handoff.
+#[tokio::test]
+async fn repeated_add_with_trailing_commit_key_matches_the_coverage_probe() {
+    let (app, _dir) = update9_app().await;
+
+    let duplicate = r#"{"add":{"doc":{"id":"u9","body":"first"}},"add":{"doc":{"id":"u10","body":"second"}},"commit":{}}"#;
+    let (status, body) = post9(&app, "update?wt=json", duplicate).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the coverage probe's exact body must be accepted, got: {body}"
+    );
+
+    // No separate ?commit=true call: the body's own `commit` key must have
+    // taken effect, exactly as the coverage probe relies on.
+    let (status, body) = get9(&app, "select?q=id:u9&wt=json").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "{body}"
+    );
+
+    let (status, body) = get9(&app, "select?q=id:u10&wt=json").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "{body}"
+    );
+}
+
+/// A repeated `add` alongside an unknown command key must still 400 —
+/// regression guard that a duplicate-key-tolerant parse of `add` does not
+/// accidentally start ignoring (rather than rejecting) commands it does not
+/// recognise. Unfixtured combination (no capture repeats a command key at
+/// all), so the expectation is drawn from the existing single-command
+/// convention: an unrecognised top-level key is a 400 with the `/update`
+/// no-params error envelope, exactly as `{"id":"x"}` already is
+/// (`tests/error_shapes.rs::update_with_a_non_array_body_is_a_400_error_envelope`,
+/// pinned to `err_update_bad_json.json`).
+#[tokio::test]
+async fn repeated_add_with_an_unknown_command_key_is_still_a_400() {
+    let (app, _dir) = update9_app().await;
+    let body = r#"{"add":{"doc":{"id":"u9","body":"x"}},"add":{"doc":{"id":"u10","body":"y"}},"frobnicate":{}}"#;
+    let (status, body) = post9(&app, "update?wt=json", body).await;
+    assert_update_error(status, &body, 400);
+}
+
+/// One of several repeated `add` commands with no `doc` key must still 400
+/// — same "unfixtured, drawn from the existing single-add convention" note
+/// as above: a single `{"add":{}}` already 400s today
+/// (`parse_update_commands`'s `"\"add\" command is missing \"doc\""`
+/// message), and that must hold when it is one of several `add` keys, not
+/// just when it is the only one.
+#[tokio::test]
+async fn one_of_several_repeated_adds_missing_doc_is_still_a_400() {
+    let (app, _dir) = update9_app().await;
+    let body = r#"{"add":{"doc":{"id":"u9","body":"x"}},"add":{}}"#;
+    let (status, body) = post9(&app, "update?wt=json", body).await;
+    assert_update_error(status, &body, 400);
+}
+
+/// An empty top-level object is a no-op, not an error — no fixture pins this
+/// (no capture ever sends a bare `{}`), so this is a regression guard on
+/// today's existing `Value`-based behaviour (an empty object's `for (key,
+/// val) in map` loop never executes, so `commands` stays default and the
+/// handler answers its ordinary 200 success envelope) that a
+/// duplicate-key-tolerant rewrite must preserve rather than a pinned Solr
+/// fact.
+#[tokio::test]
+async fn empty_object_body_is_a_200_no_op() {
+    let (app, _dir) = update9_app().await;
+    let (status, body) = post9(&app, "update?wt=json", "{}").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "empty object body must be a no-op 200: {body}"
+    );
+
+    let (status, body) = get9(&app, "select?q=*:*&rows=0&wt=json").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.pointer("/response/numFound"),
+        Some(&json!(5)),
+        "an empty-object update body must not add or remove anything from the seed corpus: {body}"
+    );
+}
