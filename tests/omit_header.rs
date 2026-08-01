@@ -596,7 +596,11 @@ async fn select_invalid_omit_header_values_return_headerless_json_400() {
             .expect("body must be readable");
         let body: Value = serde_json::from_slice(&bytes).expect("body must be valid JSON");
 
-        assert_eq!(status, StatusCode::BAD_REQUEST, "omitHeader={value}: {body}");
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "omitHeader={value}: {body}"
+        );
         assert!(
             content_type.starts_with("application/json"),
             "Wayfinder's JSON-only divergence must return JSON, got {content_type}"
