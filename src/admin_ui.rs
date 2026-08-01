@@ -369,6 +369,21 @@ mod tests {
         assert_eq!(human_size(5 * 1024 * 1024), "5.0 MB");
     }
 
+    /// Pins the one spelling claim in `admin/mbeans` (issue #158) directly to
+    /// its ground truth: `solr-ref/search-api/trace/00025.json`'s
+    /// `solr-mbeans.CORE.core.stats` carries `"INDEX.sizeInBytes":21607`
+    /// alongside `"INDEX.size":"21.1 KB"` -- the same figure, rounded. Both
+    /// numbers come from the fixture, not from running this function and
+    /// reading back whatever it happens to produce (issue #168, hardening a
+    /// round-2 #158 review finding: no test previously pinned this exact
+    /// pair). A rounding regression would not have gone unnoticed --
+    /// `human_size_steps_up_by_1024` already catches `"{value:.0}"` -- so what
+    /// this adds is the fixture tie, not the regression net.
+    #[test]
+    fn human_size_matches_trace_00025_21607_bytes_to_21_1_kb() {
+        assert_eq!(human_size(21607), "21.1 KB");
+    }
+
     #[test]
     fn core_page_renders_name_count_and_size() {
         let html = render_core_page("content", 5, 4096).expect("template must render");
