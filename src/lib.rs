@@ -2350,17 +2350,6 @@ async fn select(
         }
     };
 
-    let hits = match &parsed {
-        None => Vec::new(),
-        Some((query, filter_queries)) => state
-            .index
-            .search(query.as_ref(), filter_queries, &sort)
-            .map_err(|e| {
-                WfError::internal("wayfinder::SearchError", e.to_string()).with_params(&params)
-            })?,
-    };
-
-    let num_found = hits.len();
     let start: usize = params
         .get("start")
         .and_then(|s| s.parse().ok())
@@ -2374,11 +2363,35 @@ async fn select(
         .unwrap_or(10)
         .min(state.config.query.rows_limit);
 
+    // Bounded search (issue #242): only the first `start + rows` hits are
+    // materialised; `num_found` and `max_score` still cover every match.
+    let outcome = match &parsed {
+        None => crate::collector::TopOutcome {
+            num_found: 0,
+            max_score: None,
+            top: Vec::new(),
+        },
+        Some((query, filter_queries)) => state
+            .index
+            .search_top(
+                query.as_ref(),
+                filter_queries,
+                &sort,
+                start.saturating_add(rows),
+            )
+            .map_err(|e| {
+                WfError::internal("wayfinder::SearchError", e.to_string()).with_params(&params)
+            })?,
+    };
+
+    let num_found = outcome.num_found;
+
     let fl: Option<Vec<String>> = params
         .get("fl")
         .map(|fl| fl.split(',').map(|s| s.trim().to_string()).collect());
 
-    let page = hits
+    let page = outcome
+        .top
         .iter()
         .skip(start)
         .take(rows)
@@ -2418,7 +2431,7 @@ async fn select(
     response.insert("start".to_string(), json!(start));
     if wants_score {
         // ponytail: computed as the max score across the *whole*
-        // (unpaginated) match list, not just the current page — an
+        // (unpaginated) match set, not just the current page — an
         // unverified choice, not a fixtured fact. Every scored fixture
         // (`select_term_scored.json`, `select_quick_scored.json`) has
         // `start=0` with the full result set on one page, so page-max and
@@ -2430,13 +2443,7 @@ async fn select(
         // unverified; this omits the key entirely on the (untested)
         // assumption that Solr does the same, mirroring how `docs: []`
         // still reports a real `numFound: 0` without inventing a score.
-        if let Some(max_score) = hits
-            .iter()
-            .map(|(score, _)| *score)
-            .fold(None, |acc: Option<Score>, s| {
-                Some(acc.map_or(s, |a| a.max(s)))
-            })
-        {
+        if let Some(max_score) = outcome.max_score {
             response.insert("maxScore".to_string(), json!(max_score));
         }
     }

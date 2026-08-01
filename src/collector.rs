@@ -128,35 +128,43 @@ impl AllScoredHits {
     }
 
     fn compare(&self, a: &Hit, b: &Hit) -> Ordering {
-        for (i, clause) in self.clauses.iter().enumerate() {
-            let ord = match (&a.keys[i], &b.keys[i]) {
-                (None, None) => Ordering::Equal,
-                // `None` only reaches here for a string-typed key now: numeric/
-                // float/date clauses materialise a missing value as 0 (or the
-                // epoch) before this comparator ever runs (finding 36/37,
-                // `SegmentSortColumn::value`/`Absent`), so this arm is reached
-                // only by `SortKey::Field` on a `Str`/`Absent(None)` column.
-                // Missing sorts last in *both* directions for those, so the
-                // direction is deliberately not applied here (finding:
-                // `select_sort_mv_asc` and `select_sort_mv_desc` both put doc5
-                // last).
-                (None, Some(_)) => Ordering::Greater,
-                (Some(_), None) => Ordering::Less,
-                (Some(x), Some(y)) => {
-                    let ord = x.cmp_value(y);
-                    if clause.descending {
-                        ord.reverse()
-                    } else {
-                        ord
-                    }
-                }
-            };
-            if ord != Ordering::Equal {
-                return ord;
-            }
-        }
-        a.addr.cmp(&b.addr)
+        compare_hits(&self.clauses, a, b)
     }
+}
+
+/// The one ordering both collectors share: clause by clause, then always by
+/// ascending `DocAddress`. Never `Equal` for two distinct documents, so any
+/// bounded prefix of it is deterministic. Extracted from `AllScoredHits` so
+/// `TopScoredHits` (issue #242) cannot drift from it.
+fn compare_hits(clauses: &[SortClause], a: &Hit, b: &Hit) -> Ordering {
+    for (i, clause) in clauses.iter().enumerate() {
+        let ord = match (&a.keys[i], &b.keys[i]) {
+            (None, None) => Ordering::Equal,
+            // `None` only reaches here for a string-typed key now: numeric/
+            // float/date clauses materialise a missing value as 0 (or the
+            // epoch) before this comparator ever runs (finding 36/37,
+            // `SegmentSortColumn::value`/`Absent`), so this arm is reached
+            // only by `SortKey::Field` on a `Str`/`Absent(None)` column.
+            // Missing sorts last in *both* directions for those, so the
+            // direction is deliberately not applied here (finding:
+            // `select_sort_mv_asc` and `select_sort_mv_desc` both put doc5
+            // last).
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(x), Some(y)) => {
+                let ord = x.cmp_value(y);
+                if clause.descending {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            }
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    a.addr.cmp(&b.addr)
 }
 
 impl Collector for AllScoredHits {
@@ -359,5 +367,174 @@ impl SegmentCollector for AllScoredHitsSegmentCollector {
 
     fn harvest(self) -> Self::Fruit {
         self.hits
+    }
+}
+
+/// What a bounded search returns: the true totals plus only the first
+/// `limit` hits of the exact order `AllScoredHits` would have produced.
+#[derive(Debug, PartialEq)]
+pub struct TopOutcome {
+    /// How many documents matched in total — `response.numFound`.
+    pub num_found: usize,
+    /// Max score across *all* matches, not just the kept prefix — the
+    /// unpaginated-global semantics `/select`'s `maxScore` already had.
+    /// `None` when nothing matched.
+    pub max_score: Option<Score>,
+    /// The first `min(limit, num_found)` hits, ordered identically to
+    /// `AllScoredHits`' full sort.
+    pub top: Vec<(Score, DocAddress)>,
+}
+
+/// Bounded counterpart of [`AllScoredHits`] (issue #242): same clauses, same
+/// comparator (`compare_hits`), same tie-break — but each segment keeps at
+/// most ~`2 * limit` candidates instead of every match, so a `rows=10`
+/// request over a 2M-doc match set stops allocating and sorting the whole
+/// set. Counting and max-score tracking still see every match.
+pub struct TopScoredHits {
+    clauses: Vec<SortClause>,
+    limit: usize,
+}
+
+impl TopScoredHits {
+    /// `limit` is the number of leading hits to keep (`start + rows` for a
+    /// paginated request). `0` is valid and collects totals only. An empty
+    /// `clauses` becomes the implicit `score desc`, exactly as
+    /// [`AllScoredHits::new`] does.
+    pub fn new(mut clauses: Vec<SortClause>, limit: usize) -> TopScoredHits {
+        if clauses.is_empty() {
+            clauses.push(SortClause::new(SortKey::Score, true, None));
+        }
+        TopScoredHits { clauses, limit }
+    }
+}
+
+/// Per-segment totals plus that segment's own leading candidates. The global
+/// top-`limit` is a subset of the union of per-segment top-`limit`s, so
+/// truncating per segment loses nothing.
+pub struct TopSegmentFruit {
+    hits: Vec<Hit>,
+    count: usize,
+    max_score: Option<Score>,
+}
+
+impl Collector for TopScoredHits {
+    type Fruit = TopOutcome;
+    type Child = TopScoredHitsSegmentCollector;
+
+    fn for_segment(
+        &self,
+        segment_ord: SegmentOrdinal,
+        segment: &SegmentReader,
+    ) -> tantivy::Result<Self::Child> {
+        let mut columns = Vec::with_capacity(self.clauses.len());
+        for clause in &self.clauses {
+            columns.push((SegmentSortColumn::open(segment, clause)?, clause.descending));
+        }
+        Ok(TopScoredHitsSegmentCollector {
+            segment_ord,
+            clauses: self.clauses.clone(),
+            columns,
+            limit: self.limit,
+            // Deliberately not `with_capacity(limit)`: `limit` is
+            // client-controlled via `start`, and a huge `start` must not
+            // become a huge allocation before a single doc has matched.
+            hits: Vec::new(),
+            pruned: false,
+            count: 0,
+            max_score: None,
+            scratch: String::new(),
+        })
+    }
+
+    fn requires_scoring(&self) -> bool {
+        // Same rationale as `AllScoredHits`: the fruit carries scores for the
+        // caller (`maxScore`, per-doc `score`) whatever the sort says.
+        true
+    }
+
+    fn merge_fruits(&self, segment_fruits: Vec<TopSegmentFruit>) -> tantivy::Result<Self::Fruit> {
+        let mut num_found = 0usize;
+        let mut max_score: Option<Score> = None;
+        let mut all: Vec<Hit> = Vec::new();
+        for fruit in segment_fruits {
+            num_found += fruit.count;
+            if let Some(s) = fruit.max_score {
+                max_score = Some(max_score.map_or(s, |a| a.max(s)));
+            }
+            all.extend(fruit.hits);
+        }
+        all.sort_by(|a, b| compare_hits(&self.clauses, a, b));
+        all.truncate(self.limit);
+        Ok(TopOutcome {
+            num_found,
+            max_score,
+            top: all.into_iter().map(|h| (h.score, h.addr)).collect(),
+        })
+    }
+}
+
+pub struct TopScoredHitsSegmentCollector {
+    segment_ord: SegmentOrdinal,
+    clauses: Vec<SortClause>,
+    columns: Vec<(SegmentSortColumn, bool)>,
+    limit: usize,
+    hits: Vec<Hit>,
+    /// Whether `hits[limit - 1]` is currently this segment's `limit`-th best
+    /// (true after the first prune), making it a valid discard threshold.
+    pruned: bool,
+    count: usize,
+    max_score: Option<Score>,
+    scratch: String,
+}
+
+impl SegmentCollector for TopScoredHitsSegmentCollector {
+    type Fruit = TopSegmentFruit;
+
+    fn collect(&mut self, doc: DocId, score: Score) {
+        self.count += 1;
+        self.max_score = Some(self.max_score.map_or(score, |a| a.max(score)));
+        if self.limit == 0 {
+            return;
+        }
+
+        let mut scratch = std::mem::take(&mut self.scratch);
+        let keys: Vec<Option<SortValue>> = self
+            .columns
+            .iter()
+            .map(|(column, descending)| column.value(doc, score, *descending, &mut scratch))
+            .collect();
+        self.scratch = scratch;
+        let hit = Hit {
+            addr: DocAddress::new(self.segment_ord, doc),
+            score,
+            keys,
+        };
+
+        // After the first prune, `hits[limit - 1]` is the segment's current
+        // `limit`-th best (select_nth put it there, and later pushes only
+        // append). Anything that sorts after it can never enter this
+        // segment's top `limit`, and the global top is a subset of the
+        // per-segment tops, so discarding here is lossless.
+        if self.pruned && compare_hits(&self.clauses, &hit, &self.hits[self.limit - 1]).is_gt() {
+            return;
+        }
+        self.hits.push(hit);
+
+        if self.hits.len() >= self.limit.saturating_mul(2) {
+            let clauses = std::mem::take(&mut self.clauses);
+            self.hits
+                .select_nth_unstable_by(self.limit - 1, |a, b| compare_hits(&clauses, a, b));
+            self.clauses = clauses;
+            self.hits.truncate(self.limit);
+            self.pruned = true;
+        }
+    }
+
+    fn harvest(self) -> Self::Fruit {
+        TopSegmentFruit {
+            hits: self.hits,
+            count: self.count,
+            max_score: self.max_score,
+        }
     }
 }
