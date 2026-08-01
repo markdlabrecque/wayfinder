@@ -110,6 +110,19 @@ Note `boolean` is deliberately *not* reserved: Wayfinder has no boolean field ty
 resolves that name and a chain called `boolean` shadows nothing. This is not an oversight in
 the list — if a boolean built-in is ever added, the name becomes reserved with it.
 
+### Duplicate names
+
+Names must also be unique, and here too there is no override: two `[[field_types]]` entries with
+the same `name`, two `[[fields]]` entries with the same `name`, or two `[[dynamic_fields]]`
+entries with the same `pattern` are all hard load-time failures naming the offending duplicate.
+Previously the later entry silently won, so a schema could disagree with itself about a field's
+type while loading cleanly.
+
+Only *exact* duplicates fail. **Overlapping globs remain entirely legitimate** — `tm_*`,
+`tm_X3b_*` and a bare `*` can all coexist in one schema, and a field name matching several of
+them is resolved by longest-pattern-wins (see below), not treated as a conflict. What is refused
+is two entries declaring the *same* pattern string, which longest-pattern-wins cannot arbitrate.
+
 ## Dynamic fields
 
 `pattern` is a Solr-style glob with a `*` at exactly one end, or a bare `*` (`*_i`, `title_*`,

@@ -789,9 +789,21 @@ tokenizer = "simple"
 /// resolvable this test fails and names the list to extend, and then it should
 /// be deleted (or the name moved into `MUST_BE_RESERVED_TYPE_NAMES` above)
 /// rather than relaxed -- it exists to expire.
+///
+/// This is a heuristic net, not a proof: a test cannot enumerate `resolve_type`'s
+/// `match` arms, so no fixed list of names can close the hole -- an arm for a name
+/// nobody thought of here still slips through. The list is therefore stocked with
+/// the names most likely to be added next: `boolean`/`bool` (actively contemplated)
+/// and the Solr point-type aliases `pint`/`plong`/`pfloat`/`pdouble`/`pdate`, which
+/// are modern Solr's names for types Wayfinder already has and so are the obvious
+/// wire-compat aliases to add (`pdate` already shows up as a real trace name in
+/// `tests/schema_fieldtypes.rs`). A passing guard means these names are still
+/// unresolved, not that the reservation list is complete.
 #[test]
 fn type_names_absent_from_the_reservation_list_are_still_unresolvable() {
-    for name in ["boolean", "bool", "binary", "location"] {
+    for name in [
+        "boolean", "bool", "binary", "location", "pint", "plong", "pfloat", "pdouble", "pdate",
+    ] {
         assert!(
             !schema::builtin_type_names().contains(&name.to_string()),
             "`{name}` is not expected in `builtin_type_names()`; if it was added there, this \
