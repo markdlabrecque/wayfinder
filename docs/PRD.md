@@ -557,7 +557,7 @@ conditional lists (`2<-1 5<80%`). Implement it fully; it is a small self-contain
 | **v2.5 — Admin web UI** | A read-only operator dashboard, server-rendered by the same binary. Tracer bullet (core view, issue #94) done. See below. |
 | **v2.75 — the contract's remaining endpoints** | The four endpoints in the coverage denominator that Wayfinder does not yet serve: `/terms` (#155), `/schema/fieldtypes` (#156), `/admin/luke` (#157), `/admin/mbeans` (#158). Completing them closes the endpoints bucket. See below. |
 | **Document extraction — staged** | First the client-evidenced `extractOnly=true` path for plain text and HTML, behind request/concurrency/output limits; then DOCX/PPTX and spreadsheet/ODF/RTF families; PDF only after a separate parser-quality and cancellation decision. See below. |
-| **v3** | Result caches + autowarm, spellcheck/suggester (the module's autocomplete path: `spellcheck.*`, `suggest`; `terms` moved earlier to v2.75), grouping (`group=true` — see note below on why "collapse" left this line), `_version_` (issue TBD — scope narrowed, see below) |
+| **v3** | Result caches + autowarm; spellcheck's delivered tracer slice accepts `spellcheck`, `spellcheck.q`, `spellcheck.dictionary`, and `spellcheck.collate` and returns the captured empty envelope (#222), while real suggestions/collations remain #223; the separate `suggest` path also remains here (`terms` moved earlier to v2.75). Also grouping (`group=true` — see note below on why "collapse" left this line) and `_version_` (issue TBD — scope narrowed, see below). |
 | **v4** | Function queries (`bf`, `{!func}`) — client-evidenced: the module's `BoostMoreRecent` processor emits `product(…,recip(ms(…)))` — spatial (`{!geofilt}`, `bbox`, `{!frange}geodist()`, heatmap facets), snapshot-based read replicas |
 | **Solr 9.x parity** | Solr features with zero client evidence, deliberately unscheduled — the table below. |
 | **Deep roadmap** | Distributed / sharded search, SolrCloud. The majority of Solr's complexity and directly opposed to the operational-simplicity goal. |
@@ -659,18 +659,34 @@ not appear in `fields{}`: Wayfinder stores every dynamic value in the shared `_d
 so there is no per-instance field in the index to enumerate.
 
 **The coverage instrument.** The capture yields the denominator: the set of params, endpoints,
-and response fields the module can emit across its configured features. Coverage is the fraction
-of that set Wayfinder serves, computed from the fixtures rather than asserted. Report it
-alongside the differential results (§8). A number that can be recomputed is what keeps
-"75-80%" from becoming a slogan.
+and response fields `search_api_solr` 4.4.0 can emit across its configured features. Coverage is
+the fraction of those fixture-derived contract items that pass their item-specific runtime probe.
+The resulting report defines the project's wire-coverage claim: every request shape the captured
+client sends is accepted with the expected parameter handling and client-consumed response
+envelope, including required JSON key order. The fraction itself is a score over the item-specific
+probes; the differential and feature-specific suites (§8) provide separate fixture-derived
+semantic assertions and explicit key-order cases. It is not a claim of byte-for-byte parity for
+every trace. A reproducible claim is what keeps "75-80%" from becoming a slogan.
+
+The resulting **75/75 is a wire-contract claim, not a feature-completeness claim**. It does not
+mean that every Solr component behind those requests is implemented. The current concrete example
+is spellcheck: issue #222 accepts the client's four captured spellcheck parameters and returns the
+captured empty `suggestions`/`collations` envelope, while actual correction generation remains v3
+work in #223.
+`mlt.maxntp` was the other case that exposed this distinction during #189, but it is not a current
+gap: Wayfinder now implements and probes the token cap rather than counting accepted-but-ignored
+syntax as coverage.
 
 Notes on deferred items:
 
 - **Caches** — Tantivy has none. Measure before building; Tantivy may be fast enough that a
   filter cache is unnecessary. If v1 latency lands materially worse than Solr, that is the
   signal to build it.
-- **Spellcheck / suggester** — needs a build step over the term dictionary. Tantivy's FST and
-  fuzzy support give a foundation, not the component.
+- **Spellcheck / suggester** — the captured `spellcheck`, `spellcheck.q`, repeated
+  `spellcheck.dictionary`, and `spellcheck.collate` request plus its empty response envelope are a
+  delivered v3 tracer slice (#222). Real suggestions and collations remain v3 work in #223; they
+  need a build step over the term dictionary. Tantivy's FST and fuzzy support give a foundation,
+  not the component. The separate `suggest` path also remains v3.
 - **Atomic updates + `_version_`** — narrowed by evidence to just `_version_`; see the "v3 —
   `_version_`" subsection below.
 - **Grouping** — no native equivalent; needs a custom collector. This line originally said
