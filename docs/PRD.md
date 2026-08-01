@@ -1057,10 +1057,16 @@ operational simplicity are where this project wins, and those are the primary go
    whether `[[dynamic_fields]]` is empty (an empty-to-non-empty transition adds the catch-all
    JSON fields, so it changes the real schema); `required` is input validation and not part of
    the Tantivy schema, so toggling it is compatible.
-5. ~~**Analyzer preset coverage.**~~ **Resolved by issues #10 and #51:** every language in
-   `tantivy::tokenizer::Language` ships, 18 in total, as `text_<code>` presets alongside
+5. ~~**Analyzer preset coverage.**~~ **Resolved by issues #10, #51, and #205:** every language
+   in `tantivy::tokenizer::Language` ships, 18 in total, as `text_<code>` presets alongside
    `string`/`keyword`/`text_general`/`text_en`. Built-in `text_en` removes English stopwords
-   before stemming, matching Solr; the other language presets remain stem-only, and custom
-   `[[field_types]]` chains remain available for operator-selected stopword removal. Tantivy ships
+   before stemming and applies Solr's captured Porter terminal-`y` rule (`day` → `dai`, while
+   `sky` remains `sky`) on static fields. That semantic change is analyzer contract v2: indexes
+   built under v1 with static `text_en` terms refuse startup and require a reindex. The shared
+   `_dynamic_text` catch-all intentionally retains v1 Snowball behavior because the captured
+   Drupal Search API configset preserves singular `day`; normal v1 dynamic indexes remain
+   compatible, while pre-v1/legacy-dynamic `en_stem` indexes still fail closed before an analyzed
+   rule can use them. Unaffected raw-only indexes remain adoptable. The other language presets remain stem-only,
+   and custom `[[field_types]]` chains remain available for operator-selected stopword removal. Tantivy ships
    no stopword list for Arabic, Greek, Romanian, Tamil or Turkish, so a `stopwords` filter in
    those languages is a load-time error rather than a silent no-op.

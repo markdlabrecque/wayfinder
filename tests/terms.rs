@@ -13,10 +13,11 @@
 //!   "archiv",1, "brown",1, "cat",1, "day",1, "document",1]}}
 //! ```
 //!
-//! That trace's underlying Drupal/Search-API corpus is not itself captured
-//! anywhere in this repo (unlike `tests/mlt.rs`'s dedicated Solr container),
-//! so the exact document text behind it is unknown. What *is* pinned by the
-//! trace, and asserted here byte-for-byte, is: the ten analyzed terms, each
+//! The captured update in `solr-ref/search-api/trace/00001.json` includes the
+//! singular phrase `Quick thinking saves the day`, and the later terms trace
+//! preserves `day`; together they pin Search API's Snowball behavior separately
+//! from canonical `_default` text_en. The exact full source-to-term mapping is
+//! not reconstructed here. What is asserted byte-for-byte is: the ten analyzed terms, each
 //! one's document frequency, and count-desc/term-asc ordering (`dog`/`lazi`/
 //! `quick` tied at 2 and already alphabetical; the seven count-1 singletons
 //! `about, afternoon, archiv, brown, cat, day, document` are in alphabetical
@@ -24,10 +25,11 @@
 //! order). `terms_matches_trace_analyzed_terms_with_count_desc_term_asc_order`
 //! below indexes a small hand-built corpus, independently verified (via a
 //! throwaway harness using the exact `tantivy` version this crate pins,
-//! `0.26.1`, and the exact filter chain `src/schema.rs::build_tokenizers`
-//! wires for `text_en`: `SimpleTokenizer` -> `RemoveLongFilter(40)` ->
-//! `LowerCaser` -> `StopWordFilter(English)` -> `Stemmer(English)`) to
-//! tokenize into precisely that same ten-term, same-counts, same-order set.
+//! `0.26.1`, and the explicit `search_api_text_en` custom chain declared in
+//! `TERMS_SCHEMA_TOML`: `SimpleTokenizer` -> `LowerCaser` ->
+//! `StopWordFilter(English)` -> `Stemmer(English)`) to tokenize into precisely
+//! that same ten-term, same-counts, same-order set. This pins the captured
+//! stemming outcome, not Search API's full Solr analyzer chain.
 //! Nothing here is derived from what Wayfinder's own `/terms` handler
 //! happens to produce — the handler does not exist yet.
 //!
@@ -129,12 +131,12 @@ fast = true
 
 [[fields]]
 name = "title"
-type = "text_en"
+type = "search_api_text_en"
 stored = true
 
 [[fields]]
 name = "body"
-type = "text_en"
+type = "search_api_text_en"
 stored = true
 
 [[fields]]
@@ -142,6 +144,20 @@ name = "views"
 type = "int"
 stored = true
 fast = true
+
+# The captured Search API configset uses SnowballPorter, unlike the canonical
+# `_default` text_en Porter behavior covered by the differential core.
+[[field_types]]
+name = "search_api_text_en"
+tokenizer = "simple"
+[[field_types.filters]]
+kind = "lowercase"
+[[field_types.filters]]
+kind = "stopwords"
+language = "english"
+[[field_types.filters]]
+kind = "stemmer"
+language = "english"
 "#;
 
 async fn terms_app(corpus: &Value) -> (Router, TempDir) {

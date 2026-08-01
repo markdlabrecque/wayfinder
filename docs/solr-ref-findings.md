@@ -1898,16 +1898,18 @@ Captured 2026-08-01 against `solr:9.10.1` on a clean `content` core with the
 tracer-bullet schema and five-document corpus from `solr-ref/capture.sh`.
 Fixture: `terms_body.json`.
 
-103. **The canonical differential core has one real `text_en` stemming divergence: Solr
-     emits `dai`, while Wayfinder emits `day`.** The request
-     (`terms?terms=true&terms.fl=body&omitHeader=true&wt=json`) returns the same ten terms in
-     the same count-descending, term-ascending order with the same frequencies except for that
-     spelling: Solr stems the corpus token `day` to `dai`; Tantivy's English stemmer leaves it
-     as `day`. This is not the Search API configset's hypothesized char-filter,
-     length-filter, or word-delimiter mismatch: the differential core uses `_default`'s
-     `text_en`. `terms_body` therefore has a narrow, exact-diff waiver under follow-up #205:
-     only `terms.body[14]` changing from `"dai"` to `"day"` is allowed. Its self-expiring guard
-     fails when that mismatch disappears, and any additional response difference fails now.
+103. **Resolved by issue #205: the canonical differential core exposed Solr's Porter
+     terminal-`y` rule.** The request
+     (`terms?terms=true&terms.fl=body&omitHeader=true&wt=json`) originally returned the same ten
+     terms and frequencies except that Solr stemmed corpus token `day` to `dai` while Tantivy's
+     English stemmer left it as `day`. This was not the Search API configset's hypothesized
+     char-filter, length-filter, or word-delimiter mismatch: the differential core uses
+     `_default`'s `text_en`. Wayfinder's analyzer contract v2 now applies the captured Porter
+     terminal-`y` rule to static built-in `text_en`, requires affected v1 indexes to reindex,
+     and compares `terms_body` normally with no exact-diff waiver. The shared `_dynamic_text`
+     catch-all retains v1 Snowball behavior separately: the captured Search API update contains
+     singular `day` and its terms trace preserves `day`, so applying the canonical rule globally
+     would create a different compatibility bug.
 
 ## Finding from issue #150 (duplicate facet local-param keys)
 
