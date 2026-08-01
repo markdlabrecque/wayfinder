@@ -21,13 +21,20 @@
 //! known indexed-doc counts and a live schema, never a hardcoded constant a
 //! static blob could satisfy.
 //!
-//! Deliberately NOT asserted (per the ticket's scope note): `version`,
-//! `current`, `directory`, `indexHeapUsageBytes`, `userData`, `lastModified`
-//! in `index{}` (static placeholders with no fixture consumer — presence
-//! only, never pinned to a value), and Lucene per-field `schema`/`index`
-//! flag strings or `topTerms`/`histogram` in `fields{}` (Wayfinder has no
-//! Lucene index internals to report honestly; a plausible-looking fake
-//! string would be worse than omitting the key).
+//! Deliberately never pinned to a *value* (per the ticket's scope note): the
+//! Lucene-identity placeholders in `index{}` — `version`, `current`,
+//! `directory`, `segmentsFile`, `segmentsFileSizeInBytes`, `userData`. They
+//! are static and nothing consumes them, so
+//! `luke_index_lucene_identity_placeholder_keys_are_present` asserts their
+//! presence and nothing more; asserting a value would freeze a fabricated
+//! number into the suite as if it were ground truth.
+//! `indexHeapUsageBytes` and `lastModified` are not placeholders at all — the
+//! handler omits them, as real Solr does in the captured trace.
+//!
+//! Also deliberately absent, and not asserted in either direction: Lucene
+//! per-field `schema`/`index` flag strings and `topTerms`/`histogram` in
+//! `fields{}` (Wayfinder has no Lucene index internals to report honestly; a
+//! plausible-looking fake string would be worse than omitting the key).
 
 mod common;
 
@@ -244,6 +251,43 @@ async fn luke_index_block_stays_consistent_after_a_delete_without_a_merge() {
     );
 }
 
+/// Presence only, deliberately: the module header claims the Lucene-identity
+/// keys are served as static placeholders, and until this test existed nothing
+/// in the suite backed that claim — the handler could have dropped every one of
+/// them and stayed green. Values are *not* asserted: they are plausible
+/// fictions (`admin_luke_index_placeholders` in `src/lib.rs` names each one and
+/// why), so pinning one would freeze a fabricated number into the suite as
+/// though it were ground truth.
+#[tokio::test]
+async fn luke_index_lucene_identity_placeholder_keys_are_present() {
+    let (app, _dir) = common::indexed_app().await;
+
+    let (status, body) = get(&app, "admin/luke?wt=json&json.nl=flat").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET admin/luke must succeed: {body}"
+    );
+
+    let index = body["index"]
+        .as_object()
+        .unwrap_or_else(|| panic!("index{{}} must be an object, got: {body}"));
+    for key in [
+        "version",
+        "current",
+        "directory",
+        "segmentsFile",
+        "segmentsFileSizeInBytes",
+        "userData",
+    ] {
+        assert!(
+            index.contains_key(key),
+            "index{{}} must carry the Lucene-identity placeholder `{key}` \
+             (presence only -- its value is deliberately unasserted), got: {body}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn luke_fields_block_reflects_the_live_schema_not_a_static_blob() {
     let dir = TempDir::new().expect("create temp dir");
@@ -387,12 +431,13 @@ async fn luke_unknown_core_is_a_json_404() {
     );
 }
 
-/// Not-yet-routed baseline: today `GET /solr/{core}/admin/luke` 404s (no
-/// route). `request_full`/`CORE` are only used here to keep the import from
-/// being flagged unused by a future refactor of the tests above; the
-/// coverage-instrument classification guard for the *unrouted* state lives
-/// in `tests/search_api_coverage.rs` for `/terms` only — there is no
-/// equivalent guard for `admin/luke` today (see this issue's handoff notes).
+/// Routing assertion: `GET /solr/{core}/admin/luke` is reachable under the
+/// core path at all. Deliberately weaker than the tests above — it asserts
+/// only "not 404", so it stays true regardless of what the handler answers,
+/// and it fails loudly if the route is ever dropped from `search_api_routes!`
+/// or moved off the core-relative path. The status/body shape for the routed
+/// case is pinned by the `index{}`/`fields{}` tests above; the unknown-core
+/// 404 is pinned by `luke_unknown_core_is_a_json_404`.
 #[tokio::test]
 async fn luke_route_exists_under_the_core_path() {
     let (app, _dir) = common::indexed_app().await;

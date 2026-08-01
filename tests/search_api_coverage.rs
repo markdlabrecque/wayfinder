@@ -1210,8 +1210,9 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // (reversing the #57 descope for this endpoint), flipping two entries at
     // once: the endpoint itself, now wired in `search_api_routes!`, and the
     // `admin.luke.index` response field, whose probe now gets an `index{}`
-    // object with real `numDocs`/`maxDoc`/`deletedDocs`/`segmentCount` read off
-    // the live searcher. Denominator unchanged -- both entries were already in
+    // object with five real figures --
+    // `numDocs`/`maxDoc`/`deletedDocs`/`hasDeletions`/`segmentCount` -- read
+    // off the live searcher. Denominator unchanged -- both entries were already in
     // the contract, just unmet. Lucene-identity keys in `index{}` and the
     // per-field `schema`/`index` flag strings stay omitted or placeheld
     // deliberately (PRD section 5 v2.75), which is why the endpoint carries no

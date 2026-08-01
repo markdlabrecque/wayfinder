@@ -595,9 +595,9 @@ adds `indexed`/`stored`/`multiValued`/`docValues` to every entry where Solr emit
 because those four are Wayfinder's real uniform type-level defaults and no client reads them.
 
 `admin/luke` (#157) lands under the same rule. Its `index{}` block reports real values for the
-four figures that describe the core's contents -- `numDocs`, `maxDoc`, `deletedDocs`,
-`segmentCount`, all read per request off the same searcher `/select` answers from -- and static
-placeholders for the Lucene-identity keys (`version`, `current`, `directory`, `segmentsFile`,
+five figures that describe the core's contents -- `numDocs`, `maxDoc`, `deletedDocs`,
+`hasDeletions`, `segmentCount`, all read per request off the same searcher `/select` answers
+from -- and static placeholders for the Lucene-identity keys (`version`, `current`, `directory`, `segmentsFile`,
 `segmentsFileSizeInBytes`, `userData`); `indexHeapUsageBytes` and `lastModified` are omitted, as
 real Solr omits them in the captured trace. Its recorded divergences in `fields{}` are again an
 omission and an addition: it omits the per-field `schema`/`index` flag strings (Lucene `FieldInfo`
