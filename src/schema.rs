@@ -608,13 +608,29 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     {
         bail!("field `{VERSION_FIELD}` is reserved for Wayfinder's internal version field");
     }
+    // Every name `resolve_type` resolves to a built-in is reserved (issue
+    // #170). `resolve_type` checks `[[field_types]]` *before* its built-in
+    // match arms, so a custom chain named `double` silently retypes every
+    // `type = "double"` field from a numeric field to analyzed text, breaking
+    // range queries and sorting with no error anywhere. Rejected outright
+    // rather than allowed as an override, extending the `text_en` reservation
+    // (#51) to the whole set. The list comes from `builtin_type_names()` rather
+    // than a second hardcoded copy so adding a stemmer language cannot leave a
+    // built-in shadowable. `TEXT_EN_TOKENIZER` is not a schema type name but is
+    // reserved alongside them: it is the tokenizer identity `text_en` registers
+    // under, and a chain registering over it would redefine the built-in preset.
+    let reserved_type_names: Vec<String> = builtin_type_names()
+        .into_iter()
+        .chain(std::iter::once(TEXT_EN_TOKENIZER.to_string()))
+        .collect();
     if let Some(field_type) = parsed
         .field_types
         .iter()
-        .find(|field_type| field_type.name == "text_en" || field_type.name == TEXT_EN_TOKENIZER)
+        .find(|field_type| reserved_type_names.contains(&field_type.name))
     {
         bail!(
-            "field type `{}` is reserved for Wayfinder's built-in text_en analyzer",
+            "field type `{}` is reserved: it names one of Wayfinder's built-in field types, and \
+             `[[field_types]]` may not shadow a built-in — rename the custom chain",
             field_type.name
         );
     }
@@ -628,6 +644,42 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
             bail!(
                 "duplicate field type `{}`: two [[field_types]] entries share that name",
                 field_type.name
+            );
+        }
+    }
+    // Two `[[fields]]` entries sharing a `name` make `SchemaBuilder::add_field`
+    // *panic* ("Field already exists in schema <name>", tantivy-0.26.1
+    // `src/schema/schema.rs:202`), so an operator typo crashes the process from
+    // inside a dependency instead of producing the ordinary schema-load error
+    // every other mistake in this file produces (issue #173). This must stay
+    // ahead of the `add_*_field` calls below, which is what makes that panic
+    // unreachable. Keyed on the name alone: a second declaration is a duplicate
+    // name however it is configured, and differing configuration is the more
+    // dangerous case, since the two declarations disagree about what the field
+    // is. Case-sensitive, like Tantivy's own exact-name check and #160.
+    let mut seen_fields = HashSet::new();
+    for field in &parsed.fields {
+        if !seen_fields.insert(field.name.as_str()) {
+            bail!(
+                "duplicate field `{}`: two [[fields]] entries share that name",
+                field.name
+            );
+        }
+    }
+    // Two `[[dynamic_fields]]` rules sharing a `pattern` fail silently rather
+    // than loudly: `match_dynamic`'s `max_by_key(|d| d.pattern.len())` returns
+    // the *last* rule among equal-length patterns, so the earlier declaration is
+    // dead code, and with differing types the two rules also disagree about
+    // which catch-all field (`_dynamic` vs `_dynamic_text`) the values land in
+    // (issue #173). Exact duplicates only: overlapping-but-distinct globs
+    // (`tm_*` alongside `tm_X3b_*` and `*`) are ordinary Solr configuration,
+    // and longest-pattern-wins exists precisely to resolve that overlap.
+    let mut seen_patterns = HashSet::new();
+    for rule in &parsed.dynamic_fields {
+        if !seen_patterns.insert(rule.pattern.as_str()) {
+            bail!(
+                "duplicate dynamic field pattern `{}`: two [[dynamic_fields]] entries share it",
+                rule.pattern
             );
         }
     }
