@@ -2580,16 +2580,10 @@ async fn mlt(
 /// *defined but non-text* field is a 400 the same way — see
 /// `check_terms_field`.
 ///
-/// ponytail: no `solr-ref/manifest.tsv` row, so the differential harness does
-/// not cover this endpoint yet. Ceiling named because it is a real gap: the
-/// capture needs the differential core, and it is likely to surface analyzer
-/// differences between Wayfinder's `text_en` chain and Solr's — the captured
-/// `solr-ref/search-api/configset` uses `StandardTokenizerFactory`, a
-/// `LengthFilterFactory min="2"`, a `WordDelimiterGraphFilterFactory`, and an
-/// `accents_en.txt` mapping char filter that Wayfinder has no counterpart for.
-/// None of those is a verified finding yet, so none is recorded as one; the
-/// capture is what would settle them, and any diff it shows is a finding to
-/// escalate, not to normalise away.
+/// `terms_body.json` and its `solr-ref/manifest.tsv` row cover this endpoint
+/// in the differential harness. The one captured analyzer difference is
+/// explicit and narrowly guarded under issue #205: Solr's `text_en` emits
+/// `dai` where Tantivy emits `day` (finding 103).
 async fn terms(
     State(state): State<Arc<AppState>>,
     AxPath(core): AxPath<String>,

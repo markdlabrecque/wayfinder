@@ -540,6 +540,35 @@ async fn update_error_omit_header_true_suppresses_header_and_retains_error() {
     assert_eq!(body.pointer("/error/code"), expected.pointer("/error/code"));
 }
 
+/// Validation follows core routing. Before `check_params` runs, an invalid
+/// omitHeader value must not act like true and suppress an unknown-core error.
+#[tokio::test]
+async fn invalid_omit_header_is_inert_before_select_and_update_validation() {
+    let (app, _dir) = indexed_app().await;
+
+    let select = Request::builder()
+        .uri("/solr/nosuch/select?q=*:*&omitHeader=1&wt=json")
+        .body(Body::empty())
+        .unwrap();
+    let update = Request::builder()
+        .method("POST")
+        .uri("/solr/nosuch/update?omitHeader=1&wt=json")
+        .header("content-type", "application/json")
+        .body(Body::from("[]"))
+        .unwrap();
+
+    for req in [select, update] {
+        let resp = app.clone().oneshot(req).await.expect("must not fail");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body must be readable");
+        let body: Value = serde_json::from_slice(&bytes).expect("body must be valid JSON");
+        assert_eq!(status, StatusCode::NOT_FOUND, "got {body}");
+        assert!(body.get("responseHeader").is_some(), "got {body}");
+    }
+}
+
 /// Ground truth: `omit_header_invalid_one.html` is Solr 9.10.1's HTTP 400
 /// for `omitHeader=1`; `t` is invalid too. PRD divergence 8 deliberately keeps
 /// Wayfinder's error JSON rather than reproducing Jetty HTML.

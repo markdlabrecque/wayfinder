@@ -1972,6 +1972,6 @@ response.
      This settles #179's original question in favour of suppression. It also corrects the issue
      comment's premise: on Solr 9.10.1, `omitHeader=1` and `omitHeader=t` are invalid booleans,
      returning HTTP 400 Jetty HTML before the JSON response writer runs; `0`, `f`, `y`, and `n`
-     are invalid likewise. The two JSON captures live in `manifest-errors.tsv`; the raw `1`
+     are invalid likewise. The three JSON captures live in `manifest-errors.tsv`; the raw `1`
      response stays outside it because the differential harness intentionally parses that
      manifest as JSON.
