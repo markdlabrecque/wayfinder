@@ -1,74 +1,146 @@
-//! Spellcheck compatibility (issue #222).
+//! Spellcheck compatibility (issue #223).
 //!
-//! `solr-ref/search-api/trace/00021.json` shows that Search API sends two
-//! `spellcheck.dictionary` values and receives an empty spellcheck envelope
-//! after highlighting when `qwick` has no matches.
+//! The fixtures use capture.sh's dedicated `spellcheck_223` corpus: `en` has
+//! `quick`/`rocket`, while `und` has `quack`/`garden`. Their disagreement makes
+//! repeated `spellcheck.dictionary` precedence observable.
 
 mod common;
 
 use axum::http::StatusCode;
-use common::key_order::{KeyOrder, get_text};
-use common::{CORE, post_docs};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-/// Expiring ceiling guard: delete this test when real spellcheck suggestion
-/// generation lands. Until then, `qwick` must stay empty even though the
-/// indexed corpus contains `quick`; 75/75 measures this envelope, not spelling
-/// correction.
-#[tokio::test]
-async fn delete_this_empty_ceiling_guard_when_real_spellcheck_suggestions_land() {
+const SPELLCHECK_223_SCHEMA_TOML: &str = r#"
+[core]
+name = "spellcheck_223"
+unique_key = "id"
+default_field = "spellcheck_en"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "spellcheck_en"
+type = "text_en"
+stored = true
+multi_valued = true
+
+[[fields]]
+name = "spellcheck_und"
+type = "text_en"
+stored = true
+multi_valued = true
+"#;
+
+async fn spellcheck_223_app() -> (axum::Router, TempDir) {
     let dir = TempDir::new().expect("create temp dir");
     let schema_path = dir.path().join("schema.toml");
-    std::fs::write(&schema_path, common::SCHEMA_TOML).expect("write schema.toml");
+    std::fs::write(&schema_path, SPELLCHECK_223_SCHEMA_TOML).expect("write schema.toml");
     let config_path = dir.path().join("wayfinder.toml");
     std::fs::write(&config_path, "strict_params = true\n").expect("write wayfinder.toml");
     let data_dir = dir.path().join("data");
     std::fs::create_dir_all(&data_dir).expect("create data dir");
-    let app =
-        wayfinder::app_with_config(&schema_path, &data_dir, &config_path).expect("app must build");
-    let (index_status, index_body) = post_docs(&app, &common::corpus()).await;
-    assert_eq!(
-        index_status,
-        StatusCode::OK,
-        "index reference corpus: {index_body}"
-    );
-
-    let (status, text) = get_text(
+    let app = wayfinder::app_with_config(&schema_path, &data_dir, &config_path)
+        .expect("spellcheck app must build");
+    let corpus = json!([
+        {"id":"s1","spellcheck_en":["quick quick quick rocket rocket"],"spellcheck_und":["quack quack quack garden"]},
+        {"id":"s2","spellcheck_en":["quick brown fox"],"spellcheck_und":["quack garden"]}
+    ]);
+    let (status, body) = common::request_full(
         &app,
-        CORE,
-        "select?q=qwick&hl=true&omitHeader=true&spellcheck=true&spellcheck.q=qwick\
-         &spellcheck.dictionary=en&spellcheck.dictionary=und&spellcheck.collate=true\
-         &json.nl=flat&wt=json",
+        "POST",
+        "spellcheck_223/update?commit=true&wt=json",
+        Some(&corpus.to_string()),
     )
     .await;
+    assert_eq!(status, StatusCode::OK, "seed spellcheck corpus: {body}");
+    (app, dir)
+}
 
+async fn spellcheck_response(app: &axum::Router, query: &str) -> Value {
+    let (status, body) =
+        common::request_full(app, "GET", &format!("spellcheck_223/select?{query}"), None).await;
     assert_eq!(
         status,
         StatusCode::OK,
-        "the captured spellcheck params must pass strict mode, got {text}"
+        "spellcheck query must pass strict mode: {body}"
     );
-    let body: Value = serde_json::from_str(&text).expect("spellcheck response must be JSON");
-    assert_eq!(
-        body.pointer("/spellcheck"),
-        Some(&json!({"suggestions": [], "collations": []})),
-        "the captured no-match request must emit Solr's empty spellcheck envelope, got {text}"
-    );
-    assert_eq!(
-        KeyOrder::parse(&text)
-            .keys()
-            .expect("response must be an object"),
-        vec!["response", "highlighting", "spellcheck"],
-        "spellcheck must follow highlighting in the response body, got {text}"
-    );
+    body
+}
 
-    for query in ["select?q=qwick", "select?q=qwick&spellcheck=false"] {
-        let (status, text) = get_text(&app, CORE, query).await;
-        assert_eq!(status, StatusCode::OK, "spellcheck gate request: {text}");
-        let body: Value = serde_json::from_str(&text).expect("gated response must be JSON");
+#[tokio::test]
+async fn spellcheck_flat_named_list_includes_offsets_and_collation() {
+    let (app, _dir) = spellcheck_223_app().await;
+    let actual = spellcheck_response(
+        &app,
+        "q=*:*&rows=0&wt=json&omitHeader=true&spellcheck=true&spellcheck.q=qwick%20roket&spellcheck.dictionary=en&spellcheck.collate=true&json.nl=flat",
+    )
+    .await;
+
+    common::assert_matches_fixture(actual, "spellcheck_flat");
+}
+
+#[tokio::test]
+async fn spellcheck_map_named_list_includes_offsets_and_collation() {
+    let (app, _dir) = spellcheck_223_app().await;
+    let actual = spellcheck_response(
+        &app,
+        "q=*:*&rows=0&wt=json&omitHeader=true&spellcheck=true&spellcheck.q=qwick%20roket&spellcheck.dictionary=en&spellcheck.collate=true&json.nl=map",
+    )
+    .await;
+
+    common::assert_matches_fixture(actual, "spellcheck_map");
+}
+
+#[tokio::test]
+async fn spellcheck_offsets_are_java_utf16_code_units_not_utf8_bytes() {
+    let (app, _dir) = spellcheck_223_app().await;
+    let actual = spellcheck_response(
+        &app,
+        "q=*:*&rows=0&wt=json&omitHeader=true&spellcheck=true&spellcheck.q=%C3%A9%20qwick&spellcheck.dictionary=en&spellcheck.collate=true&json.nl=flat",
+    )
+    .await;
+
+    common::assert_matches_fixture(actual, "spellcheck_unicode_offsets");
+}
+
+#[tokio::test]
+async fn first_repeated_spellcheck_dictionary_wins_when_en_is_first() {
+    let (app, _dir) = spellcheck_223_app().await;
+    let actual = spellcheck_response(
+        &app,
+        "q=*:*&rows=0&wt=json&omitHeader=true&spellcheck=true&spellcheck.q=qwick&spellcheck.dictionary=en&spellcheck.dictionary=und&spellcheck.collate=true&json.nl=flat",
+    )
+    .await;
+
+    common::assert_matches_fixture(actual, "spellcheck_dictionary_en_first");
+}
+
+#[tokio::test]
+async fn first_repeated_spellcheck_dictionary_wins_when_und_is_first() {
+    let (app, _dir) = spellcheck_223_app().await;
+    let actual = spellcheck_response(
+        &app,
+        "q=*:*&rows=0&wt=json&omitHeader=true&spellcheck=true&spellcheck.q=qwick&spellcheck.dictionary=und&spellcheck.dictionary=en&spellcheck.collate=true&json.nl=flat",
+    )
+    .await;
+
+    common::assert_matches_fixture(actual, "spellcheck_dictionary_und_first");
+}
+
+#[tokio::test]
+async fn spellcheck_is_absent_when_disabled_or_absent() {
+    let (app, _dir) = spellcheck_223_app().await;
+
+    for query in ["q=qwick", "q=qwick&spellcheck=false"] {
+        let actual = spellcheck_response(&app, query).await;
         assert!(
-            body.get("spellcheck").is_none(),
-            "spellcheck must be absent unless spellcheck=true, got {text}"
+            actual.get("spellcheck").is_none(),
+            "spellcheck must be absent unless spellcheck=true: {actual}"
         );
     }
 }

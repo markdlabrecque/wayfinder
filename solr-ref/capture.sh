@@ -2405,3 +2405,61 @@ docker rm -f "$FL196_CONTAINER" >/dev/null
 # curl -sS "$MLT_SOLR/mlt?q=id:mlt11&mlt.fl=body&mlt.maxntp=2147483648&wt=json" -o "$OUT/mlt_maxntp_overflow.json"
 # A separate handler-only check against `wayfinder-solr-189-precedence`
 # established that malformed `q=body:[` wins over malformed `mlt.maxntp=abc`.
+
+# --- configured spellchecker suggestions and collations (issue #223) -------
+# This is intentionally a dedicated Search API configset core: the canonical
+# `content` core has no SpellCheckComponent, while this issue needs real term
+# dictionaries for both configured `en` and `und` spellcheckers. The tiny
+# corpus makes the dictionaries disagree (`quick` vs `quack`) so repeated
+# dictionary precedence is observable rather than inferred.
+SPELL_CONTAINER=wayfinder-solr-223
+SPELL_PORT=9012
+SPELL_CORE=spellcheck_223
+SPELL_SOLR=http://127.0.0.1:$SPELL_PORT/solr
+SPELL_CONFIGSET=/opt/solr/server/solr/configsets/search-api
+
+docker rm -f "$SPELL_CONTAINER" >/dev/null 2>&1 || true
+docker run -d --name "$SPELL_CONTAINER" -p "127.0.0.1:$SPELL_PORT:8983" \
+  -e SOLR_MODULES=analysis-extras \
+  -v "$HERE/search-api/configset:$SPELL_CONFIGSET:ro" \
+  solr:9 solr-precreate "$SPELL_CORE" "$SPELL_CONFIGSET" >/dev/null
+printf 'waiting for issue #223 Solr'
+for _ in $(seq 60); do
+  if curl -sf "$SPELL_SOLR/$SPELL_CORE/admin/ping?wt=json" >/dev/null 2>&1; then
+    echo ' ok'
+    break
+  fi
+  printf '.'
+  sleep 1
+done
+curl -sf "$SPELL_SOLR/$SPELL_CORE/admin/ping?wt=json" >/dev/null
+curl -sf "$SPELL_SOLR/$SPELL_CORE/update?commit=true&wt=json" \
+  -H 'Content-Type: application/json' -d '[
+    {"id":"s1","spellcheck_en":["quick quick quick rocket rocket"],"spellcheck_und":["quack quack quack garden"]},
+    {"id":"s2","spellcheck_en":["quick brown fox"],"spellcheck_und":["quack garden"]}
+  ]' >/dev/null
+
+capspell() { # capspell <name> <query-after-select?>
+  local name=$1 query=$2 url="$SPELL_CORE/select?$query"
+  curl -sg "$SPELL_SOLR/$url" -o "$OUT/$name.json" \
+    -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\tGET\t%s\t\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" "$url" "$SPELL_SOLR" \
+    >> "$HERE/manifest-errors.tsv"
+  rm -f "$OUT/$name.status"
+}
+
+SPELL_BASE='q=*:*&rows=0&wt=json&omitHeader=true&spellcheck=true'
+capspell spellcheck_flat \
+  "$SPELL_BASE&spellcheck.q=qwick%20roket&spellcheck.dictionary=en&spellcheck.collate=true&json.nl=flat"
+capspell spellcheck_map \
+  "$SPELL_BASE&spellcheck.q=qwick%20roket&spellcheck.dictionary=en&spellcheck.collate=true&json.nl=map"
+capspell spellcheck_dictionary_en_first \
+  "$SPELL_BASE&spellcheck.q=qwick&spellcheck.dictionary=en&spellcheck.dictionary=und&spellcheck.collate=true&json.nl=flat"
+capspell spellcheck_dictionary_und_first \
+  "$SPELL_BASE&spellcheck.q=qwick&spellcheck.dictionary=und&spellcheck.dictionary=en&spellcheck.collate=true&json.nl=flat"
+capspell spellcheck_unicode_offsets \
+  "$SPELL_BASE&spellcheck.q=%C3%A9%20qwick&spellcheck.dictionary=en&spellcheck.collate=true&json.nl=flat"
+
+echo "captured issue #223 spellcheck fixtures from '$SPELL_CONTAINER' (port $SPELL_PORT)"
+docker rm -f "$SPELL_CONTAINER" >/dev/null

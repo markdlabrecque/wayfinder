@@ -2069,3 +2069,26 @@ schema and five-document corpus from `solr-ref/capture.sh` recreated verbatim. F
 116. **On the Search API corpus, `fl=ss_*` returns HTTP 200 and only the five matching `ss_*`
      fields, excluding `id` and `timestamp`.** `select_fl_ss_wildcard.json` is the captured
      evidence for this field-selection result.
+
+## Findings from issue #223 (configured spellchecker output)
+
+Captured against a dedicated `solr:9` Search API configset core (port 9012) with two documents
+whose `spellcheck_en` dictionary contains `quick`/`rocket` and whose `spellcheck_und` dictionary
+contains `quack`/`garden`. The self-contained setup is appended to `solr-ref/capture.sh`.
+
+117. **Spellcheck named-list rendering follows `json.nl`, repeated dictionaries use the first
+     requested dictionary, and a collation substitutes every misspelled token.** Under
+     `json.nl=flat`, `suggestions` alternates each misspelled token with an object containing
+     `numFound`, UTF-16-code-unit `startOffset`/`endOffset`, and a suggestion string array;
+     `collations`
+     is `["collation", "quick rocket"]`. Under `json.nl=map`, those become
+     `{"qwick": {...}, "roket": {...}}` and `{"collation":"quick rocket"}`. With
+     `spellcheck.dictionary=en&spellcheck.dictionary=und`, `qwick` becomes `quick`; reversing
+     the repeated parameter order makes it `quack`, proving first-dictionary precedence rather
+     than merging or per-dictionary output. `spellcheck.collate=true` emits one corrected query
+     string and no hit count when `spellcheck.collateExtendedResults` is not requested. Fixtures:
+     `spellcheck_flat.json`, `spellcheck_map.json`,
+     `spellcheck_dictionary_en_first.json`, and `spellcheck_dictionary_und_first.json`.
+     `spellcheck_unicode_offsets.json` resolves the offset unit directly: for `é qwick`, Solr
+     reports `qwick` at `startOffset:2,endOffset:7`, i.e. Java UTF-16 code units rather than
+     Rust UTF-8 byte positions (`3..8`).

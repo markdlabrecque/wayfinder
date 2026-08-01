@@ -141,9 +141,9 @@ const SELECT_PARAMS: &[&str] = &[
     // (findings 113-114).
     "hl.mergeContiguous",
     "hl.requireFieldMatch",
-    // Issue #222: Search API sends these spellcheck component params. They
-    // are accepted-and-ignored pending real suggestion generation; dictionary
-    // is intentionally repeatable, as in trace 00021.
+    // Issue #222: Search API sends these spellcheck component params.
+    // `spellcheck.dictionary` is intentionally repeatable, as in trace 00021;
+    // the suggestion path uses its first value, matching Solr's capture.
     "spellcheck",
     "spellcheck.q",
     "spellcheck.dictionary",
@@ -1944,6 +1944,150 @@ fn query_parse_error(e: anyhow::Error, params: &Params) -> WfError {
     }
 }
 
+/// Returns raw Unicode-alphanumeric runs with both Rust byte ranges (for
+/// slicing/collation) and Java UTF-16 code-unit offsets (for Solr's wire
+/// `startOffset`/`endOffset`; `spellcheck_unicode_offsets.json`).
+fn spellcheck_tokens(text: &str) -> Vec<(usize, usize, usize, usize, &str)> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    let mut utf16_offset = 0;
+    for (byte_offset, ch) in text.char_indices() {
+        if ch.is_alphanumeric() {
+            start.get_or_insert((byte_offset, utf16_offset));
+        } else if let Some((byte_start, utf16_start)) = start.take() {
+            tokens.push((
+                byte_start,
+                byte_offset,
+                utf16_start,
+                utf16_offset,
+                &text[byte_start..byte_offset],
+            ));
+        }
+        utf16_offset += ch.len_utf16();
+    }
+    if let Some((byte_start, utf16_start)) = start {
+        tokens.push((
+            byte_start,
+            text.len(),
+            utf16_start,
+            utf16_offset,
+            &text[byte_start..],
+        ));
+    }
+    tokens
+}
+
+/// Builds the narrow issue-#223 spellcheck component from one real Tantivy
+/// field dictionary. `dictionary` names `spellcheck_<dictionary>`, and the
+/// first repeated request value wins through `Params::get`.
+fn spellcheck(index: &CoreIndex, params: &Params) -> anyhow::Result<Value> {
+    let map = params.get("json.nl") == Some("map");
+    let empty = || {
+        let named_list = || {
+            if map {
+                Value::Object(Map::new())
+            } else {
+                Value::Array(Vec::new())
+            }
+        };
+        json!({ "suggestions": named_list(), "collations": named_list() })
+    };
+
+    let Some(dictionary) = params.get("spellcheck.dictionary") else {
+        return Ok(empty());
+    };
+    let field_name = format!("spellcheck_{dictionary}");
+    if !index.resolves_field_name(&field_name) || params.get("spellcheck.q").is_none() {
+        return Ok(empty());
+    }
+    let terms = index.field_terms(&field_name)?;
+    let text = params
+        .get("spellcheck.q")
+        .expect("spellcheck.q presence was checked above");
+    let mut corrections = Vec::new();
+
+    // ponytail: this is deliberately not Solr's configurable spellcheck
+    // analyzer or ranking pipeline. It only scans raw Unicode-alphanumeric
+    // query runs, matches exact dictionary terms verbatim, then chooses one
+    // Damerau candidate at edit distance <= 2 (term-ascending tie break).
+    // Extend it only with a captured analyzer/ranking contract.
+    for (byte_start, byte_end, offset_start, offset_end, token) in spellcheck_tokens(text) {
+        if terms.contains_key(token) {
+            continue;
+        }
+        let candidate = terms
+            .keys()
+            .filter_map(|term| {
+                let distance = query::levenshtein(token, term);
+                (distance <= 2).then_some((distance, term))
+            })
+            .min_by(|(distance_a, term_a), (distance_b, term_b)| {
+                distance_a.cmp(distance_b).then_with(|| term_a.cmp(term_b))
+            })
+            .map(|(_, term)| term.clone());
+        if let Some(candidate) = candidate {
+            corrections.push((
+                byte_start,
+                byte_end,
+                offset_start,
+                offset_end,
+                token,
+                candidate,
+            ));
+        }
+    }
+
+    let suggestions = if map {
+        let mut suggestions = Map::new();
+        for (_, _, start, end, token, candidate) in &corrections {
+            suggestions.insert(
+                (*token).to_string(),
+                json!({
+                    "numFound": 1,
+                    "startOffset": start,
+                    "endOffset": end,
+                    "suggestion": [candidate],
+                }),
+            );
+        }
+        Value::Object(suggestions)
+    } else {
+        let mut suggestions = Vec::with_capacity(corrections.len() * 2);
+        for (_, _, start, end, token, candidate) in &corrections {
+            suggestions.push(json!(token));
+            suggestions.push(json!({
+                "numFound": 1,
+                "startOffset": start,
+                "endOffset": end,
+                "suggestion": [candidate],
+            }));
+        }
+        Value::Array(suggestions)
+    };
+
+    let collations = if params.bool_or("spellcheck.collate", false)? && !corrections.is_empty() {
+        let mut corrected = String::with_capacity(text.len());
+        let mut cursor = 0;
+        for (byte_start, byte_end, _, _, _, candidate) in &corrections {
+            corrected.push_str(&text[cursor..*byte_start]);
+            corrected.push_str(candidate);
+            cursor = *byte_end;
+        }
+        corrected.push_str(&text[cursor..]);
+        if map {
+            json!({ "collation": corrected })
+        } else {
+            json!(["collation", corrected])
+        }
+    } else if map {
+        Value::Object(Map::new())
+    } else {
+        Value::Array(Vec::new())
+    };
+
+    Ok(json!({ "suggestions": suggestions, "collations": collations }))
+}
+
 async fn select(
     State(state): State<Arc<AppState>>,
     AxPath(core): AxPath<String>,
@@ -2270,13 +2414,9 @@ async fn select(
         body["highlighting"] = highlighting;
     }
     if spellcheck_requested {
-        // ponytail: this is strictly the v3-suggester bridge, not suggestion
-        // generation. Real suggestions remain PRD v3. Trace 00021 proves the
-        // explicit-flat empty `suggestions: []` shape. Solr renders suggestions
-        // as an object under `json.nl=map`; this slice deliberately ignores
-        // that distinction while suggestions are always empty. Replace this
-        // expiring envelope when generation lands.
-        body["spellcheck"] = json!({ "suggestions": [], "collations": [] });
+        body["spellcheck"] = spellcheck(&state.index, &params).map_err(|e| {
+            WfError::internal("wayfinder::SpellcheckError", e.to_string()).with_params(&params)
+        })?;
     }
 
     Ok(axum::Json(body).into_response())
