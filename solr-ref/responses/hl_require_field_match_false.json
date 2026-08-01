@@ -1,0 +1,34 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":7,
+    "params":{
+      "q":"title:quick OR body:fox",
+      "hl":"true",
+      "fl":"id",
+      "hl.requireFieldMatch":"false",
+      "sort":"id asc",
+      "hl.fl":"title,body",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"rfm1"
+    },{
+      "id":"rfm2"
+    }]
+  },
+  "highlighting":{
+    "rfm1":{
+      "title":["<em>quick</em> launch"],
+      "body":["<em>quick</em> <em>fox</em>"]
+    },
+    "rfm2":{
+      "body":["<em>quick</em> <em>fox</em>"]
+    }
+  }
+}

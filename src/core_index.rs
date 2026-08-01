@@ -2,7 +2,7 @@
 //! core (PRD open question 1 — single-core-per-process, so there's exactly
 //! one of these per running `app()`).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -59,6 +59,16 @@ const MAX_FACET_TERMS: u32 = DEFAULT_BUCKET_LIMIT;
 /// allocated or sized by it and the split simply never fires.
 pub(crate) const WHOLE_FIELD_MAX_CHARS: usize = usize::MAX;
 
+/// One `hl.method=original` text fragment, modeled after Lucene's
+/// `TextFragment`: raw byte bounds into the stored text, query-term ranges,
+/// and the score used to choose `hl.snippets` candidates.
+#[derive(Clone)]
+struct OriginalHighlightFragment {
+    range: Range<usize>,
+    highlights: Vec<Range<usize>>,
+    score: Score,
+}
+
 /// The same minimal HTML entity encoding `tantivy::snippet::Snippet::to_html`
 /// applies to the non-highlighted parts of a fragment
 /// (`htmlescape::encode_minimal`, whose `MINIMAL_ENTITIES` table is exactly
@@ -78,6 +88,36 @@ fn encode_minimal(text: &str) -> String {
             _ => out.push(c),
         }
     }
+    out
+}
+
+/// Renders an original-highlighter fragment with Tantivy's existing minimal
+/// HTML escaping and the request's marker pair.
+fn render_original_highlight_fragment(
+    text: &str,
+    fragment: OriginalHighlightFragment,
+    pre: &str,
+    post: &str,
+) -> String {
+    let mut highlights = fragment.highlights;
+    highlights.sort_by_key(|range| (range.start, range.end));
+    highlights.dedup();
+
+    let mut out = String::new();
+    let mut cursor = fragment.range.start;
+    for range in highlights {
+        let start = range.start.max(fragment.range.start);
+        let end = range.end.min(fragment.range.end);
+        if start >= end || start < cursor {
+            continue;
+        }
+        out.push_str(&encode_minimal(&text[cursor..start]));
+        out.push_str(pre);
+        out.push_str(&encode_minimal(&text[start..end]));
+        out.push_str(post);
+        cursor = end;
+    }
+    out.push_str(&encode_minimal(&text[cursor..fragment.range.end]));
     out
 }
 
@@ -2156,6 +2196,188 @@ impl CoreIndex {
         Ok(Value::Object(out))
     }
 
+    /// Extracts the query's textual terms for `field`. With
+    /// `cross_field_query_terms`, each text term is retargeted to the field
+    /// being highlighted; otherwise only terms the query already targets at
+    /// that field are retained.
+    fn highlight_terms(
+        &self,
+        query: &dyn Query,
+        field: Field,
+        cross_field_query_terms: bool,
+    ) -> Result<BTreeMap<String, Score>> {
+        let mut term_texts = BTreeSet::new();
+        query.query_terms(&mut |term, _| {
+            if !cross_field_query_terms && term.field() != field {
+                return;
+            }
+            if let Some(text) = term.value().as_str() {
+                term_texts.insert(text.to_string());
+            }
+        });
+
+        let searcher = self.reader.searcher();
+        let mut terms = BTreeMap::new();
+        for text in term_texts {
+            let doc_freq = searcher.doc_freq(&Term::from_field_text(field, &text))?;
+            if doc_freq > 0 {
+                terms.insert(text, 1.0 / (1.0 + doc_freq as Score));
+            }
+        }
+        Ok(terms)
+    }
+
+    /// Reproduces Solr original highlighter's default `LuceneGapFragmenter`
+    /// plus Lucene `Highlighter::getBestTextFragments` selection. In
+    /// particular, the queue keeps zero-score fragments: when
+    /// `hl.mergeContiguous=true`, those selected bridges are what let the
+    /// original highlighter coalesce the first two matching fragments without
+    /// also coalescing a later one.
+    #[allow(clippy::too_many_arguments)]
+    fn original_highlight_fragments(
+        &self,
+        field: Field,
+        text: &str,
+        terms: &BTreeMap<String, Score>,
+        max_num_chars: usize,
+        pre: &str,
+        post: &str,
+        snippets_cap: usize,
+        merge_contiguous: bool,
+    ) -> Result<Vec<String>> {
+        const MAX_SNIPPETS_PER_FIELD: usize = 100;
+
+        let mut tokenizer = self.index.tokenizer_for_field(field)?;
+        let mut stream = tokenizer.token_stream(text);
+        let mut fragments = Vec::new();
+        let mut current = OriginalHighlightFragment {
+            range: 0..0,
+            highlights: Vec::new(),
+            score: 0.0,
+        };
+        let mut previous_end = 0;
+        let mut fragment_offset = 0usize;
+        let mut has_previous_token = false;
+        let mut current_terms = BTreeSet::new();
+
+        while stream.advance() {
+            let token = stream.token();
+            // Solr's default original fragmenter is `LuceneGapFragmenter`:
+            // it tests the *current* token's end offset against the prior
+            // break's current-token end offset. Lucene calls it only after
+            // flushing the preceding token group, so a boundary belongs after
+            // that preceding token and retains leading whitespace here.
+            if has_previous_token
+                && token.offset_to >= fragment_offset.saturating_add(max_num_chars)
+            {
+                current.range.end = previous_end;
+                fragments.push(current);
+                current = OriginalHighlightFragment {
+                    range: previous_end..previous_end,
+                    highlights: Vec::new(),
+                    score: 0.0,
+                };
+                current_terms.clear();
+                fragment_offset = token.offset_to;
+            }
+
+            // The analyzer already decides case normalization. Preserve its
+            // token text so custom case-sensitive chains remain highlightable.
+            let term_text = token.text.clone();
+            if let Some(score) = terms.get(&term_text) {
+                // Lucene QueryScorer scores a term only on its first
+                // occurrence in a fragment, while marking every occurrence.
+                if current_terms.insert(term_text) {
+                    current.score += score;
+                }
+                current.highlights.push(token.offset_from..token.offset_to);
+            }
+            previous_end = token.offset_to;
+            has_previous_token = true;
+        }
+        current.range.end = text.len();
+        fragments.push(current);
+
+        let wanted = snippets_cap.min(MAX_SNIPPETS_PER_FIELD);
+        let mut ranked: Vec<(usize, OriginalHighlightFragment)> =
+            fragments.into_iter().enumerate().collect();
+        ranked.sort_by(|(left_number, left), (right_number, right)| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left_number.cmp(right_number))
+        });
+        let mut selected: Vec<Option<OriginalHighlightFragment>> = ranked
+            .into_iter()
+            .take(wanted)
+            .map(|(_, fragment)| Some(fragment))
+            .collect();
+
+        if merge_contiguous {
+            // This is `Highlighter::mergeContiguousFragments` in document
+            // terms. It deliberately runs over the selected zero-score
+            // bridges too; they are removed only after all merges finish.
+            loop {
+                let mut merged = false;
+                'search: for i in 0..selected.len() {
+                    let Some(current) = selected[i].as_ref() else {
+                        continue;
+                    };
+                    for x in 0..selected.len() {
+                        if i == x {
+                            continue;
+                        }
+                        let Some(other) = selected[x].as_ref() else {
+                            continue;
+                        };
+                        let pair = if current.range.end == other.range.start {
+                            Some((i, x))
+                        } else if other.range.end == current.range.start {
+                            Some((x, i))
+                        } else {
+                            None
+                        };
+                        let Some((first, second)) = pair else {
+                            continue;
+                        };
+
+                        let first_fragment = selected[first]
+                            .take()
+                            .expect("selected original fragment is present");
+                        let second_fragment = selected[second]
+                            .take()
+                            .expect("selected original fragment is present");
+                        let winner = if first_fragment.score > second_fragment.score {
+                            first
+                        } else {
+                            second
+                        };
+                        let mut highlights = first_fragment.highlights;
+                        highlights.extend(second_fragment.highlights);
+                        selected[winner] = Some(OriginalHighlightFragment {
+                            range: first_fragment.range.start..second_fragment.range.end,
+                            highlights,
+                            score: first_fragment.score + second_fragment.score,
+                        });
+                        merged = true;
+                        break 'search;
+                    }
+                }
+                if !merged {
+                    break;
+                }
+            }
+        }
+
+        Ok(selected
+            .into_iter()
+            .flatten()
+            .filter(|fragment| fragment.score > 0.0)
+            .map(|fragment| render_original_highlight_fragment(text, fragment, pre, post))
+            .collect())
+    }
+
     /// Generates up to `snippets_cap` distinct highlighted HTML snippets for
     /// `field_name` in the doc at `addr`, against `query`'s terms in that
     /// field (Solr's `hl`/`hl.fl`). `snippets_cap` is Solr's `hl.snippets`:
@@ -2212,6 +2434,7 @@ impl CoreIndex {
     // Same call as `parse_edismax_query` above: these are Solr request
     // parameters arriving one-per-`hl.*`-param, and bundling them into a
     // struct would only move the arity somewhere else.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn highlight_field(
         &self,
@@ -2222,6 +2445,39 @@ impl CoreIndex {
         pre: &str,
         post: &str,
         snippets_cap: usize,
+    ) -> Result<Vec<String>> {
+        self.highlight_field_with_options(
+            query,
+            addr,
+            field_name,
+            max_num_chars,
+            pre,
+            post,
+            snippets_cap,
+            false,
+            false,
+            false,
+        )
+    }
+
+    /// The parameter-aware highlighting primitive. An explicit
+    /// `hl.requireFieldMatch=false` supplies query terms from every queried
+    /// field; otherwise terms stay scoped to `field_name`. `hl.method=original`
+    /// selects Lucene original-highlighter fragment selection, including its
+    /// selected zero-score bridges for `hl.mergeContiguous=true`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn highlight_field_with_options(
+        &self,
+        query: &dyn Query,
+        addr: DocAddress,
+        field_name: &str,
+        max_num_chars: usize,
+        pre: &str,
+        post: &str,
+        snippets_cap: usize,
+        cross_field_query_terms: bool,
+        original_fragments: bool,
+        merge_contiguous: bool,
     ) -> Result<Vec<String>> {
         /// Defensive outer ceiling on the mask-and-resnippet loop, so a
         /// pathological request (`hl.snippets=100000`) over a field repeating
@@ -2236,8 +2492,14 @@ impl CoreIndex {
             .wf_schema
             .field(field_name)
             .ok_or_else(|| anyhow!("can not highlight undefined field: {field_name}"))?;
+        let terms = self.highlight_terms(query, field, cross_field_query_terms)?;
         let searcher = self.reader.searcher();
-        let mut generator = SnippetGenerator::create(&searcher, query, field)?;
+        let mut generator = SnippetGenerator::new(
+            terms.clone(),
+            self.index.tokenizer_for_field(field)?,
+            field,
+            max_num_chars,
+        );
         generator.set_max_num_chars(max_num_chars);
         let doc: TantivyDocument = searcher.doc(addr)?;
 
@@ -2302,6 +2564,19 @@ impl CoreIndex {
             html.push_str(&snippet.to_html());
             html.push_str(&encode_minimal(&text[end..]));
             return Ok(vec![html]);
+        }
+
+        if original_fragments {
+            return self.original_highlight_fragments(
+                field,
+                &text,
+                &terms,
+                max_num_chars,
+                pre,
+                post,
+                snippets_cap,
+                merge_contiguous,
+            );
         }
 
         // `snippets_cap` is the real bound; the iteration count is capped

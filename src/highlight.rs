@@ -147,7 +147,14 @@ pub fn highlighting(
         let key = doc_key(index, addr, unique_key)?;
         let mut per_field = Map::new();
         for field_name in &fields {
-            let mut snippets = index.highlight_field(
+            // Solr defaults `hl.requireFieldMatch` to false: absent or
+            // explicit false uses query terms from every field. Only true
+            // restricts terms to the field being highlighted (finding 113).
+            let cross_field_query_terms = params.get("hl.requireFieldMatch") != Some("true");
+            let original_fragments = params.get("hl.method") == Some("original");
+            let merge_contiguous =
+                original_fragments && params.get("hl.mergeContiguous") == Some("true");
+            let mut snippets = index.highlight_field_with_options(
                 query,
                 addr,
                 field_name,
@@ -155,9 +162,20 @@ pub fn highlighting(
                 pre,
                 post,
                 snippets_cap,
+                cross_field_query_terms,
+                original_fragments,
+                merge_contiguous,
             )?;
             if snippets.is_empty() && index.wf_schema.is_raw_string(field_name) {
-                snippets = raw_string_snippets(index, query, addr, field_name, pre, post)?;
+                snippets = raw_string_snippets(
+                    index,
+                    query,
+                    addr,
+                    field_name,
+                    pre,
+                    post,
+                    cross_field_query_terms,
+                )?;
             }
             if snippets.is_empty() {
                 // finding 52: absent from the per-field map, not `[]`.
@@ -194,6 +212,7 @@ fn raw_string_snippets(
     field_name: &str,
     pre: &str,
     post: &str,
+    cross_field_query_terms: bool,
 ) -> Result<Vec<String>> {
     let field = index
         .wf_schema
@@ -201,7 +220,7 @@ fn raw_string_snippets(
         .ok_or_else(|| anyhow!("can not highlight undefined field: {field_name}"))?;
     let mut terms = Vec::new();
     query.query_terms(&mut |term, _| {
-        if term.field() == field
+        if (cross_field_query_terms || term.field() == field)
             && let Some(value) = term.value().as_str()
         {
             terms.push(value.to_owned());
