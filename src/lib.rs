@@ -102,7 +102,7 @@ const SELECT_PARAMS: &[&str] = &[
     "tie",
     "boost",
     "bq",
-    // Accepted-and-ignored (issue #108): edismax's boost-function param.
+    // Accepted-and-warned (issue #232): edismax's boost-function param.
     // Wayfinder does not apply it yet, but a request using it must not 400
     // under strict_params, since Solr accepts it.
     "bf",
@@ -2111,6 +2111,26 @@ async fn select(
     // component; false and an absent param leave its key out of the envelope.
     let spellcheck_requested = params.bool_or("spellcheck", false)?;
 
+    // Function queries are accepted for compatibility, but cannot affect
+    // ranking until their evaluator lands. Surface that consequential gap
+    // rather than silently returning a differently ranked result.
+    let mut select_warnings = Vec::new();
+    if params.get("bf").is_some() {
+        select_warnings.push(
+            "Ignoring function-query parameter `bf`: function queries are not implemented."
+                .to_string(),
+        );
+    }
+    if params
+        .get("boost")
+        .is_some_and(|value| value.parse::<f32>().is_err())
+    {
+        select_warnings.push(
+            "Ignoring function-query parameter `boost`: function queries are not implemented."
+                .to_string(),
+        );
+    }
+
     let default_field = params
         .get("df")
         .unwrap_or(&state.index.wf_schema.core.default_field)
@@ -2146,9 +2166,9 @@ async fn select(
                 // (PRD v1 scope explicitly excludes it, same as `bf` --
                 // issue #108/finding 75). A non-numeric `boost` value (e.g.
                 // `recip(rord(date),1,1000,1000)`) therefore fails `.parse()`
-                // and falls back to `None` here -- accepted and silently
-                // ignored, not rejected, matching the same unknown-value
-                // leniency `bf` gets rather than a 400 (issue #110).
+                // and falls back to `None` here -- accepted and warned rather
+                // than rejected, matching `bf`'s compatibility treatment
+                // (issue #232).
                 let boost: Option<f32> = params.get("boost").and_then(|s| s.parse().ok());
                 state
                     .index
@@ -2320,10 +2340,11 @@ async fn select(
     } else {
         None
     };
-    let warnings = facet_result
-        .as_ref()
-        .map(|(_, warnings)| warnings.as_slice())
-        .unwrap_or_default();
+    // Select-level warnings precede facet warnings because they describe
+    // request parameters ignored before facet processing begins.
+    if let Some((_, facet_warnings)) = &facet_result {
+        select_warnings.extend(facet_warnings.iter().cloned());
+    }
 
     // `stats=true` gates the whole `stats` block the same way `facet=true`
     // gates `facet_counts` — `stats.field` alone does not turn it on (mirrors
@@ -2384,8 +2405,8 @@ async fn select(
     // mincount 0 lacks the key) — never an empty array — and, when present,
     // leads the object rather than trailing it.
     let mut response_header = Map::new();
-    if !warnings.is_empty() {
-        response_header.insert("warnings".to_string(), json!(warnings));
+    if !select_warnings.is_empty() {
+        response_header.insert("warnings".to_string(), json!(select_warnings));
     }
     response_header.insert("status".to_string(), json!(0));
     response_header.insert("QTime".to_string(), json!(0));
