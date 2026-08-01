@@ -48,7 +48,7 @@ use std::time::Instant;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Path as AxPath, RawQuery, State};
-use axum::http::{Method, StatusCode};
+use axum::http::{Method, Request, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, get};
 use http_body_util::BodyExt;
@@ -56,6 +56,7 @@ use serde_json::{Map, Value, json};
 use tantivy::Score;
 use tantivy::query::{EmptyQuery, Occur, Query, QueryClone};
 use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::trace::TraceLayer;
 
 use collector::{SortClause, SortKey};
 use core_index::CoreIndex;
@@ -73,6 +74,46 @@ struct AppState {
     /// clock cannot be walked backwards by an NTP step the way a
     /// `SystemTime` difference can.
     started_at: Instant,
+}
+
+/// Opaque handle to the state shared by an [`AppServer`]'s router.
+///
+/// Keeping this as an `Arc<AppState>` avoids a second index ownership path:
+/// the binary can flush the exact core its router served after Axum has
+/// drained all in-flight requests.
+#[derive(Clone)]
+pub struct ShutdownHandle(Arc<AppState>);
+
+impl ShutdownHandle {
+    /// Hard-commits all writes accepted before graceful shutdown completed.
+    ///
+    /// This is intentionally unconditional: delete-only updates do not raise
+    /// `pending_docs`, but can still be waiting on a `commitWithin` deadline.
+    pub fn flush(&self) -> anyhow::Result<()> {
+        self.0.index.commit()
+    }
+}
+
+/// Router construction plus a handle for graceful process shutdown.
+///
+/// [`app`] remains the normal in-process test entry point. The binary uses
+/// this type so it retains the same core state that the returned router owns.
+pub struct AppServer {
+    router: Router,
+    shutdown: ShutdownHandle,
+}
+
+impl AppServer {
+    /// Returns a cloneable handle that can flush this router's core after it
+    /// has stopped accepting and drained requests.
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        self.shutdown.clone()
+    }
+
+    /// Consumes this construction result into the HTTP router.
+    pub fn into_router(self) -> Router {
+        self.router
+    }
 }
 
 /// Request params Wayfinder implements today. Only consulted when
@@ -337,7 +378,7 @@ const TERMS_DEFAULT_LIMIT: usize = 10;
 /// Builds the Wayfinder HTTP app for a single core with all server-config
 /// defaults (PRD §6). Use `app_with_config` to supply a config file.
 pub fn app(schema_path: &Path, data_dir: &Path) -> anyhow::Result<Router> {
-    build(schema_path, data_dir, ServerConfig::default())
+    app_server(schema_path, data_dir).map(AppServer::into_router)
 }
 
 /// As `app`, with the server config read from `config_path`. A missing file
@@ -347,11 +388,25 @@ pub fn app_with_config(
     data_dir: &Path,
     config_path: &Path,
 ) -> anyhow::Result<Router> {
-    let config = ServerConfig::load(config_path)?;
-    build(schema_path, data_dir, config)
+    app_server_with_config(schema_path, data_dir, config_path).map(AppServer::into_router)
 }
 
-fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::Result<Router> {
+/// Builds an app together with the opaque handle needed to flush its core at
+/// process shutdown. This is the binary-facing counterpart to [`app`].
+pub fn app_server(schema_path: &Path, data_dir: &Path) -> anyhow::Result<AppServer> {
+    build(schema_path, data_dir, ServerConfig::default())
+}
+
+/// As [`app_server`], with server config loaded from `config_path`.
+pub fn app_server_with_config(
+    schema_path: &Path,
+    data_dir: &Path,
+    config_path: &Path,
+) -> anyhow::Result<AppServer> {
+    build(schema_path, data_dir, ServerConfig::load(config_path)?)
+}
+
+fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::Result<AppServer> {
     let index = CoreIndex::open(schema_path, data_dir, &config)?;
     let core_name = index.wf_schema.core.name.clone();
     // Issue #64: raise (and make configurable via `resources.max_body_size`)
@@ -412,10 +467,36 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
     // attacker-controlled input) must surface as a normal HTTP 500 in
     // Solr's error envelope rather than unwinding the connection. This is a
     // last-resort net, not a substitute for fixing the panic at its source.
-    Ok(router
+    let shutdown = ShutdownHandle(Arc::clone(&state));
+    let router = router
         .with_state(state)
         .layer(CatchPanicLayer::custom(handle_panic))
-        .layer(DefaultBodyLimit::max(max_body_size)))
+        .layer(DefaultBodyLimit::max(max_body_size))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &Request<_>| {
+                    tracing::info_span!(
+                        "http_request",
+                        method = %request.method(),
+                        uri = %request.uri(),
+                    )
+                })
+                .on_request(|_request: &Request<_>, span: &tracing::Span| {
+                    let _entered = span.enter();
+                    tracing::info!("request started");
+                })
+                .on_response(
+                    |response: &axum::http::Response<_>, latency, span: &tracing::Span| {
+                        let _entered = span.enter();
+                        tracing::info!(
+                            status = response.status().as_u16(),
+                            latency = ?latency,
+                            "request completed"
+                        );
+                    },
+                ),
+        );
+    Ok(AppServer { router, shutdown })
 }
 
 /// Test-only handler behind the `test-support` feature (see `build()`): an
@@ -948,14 +1029,17 @@ fn check_params(state: &AppState, allowed: &[&str], params: &Params) -> Result<(
                 .suppress_response_header()
         })?;
     }
-    if !state.config.strict_params {
-        return Ok(());
-    }
     let accepted = |key: &str| {
         allowed.contains(&key)
             || params::split_per_field_key(key, PER_FIELD_PARAMS)
                 .is_some_and(|(_, base)| allowed.contains(&base))
     };
+    if !state.config.strict_params {
+        for unknown in params.keys().filter(|key| !accepted(key)) {
+            tracing::debug!(parameter = %unknown, "ignoring unknown request parameter");
+        }
+        return Ok(());
+    }
     match params.keys().find(|key| !accepted(key)) {
         None => Ok(()),
         Some(unknown) => Err(WfError::bad_request(
