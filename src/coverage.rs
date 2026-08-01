@@ -1124,14 +1124,12 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
                 )
                 .await
         }
-        "select.spellcheck.dictionaries" => {
-            probe
-                .has(
-                    "select?q=quick&spellcheck=true&spellcheck.dictionary=en",
-                    "/spellcheck/suggestions",
-                )
-                .await
-        }
+        "select.spellcheck.dictionaries" => probe
+            .has(
+                "select?q=quick&spellcheck=true&spellcheck.dictionary=en&spellcheck.dictionary=und",
+                "/spellcheck/suggestions",
+            )
+            .await,
         "select.spellcheck.collate" => {
             probe
                 .has(
@@ -1372,12 +1370,15 @@ async fn response_field_covered(probe: &ProbeApp, id: &str) -> bool {
                 })
             }),
         "select.spellcheck.suggestions" => probe
-            .response("select?q=quick&spellcheck=true")
+            .response("select?q=quick&spellcheck=true&json.nl=flat")
             .await
             .and_then(|body| body.pointer("/spellcheck/suggestions").cloned())
-            .is_some_and(|value| value.is_object()),
+            // Trace 00021 pins the explicit-flat empty shape as `[]`.
+            // Issue #222 deliberately leaves `json.nl=map`'s object rendering
+            // to the v3 implementation that can produce real suggestions.
+            .is_some_and(|value| value.is_array()),
         "select.spellcheck.collations" => probe
-            .response("select?q=quick&spellcheck=true")
+            .response("select?q=quick&spellcheck=true&json.nl=flat")
             .await
             .and_then(|body| body.pointer("/spellcheck/collations").cloned())
             .is_some_and(|value| value.is_array()),

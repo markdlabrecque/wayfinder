@@ -141,6 +141,13 @@ const SELECT_PARAMS: &[&str] = &[
     // (findings 113-114).
     "hl.mergeContiguous",
     "hl.requireFieldMatch",
+    // Issue #222: Search API sends these spellcheck component params. They
+    // are accepted-and-ignored pending real suggestion generation; dictionary
+    // is intentionally repeatable, as in trace 00021.
+    "spellcheck",
+    "spellcheck.q",
+    "spellcheck.dictionary",
+    "spellcheck.collate",
     "wt",
     // Envelope params `search_api_solr` sends on essentially every request
     // (issue #143). `omitHeader=true` drops `responseHeader` — see
@@ -1956,6 +1963,9 @@ async fn select(
     let facet_requested = params.bool_or("facet", false)?;
     let stats_requested = params.bool_or("stats", false)?;
     let hl_requested = params.bool_or("hl", false)?;
+    // Use the same strict Solr boolean parser as `hl`: only true enables the
+    // component; false and an absent param leave its key out of the envelope.
+    let spellcheck_requested = params.bool_or("spellcheck", false)?;
 
     let default_field = params
         .get("df")
@@ -2258,6 +2268,15 @@ async fn select(
 
     if let Some(highlighting) = highlighting_result {
         body["highlighting"] = highlighting;
+    }
+    if spellcheck_requested {
+        // ponytail: this is strictly the v3-suggester bridge, not suggestion
+        // generation. Real suggestions remain PRD v3. Trace 00021 proves the
+        // explicit-flat empty `suggestions: []` shape. Solr renders suggestions
+        // as an object under `json.nl=map`; this slice deliberately ignores
+        // that distinction while suggestions are always empty. Replace this
+        // expiring envelope when generation lands.
+        body["spellcheck"] = json!({ "suggestions": [], "collations": [] });
     }
 
     Ok(axum::Json(body).into_response())

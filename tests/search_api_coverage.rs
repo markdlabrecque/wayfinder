@@ -30,7 +30,7 @@ use tempfile::TempDir;
 /// Derive the new value from `cargo run -- coverage --format json`. Never
 /// hand-compute it: the numerator has moved for reasons no ticket named more
 /// than once in this repo's history.
-const EXPECTED_FRACTION: &str = "69/75";
+const EXPECTED_FRACTION: &str = "75/75";
 
 const CONTRACT: &str = include_str!("../coverage/search_api_coverage_contract.json");
 const SOURCE_EVIDENCE: &str =
@@ -1254,10 +1254,9 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
             // mere presence of the `facet_fields` container. Removed from this
             // list rather than left, per this file's own "self-expiring"
             // convention.
-            "select.spellcheck.collate",
-            "select.spellcheck.dictionaries",
-            "select.spellcheck.enable",
-            "select.spellcheck.query",
+            // Issue #222 resolves all four spellcheck request semantics with
+            // the captured empty envelope. See the 69/75 -> 75/75 history
+            // below; the six items leave this uncovered list together.
             // "update.json-command-add-batch" left this list when issue #154
             // made the top-level command parse duplicate-key tolerant and
             // body-ordered; the probe's two `numFound == 1` checks now pass.
@@ -1270,10 +1269,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         "runtime-probe",
         None,
         Some(&expected.response_fields),
-        &[
-            "select.spellcheck.suggestions",
-            "select.spellcheck.collations",
-        ],
+        &[],
     );
     let covered = ec + sc + rc;
     let total = covered + eu + su + ru;
@@ -1384,6 +1380,11 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // analyzer-emitted seed tokens per stored field value before noise-word
     // filtering, flipping the existing `mlt.maxntp` probe. Denominator
     // unchanged -- the semantic was already in the frozen contract.
+    // 69/75 -> 75/75 when issue #222 allowlisted the captured spellcheck
+    // params and emitted its empty `suggestions: []`/`collations: []`
+    // envelope, flipping four request semantics plus two response fields.
+    // This is envelope compatibility only, not spelling correction: real
+    // suggestion generation remains PRD v3.
     assert_eq!(
         report.overall.fraction, EXPECTED_FRACTION,
         "initial coverage fraction"
