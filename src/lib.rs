@@ -2216,10 +2216,12 @@ async fn mlt(
 ///
 ///   `terms=true` with no `terms.fl` is a *different* case, and deliberately
 ///   not swept up by the gate: the component runs and contributes an empty
-///   list, so the block is present and empty (`{"terms":{}}`). That is what
-///   `src/coverage.rs`'s `terms.terms` probe asserts, and
+///   list, so the block is present and empty (`{"terms":{}}`).
 ///   `tests/terms.rs::terms_true_without_fl_produces_an_empty_terms_object`
-///   pins it.
+///   pins it. `src/coverage.rs`'s `terms.terms` probe deliberately does *not*
+///   use that request (issue #162): a hollow `{"terms":{}}` is nothing a
+///   client can read, so the probe sends `terms.fl=body` and requires a real
+///   term/frequency pair.
 /// - `terms.fl` is repeatable, one key under `terms` per field, each
 ///   independent.
 /// - The value is the flat `[term, count, term, count, ...]` array. That is

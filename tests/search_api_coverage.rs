@@ -1268,3 +1268,60 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
         "initial coverage fraction"
     );
 }
+
+/// Issue #162: `admin.luke.index`, `terms.terms`, and
+/// `schema.fieldtypes.fieldTypes` each check only that a container exists
+/// (`is_object()`/`is_array()`), not that a real client consumer could read
+/// anything out of it. Tightening those three predicates to require their
+/// real leaf (`index.numDocs` as a u64; a non-empty term/frequency pair; a
+/// non-empty name list) must not drop the fraction below `57/75` -- these
+/// three items are covered *today*, against the real seeded corpus
+/// (`ProbeApp::PROBE_DOCS`) driving the real routed handlers, and a
+/// tightened probe must still see real, non-hollow data at each of them.
+///
+/// This is deliberately a live regression guard rather than a red test:
+/// `src/coverage.rs`'s own `#[cfg(test)]` unit tests already pin the failing
+/// half (a hollow container must read as uncovered) with a stub router,
+/// since the real app cannot be coaxed into emitting a genuinely hollow
+/// container at any of these three paths. What *is* observable against the
+/// real app, and worth pinning here, is the inverse hazard named by the
+/// task: `terms.terms`'s current probe requests
+/// `content/terms?terms=true` with no `terms.fl` (see the doc comment on
+/// `src/lib.rs::terms`), which -- by that handler's own documented
+/// contract -- returns the hollow `{"terms":{}}` right now. Tightening only
+/// the assertion without also pointing the probe's request at a real field
+/// (as its sibling `terms.enumeration` request-semantic probe already does
+/// with `terms.fl=body`) flips `terms.terms` from covered to uncovered and
+/// drops the fraction to `56/75`. If this test goes red, that is the
+/// tightening missing its matching request fix, not a fixture to update.
+#[tokio::test]
+async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_app() {
+    let report = wayfinder::coverage_report().await;
+    let items = report["response_fields"]["items"]
+        .as_array()
+        .expect("response_fields items array");
+    for id in [
+        "admin.luke.index",
+        "terms.terms",
+        "schema.fieldtypes.fieldTypes",
+    ] {
+        let item = items
+            .iter()
+            .find(|item| item["id"] == id)
+            .unwrap_or_else(|| panic!("response_fields item `{id}` present in report"));
+        assert_eq!(
+            item["covered"],
+            Value::Bool(true),
+            "`{id}` must remain covered against the real seeded corpus once its \
+             probe requires its real leaf value, got item: {item}"
+        );
+    }
+    assert_eq!(
+        report["overall"]["fraction"],
+        Value::String("57/75".to_string()),
+        "tightening the three hollow-container probes must not, by itself, \
+         change the coverage fraction -- if it drops, a probe's request (not \
+         just its assertion) needs to change to reach real data, see \
+         `terms.terms` above"
+    );
+}

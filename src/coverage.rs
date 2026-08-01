@@ -1163,26 +1163,60 @@ async fn response_field_covered(probe: &ProbeApp, id: &str) -> bool {
             .await
             .and_then(|body| body.pointer("/core/schema").cloned())
             .is_some_and(|value| value.is_string()),
+        // The one real consumer is `isPartOfSchema('fieldTypes', ...)`, an
+        // `in_array()` over the entries' `name`s -- so an empty array, or
+        // entries without a usable name, is nothing a client can act on.
         "schema.fieldtypes.fieldTypes" => probe
             .response("content/schema/fieldtypes")
             .await
             .and_then(|body| body.get("fieldTypes").cloned())
-            .is_some_and(|value| value.is_array()),
+            .is_some_and(|value| {
+                value.as_array().is_some_and(|entries| {
+                    !entries.is_empty()
+                        && entries.iter().all(|entry| {
+                            entry
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .is_some_and(|name| !name.is_empty())
+                        })
+                })
+            }),
+        // `SearchApiSolrBackend::getLuke()` reads `index.numDocs` and nothing
+        // else, so that leaf -- not the container -- is what coverage means.
         "admin.luke.index" => probe
             .response("content/admin/luke")
             .await
-            .and_then(|body| body.get("index").cloned())
-            .is_some_and(|value| value.is_object()),
+            .and_then(|body| body.pointer("/index/numDocs").cloned())
+            .is_some_and(|value| value.is_u64()),
         "admin.mbeans.solr-mbeans" => probe
             .response("content/admin/mbeans")
             .await
             .and_then(|body| body.get("solr-mbeans").cloned())
             .is_some_and(|value| value.is_object()),
+        // A client reads term/frequency pairs out of `terms.<field>`, so the
+        // probe has to ask for a real field -- `terms=true` with no `terms.fl`
+        // is documented (see `terms` in `src/lib.rs`) to return the hollow
+        // `{"terms":{}}`, which proves nothing. Same field as the sibling
+        // `terms.enumeration` request-semantic probe.
         "terms.terms" => probe
-            .response("content/terms?terms=true")
+            .response("content/terms?terms=true&terms.fl=body")
             .await
             .and_then(|body| body.get("terms").cloned())
-            .is_some_and(|value| value.is_object()),
+            .is_some_and(|value| {
+                value.as_object().is_some_and(|fields| {
+                    fields.values().any(|entries| {
+                        entries.as_array().is_some_and(|pairs| {
+                            !pairs.is_empty()
+                                && pairs.len() % 2 == 0
+                                && pairs
+                                    .iter()
+                                    .step_by(2)
+                                    .all(|term| term.as_str().is_some_and(|text| !text.is_empty()))
+                                && pairs.iter().skip(1).step_by(2).all(Value::is_u64)
+                        })
+                    })
+                })
+            }),
         _ => panic!("unrecognised Search API response denominator item: {id}"),
     }
 }
@@ -1279,12 +1313,108 @@ pub async fn report() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::routing::get;
 
     #[test]
     fn contract_rejects_manual_coverage_classifications() {
         let mut contract: serde_json::Value = serde_json::from_str(CONTRACT).unwrap();
         contract["request_semantics"][0]["covered"] = serde_json::json!(true);
         assert!(serde_json::from_value::<Contract>(contract).is_err());
+    }
+
+    // Issue #162: `admin.luke.index`, `terms.terms`, and
+    // `schema.fieldtypes.fieldTypes` each check only that a container exists
+    // (`is_object()`/`is_array()`), so an empty container counts as covered.
+    // None of the three real handlers can be coaxed into emitting a genuinely
+    // hollow container through `ProbeApp`'s real router -- `admin/luke`
+    // always populates `index.numDocs` (0 is still a present u64),
+    // `schema/fieldtypes` always lists Wayfinder's built-in types, and
+    // `terms.terms`'s own probe request already exercises real term/count
+    // data. So this builds a second, throwaway `ProbeApp` around a stub
+    // router that serves exactly the hollow shape described in the issue at
+    // the same paths `response_field_covered`'s match arms request, and
+    // drives the real (private) predicate function against it -- the same
+    // function `report()` calls, not a reimplementation of its logic.
+    async fn hollow_index_container() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"index": {}}))
+    }
+
+    async fn hollow_terms_container() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"terms": {}}))
+    }
+
+    async fn hollow_terms_field_with_no_terms() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"terms": {"body": []}}))
+    }
+
+    async fn hollow_fieldtypes_container() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"fieldTypes": []}))
+    }
+
+    fn hollow_probe() -> ProbeApp {
+        let app = Router::new()
+            .route("/solr/content/admin/luke", get(hollow_index_container))
+            .route("/solr/content/terms", get(hollow_terms_container))
+            .route(
+                "/solr/content/schema/fieldtypes",
+                get(hollow_fieldtypes_container),
+            );
+        ProbeApp {
+            app,
+            _workspace: ProbeWorkspace::new(),
+        }
+    }
+
+    fn hollow_terms_with_empty_field_probe() -> ProbeApp {
+        let app = Router::new().route("/solr/content/terms", get(hollow_terms_field_with_no_terms));
+        ProbeApp {
+            app,
+            _workspace: ProbeWorkspace::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_luke_index_probe_rejects_a_hollow_index_container() {
+        let probe = hollow_probe();
+        assert!(
+            !response_field_covered(&probe, "admin.luke.index").await,
+            "admin.luke.index must require the real leaf its client consumer reads \
+             (index.numDocs as a u64), not merely that `index` is an object -- \
+             an empty `{{}}` must not count as covered"
+        );
+    }
+
+    #[tokio::test]
+    async fn terms_terms_probe_rejects_a_hollow_terms_container() {
+        let probe = hollow_probe();
+        assert!(
+            !response_field_covered(&probe, "terms.terms").await,
+            "terms.terms must require at least one non-empty term/frequency pair, \
+             not merely that `terms` is an object -- an empty `{{}}` must not count \
+             as covered"
+        );
+    }
+
+    #[tokio::test]
+    async fn terms_terms_probe_rejects_a_field_with_no_terms() {
+        let probe = hollow_terms_with_empty_field_probe();
+        assert!(
+            !response_field_covered(&probe, "terms.terms").await,
+            "terms.terms must require a non-empty term/frequency pair -- a `terms` \
+             object whose only field key maps to an empty array (the shape real \
+             `terms=true` with no matching terms produces) must not count as covered"
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_fieldtypes_fieldtypes_probe_rejects_a_hollow_array() {
+        let probe = hollow_probe();
+        assert!(
+            !response_field_covered(&probe, "schema.fieldtypes.fieldTypes").await,
+            "schema.fieldtypes.fieldTypes must require a non-empty name list, not \
+             merely that `fieldTypes` is an array -- an empty `[]` must not count \
+             as covered"
+        );
     }
 
     /// `"select.highlight.snippets"` used to probe with `hl.snippets=1`, which
