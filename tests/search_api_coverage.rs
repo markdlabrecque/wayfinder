@@ -1304,8 +1304,9 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
 /// the assertion without also pointing the probe's request at a real field
 /// (as its sibling `terms.enumeration` request-semantic probe already does
 /// with `terms.fl=body`) flips `terms.terms` from covered to uncovered and
-/// drops the fraction to `56/75`. If this test goes red, that is the
-/// tightening missing its matching request fix, not a fixture to update.
+/// drops the fraction by one, to `58/75` against the `59/75` pinned below. If
+/// this test goes red, that is the tightening missing its matching request
+/// fix, not a fixture to update.
 #[tokio::test]
 async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_app() {
     let report = wayfinder::coverage_report().await;
@@ -1328,9 +1329,19 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
              probe requires its real leaf value, got item: {item}"
         );
     }
+    // The constant tracks landed features; the assertion's job is unchanged.
+    // It went 57/75 -> 59/75 when issue #143 landed `omitHeader`/`TZ`, which
+    // flipped exactly two *request_semantics* items to covered on their own
+    // merits: `request.omitHeader` and `request.timezone.utc`. The
+    // `response_fields` section this test actually guards is untouched at
+    // 13/15 across that change, which is the point -- bumping the number for a
+    // feature that genuinely adds coverage elsewhere is correct; bumping it
+    // because one of the three probes below stopped reaching real data is the
+    // failure this guards, and that would show up as `response_fields`
+    // dropping.
     assert_eq!(
         report["overall"]["fraction"],
-        Value::String("57/75".to_string()),
+        Value::String("59/75".to_string()),
         "tightening the three hollow-container probes must not, by itself, \
          change the coverage fraction -- if it drops, a probe's request (not \
          just its assertion) needs to change to reach real data, see \

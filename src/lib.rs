@@ -134,11 +134,26 @@ const SELECT_PARAMS: &[&str] = &[
     "wt",
     // Envelope params `search_api_solr` sends on essentially every request
     // (issue #143). `omitHeader=true` drops `responseHeader` — see
-    // `Params::omit_header`. `TZ` is accepted and ignored: it only affects
-    // date math and date-range faceting, and Wayfinder has no date field
-    // type, no `NOW`/date-math syntax, and no temporal `facet.range`, so
-    // there is nothing for a timezone to change. It must not 400 under
-    // `strict_params = true`, since Solr accepts it.
+    // `Params::omit_header`. `TZ` must not 400 under `strict_params = true`,
+    // since Solr accepts it; it is accepted and ignored.
+    //
+    // ponytail: `TZ` is inert *today*, not inherently. Wayfinder does have a
+    // date field type (`ResolvedType::Date` / `add_date_field`, `src/schema.rs`)
+    // and date-range faceting (`parse_date` / `parse_date_gap` /
+    // `RangeEnd::Date`, `src/facet.rs`), which are exactly what a timezone
+    // would bear on in Solr. It stays inert because of two narrower facts:
+    // `facet.range.start`/`end` must be literal RFC3339 instants — `parse_date`
+    // rejects `NOW` and every other date-math expression, and no date math
+    // exists anywhere else — and `parse_date_gap` refuses the calendar gaps
+    // `+1MONTH`/`+1YEAR` by name. What is left is fixed-length gaps walked over
+    // absolute instants, and those give the same bucket boundaries in every
+    // timezone.
+    //
+    // The ceiling ends the moment either fact does: if `NOW`/date-math parsing
+    // or MONTH/YEAR gaps land, `TZ` starts changing which bucket a document
+    // falls in, and silently ignoring it becomes a wrong answer rather than a
+    // no-op. Whoever lands either must thread `TZ` through to date parsing and
+    // gap walking here, not just add the feature.
     "omitHeader",
     "TZ",
 ];

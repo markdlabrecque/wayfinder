@@ -53,8 +53,24 @@ impl Params {
 
     /// Solr's `omitHeader`: `true` drops `responseHeader` from the response
     /// entirely. Anything else — `false`, absent, an unrecognized value — keeps
-    /// it, matching Solr's own "exactly the string `true` counts as on"
-    /// boolean handling used elsewhere in this codebase.
+    /// it.
+    ///
+    /// That exact-string strictness is *this codebase's* convention, not
+    /// Solr's: `== Some("true")` is how every other boolean param is read
+    /// (`src/lib.rs`'s `commit`, `softCommit`, `facet`, `stats`, `hl`,
+    /// `mlt.boost`, `terms`). Solr itself is laxer — `StrUtils.parseBool`
+    /// accepts `1`, `t`, `yes` and is case-insensitive, so `omitHeader=1`
+    /// suppresses the header in real Solr and does not here.
+    ///
+    /// ponytail: that is a real, unfixtured divergence. No fixture exercises
+    /// it — `search_api_solr` only ever sends the literal `true`/`false` (all
+    /// 28 traces), and no `manifest.tsv` row uses `omitHeader` at all — so
+    /// widening it here would be guessing at behaviour nothing captured
+    /// confirms, and would diverge from the sibling params above for no
+    /// evidenced gain. Settling it belongs with the other open `omitHeader`
+    /// question in issue #179: one `capture.sh` block covering `omitHeader=1`
+    /// alongside the error-envelope case answers both, after which either
+    /// widen all the boolean reads together or pin the strictness with a test.
     ///
     /// Ground truth is `search_api_solr`'s own traffic
     /// (`solr-ref/search-api/trace/`): all twenty traces that send
