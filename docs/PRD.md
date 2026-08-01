@@ -229,9 +229,21 @@ chosen. Nothing may be added here without the same two things.
    is the honest answer until the parser it names exists. (issue #137's open question 5; findings
    90-92)
 
+7. **Colliding `facet.field` response labels are a hard 400, where Solr returns 200 with duplicate
+   JSON object members.** `facet_collision_field_flat.json` and
+   `facet_collision_field_map.json` show `{!key=x}category` plus `{!key=x}id` producing two literal
+   `"x"` members in request order; `json.nl=map` changes only each member's bucket shape. That
+   response cannot be represented by a normal JSON object model, and common parsers silently keep
+   only one member — recreating the data loss this edge case is meant to prevent. Wayfinder
+   therefore rejects the ambiguous request in its normal 400 error envelope rather than emitting
+   duplicate keys or silently choosing a facet. This is deliberately narrow: the companion
+   `facet_collision_query_flat.json` and `facet_collision_query_map.json` fixtures show Solr itself
+   coalescing duplicate identical `facet.query` values, which Wayfinder matches. (issue #149;
+   finding 102)
+
 Note that divergence 3 is a difference from the *configset* the reference fixtures were captured
-against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, 4, and 6 are
-differences from Solr proper. Divergence 5 is a deliberate config choice plus inherent host
+against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, 4, 6, and 7
+are differences from Solr proper. Divergence 5 is a deliberate config choice plus inherent host
 non-reproducibility, not a Solr-behaviour disagreement.
 
 ### How this is verified

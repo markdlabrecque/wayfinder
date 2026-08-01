@@ -2086,3 +2086,26 @@ cape edismax_unquoted_multitoken 'select?q=quick%2Brocket&defType=edismax&qf=tit
 # `tests/edismax.rs::unquoted_multitoken_debug_parsedquery_shows_one_clause_over_both_tokens`.
 # curl -sg 'http://localhost:8994/solr/content/select?q=quick%2Brocket&defType=edismax&qf=title+body&debugQuery=true&fl=id&sort=id+asc&wt=json' \
 #   -o solr-ref/responses/edismax_unquoted_multitoken_debug.json
+
+# --- colliding facet response keys (issue #149) -----------------------------
+# Captured 2026-08-01 against a one-off `solr:9` container on port 8997
+# (`wayfinder-solr-149`, removed afterwards), with the tracer-bullet schema and
+# five-document corpus from the start of this script recreated verbatim. Only
+# these four requests were run; this script was NOT re-run wholesale.
+#
+# Two `{!key=x}` facet fields make Solr's NamedList writer emit two literal `x`
+# object members, in request order, under both the default and `json.nl=map`.
+# This is legal to emit but ambiguous to consume: ordinary JSON object models
+# retain only one member. By contrast, two identical `facet.query` values are
+# coalesced by Solr itself into one `category:animals` member under both shapes.
+#
+# Deliberately NOT manifest.tsv rows. The differential harness parses each body
+# into `serde_json::Value`, which necessarily discards one duplicate `x` member
+# and would turn the field collision into a false-positive green. Dedicated raw
+# fixture assertions in `tests/facet_key_collision.rs` preserve the evidence.
+#
+# Reproduce (after recreating the opening schema/corpus on port 8997):
+# cap facet_collision_field_flat 'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dx%7Dcategory&facet.field=%7B%21key%3Dx%7Did&wt=json'
+# cap facet_collision_field_map  'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dx%7Dcategory&facet.field=%7B%21key%3Dx%7Did&json.nl=map&wt=json'
+# cap facet_collision_query_flat 'select?q=*:*&rows=0&facet=true&facet.query=category%3Aanimals&facet.query=category%3Aanimals&wt=json'
+# cap facet_collision_query_map  'select?q=*:*&rows=0&facet=true&facet.query=category%3Aanimals&facet.query=category%3Aanimals&json.nl=map&wt=json'

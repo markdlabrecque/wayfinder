@@ -1838,3 +1838,24 @@ not `/mlt`'s handler alone, so it is **descoped from #141 to issue #188**. Two e
 pin the gap meanwhile: `tests/mlt.rs::mlt_fl_wildcard_plus_score_still_drops_every_field_until_issue_188`
 and the `mlt_fl_wildcard_score` entry in that file's `MLT_EXPECTED_DIVERGENCES`, both of which
 fail as soon as `render_doc` learns `*`. The fixture stays committed for #188.
+
+## Finding from issue #149 (colliding facet response keys)
+
+One-off `solr:9` container (port 8997, `wayfinder-solr-149`, removed after capture), with the
+tracer-bullet schema and five-document corpus from `solr-ref/capture.sh` recreated verbatim.
+Fixtures: `facet_collision_field_flat.json`, `facet_collision_field_map.json`,
+`facet_collision_query_flat.json`, `facet_collision_query_map.json`.
+
+102. **Solr emits duplicate JSON object members for colliding `facet.field` labels, but
+     coalesces duplicate `facet.query` values itself; `json.nl=map` does not change either
+     result.** `{!key=x}category` plus `{!key=x}id` produces two literal `"x"` members in
+     request order under `facet_counts.facet_fields`: first category's buckets, then id's.
+     The default writer makes each value a flat alternating array; `json.nl=map` changes each
+     value to a bucket object but leaves the duplicate outer `"x"` members intact. Ordinary
+     JSON object models cannot represent that response faithfully and generally retain only
+     one member. In contrast, sending `facet.query=category:animals` twice produces exactly
+     one `"category:animals":2` member with either `json.nl` shape -- Solr has already
+     coalesced it before writing. The field-collision fixtures stay out of `manifest.tsv`
+     because its differential harness parses bodies into `serde_json::Value`, which would
+     discard one duplicate and report a false-positive match; dedicated tests inspect those
+     fixtures as raw text.
