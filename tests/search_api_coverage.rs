@@ -1176,13 +1176,20 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
             // as a side effect. It is NOT owned by #153 (repeated `json.nl`
             // on `/select`) despite the name similarity -- its probe never
             // touches `/select`.
+            // Issue #143: "request.omitHeader" and "request.timezone.utc"
+            // are resolved -- `omitHeader`/`TZ` are registered in
+            // `SELECT_PARAMS`/`MLT_PARAMS` (so `strict_params = true` no
+            // longer 400s the exact query shape `search_api_solr` sends on
+            // essentially every request), and `/select`/`/mlt` now suppress
+            // `responseHeader` when `omitHeader=true`, matching every
+            // captured trace that sends it (`solr-ref/search-api/trace/00002`
+            // through `00022`). Removed from this list rather than left, per
+            // this file's own "self-expiring" convention.
             "mlt.filters",
             "mlt.fl.wildcard-plus-score",
             "mlt.match-include-and-offset",
             "mlt.maxntp",
             "request.json-nl.flat",
-            "request.omitHeader",
-            "request.timezone.utc",
             "select.facet.per-field-missing",
             "select.highlight.merge-contiguous",
             "select.highlight.require-field-match",
@@ -1263,8 +1270,13 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // (not named by the ticket, but its probe is gated on the same route --
     // see the comment on the request-semantics uncovered list above).
     // Denominator unchanged -- four previously-uncovered items now answered.
+    // 57/75 -> 59/75 when issue #143 registered `omitHeader`/`TZ` in
+    // `SELECT_PARAMS`/`MLT_PARAMS` and taught `/select`/`/mlt` to suppress
+    // `responseHeader` on `omitHeader=true`, flipping `request.omitHeader`
+    // and `request.timezone.utc`. Denominator unchanged -- both were already
+    // in the contract, just unmet.
     assert_eq!(
-        report.overall.fraction, "57/75",
+        report.overall.fraction, "59/75",
         "initial coverage fraction"
     );
 }

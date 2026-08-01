@@ -51,6 +51,35 @@ impl Params {
         self.pairs.iter().map(|(k, _)| k.as_str())
     }
 
+    /// Solr's `omitHeader`: `true` drops `responseHeader` from the response
+    /// entirely. Anything else — `false`, absent, an unrecognized value — keeps
+    /// it, matching Solr's own "exactly the string `true` counts as on"
+    /// boolean handling used elsewhere in this codebase.
+    ///
+    /// Ground truth is `search_api_solr`'s own traffic
+    /// (`solr-ref/search-api/trace/`): all twenty traces that send
+    /// `omitHeader=true` (`00002`-`00019`, `00021` on `/select`, `00022` on
+    /// `/mlt`, plus `00028` on `/terms`) have responses with no
+    /// `responseHeader` key at all, while `00001` (`/update`,
+    /// `omitHeader=false`) does carry one.
+    ///
+    /// ponytail: **success responses only.** Every error envelope
+    /// (`src/error.rs`'s `WfError`) still carries its `responseHeader`
+    /// unconditionally, whatever `omitHeader` says. That is not a decision
+    /// backed by evidence, it is the absence of one: all 28 captured traces
+    /// are 200s, and neither `solr-ref/manifest.tsv` nor
+    /// `solr-ref/manifest-errors.tsv` has a single row using `omitHeader`, so
+    /// no fixture shows whether real Solr suppresses the header on an error.
+    /// The ceiling is deliberate — leaving the landed error-envelope shape
+    /// untouched beats guessing. What would settle it: a `capture.sh` block
+    /// issuing an erroring request (say `select?q=*:*&facet=true&facet.field=nope`)
+    /// with `omitHeader=true`, captured against real `solr:9`. If it shows
+    /// suppression, thread this check into `WfError`'s rendering; if not,
+    /// pin the current behaviour with a test.
+    pub fn omit_header(&self) -> bool {
+        self.get("omitHeader") == Some("true")
+    }
+
     /// Renders `responseHeader.params` per findings fact 5/6: raw string
     /// values, repeated keys folded into a JSON array.
     pub fn echo(&self) -> Value {
