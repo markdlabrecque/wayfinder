@@ -648,6 +648,412 @@ fn deletable_corpus() -> Value {
     ])
 }
 
+// --- dynamic fields (regression: check_terms_field/field_terms consult only
+// WayfinderSchema::field, so a name that only matches a [[dynamic_fields]]
+// rule 400s as "undefined field" even though CoreIndex::field_target resolves
+// it fine for /select) ---------------------------------------------------
+
+/// Two `[[dynamic_fields]]` rules shaped after the two the bug report's own
+/// repro and fix note: `tm_X3b_en_*` (multi-valued, English-stemmed text --
+/// the exact pattern `presets/search-api.toml:113-117` declares and the exact
+/// one `tm_X3b_en_title` in the repro matches) and `is_*` (single-valued int,
+/// `presets/search-api.toml` around the same block) for the non-text-dynamic
+/// rejection test. `id` is the only static field, so every other name in this
+/// file's dynamic tests is resolved purely through a `[[dynamic_fields]]`
+/// rule, not a declared one -- the exact condition `check_terms_field`/
+/// `field_terms` fail to handle today.
+const DYNAMIC_TERMS_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "id"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[dynamic_fields]]
+pattern = "tm_X3b_en_*"
+type = "text_en"
+multi_valued = true
+stored = true
+
+[[dynamic_fields]]
+pattern = "is_*"
+type = "int"
+stored = true
+fast = true
+"#;
+
+async fn dynamic_terms_app(corpus: &Value) -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = app_with_schema(dir.path(), DYNAMIC_TERMS_SCHEMA_TOML).expect("app must build");
+    let (status, body) = post_docs(&app, corpus).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the dynamic-field terms corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
+/// The trace's exact corpus (see `trace_corpus` above) reindexed under a
+/// dynamic name instead of the static `title` field, so a match against the
+/// same expected term list isolates "does dynamic resolution work at all"
+/// from "does the analyzer chain agree with the trace" -- the latter is
+/// already pinned by `terms_matches_trace_analyzed_terms_with_count_desc_term_asc_order`.
+fn dynamic_trace_corpus() -> Value {
+    json!([
+        {"id": "t1", "tm_X3b_en_title": ["quick brown lazy dog"]},
+        {"id": "t2", "tm_X3b_en_title": ["lazy afternoon about archived document"]},
+        {"id": "t3", "tm_X3b_en_title": ["quick dog cat day"]},
+    ])
+}
+
+/// The defect: `terms.fl=tm_X3b_en_title` names nothing in `[[fields]]`, only
+/// a `[[dynamic_fields]]` pattern -- exactly `presets/search-api.toml`'s own
+/// `tm_X3b_en_*` rule, and exactly the request the bug report reproduced
+/// 400ing (`GET /solr/search_api_capture/terms?terms=true&terms.fl=tm_X3b_en_title`)
+/// even though `select?q=tm_X3b_en_title:lazy` on the same app resolves the
+/// same name via `CoreIndex::field_target` and returns real hits. `/terms`
+/// must resolve it the same way, not just statically-declared names.
+#[tokio::test]
+async fn terms_resolves_dynamic_field_name_via_dynamic_fields_rule() {
+    let (app, _dir) = dynamic_terms_app(&dynamic_trace_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=tm_X3b_en_title").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a terms.fl naming a name only a [[dynamic_fields]] rule matches must \
+         resolve, not 400 as \"undefined field\" the way a truly unknown name \
+         does, got {body}"
+    );
+
+    let expected = json!([
+        "dog",
+        2,
+        "lazi",
+        2,
+        "quick",
+        2,
+        "about",
+        1,
+        "afternoon",
+        1,
+        "archiv",
+        1,
+        "brown",
+        1,
+        "cat",
+        1,
+        "day",
+        1,
+        "document",
+        1,
+    ]);
+    assert_eq!(
+        body.pointer("/terms/tm_X3b_en_title"),
+        Some(&expected),
+        "the same corpus/analyzer chain as the static-field trace test above \
+         must produce the same ten analyzed terms, counts, and count-desc/\
+         term-asc order under a dynamically-resolved name, got {body}"
+    );
+}
+
+/// The specific failure mode a naive fix invites: resolving `tm_X3b_en_title`
+/// to its storage field (`CoreIndex::field_target`'s `_dynamic_text` catch-all)
+/// and then keying the response by *that* name, or by whatever internal path
+/// string the resolution step used, instead of the name the client actually
+/// asked for in `terms.fl`.
+#[tokio::test]
+async fn terms_dynamic_field_key_is_the_requested_name_not_the_storage_field() {
+    let (app, _dir) = dynamic_terms_app(&dynamic_trace_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=tm_X3b_en_title").await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+
+    let terms_obj = body
+        .pointer("/terms")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("no /terms object in {body}"));
+    let keys: Vec<&str> = terms_obj.keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        vec!["tm_X3b_en_title"],
+        "the terms block must be keyed by the name the client requested in \
+         terms.fl, not by `_dynamic_text` or any other internal storage-field \
+         name `field_target` resolves it to, got {body}"
+    );
+}
+
+/// Two dynamic names matched by the *same* `[[dynamic_fields]]` rule, with
+/// disjoint-but-overlapping vocabularies (`cat` legitimately appears in both
+/// fields' own corpora -- that is not leakage, it is two independent
+/// documents each containing "cat"). Because Tantivy stores every match of
+/// this rule in one shared `_dynamic_text` JSON container with the field name
+/// as a path prefix inside the term (the reviewer's probe:
+/// `tm_X3b_en_title\0slazi`), an implementation that enumerates that shared
+/// container's whole term dictionary for either name -- rather than filtering
+/// by path -- reports one field's terms under the other's key too. `quick`/
+/// `fox` only ever appear in `tm_X3b_en_title`; `lazi`/`dog` only in
+/// `tm_X3b_en_body`. This is the test most likely to catch a wrong fix.
+fn two_dynamic_fields_corpus() -> Value {
+    json!([
+        {"id": "x1", "tm_X3b_en_title": ["quick fox"], "tm_X3b_en_body": ["lazy dog"]},
+        {"id": "x2", "tm_X3b_en_title": ["quick cat"], "tm_X3b_en_body": ["lazy cat"]},
+    ])
+}
+
+#[tokio::test]
+async fn terms_dynamic_fields_do_not_leak_across_the_shared_catch_all_container() {
+    let (app, _dir) = dynamic_terms_app(&two_dynamic_fields_corpus()).await;
+    let (status, body) = get(
+        &app,
+        "terms?terms=true&terms.fl=tm_X3b_en_title&terms.fl=tm_X3b_en_body",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+
+    assert_eq!(
+        body.pointer("/terms/tm_X3b_en_title"),
+        Some(&json!(["quick", 2, "cat", 1, "fox", 1])),
+        "tm_X3b_en_title's own vocabulary only, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/terms/tm_X3b_en_body"),
+        Some(&json!(["lazi", 2, "cat", 1, "dog", 1])),
+        "tm_X3b_en_body's own vocabulary only, got {body}"
+    );
+
+    let title_flat = flat_terms(&body, "tm_X3b_en_title");
+    for leaked in ["lazi", "dog"] {
+        assert!(
+            term_count(title_flat, leaked).is_none(),
+            "tm_X3b_en_body's term {leaked:?} must not appear under \
+             tm_X3b_en_title just because both share the `_dynamic_text` \
+             catch-all container, got {body}"
+        );
+    }
+    let body_flat = flat_terms(&body, "tm_X3b_en_body");
+    for leaked in ["quick", "fox"] {
+        assert!(
+            term_count(body_flat, leaked).is_none(),
+            "tm_X3b_en_title's term {leaked:?} must not appear under \
+             tm_X3b_en_body, got {body}"
+        );
+    }
+}
+
+/// A name matching no `[[dynamic_fields]]` pattern and no `[[fields]]` entry
+/// must still 400 -- the fix for the dynamic-resolution gap must not turn
+/// `check_terms_field` into a rubber stamp that accepts anything.
+#[tokio::test]
+async fn terms_dynamic_name_matching_no_rule_is_still_a_400() {
+    let (app, _dir) = dynamic_terms_app(&dynamic_trace_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=zz_no_such_prefix").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a name matching no [[dynamic_fields]] rule and no static field must \
+         still 400 as undefined, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/error/code").and_then(Value::as_u64),
+        Some(400),
+        "got {body}"
+    );
+    let msg = body
+        .pointer("/error/msg")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("no /error/msg string in {body}"));
+    assert!(
+        msg.contains("zz_no_such_prefix"),
+        "error.msg should name the offending field, got {msg:?}"
+    );
+    assert!(
+        body.get("terms").is_none(),
+        "an undefined field must not silently render an empty terms block, got {body}"
+    );
+}
+
+/// A name matched only by a `[[dynamic_fields]]` rule whose type is non-text
+/// (`is_*` -> `int`, mirroring `presets/search-api.toml`'s own `is_*` rule)
+/// must 400 the same way a declared non-text field does, not enumerate the
+/// shared `_dynamic` catch-all's fixed-width numeric encoding.
+#[tokio::test]
+async fn terms_dynamic_field_of_non_text_type_is_rejected() {
+    let (app, _dir) = dynamic_terms_app(&json!([
+        {"id": "n1", "is_weight": 1},
+        {"id": "n2", "is_weight": 300},
+    ]))
+    .await;
+
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=is_weight").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a dynamically-resolved non-text field must 400, not return \
+         replacement-character or otherwise garbage terms with a 200, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/error/code").and_then(Value::as_u64),
+        Some(400),
+        "got {body}"
+    );
+    let msg = body
+        .pointer("/error/msg")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("no /error/msg string in {body}"));
+    assert!(
+        msg.contains("is_weight"),
+        "error.msg should name the offending field, got {msg:?}"
+    );
+    assert!(
+        body.get("terms").is_none(),
+        "a rejected field must not also render a terms block, got {body}"
+    );
+    assert!(
+        !body.to_string().contains('\u{fffd}'),
+        "no U+FFFD replacement character should reach the response at all, got {body}"
+    );
+}
+
+/// The exact motivating request, against the exact shipped preset, not a
+/// synthetic schema approximating it: `presets/search-api.toml` loaded
+/// as-is, a corpus reproducing the trace's `tm_X3b_en_title` vocabulary, and
+/// `GET .../terms?terms=true&terms.fl=tm_X3b_en_title` -- the request the
+/// bug report's independent reviewer showed 400ing.
+fn search_api_preset_toml() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("presets/search-api.toml");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "presets/search-api.toml must exist and be readable: {e} (path: {})",
+            path.display()
+        )
+    })
+}
+
+#[tokio::test]
+async fn terms_resolves_the_shipped_drupal_preset_tm_x3b_en_title_field() {
+    let dir = TempDir::new().expect("temp dir");
+    let app = app_with_schema(dir.path(), &search_api_preset_toml())
+        .expect("presets/search-api.toml must build a working app");
+    let (status, resp) = post_docs(
+        &app,
+        &json!([
+            {"id": "doc1", "tm_X3b_en_title": ["quick brown lazy dog"]},
+            {"id": "doc2", "tm_X3b_en_title": ["lazy afternoon about archived document"]},
+            {"id": "doc3", "tm_X3b_en_title": ["quick dog cat day"]},
+        ]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing into the shipped preset must succeed, got {resp}"
+    );
+
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=tm_X3b_en_title").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "this is the exact request shape the bug report reproduced 400ing \
+         against the shipped preset itself \
+         (GET .../terms?terms=true&terms.fl=tm_X3b_en_title), not a synthetic \
+         schema merely approximating it, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/terms/tm_X3b_en_title"),
+        Some(&json!([
+            "dog",
+            2,
+            "lazi",
+            2,
+            "quick",
+            2,
+            "about",
+            1,
+            "afternoon",
+            1,
+            "archiv",
+            1,
+            "brown",
+            1,
+            "cat",
+            1,
+            "day",
+            1,
+            "document",
+            1,
+        ])),
+        "got {body}"
+    );
+}
+
+// --- json.nl honesty ---------------------------------------------------------
+//
+// `TERMS_PARAMS` lists `json.nl` and accepts it with any value, but the
+// handler always renders the flat `[term, count, ...]` shape regardless --
+// unlike `src/facet.rs`'s `JsonNl::from_params`, which actually honours
+// `map`/`arrarr`/`arrmap` for facet counts. The handler's own doc comment
+// argues "listing a param here that the handler ignores would be worse than
+// 400ing it, since it would silently answer the wrong question"; these tests
+// hold the handler to that standard rather than merely restating the status
+// quo. Chosen interpretation: `json.nl=flat` (and the default, absent
+// `json.nl`) is accepted since flat is the only shape `/terms` ever renders;
+// any other value this codebase already gives a documented meaning to
+// (`map`/`arrarr`/`arrmap`) is a 400, not a silently-flat 200.
+
+#[tokio::test]
+async fn terms_json_nl_flat_is_accepted() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=title&json.nl=flat").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "json.nl=flat is the shape this handler actually renders, so it must \
+         be accepted, got {body}"
+    );
+    assert!(body.get("terms").is_some(), "got {body}");
+}
+
+#[tokio::test]
+async fn terms_json_nl_map_is_rejected_rather_than_silently_ignored() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=title&json.nl=map").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "json.nl=map is a shape this handler cannot actually produce (it \
+         always renders flat), so per the handler's own doc comment this must \
+         400 rather than silently answer a different question than the one \
+         asked, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/error/code").and_then(Value::as_u64),
+        Some(400),
+        "got {body}"
+    );
+}
+
+#[tokio::test]
+async fn terms_json_nl_arrarr_is_rejected_rather_than_silently_ignored() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=title&json.nl=arrarr").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "json.nl=arrarr is likewise a shape this handler cannot produce, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/error/code").and_then(Value::as_u64),
+        Some(400),
+        "got {body}"
+    );
+}
+
 #[tokio::test]
 async fn terms_doc_frequency_includes_deleted_docs_without_a_merge() {
     let (app, _dir) = terms_app(&deletable_corpus()).await;
