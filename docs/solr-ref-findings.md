@@ -7,6 +7,16 @@ Schema: `id` (string, uniqueKey), `body` (text_en, stored), `category` (string, 
 docValues, multiValued). `doc5` has no `category` — that is what makes `facet.missing`
 observable.
 
+## Numbering
+
+A finding is numbered once and never renumbered; a new one takes the next free number rather
+than reusing a vacated one. Citations across `src/`, `tests/`, `docs/` and
+`solr-ref/capture.sh` point at these numbers, and `tests/finding_citations.rs` fails on a
+citation that resolves to nothing and on a number defined twice.
+
+32, 33, 43, 44, 45, 85 and 86 were vacated by renumbers and never reused; a citation of one
+of them dangles and the guard catches it.
+
 ## Envelope facts the tracer bullet must reproduce
 
 1. **`facet_fields` defaults to a flat alternating array**, not an object:
@@ -61,7 +71,7 @@ still giving a way to discover gaps during the Search API phase.
 ## Not yet captured
 
 Stats, MLT, edismax, `/update` responses, `commitWithin`/`softCommit` behaviour.
-Range facets were captured by issue #3 (findings 16-18) — what is still missing there is
+Range facets were captured by issue #3 (findings 105-107) — what is still missing there is
 `facet.range.other` / `.include` / `.hardend`, month/year date-math gaps, `facet.prefix`,
 `facet.method`, `facet.pivot`, interval and heatmap faceting, `f.<field>.facet.*` per-field
 overrides, and `json.nl=map` combined with `facet.missing` (a `null` key in an object).
@@ -115,7 +125,11 @@ ground truth for every doc-returning fixture, so the range corpus lives in a **s
 (`facets`, 4 docs, `views` pint + `created` pdate + `note` string-stored-only) on the same
 container. Anything not a main-core GET is a `manifest-errors.tsv` row.
 
-16. **The issue-#3 premise was wrong: Solr never errors on a facet it cannot build.**
+Issue #3 and issue #2 both claimed 16-18 for their own findings, which made a citation of
+those numbers ambiguous. These three are issue #3's, renumbered to 105-107; issue #2's `sort`
+16-18 keep their numbers, being contiguous with 19/20.
+
+105. **The issue-#3 premise was wrong: Solr never errors on a facet it cannot build.**
     `facet.field` on `body` (text_en, indexed, stored, **no** docValues) returns HTTP 200 with
     `"body":[]` (`facet_non_docvalues_text.json`). So does a stored-only field that is neither
     indexed nor docValues (`facet_stored_only_field.json`, `note` on the `facets` core). Both are
@@ -144,16 +158,16 @@ container. Anything not a main-core GET is a `manifest-errors.tsv` row.
     `EXPECTED_DIVERGENCES` entry, and that list is a self-expiring to-do list, not a home for
     accepted divergences.
 
-17. **The empty array is a property of the default `fc` facet method, not of the field.**
+106. **The empty array is a property of the default `fc` facet method, not of the field.**
     `facet.field=body&facet.method=enum` on that same non-docValues field **does** enumerate the
     term dictionary — `["dog",2,"lazi",2,"quick",2,"afternoon",1,...]`, the stemmed `text_en`
     tokens (`facet_non_docvalues_text_enum.json`). Solr's `enum` method walks the inverted index
     instead of the uninverted field, so the data is reachable; the default just declines to reach
     it. `facet.method` is out of scope for #3 (Wayfinder has one implementation, the fast-field
-    aggregation), recorded so nobody later concludes from finding 16 that Solr *cannot* facet a
+    aggregation), recorded so nobody later concludes from finding 105 that Solr *cannot* facet a
     non-docValues field.
 
-18. **`facet_ranges` envelope — the part that is not guessable.** From
+107. **`facet_ranges` envelope — the part that is not guessable.** From
     `facet_range_numeric.json` / `facet_range_date.json` / `facet_range_json_nl_map.json`:
     - `facet_ranges.<field>` is `{"counts": ..., "gap": ..., "start": ..., "end": ...}` and
       nothing else when `facet.range.other` is unset — no `before`/`after`/`between` keys.
@@ -218,7 +232,7 @@ Two distinct lists, both self-documenting, printed during their runs, never sile
   ratifies it: `err_missing_core` (finding 15, HTML vs JSON 404 body — checked as a raw-text
   non-JSON assertion, since `common::fixture` would panic parsing it), `update_unknown_field_schemaless`
   (PRD ratified-divergence 3, no schemaless mode), and the three unfacetable-field rows
-  (finding 16, `facet_non_docvalues_text[/_enum]`, `facet_stored_only_field`). These never
+  (finding 105, `facet_non_docvalues_text[/_enum]`, `facet_stored_only_field`). These never
   expire — there is nothing to build, the PRD says this is Wayfinder's intended shape — so they
   are checked by a narrower, row-specific assertion instead of the generic differ, and are not
   expected to ever leave the list.
@@ -272,7 +286,7 @@ moved to `RANKED_SCORE_VALUE_RATIFIED` (PRD ratified-divergence 4, finding 31) i
 deleted outright. Each entry carries a mandatory reason naming the owning issue.
 
 Note what does **not** belong here: an *accepted, permanent* divergence (finding 15's unknown
-core, finding 16's unfacetable-field 400). Those get their fixtures in `manifest-errors.tsv` and
+core, finding 105's unfacetable-field 400). Those get their fixtures in `manifest-errors.tsv` and
 a numbered finding, because this list is a to-do list that fails when an entry stops diverging —
 an accepted divergence parked here would sit unexpiring forever.
 

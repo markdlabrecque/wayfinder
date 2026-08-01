@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// The findings doc's own numbering is not gapless — 32, 33, 43, 44, 45, 85
 /// and 86 were vacated by renumbers and never reused. A gap is harmless; it
 /// only means a citation to it dangles, which is exactly what this test
-/// catches. Duplicates are the real hazard, and are pinned separately below.
+/// catches. Duplicates are the real hazard, and are rejected outright below.
 fn findings_doc() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/solr-ref-findings.md")
 }
@@ -173,17 +173,10 @@ fn findings_are_numbered_uniquely() {
         .filter(|&(_, count)| count > 1)
         .map(|(n, _)| n)
         .collect();
-    // Deliberate skip with an expiry guard: 16, 17, 18 are each used twice --
-    // once by issue #3's faceting capture, once by issue #2's sort capture --
-    // so a citation to them is ambiguous about which it means. Renumbering
-    // them would invalidate the citations that currently resolve correctly, so
-    // #198 left them and filed the follow-up. When they are fixed this
-    // assertion fails and names itself for deletion.
-    let known: BTreeSet<u32> = [16, 17, 18].into();
-    assert_eq!(
-        duplicated, known,
-        "findings doc's duplicate numbers changed. If a NEW duplicate appeared, \
-         renumber it. If 16/17/18 were fixed, delete this expectation and assert \
-         `duplicated.is_empty()`."
+    assert!(
+        duplicated.is_empty(),
+        "docs/solr-ref-findings.md numbers {duplicated:?} more than once. A citation of a \
+         duplicated number is ambiguous about which finding it means -- give the newer one \
+         the next free number and sweep its citations."
     );
 }
