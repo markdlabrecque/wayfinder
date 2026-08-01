@@ -1897,7 +1897,7 @@ Captured against a one-off `solr:9` container (port 8998, `wayfinder-solr-150`, 
 capture), with the tracer-bullet schema and five-document corpus from `solr-ref/capture.sh`
 recreated verbatim. Fixture: `facet_local_params_duplicate_key.json`.
 
-103. **A repeated key inside a `facet.field` local-params block keeps the first value, not the
+108. **A repeated key inside a `facet.field` local-params block keeps the first value, not the
      last.** `{!key=a key=b}category` returns category's counts under `"a"`; there is no `"b"`
      member. This contradicts issue #150's source-based guess that Solr's map write would make
      the last value win. Wayfinder's ordered `LocalParams::params` plus first-match `get`

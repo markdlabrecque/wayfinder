@@ -6,15 +6,15 @@ Pin Solr-compatible resolution of `facet.field` local parameters: a response `ke
 
 ## Result and implementation
 
-The capture contradicts the ticket's source-based guess: `{!key=a key=b}category` is **first-wins**. Solr returns the category counts under `a`, with no `b` member (finding 103).
+The capture contradicts the ticket's source-based guess: `{!key=a key=b}category` is **first-wins**. Solr returns the category counts under `a`, with no `b` member (finding 108).
 
 Production behavior was already correct: ordered `LocalParams` lookup takes the first `key`, and schema resolution keys off the faceted field rather than its response label. There is no production behavior change. The only `src/` edits in `e839b3d` document the verified behavior.
 
 Commits and files:
 
-- `3e70afa test(facet): capture duplicate local-param keys` — `solr-ref/responses/facet_local_params_duplicate_key.json`, `solr-ref/manifest.tsv`, `solr-ref/capture.sh`, `docs/solr-ref-findings.md`.
-- `9cabde4 test(facet): pin field-based schema resolution` — `tests/facet_local_params_key.rs`, `tests/common/mod.rs`; adds numeric `views` to the shared test schema and proves `{!key=views}category` remains a text facet (no Points warning).
-- `e839b3d docs(facet): record duplicate key precedence` — documentation comments only in `src/facet.rs` and `src/local_params.rs`.
+- `21c537a test(facet): capture duplicate local-param keys` — `solr-ref/responses/facet_local_params_duplicate_key.json`, `solr-ref/manifest.tsv`, `solr-ref/capture.sh`, `docs/solr-ref-findings.md`.
+- `104f488 test(facet): pin field-based schema resolution` — `tests/facet_local_params_key.rs`, `tests/common/mod.rs`; adds numeric `views` to the shared test schema and proves `{!key=views}category` remains a text facet (no Points warning).
+- `ad43102 docs(facet): record duplicate key precedence` — documentation comments only in `src/facet.rs` and `src/local_params.rs`.
 
 Mutation proof: deliberately resolving the facet value kind from the local-param response label rather than the actual field makes the numeric-label/text-field regression fail; the regression therefore guards the field-based resolution contract.
 

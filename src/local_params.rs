@@ -78,7 +78,7 @@ pub struct LocalParams {
 
 impl LocalParams {
     /// First value for `key`, if present. Repeated local-param keys are
-    /// first-wins, matching captured Solr behaviour (finding 103).
+    /// first-wins, matching captured Solr behaviour (finding 108).
     pub fn get(&self, key: &str) -> Option<&str> {
         self.params
             .iter()
