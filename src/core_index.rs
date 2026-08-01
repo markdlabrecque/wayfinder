@@ -21,8 +21,8 @@ use tantivy::aggregation::{
 };
 use tantivy::collector::{Count, DocSetCollector};
 use tantivy::query::{
-    AllQuery, BooleanQuery, BoostQuery, DisjunctionMaxQuery, EmptyQuery, ExistsQuery, Occur,
-    PhraseQuery, Query, QueryClone, QueryParser, RegexQuery, TermQuery,
+    AllQuery, BooleanQuery, BoostQuery, ConstScoreQuery, DisjunctionMaxQuery, EmptyQuery,
+    ExistsQuery, Occur, PhraseQuery, Query, QueryClone, QueryParser, RegexQuery, TermQuery,
 };
 use tantivy::schema::document::Value as _;
 use tantivy::schema::{Field, IndexRecordOption, OwnedValue};
@@ -35,7 +35,7 @@ use tantivy::{
     Term,
 };
 
-use crate::collector::{AllScoredHits, SortClause};
+use crate::collector::{AllScoredHits, SortClause, TopOutcome, TopScoredHits};
 use crate::config::ServerConfig;
 use crate::edismax;
 use crate::local_params;
@@ -2155,6 +2155,35 @@ impl CoreIndex {
         Ok(hits)
     }
 
+    /// Bounded counterpart of [`search`](Self::search) (issue #242): same
+    /// query semantics, same ordering, but keeps only the first `limit` hits
+    /// while still counting every match and tracking the global max score.
+    /// Filter queries are composed into the main query as scoreless `Must`
+    /// clauses, so the intersection happens inside Tantivy's posting-list
+    /// iterators instead of as a full second pass — a `ConstScoreQuery` of
+    /// `0.0` leaves every score bit-identical (`s + 0.0 == s`).
+    pub fn search_top(
+        &self,
+        query: &dyn Query,
+        filter_queries: &[Box<dyn Query>],
+        sort: &[SortClause],
+        limit: usize,
+    ) -> Result<TopOutcome> {
+        let searcher = self.reader.searcher();
+        let collector = TopScoredHits::new(sort.to_vec(), limit);
+        if filter_queries.is_empty() {
+            return Ok(searcher.search(query, &collector)?);
+        }
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, query.box_clone())];
+        for fq in filter_queries {
+            clauses.push((
+                Occur::Must,
+                Box::new(ConstScoreQuery::new(fq.box_clone(), 0.0)),
+            ));
+        }
+        Ok(searcher.search(&BooleanQuery::new(clauses), &collector)?)
+    }
+
     /// Renders the stored fields of `addr` as a Solr-shaped doc JSON object,
     /// restricted to `fl` (schema field names) if given. Unknown `fl` fields
     /// are silently dropped (findings fact 6); fields with no stored value
@@ -3348,6 +3377,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use crate::collector::SortKey;
     use tempfile::TempDir;
 
     #[test]
@@ -4091,5 +4121,141 @@ fast = true
                 "capping early must yield the same leading snippets as extracting everything"
             );
         }
+    }
+
+    /// Issue #242's bounded-collector helpers: a multi-segment corpus with
+    /// score ties, a string sort field with duplicates *and* missing values,
+    /// so every comparator arm (score, value, missing-last, doc-order
+    /// tie-break) is exercised across segment boundaries.
+    fn open_bounded_corpus() -> (TempDir, CoreIndex) {
+        let (dir, index) = open_test_index();
+        // Two commits -> two segments, so per-segment truncation and
+        // merge_fruits both carry real weight.
+        for (batch, ids) in [(0, 0..20), (1, 20..40)] {
+            let docs: Vec<Value> = ids
+                .map(|i: i32| {
+                    let body = if i % 3 == 0 {
+                        // Score ties within and across segments: identical
+                        // bodies produce identical BM25 scores.
+                        "quick brown fox".to_string()
+                    } else {
+                        format!("quick fox {}", "filler ".repeat((i % 5) as usize))
+                    };
+                    let mut doc = json!({"id": format!("doc{i:02}"), "body": body});
+                    // Every third doc has NO extra_s (missing-last arm);
+                    // the rest reuse a small set of values (duplicates).
+                    if i % 3 != 0 {
+                        doc["extra_s"] = json!(format!("tag{}", i % 4));
+                    }
+                    doc
+                })
+                .collect();
+            index.add_documents(&docs, true).expect("add_documents");
+            index.commit().expect("commit");
+            let _ = batch;
+        }
+        (dir, index)
+    }
+
+    /// `search_top(limit)` must return exactly the first `limit` entries of
+    /// the unbounded `search`, plus the true total and true max score --
+    /// for every sort shape and for limits below, at, and above the match
+    /// count, including 0 (`rows=0` count-only requests).
+    #[test]
+    fn search_top_matches_the_unbounded_search_prefix() {
+        let (_dir, index) = open_bounded_corpus();
+        let query = index.parse_query("quick", "body").expect("parse_query");
+
+        let sorts: Vec<Vec<SortClause>> = vec![
+            vec![], // implicit score desc
+            vec![SortClause::new(
+                SortKey::Field("extra_s".to_string()),
+                false,
+                Some(ValueKind::Text),
+            )],
+            vec![
+                SortClause::new(
+                    SortKey::Field("extra_s".to_string()),
+                    true,
+                    Some(ValueKind::Text),
+                ),
+                SortClause::new(SortKey::Score, false, None),
+            ],
+        ];
+        for sort in &sorts {
+            let full = index
+                .search(query.as_ref(), &[], sort)
+                .expect("unbounded search");
+            assert!(full.len() > 10, "corpus must be bigger than the limits");
+            let true_max = full
+                .iter()
+                .map(|(s, _)| *s)
+                .fold(None, |acc: Option<Score>, s| {
+                    Some(acc.map_or(s, |a| a.max(s)))
+                });
+
+            for limit in [0usize, 1, 7, full.len(), full.len() + 5] {
+                let outcome = index
+                    .search_top(query.as_ref(), &[], sort, limit)
+                    .expect("search_top");
+                assert_eq!(outcome.num_found, full.len(), "limit {limit}");
+                assert_eq!(outcome.max_score, true_max, "limit {limit}");
+                assert_eq!(
+                    outcome.top,
+                    full[..limit.min(full.len())],
+                    "sort {sort:?} limit {limit}: bounded top must be the exact \
+                     unbounded prefix, byte-identical ordering included"
+                );
+            }
+        }
+    }
+
+    /// Filter queries must narrow the match set without touching a single
+    /// score. Expected values are computed *independently* of both the old
+    /// (retain-based) and new (composed) implementations: the fq's match set
+    /// comes from its own DocSetCollector pass, and the expectation is the
+    /// unfiltered result manually intersected with it.
+    #[test]
+    fn filter_queries_narrow_without_changing_scores() {
+        use tantivy::collector::DocSetCollector;
+
+        let (_dir, index) = open_bounded_corpus();
+        let query = index.parse_query("quick", "body").expect("parse_query");
+        let fq = index.parse_query("extra_s:tag1", "body").expect("parse fq");
+
+        let unfiltered = index
+            .search(query.as_ref(), &[], &[])
+            .expect("unfiltered search");
+        let allowed = index
+            .reader
+            .searcher()
+            .search(fq.as_ref(), &DocSetCollector)
+            .expect("fq doc set");
+        assert!(
+            !allowed.is_empty() && allowed.len() < unfiltered.len(),
+            "fq must be a proper, non-empty narrowing or this test is vacuous"
+        );
+        let expected: Vec<(Score, DocAddress)> = unfiltered
+            .iter()
+            .filter(|(_, addr)| allowed.contains(addr))
+            .copied()
+            .collect();
+
+        let fq2 = index.parse_query("extra_s:tag1", "body").expect("parse fq");
+        let filtered = index
+            .search(query.as_ref(), &[fq2], &[])
+            .expect("filtered search");
+        assert_eq!(
+            filtered, expected,
+            "same docs, same order, and bit-identical scores as the \
+             unfiltered result restricted to the fq's own match set"
+        );
+
+        let fq3 = index.parse_query("extra_s:tag1", "body").expect("parse fq");
+        let outcome = index
+            .search_top(query.as_ref(), &[fq3], &[], 5)
+            .expect("bounded filtered search");
+        assert_eq!(outcome.num_found, expected.len());
+        assert_eq!(outcome.top, expected[..5.min(expected.len())]);
     }
 }
