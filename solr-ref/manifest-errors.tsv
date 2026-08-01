@@ -139,3 +139,5 @@ update_select_after_repeated_add_unknown_key	200	GET	update9/select?q=id:r7+OR+i
 omit_header_error_true	400	GET	content/select?q=nosuchfield:x&omitHeader=true&wt=json	
 omit_header_error_yes	400	GET	content/select?q=nosuchfield:x&omitHeader=yes&wt=json	
 omit_header_update_error_true	400	POST	content/update?omitHeader=true&wt=json	{not json
+mlt_maxntp_invalid	400	GET	content/mlt?q=id:mlt11&mlt.fl=body&mlt.maxntp=abc&wt=json		http://localhost:18990/solr
+mlt_maxntp_overflow	400	GET	content/mlt?q=id:mlt11&mlt.fl=body&mlt.maxntp=2147483648&wt=json		http://localhost:18990/solr

@@ -146,14 +146,15 @@ const ENGLISH_STOPWORDS: &[&str] = &[
 
 /// Tuning knobs for `CoreIndex::mlt_query`, one field per `/mlt` request
 /// param `src/lib.rs`'s handler parses. Solr's own defaults (`mlt.mintf=2`,
-/// `mlt.mindf=5`, `mlt.maxqt=25`, `mlt.boost=false`, no word-length/max-doc-
-/// frequency gate) are the caller's job to supply when a param is absent —
+/// `mlt.mindf=5`, `mlt.maxqt=25`, `mlt.maxntp=5000`, `mlt.boost=false`, no
+/// word-length/max-doc-frequency gate) are the caller's job to supply when a param is absent —
 /// this struct carries only the resolved values, no further defaulting.
 pub struct MltOptions {
     pub min_doc_frequency: Option<u64>,
     pub max_doc_frequency: Option<u64>,
     pub min_term_frequency: Option<usize>,
     pub max_query_terms: Option<usize>,
+    pub max_num_tokens_parsed: usize,
     pub min_word_length: Option<usize>,
     pub max_word_length: Option<usize>,
     pub boost_factor: Option<f32>,
@@ -2699,19 +2700,18 @@ impl CoreIndex {
     /// `MoreLikeThis`/`MoreLikeThisQuery` algorithm. That type's containing
     /// module (`tantivy::query::more_like_this`) is private — only
     /// `MoreLikeThisQuery`/`MoreLikeThisQueryBuilder` are re-exported — and
-    /// the builder offers no way to get `boost_factor: None` (Solr's
-    /// `mlt.boost=false` default; the builder's own default is always
-    /// `Some(1.0)`, since `MoreLikeThis::boost_factor` itself is private and
-    /// `with_boost_factor(f32)` can only ever produce `Some`). That is the
-    /// one real gap in the public builder API; `with_stop_words` *is* public,
-    /// so the stop-word list alone would not have forced a reimplementation.
-    /// This mirrors Tantivy 0.26.1's private algorithm term-for-term
-    /// (tokenize each mined field with its own indexing analyzer, drop noise
-    /// words, threshold by term/doc frequency, score by `tf * idf` with the
-    /// identical BM25-style `idf` formula, keep the top `max_query_terms`),
-    /// so it should track upstream's actual output; revisit if that
-    /// algorithm becomes public or gains a `with_boost_factor(None)` escape
-    /// hatch.
+    /// its public builder cannot express either `boost_factor: None` (Solr's
+    /// `mlt.boost=false` default; `with_boost_factor(f32)` always produces
+    /// `Some`) or `mlt.maxntp`'s per-value token cap. `with_stop_words` *is*
+    /// public, so the stop-word list alone would not have forced a
+    /// reimplementation. This mirrors Tantivy 0.26.1's private algorithm
+    /// term-for-term (tokenize each mined field with its own indexing
+    /// analyzer, drop noise words, threshold by term/doc frequency, score by
+    /// `tf * idf` with the identical BM25-style `idf` formula, keep the top
+    /// `max_query_terms`). Before noise filtering, `mlt.maxntp` caps
+    /// analyzer-emitted tokens per stored field value, matching Lucene's
+    /// `MoreLikeThis` semantics. Revisit if Tantivy's algorithm becomes
+    /// public or its builder gains APIs for both gaps.
     ///
     /// Returns both the composed query and the scored terms it was built
     /// from (highest-scored first, already truncated to `max_query_terms`)
@@ -2755,13 +2755,19 @@ impl CoreIndex {
                     continue;
                 };
                 let mut token_stream = tokenizer.token_stream(text);
-                token_stream.process(&mut |token: &tantivy::tokenizer::Token| {
+                let mut token_count = 0;
+                while token_stream.advance() {
+                    token_count += 1;
+                    if token_count > opts.max_num_tokens_parsed {
+                        break;
+                    }
+                    let token = token_stream.token();
                     if mlt_is_noise_word(&token.text, opts.min_word_length, opts.max_word_length) {
-                        return;
+                        continue;
                     }
                     let term = Term::from_field_text(field, &token.text);
                     *term_frequencies.entry(term).or_insert(0) += 1;
-                });
+                }
             }
         }
 

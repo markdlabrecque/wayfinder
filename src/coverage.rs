@@ -1243,7 +1243,21 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
                 .await;
             uncapped.is_some_and(|count| count > 0) && capped == Some(0)
         }
-        "mlt.maxntp" => probe.ok("mlt?q=id:mlt11&mlt.fl=body&mlt.maxntp=2000").await,
+        "mlt.maxntp" => {
+            let uncapped = probe
+                .number(
+                    "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxntp=5000",
+                    "/response/numFound",
+                )
+                .await;
+            let capped = probe
+                .number(
+                    "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxntp=1",
+                    "/response/numFound",
+                )
+                .await;
+            uncapped.is_some_and(|count| count > 0) && capped == Some(0)
+        }
         "mlt.boost" => {
             let unboosted = probe
                 .response_docs(

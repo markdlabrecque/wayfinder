@@ -2391,3 +2391,17 @@ curl -sSf \
   -o "$OUT/select_fl_ss_wildcard.json"
 echo "captured select_fl_ss_wildcard.json from '$FL196_CONTAINER' (port $FL196_PORT)"
 docker rm -f "$FL196_CONTAINER" >/dev/null
+
+# --- mlt.maxntp token cap and Java-int errors (issue #189) ------------------
+# Captured 2026-08-01 against clean one-off `solr:9` containers after
+# recreating the MLT block's schema, handler, and 20-document corpus verbatim.
+# `mlt_maxntp_low` used `wayfinder-solr-189`; the signed-int edge captures used
+# `wayfinder-solr-189-edges`. Both containers were removed afterwards.
+#
+# Reproduce after setting MLT_SOLR to that recreated core and defining capm as
+# in the issue #141 block:
+# capm mlt_maxntp_low 'mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&mlt.maxntp=1&wt=json'
+# curl -sS "$MLT_SOLR/mlt?q=id:mlt11&mlt.fl=body&mlt.maxntp=abc&wt=json" -o "$OUT/mlt_maxntp_invalid.json"
+# curl -sS "$MLT_SOLR/mlt?q=id:mlt11&mlt.fl=body&mlt.maxntp=2147483648&wt=json" -o "$OUT/mlt_maxntp_overflow.json"
+# A separate handler-only check against `wayfinder-solr-189-precedence`
+# established that malformed `q=body:[` wins over malformed `mlt.maxntp=abc`.
