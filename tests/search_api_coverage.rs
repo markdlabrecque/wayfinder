@@ -236,9 +236,10 @@ fn observed_parameters(traces: &[Trace]) -> BTreeMap<String, BTreeMap<String, BT
 
         let body = request["body"].as_str().expect("trace request body string");
         if !body.is_empty() {
-            // Parse every nonempty body. serde_json intentionally accepts the
-            // duplicate-key object in 00001, which is why the raw-key guard
-            // below is separate and keeps that variant uncovered.
+            // Parse every nonempty body. `serde_json` accepts the
+            // duplicate-key object in 00001 but its `Value` map keeps only the
+            // last `add`, which is why the raw-key guard below counts the key
+            // occurrences in the raw text instead of trusting this parse.
             let _: Value = serde_json::from_str(body)
                 .unwrap_or_else(|e| panic!("{} request body must be JSON: {e}", trace.file));
         }
@@ -672,13 +673,16 @@ async fn frozen_capture_exhaustively_maps_all_urls_bodies_parameters_and_materia
         .iter()
         .find(|item| item.id == "update.json-command-add-batch")
         .expect("duplicate-add semantic");
+    // Issue #154 replaced the `serde_json::Value` top-level parse (which
+    // collapsed duplicate keys to the last occurrence) with a duplicate-
+    // tolerant, order-preserving one, so this semantic is now covered.
     assert!(
-        wayfinder::coverage_report().await["request_semantics"]["uncovered_items"]
+        !wayfinder::coverage_report().await["request_semantics"]["uncovered_items"]
             .as_array()
             .expect("coverage report uncovered semantic list")
             .iter()
             .any(|item| item == "update.json-command-add-batch"),
-        "duplicate-key adds remain uncovered until the Value parse path is replaced"
+        "duplicate-key adds are covered since issue #154; the probe must not regress"
     );
     assert_eq!(
         duplicate.body_variants[0].kind,
@@ -1091,10 +1095,18 @@ async fn classification_guards_exercise_real_router_strict_param_and_renderer_be
     );
     let (_, first) = common::get(&app, "select?q=id:first").await;
     let (_, second) = common::get(&app, "select?q=id:second").await;
+    // Was `Some(0)` while `parse_update_commands` went through
+    // `serde_json::Value`, whose object map collapsed the repeated `add` key
+    // to the last occurrence. Issue #154 replaced that top-level parse with a
+    // duplicate-tolerant, body-ordered one -- real Solr executes every
+    // occurrence (`solr-ref/responses/update_repeated_add_batch.json` and its
+    // corpus select, finding 96) -- so BOTH adds must now land. This is the
+    // self-expiring guard for that bug: it went red the moment the bug was
+    // fixed, which is what it was for.
     assert_eq!(
         first.pointer("/response/numFound").and_then(Value::as_u64),
-        Some(0),
-        "Value parsing must currently lose the first duplicate add"
+        Some(1),
+        "every repeated `add` must land, not just the last (issue #154)"
     );
     assert_eq!(
         second.pointer("/response/numFound").and_then(Value::as_u64),
@@ -1202,7 +1214,9 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
             "select.spellcheck.dictionaries",
             "select.spellcheck.enable",
             "select.spellcheck.query",
-            "update.json-command-add-batch",
+            // "update.json-command-add-batch" left this list when issue #154
+            // made the top-level command parse duplicate-key tolerant and
+            // body-ordered; the probe's two `numFound == 1` checks now pass.
         ],
     );
     let (rc, ru) = assert_bucket(
@@ -1288,8 +1302,14 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // and `select.highlight.require-field-match` were already in the frozen
     // contract (added ahead of the implementation); three previously-
     // uncovered items now answered.
+    // 62/75 -> 63/75 when issue #154 replaced `parse_update_commands`'s
+    // `serde_json::Value` top-level parse -- whose object map collapsed a
+    // repeated `add` key to the last occurrence -- with a duplicate-tolerant,
+    // body-ordered one, so `update.json-command-add-batch`'s two
+    // `numFound == 1` checks both pass. Denominator unchanged -- the semantic
+    // was already in the contract, just unmet.
     assert_eq!(
-        report.overall.fraction, "62/75",
+        report.overall.fraction, "63/75",
         "initial coverage fraction"
     );
 }
@@ -1299,7 +1319,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
 /// (`is_object()`/`is_array()`), not that a real client consumer could read
 /// anything out of it. Tightening those three predicates to require their
 /// real leaf (`index.numDocs` as a u64; a non-empty term/frequency pair; a
-/// non-empty name list) must not drop the fraction below `62/75` -- these
+/// non-empty name list) must not drop the fraction below `63/75` -- these
 /// three items are covered *today*, against the real seeded corpus
 /// (`ProbeApp::PROBE_DOCS`) driving the real routed handlers, and a
 /// tightened probe must still see real, non-hollow data at each of them.
@@ -1317,7 +1337,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
 /// the assertion without also pointing the probe's request at a real field
 /// (as its sibling `terms.enumeration` request-semantic probe already does
 /// with `terms.fl=body`) flips `terms.terms` from covered to uncovered and
-/// drops the fraction by one, to `61/75` against the `62/75` pinned below. If
+/// drops the fraction by one, to `62/75` against the `63/75` pinned below. If
 /// this test goes red, that is the tightening missing its matching request
 /// fix, not a fixture to update.
 #[tokio::test]
@@ -1349,16 +1369,19 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
     // 62/75 when issue #139 landed `hl.fl=*` expansion plus the
     // `hl.mergeContiguous`/`hl.requireFieldMatch` allowlist entries, which
     // flipped three more items in the *request_semantics* and
-    // *select.highlight* buckets. The
+    // *select.highlight* buckets, and 62/75 -> 63/75 when issue #154 made
+    // `/update`'s top-level command parse duplicate-key tolerant, flipping
+    // `update.json-command-add-batch` -- another *request_semantics* item.
+    // The
     // `response_fields` section this test actually guards is untouched at
-    // 13/15 across that change, which is the point -- bumping the number for a
-    // feature that genuinely adds coverage elsewhere is correct; bumping it
-    // because one of the three probes below stopped reaching real data is the
-    // failure this guards, and that would show up as `response_fields`
-    // dropping.
+    // 13/15 across all of those changes, which is the point -- bumping the
+    // number for a feature that genuinely adds coverage elsewhere is correct;
+    // bumping it because one of the three probes below stopped reaching real
+    // data is the failure this guards, and that would show up as
+    // `response_fields` dropping.
     assert_eq!(
         report["overall"]["fraction"],
-        Value::String("62/75".to_string()),
+        Value::String("63/75".to_string()),
         "tightening the three hollow-container probes must not, by itself, \
          change the coverage fraction -- if it drops, a probe's request (not \
          just its assertion) needs to change to reach real data, see \
@@ -1372,7 +1395,7 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
 /// #162 fixed for three response-field probes, but here on a
 /// request-semantics probe. Tightening it to also require `solr-mbeans` to
 /// be a JSON object, and conjoining a `/select` facet leg, must not drop the
-/// fraction below `62/75`: neither leg's *request* needs to change to reach
+/// fraction below `63/75`: neither leg's *request* needs to change to reach
 /// real data -- `admin_mbeans` in `src/lib.rs` builds `solr-mbeans`
 /// unconditionally, and the seeded probe corpus already facets `category` --
 /// so the item stays covered against the real seeded app.
@@ -1413,11 +1436,12 @@ async fn repeated_map_and_flat_stays_covered_against_the_real_seeded_app() {
     // `origin/main` when issue #143 landed `omitHeader`/`TZ`, which flipped
     // `request.omitHeader` and `request.timezone.utc` on their own merits,
     // and 59/75 -> 62/75 when issue #139 landed `hl.fl=*` expansion plus the
-    // `hl.mergeContiguous`/`hl.requireFieldMatch` allowlisting. Neither
-    // change is what moved it.
+    // `hl.mergeContiguous`/`hl.requireFieldMatch` allowlisting, and 62/75 ->
+    // 63/75 when issue #154 made `/update`'s top-level command parse
+    // duplicate-key tolerant. None of those changes is what moved it.
     assert_eq!(
         report["overall"]["fraction"],
-        Value::String("62/75".to_string()),
+        Value::String("63/75".to_string()),
         "tightening this probe's assertion must not, by itself, change the \
          coverage fraction -- the real handler already emits an object-shaped \
          `solr-mbeans` regardless of `json.nl`, so nothing about the real \

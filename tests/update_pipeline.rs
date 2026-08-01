@@ -832,15 +832,15 @@ async fn autocommit_max_time_arms_even_when_a_later_doc_in_the_batch_is_invalid(
 // the last. These tests pin the fix: every `add` in a body must survive,
 // not just the last (or the first).
 //
-// No fixture in `solr-ref/responses/` repeats a command key: the existing
-// `update_add_commit.json` / `update_mixed_commands.json` / etc. fixtures
-// are all single-command bodies. Trace 00001 is the client evidence for the
-// "many repeated `add`, nothing else" shape; there is no captured fixture at
-// all for a body that combines repeated `add` keys with a `delete` or
-// `commit` key in the same object (the coverage probe's
-// `{"add":...,"add":...,"commit":{}}` is a synthetic shape, not something
-// `search_api_solr` or a `solr-ref/responses/*.json` fixture is known to
-// send this way) — see the handoff for what that means for scope here.
+// The pre-existing fixtures (`update_add_commit.json` /
+// `update_mixed_commands.json` / etc.) are all single-command bodies and
+// repeat no key, and trace 00001 is only client-side evidence. Stage 2 closed
+// that gap: `capture.sh`'s issue-#154 block captured the repeated-`add`
+// shapes against a real `solr:9` (`update_repeated_add_*.json` and their
+// `update_select_after_repeated_add_*.json` corpus states, finding 96), and
+// the `..._from_fixtures` tests further down are derived from them. The four
+// tests immediately below predate that capture and remain as written; the
+// fixtures agree with every one of them.
 
 /// Three duplicate `add` keys, no other command key, mirroring trace 00001's
 /// shape (repeated `add`, nothing else) with a distinguishing `title` per
@@ -984,4 +984,152 @@ async fn empty_object_body_is_a_200_no_op() {
         Some(&json!(5)),
         "an empty-object update body must not add or remove anything from the seed corpus: {body}"
     );
+}
+
+// --- issue #154, captured ground truth: repeated command keys --------------
+//
+// Captured for this issue against a one-off `solr:9` (port 8992, same
+// `update9` schema and `u1..u5` seed as the rest of this file; the block is
+// appended at the end of `solr-ref/capture.sh` and the container was removed
+// afterwards). Every expectation below is read out of those fixtures, not out
+// of what Wayfinder produces. Finding 76 records what they settle:
+//
+//   1. Every repeated `add` executes -- `update_select_after_repeated_add_batch`
+//      has BOTH `r1`/alpha and `r2`/bravo, so the body is not last-wins.
+//      (The corpus selects are scoped to the ids each body touches, not
+//      `q=*:*`: `manifest-errors.tsv` rows replay in sequence against one
+//      accumulated hermetic core in `tests/differential.rs`, so a whole-corpus
+//      count would pin this capture's fresh-core state and nothing else's.)
+//   2. Commands execute in BODY ORDER, not grouped by kind:
+//      `update_repeated_add_delete_before` deletes `r4` and then re-adds it in
+//      the same body, and `r4`/echo survives. An adds-then-deletes execution
+//      loses it.
+//   3. A malformed command aborts the whole body: the valid add preceding a
+//      doc-less `add` (or an unknown command key) never lands, `numFound` 0.
+
+/// Fixtures 1-3 of the capture block, chained: they pin successive corpus
+/// states of one `update9` core, so they are replayed in capture order.
+#[tokio::test]
+async fn repeated_add_command_sequence_from_fixtures() {
+    let (app, _dir) = update9_app().await;
+
+    // Two repeated adds + a delete of a seed doc + a trailing `commit` key,
+    // no `?commit` param: `update_repeated_add_batch` is a 200 and the corpus
+    // select shows r1/alpha, r2/bravo and u2 gone.
+    let (status, body) = post9(
+        &app,
+        "update?wt=json",
+        r#"{"add":{"doc":{"id":"r1","body":"first repeated add","title":"alpha"}},"add":{"doc":{"id":"r2","body":"second repeated add","title":"bravo"}},"delete":{"id":"u2"},"commit":{}}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_matches_fixture(body, "update_repeated_add_batch");
+    let (status, body) = get9(
+        &app,
+        "select?q=id:r1+OR+id:r2+OR+id:u2&fl=id,title&rows=20&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_matches_fixture(body, "update_select_after_repeated_add_batch");
+
+    // A `delete` BETWEEN two adds sees the add that precedes it: r3 is added
+    // and then deleted in one body, r4 survives.
+    let (status, body) = post9(
+        &app,
+        "update?wt=json",
+        r#"{"add":{"doc":{"id":"r3","body":"third","title":"charlie"}},"delete":{"id":"r3"},"add":{"doc":{"id":"r4","body":"fourth","title":"delta"}},"commit":{}}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_matches_fixture(body, "update_repeated_add_delete_between");
+    let (status, body) = get9(
+        &app,
+        "select?q=id:r3+OR+id:r4&fl=id,title&rows=20&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_matches_fixture(body, "update_select_after_repeated_add_delete_between");
+
+    // The reverse: a `delete` BEFORE an add of the same id does not consume
+    // it. r4 comes back with the new title `echo` -- the case an
+    // adds-then-deletes execution order gets wrong.
+    let (status, body) = post9(
+        &app,
+        "update?wt=json",
+        r#"{"delete":{"id":"r4"},"add":{"doc":{"id":"r4","body":"re-added","title":"echo"}},"commit":{}}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_matches_fixture(body, "update_repeated_add_delete_before");
+    let (status, body) = get9(
+        &app,
+        "select?q=id:r4&fl=id,title&rows=20&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_matches_fixture(body, "update_select_after_repeated_add_delete_before");
+}
+
+/// `update_repeated_add_same_id` / `update_select_after_repeated_add_same_id`:
+/// two repeated adds of the SAME id in one body leave exactly one doc, the
+/// LAST one (`body` "same id second", `title` golf). Corpus-independent (the
+/// select is id-scoped), so it starts from the plain seed.
+#[tokio::test]
+async fn repeated_add_of_the_same_id_keeps_the_last_from_fixtures() {
+    let (app, _dir) = update9_app().await;
+    let (status, body) = post9(
+        &app,
+        "update?wt=json",
+        r#"{"add":{"doc":{"id":"r5","body":"same id first","title":"foxtrot"}},"add":{"doc":{"id":"r5","body":"same id second","title":"golf"}},"commit":{}}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_matches_fixture(body, "update_repeated_add_same_id");
+    let (status, body) = get9(&app, "select?q=id:r5&fl=id,title,body&wt=json").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_matches_fixture(body, "update_select_after_repeated_add_same_id");
+}
+
+/// `update_repeated_add_missing_doc` is a 400 ("Missing solr document at
+/// [66]"), and `update_select_after_repeated_add_missing_doc` shows
+/// `numFound` 0 for `r6` -- the VALID add that preceded the doc-less one
+/// never landed, even though the request carried `?commit=true`. Message text
+/// is Wayfinder's own (this file's stated contract); status and the corpus
+/// effect are the pinned parts.
+#[tokio::test]
+async fn one_of_several_repeated_adds_missing_doc_indexes_nothing_from_fixtures() {
+    let (app, _dir) = update9_app().await;
+    let (status, body) = post9(
+        &app,
+        "update?commit=true&wt=json",
+        r#"{"add":{"doc":{"id":"r6","body":"valid","title":"hotel"}},"add":{}}"#,
+    )
+    .await;
+    assert_update_error(status, &body, 400);
+    let (status, body) = get9(&app, "select?q=id:r6&fl=id,title&wt=json").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_matches_fixture(body, "update_select_after_repeated_add_missing_doc");
+}
+
+/// `update_repeated_add_unknown_key` is a 400 ("Unknown command 'frobnicate'
+/// at [129]") and neither preceding add lands
+/// (`update_select_after_repeated_add_unknown_key`, `numFound` 0): an
+/// unrecognised key rejects the body rather than being skipped.
+#[tokio::test]
+async fn repeated_add_with_unknown_command_key_indexes_nothing_from_fixtures() {
+    let (app, _dir) = update9_app().await;
+    let (status, body) = post9(
+        &app,
+        "update?commit=true&wt=json",
+        r#"{"add":{"doc":{"id":"r7","body":"valid","title":"india"}},"add":{"doc":{"id":"r8","body":"valid","title":"juliett"}},"frobnicate":{}}"#,
+    )
+    .await;
+    assert_update_error(status, &body, 400);
+    let (status, body) = get9(
+        &app,
+        "select?q=id:r7+OR+id:r8&fl=id,title&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_matches_fixture(body, "update_select_after_repeated_add_unknown_key");
 }

@@ -1822,3 +1822,59 @@ echo "  (docker rm -f $FRAGSIZE_CONTAINER to stop)"
 # cap facet_local_params_key_as_other_field  'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dbody%7Dcategory&wt=json'
 # cap facet_local_params_key_unterminated    'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dmylabel%20category&wt=json'
 # cap facet_local_params_key_empty_remainder 'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dmylabel%7D&wt=json'
+
+# --- repeated `add` command keys in one body (issue #154) ---------------------
+# `search_api_solr`'s real /update body (search-api/trace/00001.json) repeats
+# the top-level `add` key once per doc -- six times -- and no fixture here had
+# ever repeated a command key, so nothing pinned what Solr does with the
+# duplicates. These twelve were captured against a one-off solr:9 container
+# (port 8992) with an `update9` core built from exactly the schema and u1..u5
+# seed above; the container was removed afterwards; re-take them the same way
+# rather than re-running this whole script.
+#
+#   R_SOLR=http://localhost:8992/solr; R_CORE=update9
+#
+# What they settle (finding 96):
+#   1. EVERY repeated `add` executes -- update_repeated_add_batch's two adds
+#      both land (r1/alpha AND r2/bravo). Not last-wins, which is what a
+#      `serde_json::Value` top-level parse would give.
+#   2. Commands execute in BODY ORDER, not grouped by kind. A `delete` between
+#      two adds sees the earlier one (r3 added then deleted -> gone), and a
+#      `delete` BEFORE an add of the same id does not consume it (r4 deleted
+#      then re-added -> present, title `echo`). An adds-then-deletes execution
+#      order gets that second case wrong.
+#   3. Two adds of the SAME id leave one doc, the LAST (`same id second`).
+#   4. A malformed command aborts the whole body: a doc-less `add` is a 400
+#      ("Missing solr document at [66]") and the VALID add before it never
+#      lands (numFound 0) even under ?commit=true; likewise an unknown command
+#      key ("Unknown command 'frobnicate' at [129]").
+#
+# The corpus selects are scoped to the ids each body touches rather than
+# `q=*:*`: manifest-errors.tsv rows replay in sequence against one accumulated
+# hermetic core in tests/differential.rs, so a whole-corpus count would pin
+# this capture's fresh-core state and diverge there for no compatibility
+# reason. POSTs, so all twelve rows are manifest-errors.tsv, never manifest.tsv.
+# capup update_repeated_add_batch "$R_CORE/update?wt=json" \
+#   '{"add":{"doc":{"id":"r1","body":"first repeated add","title":"alpha"}},"add":{"doc":{"id":"r2","body":"second repeated add","title":"bravo"}},"delete":{"id":"u2"},"commit":{}}'
+# capu update_select_after_repeated_add_batch GET \
+#   "$R_CORE/select?q=id:r1+OR+id:r2+OR+id:u2&fl=id,title&rows=20&sort=id+asc&wt=json"
+# capup update_repeated_add_delete_between "$R_CORE/update?wt=json" \
+#   '{"add":{"doc":{"id":"r3","body":"third","title":"charlie"}},"delete":{"id":"r3"},"add":{"doc":{"id":"r4","body":"fourth","title":"delta"}},"commit":{}}'
+# capu update_select_after_repeated_add_delete_between GET \
+#   "$R_CORE/select?q=id:r3+OR+id:r4&fl=id,title&rows=20&sort=id+asc&wt=json"
+# capup update_repeated_add_delete_before "$R_CORE/update?wt=json" \
+#   '{"delete":{"id":"r4"},"add":{"doc":{"id":"r4","body":"re-added","title":"echo"}},"commit":{}}'
+# capu update_select_after_repeated_add_delete_before GET \
+#   "$R_CORE/select?q=id:r4&fl=id,title&rows=20&sort=id+asc&wt=json"
+# capup update_repeated_add_same_id "$R_CORE/update?wt=json" \
+#   '{"add":{"doc":{"id":"r5","body":"same id first","title":"foxtrot"}},"add":{"doc":{"id":"r5","body":"same id second","title":"golf"}},"commit":{}}'
+# capu update_select_after_repeated_add_same_id GET \
+#   "$R_CORE/select?q=id:r5&fl=id,title,body&wt=json"
+# capup update_repeated_add_missing_doc "$R_CORE/update?commit=true&wt=json" \
+#   '{"add":{"doc":{"id":"r6","body":"valid","title":"hotel"}},"add":{}}'
+# capu update_select_after_repeated_add_missing_doc GET \
+#   "$R_CORE/select?q=id:r6&fl=id,title&wt=json"
+# capup update_repeated_add_unknown_key "$R_CORE/update?commit=true&wt=json" \
+#   '{"add":{"doc":{"id":"r7","body":"valid","title":"india"}},"add":{"doc":{"id":"r8","body":"valid","title":"juliett"}},"frobnicate":{}}'
+# capu update_select_after_repeated_add_unknown_key GET \
+#   "$R_CORE/select?q=id:r7+OR+id:r8&fl=id,title&sort=id+asc&wt=json"

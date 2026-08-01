@@ -1514,82 +1514,169 @@ async fn admin_luke(
     Ok(axum::Json(body).into_response())
 }
 
-/// The parsed shape of an `/update` POST body: either form Solr accepts.
-/// `add_docs` holds one JSON doc object per add (from either the bare-array
-/// form or a `{"add":{"doc":{...}}}` command); `delete_ids`/`delete_queries`
-/// and `commit` come only from the command-object form, since the bare-array
-/// form is adds-only (existing, pre-#9 behaviour, unchanged).
-#[derive(Default)]
-struct UpdateCommands {
-    add_docs: Vec<Value>,
-    delete_ids: Vec<String>,
-    delete_queries: Vec<String>,
-    commit: bool,
+/// One `/update` command, in the order the body listed it. A bare-array body
+/// (the pre-#9 adds-only form) becomes a run of `Add`s; a command-object body
+/// becomes one entry per key *occurrence*, duplicates included.
+enum UpdateCommand {
+    Add(Value),
+    DeleteIds(Vec<String>),
+    DeleteQuery(String),
+    Commit,
 }
 
-/// Parses a `/update` POST body into add/delete/commit commands (finding 46).
-/// Two shapes: the pre-#9 bare JSON array of docs (all adds, unchanged), and
-/// Solr's command-object form — `{"add":{"doc":{...}}, "delete":{"id":...} |
-/// [...] | {"query":"..."}, "commit":{}}`. Every key present in a
-/// command-object body executes; the mixed-command fixture
-/// (`update_mixed_commands.json`) has an add and a delete on independent ids,
-/// so any execution order passes — `update` below just does adds, then
-/// deletes-by-id, then deletes-by-query, then commit.
+/// The top level of an `/update` POST body, deserialized *without* going
+/// through `serde_json::Value` — `Value::Object` is a map, so it collapses a
+/// duplicate JSON key to the last occurrence, and Solr's command format
+/// repeats `add` once per document (six times in `search-api/trace/00001.json`,
+/// and `update_repeated_add_batch.json` confirms real Solr executes every
+/// one). Driving the top level from `MapAccess` keeps each occurrence, in
+/// order; each command's *value* is still an ordinary `Value`, which is all
+/// the command bodies need.
 ///
-/// ponytail: `serde_json`'s `Value::Object` collapses a duplicate JSON key to
-/// the last occurrence (legal in Solr's own hand-rolled parser, but
-/// unobserved — no fixture repeats a command key), so that shape is out of
-/// scope per the task spec.
-fn parse_update_commands(body: &[u8]) -> Result<UpdateCommands, String> {
-    let value: Value =
-        serde_json::from_slice(body).map_err(|e| format!("invalid JSON body: {e}"))?;
-    let mut commands = UpdateCommands::default();
-    match value {
-        Value::Array(docs) => commands.add_docs = docs,
-        Value::Object(map) => {
-            for (key, val) in map {
-                match key.as_str() {
-                    "add" => {
-                        let doc = val
-                            .get("doc")
-                            .cloned()
-                            .ok_or_else(|| "\"add\" command is missing \"doc\"".to_string())?;
-                        commands.add_docs.push(doc);
-                    }
-                    "delete" => match val {
-                        Value::Array(ids) => {
-                            for id in ids {
-                                let id = id.as_str().ok_or_else(|| {
-                                    "\"delete\" id list entries must be strings".to_string()
-                                })?;
-                                commands.delete_ids.push(id.to_string());
-                            }
-                        }
-                        Value::Object(ref dm) if dm.contains_key("id") => {
-                            let id = dm["id"]
-                                .as_str()
-                                .ok_or_else(|| "\"delete.id\" must be a string".to_string())?;
-                            commands.delete_ids.push(id.to_string());
-                        }
-                        Value::Object(ref dm) if dm.contains_key("query") => {
-                            let q = dm["query"]
-                                .as_str()
-                                .ok_or_else(|| "\"delete.query\" must be a string".to_string())?;
-                            commands.delete_queries.push(q.to_string());
-                        }
-                        other => {
-                            return Err(format!("unsupported \"delete\" command shape: {other}"));
-                        }
-                    },
-                    "commit" => commands.commit = true,
-                    other => return Err(format!("unsupported update command `{other}`")),
+/// ponytail: only the top level is duplicate-tolerant. A repeated key *inside*
+/// a command value (`{"add":{"doc":{...},"doc":{...}}}`) still collapses to
+/// the last occurrence — unobserved in any capture or trace, and Solr's own
+/// `JsonLoader` reads a single `doc` per add.
+enum UpdateBody {
+    /// A bare JSON array of documents: every element is an add.
+    Docs(Vec<Value>),
+    /// A command object, as `(key, value)` pairs in body order with duplicate
+    /// keys preserved.
+    Commands(Vec<(String, Value)>),
+    /// Anything else (a scalar, `null`), kept so the caller can name it in the
+    /// "must be an array or a command object" error.
+    Other(Value),
+}
+
+impl<'de> serde::Deserialize<'de> for UpdateBody {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        struct BodyVisitor;
+
+        /// The scalar arms all mean the same thing to `parse_update_commands`
+        /// ("not an array, not an object"); they exist only so the error can
+        /// echo the offending body.
+        macro_rules! scalar_arm {
+            ($name:ident, $ty:ty) => {
+                fn $name<E: serde::de::Error>(self, v: $ty) -> Result<UpdateBody, E> {
+                    Ok(UpdateBody::Other(Value::from(v)))
                 }
+            };
+        }
+
+        impl<'de> serde::de::Visitor<'de> for BodyVisitor {
+            type Value = UpdateBody;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON array of documents or an update command object")
+            }
+
+            scalar_arm!(visit_bool, bool);
+            scalar_arm!(visit_i64, i64);
+            scalar_arm!(visit_u64, u64);
+            scalar_arm!(visit_f64, f64);
+            scalar_arm!(visit_str, &str);
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<UpdateBody, E> {
+                Ok(UpdateBody::Other(Value::Null))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<UpdateBody, A::Error> {
+                let mut docs = Vec::new();
+                while let Some(doc) = seq.next_element::<Value>()? {
+                    docs.push(doc);
+                }
+                Ok(UpdateBody::Docs(docs))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<UpdateBody, A::Error> {
+                let mut pairs = Vec::new();
+                while let Some((key, val)) = map.next_entry::<String, Value>()? {
+                    pairs.push((key, val));
+                }
+                Ok(UpdateBody::Commands(pairs))
             }
         }
-        other => {
+
+        de.deserialize_any(BodyVisitor)
+    }
+}
+
+/// Parses a `/update` POST body into an ordered command list (finding 46).
+/// Two shapes: the pre-#9 bare JSON array of docs (all adds, unchanged), and
+/// Solr's command-object form — `{"add":{"doc":{...}}, "delete":{"id":...} |
+/// [...] | {"query":"..."}, "commit":{}}` — where any key may repeat.
+///
+/// Order is the body's order and `update` below executes it as such, because
+/// Solr does: `update_repeated_add_delete_before.json` deletes `r4` and then
+/// re-adds it in one body, and the following select still finds `r4`
+/// (finding 96). A body-order-independent execution (all adds, then all
+/// deletes) loses that doc.
+///
+/// A malformed command aborts the whole body before anything executes, which
+/// is also what Solr does: `update_repeated_add_missing_doc.json` is a 400 and
+/// the valid add that *preceded* the bad one never lands
+/// (`update_select_after_repeated_add_missing_doc.json`, `numFound` 0); same
+/// for an unknown command key (`update_repeated_add_unknown_key.json`).
+fn parse_update_commands(body: &[u8]) -> Result<Vec<UpdateCommand>, String> {
+    let parsed: UpdateBody =
+        serde_json::from_slice(body).map_err(|e| format!("invalid JSON body: {e}"))?;
+    let pairs = match parsed {
+        UpdateBody::Docs(docs) => {
+            return Ok(docs.into_iter().map(UpdateCommand::Add).collect());
+        }
+        UpdateBody::Commands(pairs) => pairs,
+        UpdateBody::Other(other) => {
             return Err(format!(
                 "update body must be a JSON array of documents or a command object, got {other}"
             ));
+        }
+    };
+
+    let mut commands = Vec::with_capacity(pairs.len());
+    for (key, val) in pairs {
+        match key.as_str() {
+            "add" => {
+                let doc = val
+                    .get("doc")
+                    .cloned()
+                    .ok_or_else(|| "\"add\" command is missing \"doc\"".to_string())?;
+                commands.push(UpdateCommand::Add(doc));
+            }
+            "delete" => match val {
+                Value::Array(ids) => {
+                    let mut delete_ids = Vec::with_capacity(ids.len());
+                    for id in ids {
+                        let id = id.as_str().ok_or_else(|| {
+                            "\"delete\" id list entries must be strings".to_string()
+                        })?;
+                        delete_ids.push(id.to_string());
+                    }
+                    commands.push(UpdateCommand::DeleteIds(delete_ids));
+                }
+                Value::Object(ref dm) if dm.contains_key("id") => {
+                    let id = dm["id"]
+                        .as_str()
+                        .ok_or_else(|| "\"delete.id\" must be a string".to_string())?;
+                    commands.push(UpdateCommand::DeleteIds(vec![id.to_string()]));
+                }
+                Value::Object(ref dm) if dm.contains_key("query") => {
+                    let q = dm["query"]
+                        .as_str()
+                        .ok_or_else(|| "\"delete.query\" must be a string".to_string())?;
+                    commands.push(UpdateCommand::DeleteQuery(q.to_string()));
+                }
+                other => {
+                    return Err(format!("unsupported \"delete\" command shape: {other}"));
+                }
+            },
+            "commit" => commands.push(UpdateCommand::Commit),
+            other => return Err(format!("unsupported update command `{other}`")),
         }
     }
     Ok(commands)
@@ -1665,34 +1752,62 @@ async fn update(
     let commands =
         parse_update_commands(&body).map_err(|msg| update_err("wayfinder::BadUpdateBody", msg))?;
 
-    if !commands.add_docs.is_empty() {
-        state
-            .index
-            .add_documents(&commands.add_docs, overwrite)
-            .map_err(|e| update_err("wayfinder::IndexError", e.to_string()))?;
+    // Execute in body order (finding 96). Consecutive adds still go to
+    // `add_documents` as one batch — the bare-array body is the whole-batch
+    // case — but a delete or commit between them flushes first, so a
+    // delete-then-re-add of the same id keeps the re-added doc.
+    let mut pending_adds: Vec<Value> = Vec::new();
+    macro_rules! flush_adds {
+        () => {
+            if !pending_adds.is_empty() {
+                state
+                    .index
+                    .add_documents(&pending_adds, overwrite)
+                    .map_err(|e| update_err("wayfinder::IndexError", e.to_string()))?;
+                pending_adds.clear();
+            }
+        };
     }
-    if !commands.delete_ids.is_empty() {
-        state
-            .index
-            .delete_by_ids(&commands.delete_ids)
-            .map_err(|e| update_err("wayfinder::IndexError", e.to_string()))?;
+    for command in commands {
+        match command {
+            UpdateCommand::Add(doc) => pending_adds.push(doc),
+            UpdateCommand::DeleteIds(ids) => {
+                flush_adds!();
+                state
+                    .index
+                    .delete_by_ids(&ids)
+                    .map_err(|e| update_err("wayfinder::IndexError", e.to_string()))?;
+            }
+            UpdateCommand::DeleteQuery(q) => {
+                flush_adds!();
+                state
+                    .index
+                    .delete_by_query(&q, &state.index.wf_schema.core.default_field)
+                    .map_err(|e| update_err("wayfinder::IndexError", e.to_string()))?;
+            }
+            // A body `commit` commits what precedes it, there and then: any
+            // add after it is a separate, still-uncommitted batch unless a
+            // `commit`/`softCommit` param commits again below.
+            UpdateCommand::Commit => {
+                flush_adds!();
+                state.index.commit().map_err(|e| {
+                    WfError::internal("wayfinder::CommitError", e.to_string())
+                        .envelope(Envelope::NoParams)
+                })?;
+            }
+        }
     }
-    for query in &commands.delete_queries {
-        state
-            .index
-            .delete_by_query(query, &state.index.wf_schema.core.default_field)
-            .map_err(|e| update_err("wayfinder::IndexError", e.to_string()))?;
-    }
+    flush_adds!();
 
     // `commit=true` (existing) and `softCommit=true` both mean "commit and
     // reload now" — per the task spec's softCommit note, Tantivy has no
     // in-memory-searchable segment for a real soft commit to leave
     // uncommitted-but-visible, so Wayfinder's softCommit is a hard commit
     // too (wire-visible behaviour matches Solr; durability is only ever
-    // stronger, never weaker). A `commit` key in the body does the same.
-    let commit_now = commands.commit
-        || params.get("commit") == Some("true")
-        || params.get("softCommit") == Some("true");
+    // stronger, never weaker). A `commit` key in the body does the same, but
+    // in body order, in the loop above.
+    let commit_now =
+        params.get("commit") == Some("true") || params.get("softCommit") == Some("true");
     if commit_now {
         state.index.commit().map_err(|e| {
             WfError::internal("wayfinder::CommitError", e.to_string()).envelope(Envelope::NoParams)
