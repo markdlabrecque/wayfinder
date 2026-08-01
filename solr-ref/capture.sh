@@ -33,15 +33,22 @@ curl -s "$SOLR/$CORE/schema" -H 'Content-Type: application/json' -d '{
     {"name":"body",     "type":"text_en", "indexed":true, "stored":true},
     {"name":"category", "type":"string",  "indexed":true, "stored":true,
      "docValues":true, "multiValued":true}
-  ]
+  ],
+  "add-dynamic-field": {
+    "name":"tm_X3b_en_*", "type":"text_en", "indexed":true,
+    "stored":false, "multiValued":true
+  }
 }' >/dev/null
 
 # --- Corpus ----------------------------------------------------------------
+# The unstored dotted dynamic values back issue #177's captures at the end of
+# this script. Seeding them here avoids overwriting existing IDs later, which
+# would change live segment/doc order and deleted-term statistics for old rows.
 curl -sf "$SOLR/$CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
-  {"id":"doc1","body":"the quick brown fox jumps over the lazy dog","category":["animals","classic"]},
-  {"id":"doc2","body":"a lazy afternoon in the garden","category":["garden"]},
-  {"id":"doc3","body":"quick thinking saves the day","category":["misc","classic"]},
-  {"id":"doc4","body":"dogs and cats living together","category":["animals"]},
+  {"id":"doc1","body":"the quick brown fox jumps over the lazy dog","category":["animals","classic"],"tm_X3b_en_a.b":["gamma"]},
+  {"id":"doc2","body":"a lazy afternoon in the garden","category":["garden"],"tm_X3b_en_.leading":["gamma"]},
+  {"id":"doc3","body":"quick thinking saves the day","category":["misc","classic"],"tm_X3b_en_trailing.":["gamma"]},
+  {"id":"doc4","body":"dogs and cats living together","category":["animals"],"tm_X3b_en_a..b":["gamma"]},
   {"id":"doc5","body":"nothing much here at all"}
 ]' >/dev/null
 
@@ -2234,3 +2241,14 @@ cap_extract extract_corrupt_pdf 500 \
 # value is also the query term. Solr keys both matching docs' highlighting on
 # `category`, exactly as it does when `hl.fl=category` is explicit.
 cap hl_wildcard_stored_string 'select?q=category%3Aanimals&hl=true&hl.fl=%2A&wt=json'
+
+# --- dotted dynamic field names (issue #177) --------------------------------
+# Captured against real Solr 9 to replace issue #164's Tantivy-source-derived
+# assumption with wire evidence. Solr accepts ordinary, leading, trailing, and
+# consecutive dots in names matched by a dynamic-field rule, and all four names
+# remain queryable. The unstored rule and values are seeded with the canonical
+# schema/corpus above so live manifest replay sees no overwrite history.
+cap dotted_dynamic_basic       'select?q=tm_X3b_en_a.b:gamma&fl=id&sort=id+asc&wt=json'
+cap dotted_dynamic_leading     'select?q=tm_X3b_en_.leading:gamma&fl=id&sort=id+asc&wt=json'
+cap dotted_dynamic_trailing    'select?q=tm_X3b_en_trailing.:gamma&fl=id&sort=id+asc&wt=json'
+cap dotted_dynamic_consecutive 'select?q=tm_X3b_en_a..b:gamma&fl=id&sort=id+asc&wt=json'

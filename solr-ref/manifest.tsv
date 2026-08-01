@@ -177,3 +177,7 @@ facet_local_params_duplicate_key	200	select?q=*:*&rows=0&facet=true&facet.field=
 select_json_nl_repeated_map_flat	200	select?q=*:*&rows=0&facet=true&facet.field=category&json.nl=map&json.nl=flat&wt=json
 select_json_nl_flat	200	select?q=*:*&rows=0&facet=true&facet.field=category&json.nl=flat&wt=json
 hl_wildcard_stored_string	200	select?q=category%3Aanimals&hl=true&hl.fl=%2A&wt=json
+dotted_dynamic_basic	200	select?q=tm_X3b_en_a.b:gamma&fl=id&sort=id+asc&wt=json
+dotted_dynamic_leading	200	select?q=tm_X3b_en_.leading:gamma&fl=id&sort=id+asc&wt=json
+dotted_dynamic_trailing	200	select?q=tm_X3b_en_trailing.:gamma&fl=id&sort=id+asc&wt=json
+dotted_dynamic_consecutive	200	select?q=tm_X3b_en_a..b:gamma&fl=id&sort=id+asc&wt=json

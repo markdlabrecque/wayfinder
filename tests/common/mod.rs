@@ -76,16 +76,23 @@ multi_valued = true
 name = "views"
 type = "int"
 fast = true
+
+# Unstored to keep older default-fl fixtures unchanged. These values back the
+# four real-Solr dotted dynamic-field captures appended by issue #177.
+[[dynamic_fields]]
+pattern = "tm_X3b_en_*"
+type = "text_en"
+multi_valued = true
 "#;
 
 /// The exact 5-doc corpus indexed by `solr-ref/capture.sh`, so fixture JSON
 /// under `solr-ref/responses/` is ground truth for the same corpus here.
 pub fn corpus() -> Value {
     json!([
-        {"id":"doc1","body":"the quick brown fox jumps over the lazy dog","category":["animals","classic"]},
-        {"id":"doc2","body":"a lazy afternoon in the garden","category":["garden"]},
-        {"id":"doc3","body":"quick thinking saves the day","category":["misc","classic"]},
-        {"id":"doc4","body":"dogs and cats living together","category":["animals"]},
+        {"id":"doc1","body":"the quick brown fox jumps over the lazy dog","category":["animals","classic"],"tm_X3b_en_a.b":["gamma"]},
+        {"id":"doc2","body":"a lazy afternoon in the garden","category":["garden"],"tm_X3b_en_.leading":["gamma"]},
+        {"id":"doc3","body":"quick thinking saves the day","category":["misc","classic"],"tm_X3b_en_trailing.":["gamma"]},
+        {"id":"doc4","body":"dogs and cats living together","category":["animals"],"tm_X3b_en_a..b":["gamma"]},
         {"id":"doc5","body":"nothing much here at all"}
     ])
 }
