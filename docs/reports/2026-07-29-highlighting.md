@@ -21,7 +21,7 @@
    `hl.method=original` (truncation), a no-field-match doc, comma- and space-separated multi-field
    `hl.fl`, and default `hl.fl` (via `df`, no `hl.fl` given).
 
-2. **Findings 51-54 in `docs/solr-ref-findings.md`**, plus a correction to the "Not yet captured"
+2. **Findings 52-55 in `docs/solr-ref-findings.md`**, plus a correction to the "Not yet captured"
    section (highlighting removed from the not-yet-captured list; a follow-up line added for the
    `hl.fl`-invalid-field 400 shape, see below). The findings pin: the `highlighting` envelope's
    always-present/per-doc, present/absent-per-field, never-`[]` shape (51); `hl.snippets` as a cap
@@ -61,7 +61,7 @@
 
 - **`hl.fragsize` is only honored under an explicit `hl.method=original`.** Solr's real default,
   `hl.method=unified`, was captured and found not to meaningfully truncate this fixture set's
-  short, punctuation-free fields at any `hl.fragsize` value (finding 54) — a real `unified`
+  short, punctuation-free fields at any `hl.fragsize` value (finding 55) — a real `unified`
   fragmenter is out of the issue's own stated scope, so under the (unset) default `hl.fragsize` is
   silently ignored and Tantivy's own 150-char `SnippetGenerator` default applies instead. Marked
   with a `ponytail:` comment in `src/highlight.rs`.
@@ -82,7 +82,7 @@
   `q=*:*&fq=category:animals` instead, which ties every matching doc's score so the ascending-doc
   tie-break is deterministic on both engines and the fixture isolates only the highlighting fact it
   exists to pin. **This divergence is not filed as a GitHub issue and should be**, since as
-  written it is only documented in a commit message and finding 51's parenthetical, not tracked
+  written it is only documented in a commit message and finding 52's parenthetical, not tracked
   anywhere actionable.
 
 ## Test evidence
@@ -98,7 +98,7 @@ Re-run directly by the reporter, current branch tip:
 **Round 1: BOUNCE.** The reviewer verified most of the implementor's judgment calls as correct
 rather than papered-over (the `hl.fragsize`/`hl.method` split traced to a fixture, not a guess; the
 `hl.snippets` ceiling confirmed against `tantivy-0.26.1` source as a genuine public-API limit;
-finding 51's three-way present/absent/absent-key logic confirmed as real behavior, not an artifact
+finding 52's three-way present/absent/absent-key logic confirmed as real behavior, not an artifact
 of serde's defaults). Must-fix: an undefined or non-text `hl.fl` field surfaced as a 500
 (`WfError::internal`) rather than a 400, on two reachable user-input paths — inconsistent with the
 `check_sort`/`facet.field` sibling precedent already in the codebase. 5-minute items: a stale "Not
@@ -156,6 +156,6 @@ before this fact is lost to a commit message.
   `hl_*` placeholder rows added then removed).
 - Fixtures/capture: `solr-ref/capture.sh` (appended `wayfinder-solr-4`/port-8991 block),
   `solr-ref/manifest.tsv` (9 new `hl_*` rows), `solr-ref/responses/hl_*.json` (9 fixtures).
-- Docs: `docs/solr-ref-findings.md` — findings 51-54 (new), "Not yet captured" section correction
+- Docs: `docs/solr-ref-findings.md` — findings 52-55 (new), "Not yet captured" section correction
   and the added note on the unfixtured `hl.fl`-error `.with_response()` inference.
 - Issue: [#4](https://github.com/markdlabrecque/wayfinder/issues/4).

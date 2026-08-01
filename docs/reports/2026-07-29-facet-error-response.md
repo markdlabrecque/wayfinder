@@ -43,7 +43,7 @@
    `facet_err_query_single.json` were captured from, asserting `response.numFound`, `.start`,
    `.numFoundExact`, `.docs`, and that `error` is still present alongside it.
 
-5. **`docs/solr-ref-findings.md`.** New numbered finding 43 documents the pre-query/post-query
+5. **`docs/solr-ref-findings.md`.** New numbered finding 50 documents the pre-query/post-query
    split (facet.range detected before the base query runs vs. facet.query/facet.field detected
    after), names the fixtures it is pinned against, and states which
    `EXPECTED_DIVERGENCES_MANIFEST_ERRORS` entries it closes. The harness section's stale
@@ -90,7 +90,7 @@ still omits `response` for anything wrapped in `PreQueryFacetError`.
    fix had emptied the list to zero. Corrected to state the list is now empty and summarize what
    closed it.
 2. No numbered finding existed yet documenting the pre-query/post-query facet-error split that
-   the fix's own code comments describe (in `src/facet.rs` and `src/lib.rs`). Added as finding 43,
+   the fix's own code comments describe (in `src/facet.rs` and `src/lib.rs`). Added as finding 50,
    citing the specific fixtures (`facet_unknown_field.json`, `facet_err_query_single.json` vs.
    `facet_err_range_single.json`) that pin the behaviour.
 
@@ -126,7 +126,7 @@ still be worthwhile if this were revisited.
   (`facet_field_error_still_carries_the_base_querys_response_block`,
   `facet_query_error_still_carries_the_base_querys_response_block`), `tests/differential.rs`
   (`EXPECTED_DIVERGENCES_MANIFEST_ERRORS` now `&[]`).
-- Docs: `docs/solr-ref-findings.md` — finding 43 (new), harness-section correction to the
+- Docs: `docs/solr-ref-findings.md` — finding 50 (new), harness-section correction to the
   now-empty expected-divergence list.
 - Issue: [#35](https://github.com/markdlabrecque/wayfinder/issues/35), including a prior comment
   from the #31/#33 work recording that all 5 entries (not just `facet_unknown_field`) must expire

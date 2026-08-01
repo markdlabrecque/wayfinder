@@ -30,7 +30,7 @@ pub struct Normalized {
 ///   (Wayfinder's explicit default-`fl` decision, finding 9 — reuses/extends
 ///   `normalize_envelope` in `tests/common/mod.rs`, does not duplicate it).
 /// - on an error envelope, drops `error.msg`, `error.metadata`, and
-///   `error.trace` (finding 10, extended by finding 45's captured 500 —
+///   `error.trace` (finding 10, extended by finding 59's captured 500 —
 ///   `error.trace` is a Java stack trace, free text no other engine can
 ///   reproduce) — `error.code` and the HTTP status are the only parts
 ///   compared.
@@ -75,7 +75,7 @@ pub fn normalize(mut value: Value) -> Normalized {
         }
         // `err_regex_bad_class.json`'s one 500 carries a Java stack trace —
         // free text no other engine can reproduce, same rationale as
-        // `error.msg` above (finding 10, extended by finding 45).
+        // `error.msg` above (finding 10, extended by finding 59).
         if error.remove("trace").is_some() {
             touched.push("error.trace".to_string());
         }

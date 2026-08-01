@@ -1644,7 +1644,7 @@ cape edismax_mm_conditional     'select?q=alpha+beta+gamma&defType=edismax&qf=bo
 # curl -sg "$EDISMAX_SOLR/$EDISMAX_CORE/select?q=alpha+beta+gamma&defType=edismax&qf=body&mm=&fl=id&wt=json"
 cape edismax_mm_absent          'select?q=alpha+beta+gamma&defType=edismax&qf=body&fl=id&wt=json'
 # Reviewer round-2 follow-up (issue #113): the 200/400 clause-count boundary
-# above lived only in prose (finding 85, tests/edismax.rs comments) -- this is
+# above lived only in prose (finding 89, tests/edismax.rs comments) -- this is
 # the primary committed-fixture evidence for one point on that boundary,
 # `q=*:*` (a single-clause query that reaches the `mm=` guard's clauses.len()
 # check with count < 2 and so must 200, not 400). numFound (10) is confirmed

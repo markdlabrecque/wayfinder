@@ -986,7 +986,7 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
         // returned snippet equals `HL_FRAGSIZE_PROBE_DOCS`'s whole seeded
         // body (with the match wrapped in `<em>`), not just that some
         // snippet came back. Truncation is only observable under
-        // `hl.method=original` with a nonzero budget (finding 54,
+        // `hl.method=original` with a nonzero budget (finding 55,
         // `src/highlight.rs` module docs; fixture
         // `hl_fragsize_truncated.json`), so the second half asks for a
         // 10-char budget over `doc1`'s "quick brown fox rocket" and requires

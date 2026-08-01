@@ -393,7 +393,7 @@ async fn strict_params_accepts_every_implemented_highlight_param() {
 //       `qf`/`df` set -- fields that come back from that expansion but
 //       cannot be analyzed (non-text) simply never produce a snippet, which
 //       is indistinguishable on the wire from "no term overlap" (finding
-//       51's `{}` shape covers both). That silent-skip, not a 400, is the
+//       52's `{}` shape covers both). That silent-skip, not a 400, is the
 //       behaviour worth pinning: Wayfinder's own explicit-field path 400s a
 //       named non-text `hl.fl` field
 //       (`hl_non_text_field_is_400`/`hl_undefined_field_is_400_...` above),

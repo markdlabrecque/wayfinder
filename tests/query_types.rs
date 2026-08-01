@@ -5,7 +5,7 @@
 //! `"phrase"^2`, `fuzzy~1^3`) — PRD §5 `q` row, Lucene parser only.
 //!
 //! Every expected value comes from a committed fixture in `solr-ref/responses/`
-//! (CLAUDE.md: fixtures are ground truth) — none is invented. Findings 42-45 in
+//! (CLAUDE.md: fixtures are ground truth) — none is invented. Findings 56-59 in
 //! `docs/solr-ref-findings.md` are the annotated map of which fixture proves
 //! which fact; the section headers below mirror that map.
 //!
@@ -17,7 +17,7 @@
 //!   across integration-test binaries; same precedent as that file's own
 //!   comment) since `tests/common/mod.rs` stays append-only-if-needed and this
 //!   change needs no new shared helper.
-//! - The dynamic-field-rewrite-inside-quotes regression test (finding 45's
+//! - The dynamic-field-rewrite-inside-quotes regression test (finding 59's
 //!   corollary) has no Solr fixture at all: it pins a Wayfinder-only bug in
 //!   `rewrite_dynamic_fields`'s `<ident>:` scan (documented in its own
 //!   `ponytail:` comment in `src/core_index.rs`), not a Solr-compatibility
@@ -92,7 +92,7 @@ fn ids(envelope: &Value) -> Vec<String> {
 }
 
 // =============================================================================
-// Fuzzy (`term~`, `term~N`) — finding 42
+// Fuzzy (`term~`, `term~N`) — finding 56
 // =============================================================================
 
 /// Bare `~` is distance 2: it hits a distance-1 term (`animols`) AND a
@@ -208,7 +208,7 @@ async fn fuzzy_matches_are_scored_doc2_before_doc1_not_insertion_order() {
 }
 
 // =============================================================================
-// Wildcard / prefix (`te?t`, `test*`, `*mals`, `an*ls`, `field:*`) — finding 43
+// Wildcard / prefix (`te?t`, `test*`, `*mals`, `an*ls`, `field:*`) — finding 57
 // =============================================================================
 
 #[tokio::test]
@@ -246,7 +246,7 @@ async fn wildcard_infix_star_hits() {
 }
 
 /// Wildcard terms are lowercased but never stemmed — the same rule as fuzzy
-/// (finding 42/43): `laz*` hits the stemmed `lazi`, `lazy*` misses it, `LAZ*`
+/// (finding 56/57): `laz*` hits the stemmed `lazi`, `lazy*` misses it, `LAZ*`
 /// hits (lowercased).
 #[tokio::test]
 async fn wildcard_terms_are_lowercased_but_never_stemmed() {
@@ -291,7 +291,7 @@ async fn wildcard_bare_star_is_field_exists_idiom() {
 }
 
 // =============================================================================
-// Regex (`/pattern/`) — finding 43/45
+// Regex (`/pattern/`) — finding 57/59
 // =============================================================================
 
 /// Regex is anchored whole-term matching, NOT substring: `/animals/` hits,
@@ -356,7 +356,7 @@ async fn regex_bad_char_class_is_a_500_with_no_metadata_key() {
          SyntaxError — got {body}"
     );
     // The differential harness's normaliser drops `error.trace` on both
-    // sides before comparing (finding 10/45's rationale — free text no
+    // sides before comparing (finding 10/59's rationale — free text no
     // other engine can reproduce), so the hermetic differential suite
     // cannot by itself prove Wayfinder ever actually emits the key at all;
     // this test is the one place that shape is pinned directly.
@@ -379,7 +379,7 @@ async fn regex_unclosed_is_a_400_syntax_error() {
 }
 
 // =============================================================================
-// Ranges (`[a TO b]`, `{a TO b}`, `[a TO b}`, `*` endpoints) — finding 44
+// Ranges (`[a TO b]`, `{a TO b}`, `[a TO b}`, `*` endpoints) — finding 58
 // =============================================================================
 
 #[tokio::test]
@@ -606,7 +606,7 @@ async fn date_range_inclusive_and_exclusive() {
 }
 
 // =============================================================================
-// Boosts (`term^2`, `field:term^2.5`, `"phrase"^2`, `fuzzy~1^3`) — finding 45
+// Boosts (`term^2`, `field:term^2.5`, `"phrase"^2`, `fuzzy~1^3`) — finding 59
 // =============================================================================
 
 /// A boost reorders BM25 scoring exactly as expected: the baseline `quick
@@ -661,7 +661,7 @@ async fn boost_non_numeric_is_a_syntax_error() {
 }
 
 // =============================================================================
-// Field-query scoring model + quoted-phrase-with-colon — finding 45
+// Field-query scoring model + quoted-phrase-with-colon — finding 59
 // =============================================================================
 
 /// **Scoring-model finding**: an unquoted control (`category:animals`) on a
@@ -700,7 +700,7 @@ async fn quoted_phrase_containing_colon_is_a_phrase_not_a_field_query() {
 // =============================================================================
 // Dynamic-field-rewrite-inside-quotes regression (Wayfinder-only; no Solr
 // fixture — see the module doc comment for why and how the expected token
-// shapes were derived) — corollary of finding 45, retiring schema-layer
+// shapes were derived) — corollary of finding 59, retiring schema-layer
 // follow-up 5's open question.
 // =============================================================================
 
@@ -840,7 +840,7 @@ async fn dynamic_field_wildcard_and_fuzzy_do_not_hard_error() {
 /// discards the field entirely for `UserInputLeaf::Exists`. That gap
 /// predates issue #8 (the plain, pre-#8 `QueryParser::parse_query` path hits
 /// the exact same tantivy arm for a declared field's `field:*` too, which is
-/// finding 43's whole reason `build_field_exists` exists as a Wayfinder-side
+/// finding 57's whole reason `build_field_exists` exists as a Wayfinder-side
 /// workaround for *declared* fields) and is out of this fix's minimal scope
 /// for an *undeclared* dynamic path with no Solr fixture pinning what the
 /// right answer should even be. This test pins today's honest, correctly-

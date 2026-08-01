@@ -9,19 +9,19 @@
 //! distinct fragments for a doc/field up to the `hl.snippets` cap this module
 //! resolves and hands it. Facts pinned by fixtures in
 //! `solr-ref/responses/hl_*.json` (`docs/solr-ref-findings.md` findings
-//! 51-54 and 81):
+//! 52-55 and 81):
 //!
-//! - **finding 51**: `highlighting` is a top-level object keyed by the
+//! - **finding 52**: `highlighting` is a top-level object keyed by the
 //!   unique key. A doc that matched the base query through some field other
 //!   than any `hl.fl` field still gets an entry -- an empty object, never
 //!   absent and never `{"field": []}`. A specific field with no term overlap
 //!   for a doc that does have an entry is simply absent from that doc's
 //!   per-field map, not `[]`.
-//! - **finding 52**: `hl.snippets` caps, never pads -- it never fabricates
+//! - **finding 53**: `hl.snippets` caps, never pads -- it never fabricates
 //!   snippets beyond what actually exists in the field.
-//! - **finding 53**: `hl.fl`'s default, when `hl=true` with no `hl.fl` at
+//! - **finding 54**: `hl.fl`'s default, when `hl=true` with no `hl.fl` at
 //!   all, is `df` (the resolved default search field), not `*`/absent.
-//! - **finding 54**: `hl.fragsize` truncation is only meaningfully visible in
+//! - **finding 55**: `hl.fragsize` truncation is only meaningfully visible in
 //!   this fixture set under `hl.method=original`; Solr's default
 //!   `hl.method=unified` barely truncates a short, punctuation-free field
 //!   regardless of `hl.fragsize` (`hl_fragsize_small.json` is exactly that
@@ -31,7 +31,7 @@
 //!   150-char `SnippetGenerator` default alone. This is a documented
 //!   judgment call standing in for a real `hl.method=unified`
 //!   implementation, which the issue explicitly puts out of scope. Finding
-//!   54's scope limit is about *nonzero* `hl.fragsize` only -- the zero case
+//!   55's scope limit is about *nonzero* `hl.fragsize` only -- the zero case
 //!   is finding 81 below and is decided before this split is consulted.
 //! - **finding 81**: `hl.fragsize=0` means "return the whole field,
 //!   unfragmented, as a single snippet" -- it is not "unset". It behaves that
@@ -41,7 +41,7 @@
 //!   `hl_fragsize_zero_whole_field_method_original.json`
 //!   (`hl.method=original`), which are byte-identical in their
 //!   `highlighting` block. So an explicit zero is special-cased here *ahead
-//!   of* the finding-54 original-vs-default split above, mapping to
+//!   of* the finding-55 original-vs-default split above, mapping to
 //!   `WHOLE_FIELD_MAX_CHARS` (a sentinel char budget no field can exceed) so
 //!   `SnippetGenerator::set_max_num_chars` never fragments. Absent or
 //!   unparseable `hl.fragsize` is unaffected and still falls back as before
@@ -87,7 +87,7 @@ const DEFAULT_SNIPPETS: usize = 1;
 const DEFAULT_FRAGSIZE: usize = 100;
 /// Tantivy's own `SnippetGenerator` default char budget
 /// (`DEFAULT_MAX_NUM_CHARS`, `tantivy-0.26.1/src/snippet/mod.rs`) -- used
-/// whenever `hl.fragsize` is not applied (finding 54, module docs above).
+/// whenever `hl.fragsize` is not applied (finding 55, module docs above).
 const TANTIVY_DEFAULT_MAX_CHARS: usize = 150;
 /// Solr's own default highlight markers.
 const DEFAULT_PRE: &str = "<em>";
@@ -104,7 +104,7 @@ pub fn highlighting(
     page: &[(Score, DocAddress)],
     unique_key: &str,
 ) -> Result<Value> {
-    // finding 53: `hl.fl` defaults to `df`, not `*`/absent.
+    // finding 54: `hl.fl` defaults to `df`, not `*`/absent.
     let fl_raw = params.get("hl.fl").unwrap_or(default_field);
     let fields = resolve_hl_fl(&index.wf_schema, fl_raw)?;
 
@@ -120,9 +120,9 @@ pub fn highlighting(
     let fragsize: Option<usize> = params.get("hl.fragsize").and_then(|v| v.parse().ok());
 
     // ponytail: for a *nonzero* `hl.fragsize`, only the `hl.method=original`
-    // vs. everything-else split (finding 54) -- not a real
+    // vs. everything-else split (finding 55) -- not a real
     // `hl.method=unified` fragmenter. The ceiling is exactly the module docs'
-    // finding-54 paragraph: `hl.fragsize` is applied verbatim under
+    // finding-55 paragraph: `hl.fragsize` is applied verbatim under
     // `hl.method=original`, and ignored entirely (falling back to Tantivy's
     // own 150-char default) for every other `hl.method` value, including the
     // unset default. A real `unified` implementation would need its own
@@ -157,13 +157,13 @@ pub fn highlighting(
                 snippets_cap,
             )?;
             if snippets.is_empty() {
-                // finding 51: absent from the per-field map, not `[]`.
+                // finding 52: absent from the per-field map, not `[]`.
                 continue;
             }
             // `highlight_field` already stops extracting at `snippets_cap` --
             // it has to, since every extra snippet costs another pass over the
             // field text. This `take` is the belt to that braces: capping is
-            // finding 52's wire contract, and it stays enforced here rather
+            // finding 53's wire contract, and it stays enforced here rather
             // than relying on the primitive having got it right.
             let capped: Vec<Value> = snippets
                 .into_iter()
@@ -172,7 +172,7 @@ pub fn highlighting(
                 .collect();
             per_field.insert((*field_name).to_string(), Value::Array(capped));
         }
-        // finding 51: always an entry, `{}` when nothing matched, never
+        // finding 52: always an entry, `{}` when nothing matched, never
         // absent.
         out.insert(key, Value::Object(per_field));
     }
@@ -196,7 +196,7 @@ const HL_FL_WILDCARD: &str = "*";
 ///   *schema's* field names (via `SolrPluginUtils.expandWildcardsInField`),
 ///   not against the query's `qf`/`df` set, and a field that comes back from
 ///   that expansion but cannot be analyzed simply never produces a snippet
-///   -- indistinguishable on the wire from "no term overlap" (finding 51's
+///   -- indistinguishable on the wire from "no term overlap" (finding 52's
 ///   `{}` covers both). Running wildcard-expanded names through
 ///   `check_highlightable` would instead 400 any schema that merely
 ///   *contains* a non-text field, which is not a shape Solr can produce.
