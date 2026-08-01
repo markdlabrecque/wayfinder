@@ -1890,3 +1890,16 @@ Fixture: `terms_body.json`.
      `text_en`. `terms_body` therefore has a narrow, exact-diff waiver under follow-up #205:
      only `terms.body[14]` changing from `"dai"` to `"day"` is allowed. Its self-expiring guard
      fails when that mismatch disappears, and any additional response difference fails now.
+
+## Finding from issue #150 (duplicate facet local-param keys)
+
+Captured against a one-off `solr:9` container (port 8998, `wayfinder-solr-150`, removed after
+capture), with the tracer-bullet schema and five-document corpus from `solr-ref/capture.sh`
+recreated verbatim. Fixture: `facet_local_params_duplicate_key.json`.
+
+103. **A repeated key inside a `facet.field` local-params block keeps the first value, not the
+     last.** `{!key=a key=b}category` returns category's counts under `"a"`; there is no `"b"`
+     member. This contradicts issue #150's source-based guess that Solr's map write would make
+     the last value win. Wayfinder's ordered `LocalParams::params` plus first-match `get`
+     already agrees. The fixture has a `manifest.tsv` row because it is an ordinary
+     core-relative GET whose JSON the differential harness can represent faithfully.
