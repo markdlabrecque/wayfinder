@@ -143,6 +143,12 @@ pattern = "tm_X3b_en_*"
 type = "text_en"
 multi_valued = true
 stored = true
+
+[[dynamic_fields]]
+pattern = "ss_*"
+type = "string"
+stored = true
+fast = true
 "#;
 
 async fn dotted_app(corpus: &Value) -> (Router, TempDir) {
@@ -211,6 +217,55 @@ async fn dotted_dynamic_field_round_trips_through_terms() {
         Some(&json!(["gamma", 1])),
         "the term dictionary for the dotted dynamic field name must contain \
          the analyzed term(s) the document was indexed with, got {body}"
+    );
+}
+
+/// Tantivy encodes a fast JSON column's path independently from its indexed
+/// term path. Pin the former by sorting a dotted `ss_*` dynamic field: if the
+/// write-side column name and `resolved_fast_column` ever disagree about dot
+/// expansion, this request either errors or treats every value as missing.
+#[tokio::test]
+async fn dotted_fast_dynamic_field_sorts_by_its_column_values() {
+    let corpus = json!([
+        {"id": "d1", "ss_region.code": "fr"},
+        {"id": "d2", "ss_region.code": "de"},
+        {"id": "d3", "ss_region.code": "en"},
+    ]);
+    let (app, _dir) = dotted_app(&corpus).await;
+
+    let (status, body) = get(&app, "select?q=*:*&sort=ss_region.code+asc&fl=id&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    let ids: Vec<&str> = body["response"]["docs"]
+        .as_array()
+        .expect("response.docs must be an array")
+        .iter()
+        .map(|doc| doc["id"].as_str().expect("id must be a string"))
+        .collect();
+    assert_eq!(ids, vec!["d2", "d3", "d1"], "got {body}");
+}
+
+/// Faceting opens the same dotted fast column through a separate production
+/// path. Assert real bucket counts so an absent/mis-encoded column cannot pass
+/// merely by returning a successful but empty facet.
+#[tokio::test]
+async fn dotted_fast_dynamic_field_facets_by_its_column_values() {
+    let corpus = json!([
+        {"id": "d1", "ss_region.code": "en"},
+        {"id": "d2", "ss_region.code": "en"},
+        {"id": "d3", "ss_region.code": "de"},
+    ]);
+    let (app, _dir) = dotted_app(&corpus).await;
+
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=ss_region.code&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/ss_region.code"),
+        Some(&json!(["en", 2, "de", 1])),
+        "the dotted field's fast column must supply the facet buckets, got {body}"
     );
 }
 
