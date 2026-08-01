@@ -174,3 +174,5 @@ facet_local_params_key_empty_remainder	400	select?q=*:*&rows=0&facet=true&facet.
 edismax_unquoted_multitoken	200	select?q=quick%2Brocket&defType=edismax&qf=title+body&fl=id&sort=id+asc&wt=json
 terms_body	200	terms?terms=true&terms.fl=body&omitHeader=true&wt=json
 facet_local_params_duplicate_key	200	select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Da%20key%3Db%7Dcategory&wt=json
+select_json_nl_repeated_map_flat	200	select?q=*:*&rows=0&facet=true&facet.field=category&json.nl=map&json.nl=flat&wt=json
+select_json_nl_flat	200	select?q=*:*&rows=0&facet=true&facet.field=category&json.nl=flat&wt=json

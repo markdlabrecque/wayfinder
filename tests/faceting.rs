@@ -249,6 +249,25 @@ async fn facet_basic_matches_fixture() {
 }
 
 #[tokio::test]
+async fn facet_explicit_json_nl_flat_is_alternating_and_matches_fixture() {
+    let (app, _dir) = indexed_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=category&json.nl=flat&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let expected = fixture("select_json_nl_flat");
+    assert_eq!(
+        flat_facet(&body, "category"),
+        flat_facet(&expected, "category"),
+        "json.nl=flat must render facet buckets as Solr's alternating [term, count, ...] array"
+    );
+    assert_matches_fixture(body, "select_json_nl_flat");
+}
+
+#[tokio::test]
 async fn facet_limit_matches_fixture() {
     let (app, _dir) = indexed_app().await;
     let (status, body) = get(

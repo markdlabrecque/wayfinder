@@ -2133,3 +2133,19 @@ cap terms_body 'terms?terms=true&terms.fl=body&omitHeader=true&wt=json'
 #
 # Reproduce (after recreating the opening schema/corpus on port 8998):
 # cap facet_local_params_duplicate_key 'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Da%20key%3Db%7Dcategory&wt=json'
+
+# --- repeated json.nl resolution on /select (issue #153) -------------------
+# Captured 2026-08-01 against a one-off `solr:9` container on port 8998
+# (`wayfinder-solr-153`, removed afterwards), with the tracer-bullet schema and
+# five-document corpus from the start of this script recreated verbatim. Only
+# these two requests were run; this script was NOT re-run wholesale.
+#
+# The explicit-flat fixture confirms the alternating-array NamedList shape.
+# Solr echoes both values in the repeated fixture's
+# `responseHeader.params.json.nl`, but its shaped `facet_fields.category`
+# object proves the first value (`map`) controls NamedList rendering over the
+# later `flat` value.
+#
+# Reproduce (after recreating the opening schema/corpus on port 8998):
+# cap select_json_nl_flat 'select?q=*:*&rows=0&facet=true&facet.field=category&json.nl=flat&wt=json'
+# cap select_json_nl_repeated_map_flat 'select?q=*:*&rows=0&facet=true&facet.field=category&json.nl=map&json.nl=flat&wt=json'
