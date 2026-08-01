@@ -183,3 +183,86 @@ fn decode(s: &str) -> String {
     }
     String::from_utf8_lossy(&out).into_owned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::split_per_field_key;
+
+    /// The honoured list `check_params` (`src/lib.rs`) passes in. Kept local
+    /// so these cases exercise the split itself, not `PER_FIELD_PARAMS`'s
+    /// current contents.
+    const HONOURED: &[&str] = &["facet.missing"];
+
+    /// The plain case: one undotted field, one honoured base param.
+    #[test]
+    fn splits_a_simple_field_from_its_base_param() {
+        assert_eq!(
+            split_per_field_key("f.category.facet.missing", HONOURED),
+            Some(("category", "facet.missing"))
+        );
+    }
+
+    /// Why the split is anchored on the suffix and not the first `.`: dotted
+    /// dynamic field names are real here (`src/schema.rs`'s patterns, issue
+    /// #180), and a `split_once('.')` would hand back `a` plus a base param of
+    /// `b.facet.missing`, which is in no honoured list -- so the override
+    /// would silently 400 under `strict_params` and be ignored otherwise.
+    #[test]
+    fn anchors_on_the_suffix_so_dotted_field_names_survive() {
+        assert_eq!(
+            split_per_field_key("f.a.b.facet.missing", HONOURED),
+            Some(("a.b", "facet.missing"))
+        );
+        assert_eq!(
+            split_per_field_key("f.ss_field.name.facet.missing", HONOURED),
+            Some(("ss_field.name", "facet.missing"))
+        );
+    }
+
+    /// An empty field name is not a field. `f..facet.missing` must not
+    /// resolve to `Some(("", "facet.missing"))` -- nothing downstream can
+    /// look that up, and accepting it would let `strict_params` wave through
+    /// a malformed param.
+    #[test]
+    fn rejects_an_empty_field_name() {
+        assert_eq!(split_per_field_key("f..facet.missing", HONOURED), None);
+    }
+
+    /// `f.facet.missing` has no field segment at all -- the base param sits
+    /// directly against the `f.` prefix.
+    #[test]
+    fn rejects_a_key_with_no_field_segment() {
+        assert_eq!(split_per_field_key("f.facet.missing", HONOURED), None);
+    }
+
+    /// The base param has to be the whole suffix. Trailing text after it is a
+    /// different param name, not a per-field override of this one.
+    #[test]
+    fn rejects_trailing_text_after_the_base_param() {
+        assert_eq!(
+            split_per_field_key("f.x.facet.missing.extra", HONOURED),
+            None
+        );
+    }
+
+    /// A base param outside the honoured list gets no shape match, however
+    /// well-formed the key is -- this is what keeps unimplemented
+    /// `f.<field>.facet.limit` 400ing under `strict_params`.
+    #[test]
+    fn rejects_a_base_param_outside_the_honoured_list() {
+        assert_eq!(
+            split_per_field_key("f.category.facet.limit", HONOURED),
+            None
+        );
+    }
+
+    /// No `f.` prefix, no per-field shape.
+    #[test]
+    fn rejects_a_key_without_the_f_prefix() {
+        assert_eq!(split_per_field_key("facet.missing", HONOURED), None);
+        assert_eq!(
+            split_per_field_key("fx.category.facet.missing", HONOURED),
+            None
+        );
+    }
+}

@@ -1914,10 +1914,25 @@ echo "  (docker rm -f $FRAGSIZE_CONTAINER to stop)"
 #     present, so its null bucket is present-but-zero, per finding 41a's
 #     unconditional-append rule) proves the global side is still live, not
 #     just silently absent (facet_missing_field_override_mixed_multi_field.json).
-# Deliberately *not* manifest.tsv rows, same reasoning as #138's
-# facet_local_params_key_f_field.json / _f_key.json: Wayfinder does not
-# implement `f.<field>.facet.*` yet, so a row here would only buy a mandatory
-# EXPECTED_DIVERGENCES entry in a file this very issue is about to touch.
+# Deliberately *not* manifest.tsv rows -- but NOT for #138's reason. This
+# block was written before the implementation and originally said "Wayfinder
+# does not implement `f.<field>.facet.*` yet, so a row would only buy a
+# mandatory EXPECTED_DIVERGENCES entry". Issue #140 then implemented
+# `f.<field>.facet.missing` on this very branch, so that rationale expired the
+# moment it landed.
+#
+# The reason they stay out is now narrower: a manifest row hands the whole
+# response body to the differential harness, which compares facet bucket
+# *ordering* verbatim, and that is a distinct question from the precedence
+# semantics these five captures were taken to settle. Promoting them is a
+# deliberate follow-up with its own risk, not a side effect of this issue.
+#
+# The compatibility claim is not unpinned by that: all five bodies are
+# asserted whole, against these exact fixtures, by `assert_matches_fixture` in
+# tests/facet_field_missing_override.rs. Note also that the *other*
+# `f.<field>.facet.*` params (.limit, .mincount, .sort, .prefix) do remain
+# unimplemented and still 400 under strict_params -- see PER_FIELD_PARAMS in
+# src/lib.rs.
 # cap facet_missing_field_override_wins_over_global_true             'select?q=*:*&rows=0&facet=true&facet.field=category&facet.missing=true&f.category.facet.missing=false&wt=json'
 # cap facet_missing_field_override_wins_over_global_false            'select?q=*:*&rows=0&facet=true&facet.field=category&facet.missing=false&f.category.facet.missing=true&wt=json'
 # cap facet_missing_field_override_alone                             'select?q=*:*&rows=0&facet=true&facet.field=category&f.category.facet.missing=true&wt=json'

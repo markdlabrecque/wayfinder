@@ -1692,10 +1692,17 @@ Claiming finding 97 (this block was written against 94 and has been renumbered t
 #139 landed 94/95 first, then issue #154 landed 96).
 
 Captured against a one-off `solr:9` container (port 8992), same schema and 5-doc corpus as the
-reference `content` core (`solr-ref/capture.sh`'s top block). No `manifest.tsv` rows, same
-reasoning as issue #138's `facet_local_params_key_f_field.json` / `_f_key.json`: Wayfinder does
-not implement `f.<field>.facet.*` yet, so a row would only buy a mandatory
-`EXPECTED_DIVERGENCES` entry in a file this issue is about to touch.
+reference `content` core (`solr-ref/capture.sh`'s top block). No `manifest.tsv` rows -- and
+*not* for issue #138's reason. This paragraph was written before the implementation and
+originally read "Wayfinder does not implement `f.<field>.facet.*` yet, so a row would only buy
+a mandatory `EXPECTED_DIVERGENCES` entry"; #140 implemented `f.<field>.facet.missing` on the
+same branch, so that rationale expired on landing. The reason they stay out is now narrower: a
+manifest row feeds the whole body to the differential harness, which compares facet bucket
+*ordering* verbatim -- a separate question from the precedence semantics these captures settle,
+and a deliberate follow-up rather than a side effect of this issue. The claim is still pinned:
+all five bodies are asserted whole against these fixtures by `assert_matches_fixture` in
+`tests/facet_field_missing_override.rs`. The other `f.<field>.facet.*` params (`.limit`,
+`.mincount`, `.sort`, `.prefix`) do remain unimplemented and still 400 under `strict_params`.
 
 97. **`f.<field>.facet.missing` always wins over the global `facet.missing`, unconditionally --
     not merely when the global is unset.** `facet.missing=true&f.category.facet.missing=false`

@@ -50,7 +50,7 @@ use axum::http::StatusCode;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use common::{assert_matches_fixture, corpus, fixture, get, indexed_app, post_docs};
+use common::{assert_matches_fixture, corpus, fixture, get, indexed_app, post_docs, request};
 
 /// `facet_counts.facet_fields.<label>` as the flat alternating array Solr
 /// uses, or `None` when the label is absent entirely.
@@ -425,5 +425,127 @@ async fn strict_params_still_rejects_an_unrelated_f_dot_param() {
     assert!(
         msg.contains("f.category.facet.limit"),
         "error.msg must name the unknown param, got: {msg}"
+    );
+}
+
+// --- 7. the shape is scoped to endpoints that honour the base param ----------
+
+/// `check_params` accepts a per-field key only when its base param is in
+/// *both* `PER_FIELD_PARAMS` and the endpoint's own allowlist. Dropping the
+/// second half — accepting any key whose shape matches, regardless of endpoint
+/// — leaks `f.<field>.facet.missing` into `/update`, `/mlt` and `/terms`, none
+/// of which allow `facet.missing` at all (`UPDATE_PARAMS`, `MLT_PARAMS`,
+/// `TERMS_PARAMS` in `src/lib.rs`). That leak is exactly the silent-wrong-
+/// answer failure `PER_FIELD_PARAMS`' doc comment argues against, and until
+/// this test it was asserted only in prose.
+///
+/// `/update` is checked first because it is the one that takes a body, so a
+/// leak there means an indexing request carrying a nonsense param is accepted
+/// and the param silently dropped.
+#[tokio::test]
+async fn strict_params_rejects_the_per_field_override_on_update() {
+    let (app, _dir) = indexed_app_with_config("strict_params = true\n").await;
+    let (status, body) = request(
+        &app,
+        "POST",
+        "update?commit=true&f.category.facet.missing=true",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "/update does not honour `facet.missing`, so its per-field form must 400 \
+         under strict_params rather than being accepted and ignored, got {body}"
+    );
+    let msg = body
+        .pointer("/error/msg")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        msg.contains("f.category.facet.missing"),
+        "error.msg must name the rejected param, got: {msg}"
+    );
+}
+
+/// Same scoping, on the two other endpoints whose allowlists omit
+/// `facet.missing`. Cheap to cover and it pins that the rule is a property of
+/// `check_params`, not a one-off at `/update`.
+#[tokio::test]
+async fn strict_params_rejects_the_per_field_override_on_mlt_and_terms() {
+    let (app, _dir) = indexed_app_with_config("strict_params = true\n").await;
+
+    let (mlt_status, mlt_body) = get(
+        &app,
+        "mlt?q=id:doc1&mlt.fl=body&f.category.facet.missing=true&wt=json",
+    )
+    .await;
+    assert_eq!(
+        mlt_status,
+        StatusCode::BAD_REQUEST,
+        "/mlt does not honour `facet.missing`, so its per-field form must 400 \
+         under strict_params, got {mlt_body}"
+    );
+    let mlt_msg = mlt_body
+        .pointer("/error/msg")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        mlt_msg.contains("f.category.facet.missing"),
+        "/mlt error.msg must name the rejected param, got: {mlt_msg}"
+    );
+
+    let (terms_status, terms_body) = get(
+        &app,
+        "terms?terms=true&terms.fl=body&f.category.facet.missing=true&wt=json",
+    )
+    .await;
+    assert_eq!(
+        terms_status,
+        StatusCode::BAD_REQUEST,
+        "/terms does not honour `facet.missing`, so its per-field form must 400 \
+         under strict_params, got {terms_body}"
+    );
+    let terms_msg = terms_body
+        .pointer("/error/msg")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        terms_msg.contains("f.category.facet.missing"),
+        "/terms error.msg must name the rejected param, got: {terms_msg}"
+    );
+}
+
+/// A dotted field name end to end, through the real strict-mode
+/// `check_params`. `src/schema.rs`'s dynamic patterns produce field names that
+/// contain dots (issue #180), so anchoring the split on the first `.` instead
+/// of the honoured suffix would truncate `ss_field.name` to `ss_field`, leave
+/// a base param of `name.facet.missing` that is in no allowlist, and 400 a
+/// param Wayfinder supports. `f.a.b.facet.missing` is the minimal shape of
+/// that: no such field needs to exist for the *param check* to be the thing
+/// under test, and an unknown field name is not itself a strict-mode error
+/// (`override_naming_an_unrequested_field_has_no_effect` above relies on the
+/// same).
+#[tokio::test]
+async fn strict_params_accepts_the_override_for_a_dotted_field_name() {
+    let (app, _dir) = indexed_app_with_config("strict_params = true\n").await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=category&f.a.b.facet.missing=true&wt=json",
+    )
+    .await;
+    let msg = body
+        .pointer("/error/msg")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        !msg.contains("unknown request parameter"),
+        "a dotted field name must still match the per-field shape — splitting on \
+         the first `.` would truncate it and 400 a supported param; got: {msg}"
+    );
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "f.a.b.facet.missing must pass strict mode, got {body}"
     );
 }
