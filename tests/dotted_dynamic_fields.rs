@@ -30,8 +30,9 @@
 //!   `expand_dots` is enabled; if it is disabled, the literal `.` byte is
 //!   kept, producing a *one*-segment path containing a literal dot.
 //!
-//! `src/schema.rs` (currently line 705, `JsonObjectOptions::default()...` for
-//! the dynamic catch-all containers) never calls `.set_expand_dots_enabled()`,
+//! `src/schema.rs` (the `JsonObjectOptions::default()` construction site for
+//! the dynamic catch-all containers, in `schema::parse`'s
+//! `catch_all_fields` loop) never calls `.set_expand_dots_enabled()`,
 //! so today the write path is one segment (`"tm_X3b_en_a.b"` literal) and the
 //! read path is two (`"tm_X3b_en_a"` \x01 `"b"`) — different byte sequences,
 //! so the term the query builds never matches the term indexing wrote.
@@ -72,8 +73,9 @@
 //! 1. Confirmed above by reading `tantivy-0.26.1/src/schema/term.rs`,
 //!    `tantivy-common-0.11.0/src/json_path_writer.rs`, and
 //!    `tantivy-0.26.1/src/core/json_utils.rs` directly — not inferred from
-//!    naming. `src/schema.rs:705` is indeed the `JsonObjectOptions::default()`
-//!    construction site for the catch-all containers, with no
+//!    naming. The `JsonObjectOptions::default()` call in `schema::parse`'s
+//!    `catch_all_fields` loop is indeed the construction site for the
+//!    catch-all containers, and pre-fix it had no
 //!    `.set_expand_dots_enabled()` call anywhere in the file (`grep -n
 //!    expand_dots src/schema.rs` — 0 hits besides the field name itself).
 //! 2. Reproduced empirically (not assumed) with a throwaway harness before
@@ -283,6 +285,61 @@ async fn dotted_name_matching_no_dynamic_rule_is_still_rejected() {
         Some(400),
         "got {body}"
     );
+}
+
+/// Two *distinct* dotted names in the **same core** must stay distinct. This
+/// is the one collision class a reader will ask about, given tantivy's own
+/// `expand_dots` docs warn that expanding dots "can lead to ambiguity": the
+/// encoding maps `.` to the `\x01` segment separator, so the question is
+/// whether two names that differ only in dot placement can land on the same
+/// bytes. They cannot here -- `a.b` encodes to `a\x01b` and `a..b` to
+/// `a\x01\x01b` (the empty middle segment survives, per
+/// `dotted_dynamic_field_edge_cases_round_trip` above). So this is a cheap
+/// pin against a future change that over-collapses (e.g. one that "tidies"
+/// empty segments away, or normalises runs of separators), not a suspected
+/// bug today.
+#[tokio::test]
+async fn distinct_dotted_dynamic_names_do_not_collide() {
+    let corpus = json!([
+        {"id": "d1", "tm_X3b_en_a.b": ["alpha"]},
+        {"id": "d2", "tm_X3b_en_a..b": ["beta"]},
+    ]);
+    let (app, _dir) = dotted_app(&corpus).await;
+
+    for (field, token, expected_id) in [
+        ("tm_X3b_en_a.b", "alpha", "d1"),
+        ("tm_X3b_en_a..b", "beta", "d2"),
+    ] {
+        let (status, body) = get(&app, &format!("select?q={field}:{token}")).await;
+        assert_eq!(status, StatusCode::OK, "field {field:?}, got {body}");
+        let ids: Vec<&str> = body
+            .pointer("/response/docs")
+            .and_then(Value::as_array)
+            .map(|docs| {
+                docs.iter()
+                    .filter_map(|d| d.pointer("/id").and_then(Value::as_str))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            ids,
+            vec![expected_id],
+            "querying {field:?} must return only the document indexed under \
+             that exact name, got {body}"
+        );
+    }
+
+    // The cross terms: each name must NOT match the *other* document's token.
+    for (field, token) in [("tm_X3b_en_a.b", "beta"), ("tm_X3b_en_a..b", "alpha")] {
+        let (status, body) = get(&app, &format!("select?q={field}:{token}")).await;
+        assert_eq!(status, StatusCode::OK, "field {field:?}, got {body}");
+        assert_eq!(
+            body.pointer("/response/numFound").and_then(Value::as_u64),
+            Some(0),
+            "field {field:?} must not match a token indexed under the other \
+             dotted name -- the two encodings must stay distinct, got {body}"
+        );
+    }
 }
 
 /// The edge cases point 1 in the task brief named: a leading dot, a trailing

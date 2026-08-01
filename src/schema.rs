@@ -728,13 +728,20 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
         // that one push, producing exactly the read path's bytes.
         //
         // ponytail: this changes the on-disk encoding of dotted dynamic field
-        // names. An existing index holding documents with a dotted dynamic
-        // name must be reindexed -- `check_compatible` compares schema TOML,
-        // not the Tantivy schema, so it will happily adopt such an index and
-        // the old one-segment terms will simply stay unfindable. Ceiling: no
-        // migration and no detection of the stale encoding. Non-dotted names
-        // (the overwhelming majority) are unaffected -- `push` on a
-        // dot-free segment is a no-op.
+        // names, so an existing index holding documents with a dotted dynamic
+        // name must be reindexed to benefit. On such an index the fix is
+        // simply *inert*, not harmful: `CoreIndex::open`
+        // (`src/core_index.rs`, the `create_in_dir(..).or_else(open_in_dir)`
+        // pair) reopens an existing directory with the schema persisted in its
+        // own `meta.json`, where `expand_dots` is still false, and both sides
+        // then read that same opened schema -- `term_for_target` takes the
+        // flag off `self.index.schema()`, and the writer built from that index
+        // encodes with it too. So the pre-fix (broken) one-segment behaviour
+        // is preserved end-to-end until a reindex into a fresh data directory;
+        // there is no mixed-encoding or partially-corrupt state. Ceiling: no
+        // migration and no detection that an opened index predates the fix.
+        // Non-dotted names (the overwhelming majority) are unaffected either
+        // way -- `push` on a dot-free segment is a no-op.
         let opts = JsonObjectOptions::default()
             .set_expand_dots_enabled()
             .set_stored()
