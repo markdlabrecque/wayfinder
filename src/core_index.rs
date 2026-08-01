@@ -22,7 +22,7 @@ use tantivy::aggregation::{
 use tantivy::collector::{Count, DocSetCollector};
 use tantivy::query::{
     AllQuery, BooleanQuery, BoostQuery, DisjunctionMaxQuery, EmptyQuery, ExistsQuery, Occur,
-    PhraseQuery, Query, QueryParser, RegexQuery, TermQuery,
+    PhraseQuery, Query, QueryClone, QueryParser, RegexQuery, TermQuery,
 };
 use tantivy::schema::document::Value as _;
 use tantivy::schema::{Field, IndexRecordOption, OwnedValue};
@@ -38,6 +38,7 @@ use tantivy::{
 use crate::collector::{AllScoredHits, SortClause};
 use crate::config::ServerConfig;
 use crate::edismax;
+use crate::local_params;
 use crate::query::{self, QueryError};
 use crate::schema::{self, ValueKind, WayfinderSchema};
 
@@ -466,6 +467,36 @@ fn combine_occur(outer: Occur, inner: Occur) -> Occur {
         Occur::Must
     } else {
         Occur::Should
+    }
+}
+
+/// The already-built inline nested queries (issue #137) a query string's
+/// sentinel literals stand for, together with the sentinel prefix
+/// `local_params::extract_nested_queries` actually keyed them with.
+///
+/// The prefix travels with the queries rather than being a constant, because
+/// `extract_nested_queries` re-keys it whenever the user's own query text
+/// already contains the base prefix. Resolving against a constant instead would
+/// let user-supplied text be mistaken for a placeholder and silently answer a
+/// different query (round-2 review item 1).
+struct NestedQueries<'a> {
+    sentinel_prefix: &'a str,
+    built: Vec<Box<dyn Query>>,
+}
+
+impl NestedQueries<'_> {
+    /// No local-params block was present, so no literal resolves to anything.
+    const NONE: Self = Self {
+        sentinel_prefix: "",
+        built: Vec::new(),
+    };
+
+    /// The nested query `phrase` stands for, if it is one of *this* rewrite's
+    /// sentinels. An out-of-range index falls through to `None` and so is
+    /// parsed as ordinary text.
+    fn resolve(&self, phrase: &str) -> Option<Box<dyn Query>> {
+        let i = local_params::sentinel_index(self.sentinel_prefix, phrase)?;
+        self.built.get(i).map(|q| q.box_clone())
     }
 }
 
@@ -1021,11 +1052,57 @@ impl CoreIndex {
             .wf_schema
             .field(default_field_name)
             .ok_or_else(|| anyhow!("unknown default field `{default_field_name}`"))?;
-        let rewritten = self.rewrite_dynamic_fields(&self.rewrite_wildcard_subclause(query_str));
+
+        // Inline `{!edismax qf=...}` nested queries (issue #137) are lifted out
+        // *before* the rewrites and the grammar, because neither can see them:
+        // `{`/`!`/a quoted `qf` value are not lucene query syntax to Tantivy's
+        // grammar, which 400s on the raw string. Each block plus its bound
+        // token is replaced by a sentinel literal, so the outer parser still
+        // decides the nested clause's `+`/`-`/paren context itself — see
+        // `crate::local_params`.
+        let lifted = local_params::extract_nested_queries(query_str)
+            .map_err(|msg| anyhow::Error::from(QueryError::Syntax(msg)))?;
+        let (source, nested) = match &lifted {
+            None => (query_str, NestedQueries::NONE),
+            Some(rewritten) => {
+                let mut built: Vec<Box<dyn Query>> = Vec::with_capacity(rewritten.nested.len());
+                for nq in &rewritten.nested {
+                    built.push(self.build_nested_query(nq, default_field_name)?);
+                }
+                (
+                    rewritten.outer.as_str(),
+                    NestedQueries {
+                        // The prefix the rewrite actually used, which is not the
+                        // base constant when `query_str` already contained it.
+                        sentinel_prefix: &rewritten.sentinel_prefix,
+                        built,
+                    },
+                )
+            }
+        };
+
+        let rewritten = self.rewrite_dynamic_fields(&self.rewrite_wildcard_subclause(source));
         let user_ast = tantivy::query_grammar::parse_query(&rewritten)
             .map_err(|_| anyhow!("could not parse query `{query_str}`"))?;
         let parser = QueryParser::for_index(&self.index, vec![default_field]);
-        self.build_ast(user_ast, &parser, default_field_name)
+        self.build_ast(user_ast, &parser, default_field_name, &nested)
+            .map_err(anyhow::Error::from)
+    }
+
+    /// One inline nested query: `{!edismax qf='...'}<bound token>` becomes the
+    /// same `parse_edismax_query` composition a `defType=edismax` request
+    /// would get, over just the block's own `qf` — the nested parser's local
+    /// params are its whole configuration, so no request-level `mm`/`pf`/`bq`/
+    /// `boost`/`tie` leaks in (Solr's nested parsers do inherit request params
+    /// it does not name, but no capture varies any of those alongside a nested
+    /// query, so inheriting nothing is the smaller claim).
+    fn build_nested_query(
+        &self,
+        nq: &local_params::NestedQuery,
+        default_field_name: &str,
+    ) -> Result<Box<dyn Query>> {
+        let qf = nq.local.get("qf").unwrap_or("");
+        self.parse_edismax_query(&nq.text, default_field_name, qf, None, None, 0.0, &[], None)
             .map_err(anyhow::Error::from)
     }
 
@@ -1133,12 +1210,14 @@ impl CoreIndex {
             let built: Box<dyn Query> = match &leaf {
                 tantivy::query_grammar::UserInputLeaf::Literal(lit) if lit.field_name.is_none() => {
                     literal_texts.push(lit.phrase.clone());
-                    self.build_field_disjunction(&lit.phrase, &qf_fields, tie)
+                    let quoted = lit.delimiter != tantivy::query_grammar::Delimiter::None;
+                    self.build_field_disjunction(&lit.phrase, quoted, &qf_fields, tie)
                 }
                 _ => self.build_ast(
                     tantivy::query_grammar::UserInputAst::Leaf(Box::new(leaf)),
                     &parser,
                     default_field_name,
+                    &NestedQueries::NONE,
                 )?,
             };
             clauses.push((occur, Box::new(BoostQuery::new(built, leaf_boost))));
@@ -1308,9 +1387,55 @@ impl CoreIndex {
     /// (for example, an all-stopword `text_en` phrase) is simply absent from
     /// the disjunction rather than contributing an
     /// ill-defined empty clause.
+    ///
+    /// `quoted` says whether the clause was written as a quoted phrase in `q`.
+    /// It decides what a *bare* string that nonetheless analyzes to several
+    /// tokens (`quick+rocket` — `+` is an ordinary term character mid-token in
+    /// Lucene, so this is one clause, not two) becomes: an unquoted
+    /// multi-token clause is an *optional boolean* over its tokens, and only
+    /// an explicitly quoted clause becomes a `PhraseQuery`.
+    ///
+    /// **That split is documentation-derived, not fixture-derived — say so
+    /// rather than dressing it up (issue #147 closes the gap).** Being exact
+    /// about the authority, because the first version of this comment was not:
+    ///
+    /// - The reasoning is Solr's documented default for
+    ///   `autoGeneratePhraseQueries`: off for schema `version >= 1.4`.
+    ///   `solr-ref/search-api/configset/schema.xml:52` declares
+    ///   `version="1.6"`, and **no `autoGeneratePhraseQueries` attribute is
+    ///   set anywhere in the configset** — grepping the whole of `solr-ref/`
+    ///   for the name returns exactly one hit, the XML comment at
+    ///   `schema.xml:63` covered next — so the default is what governs.
+    /// - `schema.xml:63`, which this comment used to cite as if it were the
+    ///   setting, is **inside an XML comment** documenting the history of the
+    ///   `version` attribute. Quoting it alone establishes nothing; it is only
+    ///   evidence of what the default *is*, paired with line 52.
+    /// - **No fixture distinguishes phrase from OR.** All 21
+    ///   `defType=edismax` rows in `solr-ref/manifest.tsv` use either a quoted
+    ///   phrase (`q=%22quick+fox%22`) or `+`-as-space single-token clauses
+    ///   (`q=%2Brocket+%2Blaunch`). Finding 74's fixtures, which motivated the
+    ///   original always-`PhraseQuery` behaviour, are all quoted — which is
+    ///   why the distinction went unnoticed until issue #137's
+    ///   `{!edismax}quick+rocket` probe.
+    /// - The only thing asserting the OR behaviour is the
+    ///   `select.q.local-params-edismax.and` coverage probe, whose expected
+    ///   `Some(2)` was authored **speculatively** in `bb44cc4` (#105) as a
+    ///   placeholder for an entry that could not pass then. It has never been
+    ///   validated against real Solr, which is the inverse of this repo's
+    ///   "fixtures are ground truth" contract.
+    ///
+    /// Issue #147 owns `capture.sh` and will capture
+    /// `q=quick%2Brocket&defType=edismax&qf=<text field>` plus a
+    /// `debugQuery=true` Shape-B trace to settle both this and the binding
+    /// rule against Solr itself. If Solr contradicts the OR reading, this is a
+    /// bug to fix here, not a fixture to normalise away.
+    /// `tests/local_params.rs::phrase_vs_or_is_still_unsettled_by_capture` is
+    /// the expiring guard: it fails once those fixtures land, so this comment
+    /// cannot outlive the evidence gap it describes.
     fn build_field_disjunction(
         &self,
         phrase_text: &str,
+        quoted: bool,
         qf_fields: &[(FieldTarget, f32)],
         tie: f32,
     ) -> Box<dyn Query> {
@@ -1323,12 +1448,25 @@ impl CoreIndex {
                     self.term_for_target(target, only),
                     IndexRecordOption::WithFreqsAndPositions,
                 )),
-                _ => {
+                _ if quoted => {
                     let terms: Vec<Term> = tokens
                         .iter()
                         .map(|t| self.term_for_target(target, t))
                         .collect();
                     Box::new(PhraseQuery::new(terms))
+                }
+                _ => {
+                    let clauses: Vec<(Occur, Box<dyn Query>)> = tokens
+                        .iter()
+                        .map(|t| {
+                            let q: Box<dyn Query> = Box::new(TermQuery::new(
+                                self.term_for_target(target, t),
+                                IndexRecordOption::WithFreqsAndPositions,
+                            ));
+                            (Occur::Should, q)
+                        })
+                        .collect();
+                    Box::new(BooleanQuery::new(clauses))
                 }
             };
             disjuncts.push(Box::new(BoostQuery::new(base, *field_boost)));
@@ -1502,11 +1640,18 @@ impl CoreIndex {
     /// would — no special-casing needed at the outer level, and nothing here
     /// ever injects `AllQuery` into a clause that already carries a
     /// non-`MustNot` sibling.
+    ///
+    /// `nested` carries the already-built inline nested queries (issue #137)
+    /// that `local_params::extract_nested_queries` lifted out of the query
+    /// string, indexed by sentinel; it is `NestedQueries::NONE` for every query
+    /// with no local-params block, which is every caller other than
+    /// `parse_query`.
     fn build_ast(
         &self,
         ast: tantivy::query_grammar::UserInputAst,
         parser: &QueryParser,
         default_field_name: &str,
+        nested: &NestedQueries<'_>,
     ) -> Result<Box<dyn Query>, QueryError> {
         use tantivy::query_grammar::UserInputAst;
         match ast {
@@ -1514,7 +1659,10 @@ impl CoreIndex {
                 let mut clauses = Vec::with_capacity(subqueries.len());
                 for (occur_opt, sub) in subqueries {
                     let occur = occur_opt.unwrap_or(Occur::Should);
-                    clauses.push((occur, self.build_ast(sub, parser, default_field_name)?));
+                    clauses.push((
+                        occur,
+                        self.build_ast(sub, parser, default_field_name, nested)?,
+                    ));
                 }
                 if clauses.is_empty() {
                     return Ok(Box::new(EmptyQuery));
@@ -1525,10 +1673,10 @@ impl CoreIndex {
                 Ok(Box::new(BooleanQuery::new(clauses)))
             }
             UserInputAst::Boost(inner, boost) => {
-                let built = self.build_ast(*inner, parser, default_field_name)?;
+                let built = self.build_ast(*inner, parser, default_field_name, nested)?;
                 Ok(Box::new(BoostQuery::new(built, boost.into_inner() as f32)))
             }
-            UserInputAst::Leaf(leaf) => self.build_leaf(*leaf, parser, default_field_name),
+            UserInputAst::Leaf(leaf) => self.build_leaf(*leaf, parser, default_field_name, nested),
         }
     }
 
@@ -1552,13 +1700,30 @@ impl CoreIndex {
     /// build_query_from_user_input_ast` on a single-leaf sub-AST, reusing
     /// Tantivy's own (already-correct-against-the-fixtures) conversion for
     /// plain terms/phrases/ranges/sets.
+    ///
+    /// A leaf that is one of *this rewrite's* sentinel literals (issue #137 —
+    /// see `NestedQueries`, which carries the possibly-re-keyed prefix)
+    /// resolves to the already-built inline nested query it stands for,
+    /// *before* any other classification: the sentinel occupies the exact
+    /// clause position the `{!edismax ...}` block did, so the surrounding
+    /// `+`/`-`/paren structure the outer parser derived applies to the nested
+    /// query unchanged. A sentinel-shaped literal that is *not* one of this
+    /// rewrite's own falls through and is parsed as ordinary text.
     fn build_leaf(
         &self,
         leaf: tantivy::query_grammar::UserInputLeaf,
         parser: &QueryParser,
         default_field_name: &str,
+        nested: &NestedQueries<'_>,
     ) -> Result<Box<dyn Query>, QueryError> {
         use tantivy::query_grammar::{UserInputAst, UserInputBound, UserInputLeaf};
+
+        if let UserInputLeaf::Literal(literal) = &leaf
+            && literal.field_name.is_none()
+            && let Some(query) = nested.resolve(&literal.phrase)
+        {
+            return Ok(query);
+        }
 
         if leaf_field_name(&leaf).is_some_and(is_dynamic_container_field) {
             return parser

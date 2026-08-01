@@ -1496,3 +1496,71 @@ fragment" to be different answers at all.
     silently reading an empty `mm` as "require every clause". That line is removed -- the general
     path returns the identical value for an empty spec anyway (`split_whitespace` yields no
     token, so the all-required default stands), so it was redundant rather than load-bearing.
+
+## Findings from issue #137 (inline `{!edismax qf='...'}` local params in `q`)
+
+90. **`search_api_solr`'s Shape B `q` is broken against real Solr itself, and Wayfinder now
+    reproduces the breakage.** The captured `/select` handler defaults
+    (`solr-ref/search-api/configset/solrconfig_extra.xml:110-118`) are `defType=lucene`,
+    `df=id`, `omitHeader=true`. So in `q=({!edismax qf='...'}+"quick" +"rocket")` the outer
+    parser is **lucene** and `{!edismax ...}` is an *inline nested query*, not a position-0
+    local-params block that would re-select the parser for the whole `q`. The leading `(`
+    is irrelevant to that: the block is never at position 0 anyway. A lucene inline nested
+    query binds only the **next run of characters** after `}`; everything after that run is
+    parsed by the outer lucene parser against `df`, which here is `id` and matches nothing.
+    All seven captured Shape-B traces fit that model and only that model:
+
+    | trace | text after `}` | numFound | under the model |
+    |---|---|---|---|
+    | 00006 | `+"quick"` | 2 | edismax(`+"quick"`) -> docs 1,3 |
+    | 00005, 00007 | `"quick" "rocket"` | 2 | edismax(`"quick"`) OR `id:"rocket"` (no match) |
+    | 00003 | `+"quick" +"rocket"` | **0** | edismax(`+"quick"`) AND `id:"rocket"` -> 0 |
+    | 00004, 00008 | `+"quick" +"fox"` | **0** | same |
+    | 00021 | `+"qwick"` | 0 | typo, no match |
+
+    00004/00008 is decisive: `entity:node/1` is titled "The quick brown fox..." and its body
+    also contains "quick", so an edismax applied to the *whole remainder* would return it.
+    Real Solr returns 0 because `+"fox"` never reaches edismax at all. Per the compatibility
+    contract the fixtures are ground truth, so `src/local_params.rs` reproduces the low-recall
+    outcome deliberately -- `tests/local_params.rs`'s two `numFound == 0` tests are the guard
+    against a later "obviously more useful" whole-remainder rewrite. A site builder using
+    Shape B gets a search box that returns nothing for multi-word AND queries; that is
+    `search_api_solr`'s bug to fix, not Wayfinder's to paper over.
+
+91. **The bound run's terminators are whitespace *or* an unbalanced `)`, not whitespace
+    alone.** Every captured Shape-B `q` wraps the whole query in `(...)`, so trace 00006's
+    `({!edismax ...}+"quick")` has no whitespace after the bound run at all -- binding purely
+    on whitespace swallows the closing paren and the query fails to parse. `"` is *not* a
+    terminator: every captured bound run is a quoted phrase, optionally `+`-prefixed, and the
+    quotes belong to the nested query's own text. This is what
+    `local_params::bound_token_len` implements. Note the whitespace terminator applies at
+    *any* paren depth, so a bound run that opens a paren and then contains whitespace
+    (`{!edismax ...}(+"quick" +"fox")`) is cut at the whitespace and leaves the outer parser
+    unbalanced text, i.e. a 400. No captured trace sends that shape, so real Solr's answer
+    for it is unverified and nothing pins it; it is named as a ceiling in
+    `src/local_params.rs`'s module doc rather than guessed at.
+
+92. **`autoGeneratePhraseQueries` defaults to *off*, so an unquoted string that analyzes to
+    several tokens is a boolean OR over those tokens, not a phrase query.** **Documentation-
+    derived, not captured — issue #147 settles it.** The configset never *sets* the attribute:
+    `solr-ref/search-api/configset/schema.xml:52` declares `version="1.6"`, and grepping the
+    whole of `solr-ref/` for `autoGeneratePhraseQueries` returns exactly one hit — the XML
+    comment quoted just below — so Solr's documented default for `version >= 1.4` (off)
+    governs. That one hit -- `schema.xml:63`, "autoGeneratePhraseQueries attribute introduced
+    to drive QueryParser behavior when a single string produces multiple tokens. Defaults to off
+    for version >= 1.4" -- is **inside an XML comment** documenting the history of the
+    `version` attribute, and is the line this finding used to be quoted as resting on: it
+    evidences what the default is, it is not a setting, and citing it alone establishes nothing.
+    No fixture distinguishes phrase from OR: all 21 `defType=edismax` rows in
+    `solr-ref/manifest.tsv` use either a quoted phrase or `+`-as-space single-token clauses, and
+    the only assertion of the OR behaviour is the `select.q.local-params-edismax.and` coverage
+    probe, whose expected `Some(2)` was authored speculatively in `bb44cc4` (#105). Issue #147
+    captures `q=quick%2Brocket&defType=edismax&qf=<text field>` to answer it from Solr;
+    `tests/local_params.rs::phrase_vs_or_is_still_unsettled_by_capture` fails once that fixture
+    exists, so this finding cannot outlive the gap. This matters because `+` and `-` are
+    ordinary term characters *mid-token* in Lucene's
+    `_TERM_CHAR` set, so `quick+rocket` is **one** clause whose analysis yields two terms --
+    not two clauses. Wayfinder's `build_field_disjunction` previously made a `PhraseQuery`
+    for any multi-token clause, which is right for finding 74's fixtures (all quoted) and
+    wrong for a bare multi-token string; it now takes the quoted/unquoted distinction from
+    the grammar's own `Delimiter`.
