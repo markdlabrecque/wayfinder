@@ -585,6 +585,49 @@ language = "english"
     );
 }
 
+/// Mutation guard for the duplicate check itself. The test above pins only
+/// the easiest shape -- two identically-configured entries, adjacent -- which
+/// two wrong implementations survive: an adjacent-only `windows(2)` scan, and
+/// a set keyed on `(name, tokenizer)` rather than `name` alone. This case
+/// separates the two duplicates with an unrelated entry *and* gives them
+/// different tokenizers, so it fails under both. `resolve_type` still picks
+/// the first match by name regardless of how the later entry is configured,
+/// so both of these are real duplicates.
+#[test]
+fn duplicate_field_type_names_are_rejected_when_separated_and_differently_configured() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "text_custom_dup"
+tokenizer = "simple"
+
+[[field_types]]
+name = "text_custom_other"
+tokenizer = "simple"
+
+[[field_types]]
+name = "text_custom_dup"
+tokenizer = "whitespace"
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path).expect_err(
+        "two non-adjacent [[field_types]] entries sharing a name must be rejected even when \
+         they are configured differently",
+    );
+    let msg = format!("{err:#}");
+    // `duplicate` is load-bearing here, not decoration: `whitespace` is not a
+    // supported tokenizer, so an implementation that keyed the duplicate check
+    // on `(name, tokenizer)` would let this schema through the guard and then
+    // fail later in `build_analyzer` with a message that also happens to name
+    // `text_custom_dup`. Asserting the *duplicate* error is what distinguishes
+    // the two.
+    assert!(
+        msg.contains("text_custom_dup") && msg.contains("duplicate"),
+        "load must fail with the duplicate-field-type error naming the duplicated type, got: {msg}"
+    );
+}
+
 /// The guard must not over-reject: distinct `[[field_types]]` names are
 /// unrelated to each other and the schema must still load.
 #[test]
