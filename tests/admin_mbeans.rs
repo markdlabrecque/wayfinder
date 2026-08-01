@@ -53,18 +53,42 @@
 //! exactly what `human_size` already produces (1 decimal, binary steps,
 //! `"{value:.1} {unit}"`) -- no unit-spelling mismatch to fix.
 //!
-//! **Ambiguity flagged, not guessed silently:** the trace renders
-//! `softAutoCommitMaxTime` as the STRING `"5000ms"` (with a unit suffix),
-//! while `docsPending`/`deletesById`/`deletesByQuery` are plain JSON
-//! integers. The PHP consumer only ever does `(int) $value` on it, which
-//! tolerates either a bare int or an `"Nms"`-suffixed string equally well,
-//! and (per the "not in this ticket" note above) no manifest/differential
-//! row enforces exact wire fidelity for this endpoint. This suite asserts a
-//! bare JSON integer for `softAutoCommitMaxTime` (consistent with the other
-//! three numeric UPDATE leaves, and simpler for Wayfinder to produce and to
-//! test) rather than reproducing Solr's `"Nms"` cosmetic suffix. If the
-//! implementor's read of the ticket differs, this is the assertion to
-//! renegotiate, not silently reinterpret.
+//! **Ambiguity raised, then resolved against the fixture (not guessed):**
+//! an earlier draft of this suite asserted a bare JSON integer for
+//! `softAutoCommitMaxTime`, reasoning that the PHP consumer only ever does
+//! `(int) $value` on it and no manifest/differential row enforces exact
+//! wire fidelity for this endpoint. Both points are true but neither
+//! licenses the divergence -- the compatibility contract says expected
+//! values come from the fixtures, never from what is convenient to
+//! produce, and "nothing external would catch it" is an argument for
+//! pinning the value here, not for skipping it. Checked directly against
+//! `solr-ref/search-api/trace/00025.json`:
+//! `.response.body.solr-mbeans.UPDATE.updateHandler.stats["UPDATE.updateHandler.softAutoCommitMaxTime"]`
+//! is the STRING `"5000ms"` (with `"UPDATE.updateHandler.autoCommitMaxTime"`
+//! alongside it as `"15000ms"`, same shape, not asserted by this suite).
+//! `mbeans_soft_auto_commit_max_time_reflects_configured_autocommit_max_time`
+//! below now asserts that string form, built from the configured
+//! millisecond value, so a hardcoded `"5000ms"` in the handler cannot pass.
+//!
+//! The paired "-1 when unset" assertion was also wrong, for a different
+//! reason: `-1` is `SolrConnectorPluginBase::getStatsSummary()`'s own
+//! default for a *missing* key, not a value Solr ever puts on the wire.
+//! The relevant lines (coverage/search_api_solr_4.4.0_source/src/
+//! SolrConnector/SolrConnectorPluginBase.php:787-793) are:
+//!
+//! ```php
+//! $max_time = -1;
+//! if (isset($update_handler_stats['UPDATE.updateHandler.softAutoCommitMaxTime'])) {
+//!   $max_time = (int) $update_handler_stats['UPDATE.updateHandler.softAutoCommitMaxTime'];
+//! }
+//! ```
+//!
+//! The `isset` guard exists because Solr omits the key entirely when soft
+//! autocommit is disabled -- so the faithful behaviour when
+//! `config.commit.autocommit_max_time` is unset is the KEY BEING ABSENT
+//! from `UPDATE.updateHandler.stats`, not present with a sentinel `-1`.
+//! `mbeans_soft_auto_commit_max_time_is_absent_when_unset` below now
+//! asserts absence of the key itself.
 //!
 //! Delete-counter increment granularity is also a judgment call, stated
 //! here rather than left implicit: Solr's JSON update loader turns a
@@ -540,16 +564,19 @@ async fn mbeans_index_size_tracks_real_on_disk_size_growth() {
     );
 }
 
-// --- softAutoCommitMaxTime: config-driven, -1 when unset --------------------
+// --- softAutoCommitMaxTime: config-driven "<N>ms" string, absent when unset -
 
 #[tokio::test]
 async fn mbeans_soft_auto_commit_max_time_reflects_configured_autocommit_max_time() {
     let dir = TempDir::new().expect("temp dir");
     let core = "mbeans_softcommit_configured";
+    let configured_ms = 5000;
     let app = build_mbeans_app(
         dir.path(),
         core,
-        Some("[commit]\nautocommit_max_time = 5000\n"),
+        Some(&format!(
+            "[commit]\nautocommit_max_time = {configured_ms}\n"
+        )),
     )
     .expect("app must build");
     let (status, body) = get_m(&app, core, "admin/mbeans?stats=true&wt=json").await;
@@ -558,26 +585,29 @@ async fn mbeans_soft_auto_commit_max_time_reflects_configured_autocommit_max_tim
         body.pointer(
             "/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.softAutoCommitMaxTime"
         ),
-        Some(&json!(5000)),
-        "softAutoCommitMaxTime must reflect config.commit.autocommit_max_time verbatim (ms), \
+        Some(&json!(format!("{configured_ms}ms"))),
+        "softAutoCommitMaxTime must reflect config.commit.autocommit_max_time as Solr's own \
+         \"<N>ms\" string (per solr-ref/search-api/trace/00025.json, not a bare integer), \
          got: {body}"
     );
 }
 
 #[tokio::test]
-async fn mbeans_soft_auto_commit_max_time_is_minus_one_when_unset() {
+async fn mbeans_soft_auto_commit_max_time_is_absent_when_unset() {
     let dir = TempDir::new().expect("temp dir");
     let core = "mbeans_softcommit_unset";
     let app = build_mbeans_app(dir.path(), core, None).expect("app must build");
     let (status, body) = get_m(&app, core, "admin/mbeans?stats=true&wt=json").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    assert_eq!(
+    assert!(
         body.pointer(
             "/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.softAutoCommitMaxTime"
-        ),
-        Some(&json!(-1)),
-        "softAutoCommitMaxTime must be -1 when autocommit_max_time is unset, matching the \
-         module's own `$max_time = -1` initialization, got: {body}"
+        )
+        .is_none(),
+        "the key must be ABSENT when autocommit_max_time is unset -- Solr omits it entirely \
+         when soft autocommit is disabled, and SolrConnectorPluginBase's `isset(...)` guard \
+         (SolrConnectorPluginBase.php:789-792) only falls back to its own `-1` default when the \
+         key is missing, so `-1` is never a value Solr puts on the wire, got: {body}"
     );
 }
 
