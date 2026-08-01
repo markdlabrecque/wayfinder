@@ -2,7 +2,8 @@
 
 A Solr-wire-compatible search backend in Rust, built on Tantivy: one static
 binary, one schema file, one data directory. No JVM, no ZooKeeper, no config-set
-upload. See `docs/PRD.md` for scope and phases.
+upload. See `docs/PRD.md` for scope and phases, and [`docs/deployment.md`](docs/deployment.md)
+for the supported TLS deployment model.
 
 ## Running
 
@@ -112,10 +113,12 @@ checks, where `<configured-core>` is the core name in the schema:
 A ping for a different core, or a longer look-alike path, is protected. Failed authentication returns HTTP 401 with `WWW-Authenticate: Basic realm="solr"` and Wayfinder's JSON error envelope. Real Solr 9's BasicAuthPlugin returned Jetty HTML in the captured failure cases; Wayfinder deliberately stays JSON-only (PRD §2, divergence 9).
 
 **Security warning:** HTTP Basic authentication is plaintext-equivalent: it
-base64-encodes credentials but does not encrypt them. Use it only on loopback or
-a private, trusted network, or behind TLS termination. The two public ping paths
-also disclose health without credentials; restrict network access if that is not
-acceptable.
+base64-encodes credentials but does not encrypt them. Wayfinder intentionally
+serves HTTP only; use it on loopback or a private, trusted network, and terminate
+TLS at a reverse proxy for non-colocated clients. The two public ping paths also
+disclose health without credentials. The [deployment guide](docs/deployment.md)
+shows a Caddy configuration that keeps the HTTP listener private and blocks those
+paths at the public proxy.
 
 ### Which knobs are live today
 
