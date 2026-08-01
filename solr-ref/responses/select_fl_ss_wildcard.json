@@ -1,0 +1,9 @@
+{
+  "response":{"numFound":1,"start":0,"numFoundExact":true,"docs":[
+      {
+        "ss_field_sku":"ART-001",
+        "ss_type":"article",
+        "ss_search_api_datasource":"entity:node",
+        "ss_search_api_id":"entity:node/1:en",
+        "ss_search_api_language":"en"}]
+  }}

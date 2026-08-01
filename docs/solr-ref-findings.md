@@ -2052,3 +2052,9 @@ schema and five-document corpus from `solr-ref/capture.sh` recreated verbatim. F
      reproducing Jetty's page is not worth it. The accept side *is* fixtured:
      `bool_omit_header_yes.json` shows `omitHeader=yes` suppressing `responseHeader` exactly as
      `omitHeader=true` does.
+
+## Finding from issue #196 (partial `fl` pattern capture)
+
+116. **On the Search API corpus, `fl=ss_*` returns HTTP 200 and only the five matching `ss_*`
+     fields, excluding `id` and `timestamp`.** `select_fl_ss_wildcard.json` is the captured
+     evidence for this field-selection result.

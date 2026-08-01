@@ -348,6 +348,50 @@ async fn select_fl_star_expands_stored_dynamic_fields_too() {
     );
 }
 
+/// Real Solr's Search API configset/corpus response for `fl=ss_*`.
+/// `WILDCARD_SCHEMA_TOML` reduces that captured pattern to one stored matching
+/// field plus an unrelated stored `id`, so an exact response proves both
+/// pattern expansion and exclusion.
+#[tokio::test]
+async fn select_fl_partial_ss_wildcard_expands_only_matching_stored_dynamic_fields() {
+    let captured = fixture("select_fl_ss_wildcard");
+    let captured_doc = captured
+        .pointer("/response/docs/0")
+        .and_then(Value::as_object)
+        .expect("select_fl_ss_wildcard fixture must contain one response document");
+    let captured_keys: Vec<_> = captured_doc.keys().map(String::as_str).collect();
+    assert_eq!(
+        captured_keys,
+        vec![
+            "ss_field_sku",
+            "ss_type",
+            "ss_search_api_datasource",
+            "ss_search_api_id",
+            "ss_search_api_language",
+        ],
+        "vacuity guard: the fixture must establish every `ss_*` key returned by Solr"
+    );
+    assert!(
+        !captured_doc.contains_key("id") && !captured_doc.contains_key("timestamp"),
+        "vacuity guard: `fl=ss_*` must exclude unrelated stored fields, got {captured}"
+    );
+    let expected_sku = captured_doc
+        .get("ss_field_sku")
+        .cloned()
+        .expect("vacuity guard: fixture must include ss_field_sku");
+
+    let (app, _dir) = wildcard_app().await;
+    let (status, body) = get(&app, "select?q=id:d1&fl=ss_*&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        body.pointer("/response/docs/0"),
+        Some(&json!({"ss_field_sku": expected_sku})),
+        "issue #196: partial `fl` patterns must expand over stored dynamic fields and exclude \
+         unrelated ones. Today `render_doc` treats `ss_*` as a literal field name and returns \
+         an empty document, got: {body}"
+    );
+}
+
 /// The non-vacuous version of `select_fl_star_plus_score_puts_score_last`.
 ///
 /// That test runs against the canonical 5-doc corpus, which has **no dynamic

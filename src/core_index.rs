@@ -590,6 +590,55 @@ impl FieldTarget {
     }
 }
 
+/// Matches one `fl` member against a stored field name. Only `*` has glob
+/// meaning here; every other character, including `?`, remains literal.
+fn fl_pattern_matches(pattern: &str, name: &str) -> bool {
+    let (mut pattern_at, mut name_at) = (0, 0);
+    let mut last_star = None;
+    let mut star_match_at = 0;
+
+    while name_at < name.len() {
+        if pattern_at < pattern.len() && pattern.as_bytes()[pattern_at] == b'*' {
+            last_star = Some(pattern_at);
+            pattern_at += 1;
+            star_match_at = name_at;
+        } else if pattern_at < pattern.len()
+            && pattern[pattern_at..]
+                .chars()
+                .next()
+                .is_some_and(|pattern_char| {
+                    name[name_at..]
+                        .chars()
+                        .next()
+                        .is_some_and(|name_char| pattern_char == name_char)
+                })
+        {
+            pattern_at += pattern[pattern_at..]
+                .chars()
+                .next()
+                .expect("pattern character exists")
+                .len_utf8();
+            name_at += name[name_at..]
+                .chars()
+                .next()
+                .expect("name character exists")
+                .len_utf8();
+        } else if let Some(star_at) = last_star {
+            pattern_at = star_at + 1;
+            star_match_at += name[star_match_at..]
+                .chars()
+                .next()
+                .expect("star can consume a remaining name character")
+                .len_utf8();
+            name_at = star_match_at;
+        } else {
+            return false;
+        }
+    }
+
+    pattern[pattern_at..].bytes().all(|byte| byte == b'*')
+}
+
 pub struct CoreIndex {
     pub wf_schema: WayfinderSchema,
     /// The directory this core's segments live in. Kept so read-only
@@ -2106,10 +2155,9 @@ impl CoreIndex {
     /// (`solr-ref/search-api/trace/00010.json`). `fl`'s own member order never
     /// drives it (`solr-ref/responses/select_fl_reversed.json`).
     ///
-    /// ponytail: `*` is the only glob understood. Solr also accepts a partial
-    /// pattern (`fl=ss_*`, `fl=*_txt`) and the wildcard is per-`fl`-member
-    /// there; here anything other than a bare `*` stays a literal name. No
-    /// captured fixture sends a partial pattern.
+    /// A `*` in any `fl` member matches zero or more field-name characters,
+    /// so partial patterns such as `ss_*` and `*_txt` filter the same declared
+    /// and dynamic stored-field set as literal `fl` members do.
     pub fn render_doc(
         &self,
         addr: DocAddress,
@@ -2119,10 +2167,10 @@ impl CoreIndex {
         let searcher = self.reader.searcher();
         let doc: TantivyDocument = searcher.doc(addr)?;
 
-        // An absent `fl` and an `fl` containing `*` want the same field set, so
-        // both loops below ask this rather than matching literal names.
+        // An absent `fl` selects every stored field; otherwise each member is
+        // a literal name or a `*` pattern evaluated against both field loops.
         let wants =
-            |name: &str| fl.is_none_or(|fl| fl.iter().any(|want| want == "*" || want == name));
+            |name: &str| fl.is_none_or(|fl| fl.iter().any(|want| fl_pattern_matches(want, name)));
 
         let wanted: Vec<&schema::FieldConfig> = self
             .wf_schema
@@ -3279,6 +3327,14 @@ mod tests {
 
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn fl_pattern_matches_backtracks_across_repeated_literals() {
+        assert!(fl_pattern_matches("ss_*", "ss_field"));
+        assert!(fl_pattern_matches("*_txt", "alpha_txt_beta_txt"));
+        assert!(fl_pattern_matches("*a*b", "aXbYb"));
+        assert!(!fl_pattern_matches("*_txt", "alpha_txt_beta_txt_suffix"));
+    }
 
     const SCHEMA_TOML: &str = r#"
 [core]

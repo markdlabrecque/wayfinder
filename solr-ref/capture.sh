@@ -2355,3 +2355,39 @@ cap bool_facet_missing_invalid    "$BOOL_BASE&facet.missing=nope&wt=json"
 cap bool_facet_on      'select?q=*:*&rows=0&facet=on&facet.field=category&wt=json'
 cap bool_facet_invalid 'select?q=*:*&rows=0&facet=1&facet.field=category&wt=json'
 cap bool_omit_header_yes 'select?q=*:*&rows=0&omitHeader=yes&wt=json'
+
+# --- partial `fl=ss_*` pattern expansion (issue #196) ----------------------
+# A Search API configset/corpus probe must not touch the tracer-bullet core:
+# its schema and corpus differ, and this fixture is not a manifest row because
+# the differential harness cannot replay it against that core. Recreate this
+# one-off container every run so the capture is self-contained and stable.
+FL196_CONTAINER=wayfinder-solr-196
+FL196_PORT=9000
+FL196_CORE=search_api_fl_196
+FL196_SOLR=http://127.0.0.1:$FL196_PORT/solr
+FL196_CONFIGSET=/opt/solr/server/solr/configsets/search-api
+FL196_CORPUS=$(mktemp)
+docker rm -f "$FL196_CONTAINER" >/dev/null 2>&1 || true
+docker run -d --name "$FL196_CONTAINER" -p "127.0.0.1:$FL196_PORT:8983" \
+  -e SOLR_MODULES=analysis-extras \
+  -v "$HERE/search-api/configset:$FL196_CONFIGSET:ro" \
+  solr:9 solr-precreate "$FL196_CORE" "$FL196_CONFIGSET" >/dev/null
+printf 'waiting for issue #196 Solr'
+for _ in $(seq 60); do
+  if curl -sf "$FL196_SOLR/$FL196_CORE/admin/ping?wt=json" >/dev/null 2>&1; then
+    echo ' ok'
+    break
+  fi
+  printf '.'
+  sleep 1
+done
+curl -sf "$FL196_SOLR/$FL196_CORE/admin/ping?wt=json" >/dev/null
+jq -r '.request.body' "$HERE/search-api/trace/00001.json" > "$FL196_CORPUS"
+curl -sf "$FL196_SOLR/$FL196_CORE/update?commit=true&wt=json" \
+  -H 'Content-Type: application/json' --data-binary "@$FL196_CORPUS" >/dev/null
+rm -f "$FL196_CORPUS"
+curl -sSf \
+  "$FL196_SOLR/$FL196_CORE/select?q=ss_field_sku%3AART-001&fl=ss_%2A&rows=1&wt=json&omitHeader=true" \
+  -o "$OUT/select_fl_ss_wildcard.json"
+echo "captured select_fl_ss_wildcard.json from '$FL196_CONTAINER' (port $FL196_PORT)"
+docker rm -f "$FL196_CONTAINER" >/dev/null
