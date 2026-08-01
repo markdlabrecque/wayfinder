@@ -715,7 +715,35 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
         } else {
             "raw"
         };
+        // Dot expansion has to be on: the read path splits a dynamic field
+        // name on `.` unconditionally. `Term::from_field_json_path`
+        // (tantivy-0.26.1 `schema/term.rs:78`) always runs `split_json_path`,
+        // which splits on every unescaped `.` regardless of the `expand_dots`
+        // argument, so a query for `tm_X3b_en_a.b` always addresses the two
+        // segments `tm_X3b_en_a` \x01 `b`. Indexing pushes the whole dynamic
+        // name as one JSON key, so without this the write side stores a
+        // single segment containing a literal `.` and the two never meet
+        // (issue #164: `numFound: 0`, empty `/terms`). With it,
+        // `JsonPathWriter::push` does a byte-for-byte `.` -> \x01 swap inside
+        // that one push, producing exactly the read path's bytes.
+        //
+        // ponytail: this changes the on-disk encoding of dotted dynamic field
+        // names, so an existing index holding documents with a dotted dynamic
+        // name must be reindexed to benefit. On such an index the fix is
+        // simply *inert*, not harmful: `CoreIndex::open`
+        // (`src/core_index.rs`, the `create_in_dir(..).or_else(open_in_dir)`
+        // pair) reopens an existing directory with the schema persisted in its
+        // own `meta.json`, where `expand_dots` is still false, and both sides
+        // then read that same opened schema -- `term_for_target` takes the
+        // flag off `self.index.schema()`, and the writer built from that index
+        // encodes with it too. So the pre-fix (broken) one-segment behaviour
+        // is preserved end-to-end until a reindex into a fresh data directory;
+        // there is no mixed-encoding or partially-corrupt state. Ceiling: no
+        // migration and no detection that an opened index predates the fix.
+        // Non-dotted names (the overwhelming majority) are unaffected either
+        // way -- `push` on a dot-free segment is a no-op.
         let opts = JsonObjectOptions::default()
+            .set_expand_dots_enabled()
             .set_stored()
             .set_fast(Some(tokenizer))
             .set_indexing_options(
