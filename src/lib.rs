@@ -142,6 +142,14 @@ const ADMIN_INFO_PARAMS: &[&str] = &["wt", "json.nl"];
 /// `<core>/schema/fieldtypes` (issue #156). The captured request
 /// (`solr-ref/search-api/trace/00020.json`) sends exactly these two.
 const SCHEMA_FIELDTYPES_PARAMS: &[&str] = &["wt", "json.nl"];
+/// `<core>/admin/luke` (issue #157). The captured request
+/// (`solr-ref/search-api/trace/00024.json`) sends only `wt`/`json.nl`; the
+/// other three are the params real Solr's LukeRequestHandler takes that a
+/// client might plausibly send. `numTerms`, `show` and `fl` have no behaviour
+/// here (no term histograms, no `show=schema` variant, no per-field
+/// selection), and are accepted-and-ignored on purpose: 400ing a param Solr
+/// serves would be a worse divergence than answering the full response.
+const ADMIN_LUKE_PARAMS: &[&str] = &["wt", "json.nl", "numTerms", "show", "fl"];
 /// `/mlt` params in scope for issue #6 (PRD §5's MoreLikeThis row). `q`
 /// selects the source doc with the same query-parsing semantics as
 /// `/select`'s `q` (hence `df` alongside it); `fl`/`rows`/`start` page the
@@ -174,6 +182,7 @@ macro_rules! search_api_routes {
             ("/solr/admin/info/system", admin_info_system, any_method),
             ("/solr/{core}/admin/system", core_admin_system, any_method),
             ("/solr/{core}/schema/fieldtypes", schema_fieldtypes, any_method),
+            ("/solr/{core}/admin/luke", admin_luke, any_method),
         }
     };
 }
@@ -1125,6 +1134,136 @@ async fn schema_fieldtypes(
             "QTime": 0,
         },
         "fieldTypes": field_types,
+    });
+    Ok(axum::Json(body).into_response())
+}
+
+/// The `index{}` keys of `/admin/luke` that describe *Lucene's* identity for a
+/// segment set rather than the core's contents: static, plausible placeholders,
+/// same precedent as `admin_info_jvm_system_security`. Nothing reads them —
+/// the endpoint's only client consumer (`SearchApiSolrBackend::getLuke()`)
+/// reads `index.numDocs` and nothing else — and each one would be fiction if
+/// computed:
+///
+/// - `version` is Lucene's monotonic index-version counter, `current` its
+///   "is the open reader the newest commit" flag (real Solr reports `false`
+///   here even on a quiet core, per the trace); tantivy exposes neither.
+/// - `directory` is a Java class-name dump of the `Directory` chain
+///   (`NRTCachingDirectory(MMapDirectory@...)`) — Wayfinder has an MmapDirectory
+///   from tantivy, not that stack, so any string here names classes that do
+///   not exist in this process.
+/// - `segmentsFile`/`segmentsFileSizeInBytes` name the Lucene `segments_N`
+///   commit point; tantivy's equivalent is `meta.json` and its generation is
+///   not a Lucene one. Solr itself reports `-1` for the size in the trace.
+/// - `indexHeapUsageBytes` is Lucene's per-reader RAM accounting, which
+///   tantivy does not report; real Solr also omits it in the captured trace.
+/// - `userData` is the Lucene commit-userdata map, empty in the trace.
+/// - `lastModified` is only emitted by real Solr when the commit carries a
+///   `commitTimeMSec` in that userdata; the trace has none, so the honest
+///   mirror of the captured shape is to leave both out together.
+fn admin_luke_index_placeholders() -> Vec<(&'static str, Value)> {
+    vec![
+        ("version", json!(1)),
+        ("current", json!(false)),
+        ("directory", json!("org.apache.lucene.store.MMapDirectory")),
+        ("segmentsFile", json!("segments_1")),
+        ("segmentsFileSizeInBytes", json!(-1)),
+        ("userData", json!({})),
+    ]
+}
+
+/// One `fields{}` entry: the field's declared type plus the flags Wayfinder
+/// genuinely applies to it, read off the live `[[fields]]` config.
+///
+/// Deliberately absent — and this is the reason the endpoint carries no
+/// `manifest.tsv` row (PRD section 5, v2.75) — are the Lucene-internal keys the
+/// trace shows: the `schema`/`index` flag strings (`ITS-----OF-----`, whose
+/// letters are Lucene `FieldInfo` bits), `topTerms` and `histogram`. Wayfinder
+/// has no Lucene index internals to read them from, nobody reads them (see
+/// `admin_luke`), and a plausible-looking fake flag string would be worse than
+/// an omitted key because it would read as authoritative. `docs` (per-field
+/// document frequency) is out for the same reason as `numTerms`: it is a term-
+/// dictionary walk this endpoint's one consumer does not ask for.
+///
+/// The boolean flags are the other direction — an honest *addition*, exactly as
+/// in `field_type_entry` (issue #156): they carry the same information the
+/// dropped `schema` string encodes, in the vocabulary Solr's own Schema API
+/// uses (`stored`/`multiValued`/`docValues`/`required`), and are real per-field
+/// values rather than a decoded fiction. `indexed` is unconditionally true
+/// because `schema::build` gives every declared field indexing options; `fast`
+/// is Wayfinder's spelling of docValues.
+fn luke_field_entry(field: &schema::FieldConfig) -> Value {
+    json!({
+        "type": field.type_,
+        "indexed": true,
+        "stored": field.stored,
+        "multiValued": field.multi_valued,
+        "docValues": field.fast,
+        "required": field.required,
+    })
+}
+
+/// `/solr/{core}/admin/luke` — index statistics and the field list (issue
+/// #157, reversing the #57 descope for this endpoint).
+///
+/// The one real consumer is `search_api_solr`'s
+/// `SearchApiSolrBackend::getServerInfo()` path, which calls `getLuke()` and
+/// reads `$data['index']['numDocs']` — that is the whole consumption, and it
+/// becomes the "N items indexed" line on Drupal's server-status screen. So the
+/// four count fields are real, read per request from the live core's searcher
+/// (`CoreIndex::doc_count`/`deleted_doc_count`/`segment_count`, the same
+/// searcher `/select` answers from, so this page cannot disagree with a query),
+/// and the Lucene-identity fields are static placeholders
+/// (`admin_luke_index_placeholders` names each one and why).
+///
+/// `maxDoc` is `numDocs + deletedDocs` because that is what Lucene's maxDoc is:
+/// the addressable doc-id space of the current segments, tombstones included.
+///
+/// `fields{}` is derived from the live `[[fields]]` schema, not the index's
+/// `FieldInfo`s. That means dynamic-field *instances* do not appear: Wayfinder
+/// stores every dynamic value in the shared `_dynamic`/`_dynamic_text` tantivy
+/// fields (`schema::DYNAMIC_FIELD`), so there is no per-instance field in the
+/// index to enumerate, and inventing one entry per observed dynamic key would
+/// be a term walk reporting a field that does not exist in the schema.
+async fn admin_luke(
+    State(state): State<Arc<AppState>>,
+    AxPath(core): AxPath<String>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, WfError> {
+    let params = Params::parse(query.as_deref().unwrap_or(""));
+    check_core(&state, &core, &params, Envelope::WithParams)?;
+    check_params(&state, ADMIN_LUKE_PARAMS, &params)?;
+
+    let num_docs = state.index.doc_count();
+    let deleted_docs = state.index.deleted_doc_count();
+    let mut index = Map::new();
+    index.insert("numDocs".to_string(), json!(num_docs));
+    index.insert("maxDoc".to_string(), json!(num_docs + deleted_docs));
+    index.insert("deletedDocs".to_string(), json!(deleted_docs));
+    index.insert("hasDeletions".to_string(), json!(deleted_docs > 0));
+    index.insert(
+        "segmentCount".to_string(),
+        json!(state.index.segment_count()),
+    );
+    for (key, value) in admin_luke_index_placeholders() {
+        index.insert(key.to_string(), value);
+    }
+
+    let fields: Map<String, Value> = state
+        .index
+        .wf_schema
+        .fields
+        .iter()
+        .map(|field| (field.name.clone(), luke_field_entry(field)))
+        .collect();
+
+    let body = json!({
+        "responseHeader": {
+            "status": 0,
+            "QTime": 0,
+        },
+        "index": index,
+        "fields": fields,
     });
     Ok(axum::Json(body).into_response())
 }

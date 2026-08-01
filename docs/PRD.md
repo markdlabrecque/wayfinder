@@ -594,6 +594,19 @@ omission *and* an addition: it omits the Lucene analyzer chains
 adds `indexed`/`stored`/`multiValued`/`docValues` to every entry where Solr emits them sparsely,
 because those four are Wayfinder's real uniform type-level defaults and no client reads them.
 
+`admin/luke` (#157) lands under the same rule. Its `index{}` block reports real values for the
+four figures that describe the core's contents -- `numDocs`, `maxDoc`, `deletedDocs`,
+`segmentCount`, all read per request off the same searcher `/select` answers from -- and static
+placeholders for the Lucene-identity keys (`version`, `current`, `directory`, `segmentsFile`,
+`segmentsFileSizeInBytes`, `userData`); `indexHeapUsageBytes` and `lastModified` are omitted, as
+real Solr omits them in the captured trace. Its recorded divergences in `fields{}` are again an
+omission and an addition: it omits the per-field `schema`/`index` flag strings (Lucene `FieldInfo`
+bits), `docs`, `topTerms` and `histogram`, and adds `indexed`/`stored`/`multiValued`/`docValues`/
+`required` booleans, which carry the same information the flag string encodes but as real values
+from the live `[[fields]]` schema rather than a fabricated bitmask. Dynamic-field *instances* do
+not appear in `fields{}`: Wayfinder stores every dynamic value in the shared `_dynamic` container,
+so there is no per-instance field in the index to enumerate.
+
 **The coverage instrument.** The capture yields the denominator: the set of params, endpoints,
 and response fields the module can emit across its configured features. Coverage is the fraction
 of that set Wayfinder serves, computed from the fixtures rather than asserted. Report it

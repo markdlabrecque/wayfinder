@@ -342,6 +342,51 @@ async fn luke_strict_params_rejects_an_unknown_param() {
     assert_eq!(body["error"]["code"].as_u64(), Some(400));
 }
 
+/// Mutation guard for the `check_core` call in the handler, added by the
+/// implementor (the spec named this guard explicitly: sibling #156 shipped
+/// without it and the reviewer caught it). Without `check_core`,
+/// `GET /solr/nosuchcore/admin/luke` would report the real core's doc count
+/// under any core name at all. Verified by deletion: removing the
+/// `check_core` line makes this test fail with 200, and nothing else in the
+/// suite notices.
+#[tokio::test]
+async fn luke_unknown_core_is_a_json_404() {
+    let (app, _dir) = common::indexed_app().await;
+
+    let (status, body) = request_full(
+        &app,
+        "GET",
+        "nosuchcore/admin/luke?wt=json&json.nl=flat",
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an unknown core must 404, got: {body}"
+    );
+    let header = body
+        .get("responseHeader")
+        .unwrap_or_else(|| panic!("the WithParams envelope carries responseHeader, got: {body}"));
+    assert_eq!(header["status"].as_u64(), Some(404), "body: {body}");
+    assert!(
+        header.get("params").is_some(),
+        "this route uses the WithParams envelope, so params are echoed, got: {body}"
+    );
+    assert_eq!(body["error"]["code"].as_i64(), Some(404), "body: {body}");
+    assert!(
+        body["error"]["msg"]
+            .as_str()
+            .is_some_and(|m| m.contains("nosuchcore")),
+        "error.msg must name the unknown core, got: {body}"
+    );
+    assert!(
+        body.get("index").is_none(),
+        "an unknown core must not leak the real core's index stats, got: {body}"
+    );
+}
+
 /// Not-yet-routed baseline: today `GET /solr/{core}/admin/luke` 404s (no
 /// route). `request_full`/`CORE` are only used here to keep the import from
 /// being flagged unused by a future refactor of the tests above; the
