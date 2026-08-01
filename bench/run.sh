@@ -194,8 +194,6 @@ docker rm -f "$SOLR_CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$SOLR_CONTAINER" -p "$SOLR_HOST_PORT:8983" solr:9 solr-precreate "$SOLR_CORE" >/dev/null
 SOLR_COLD_MS=$(wait_for_ping "$SOLR_URL/$SOLR_CORE/admin/ping?wt=json")
 echo "solr cold start: ${SOLR_COLD_MS}ms"
-SOLR_STARTUP_IDLE_MB=$(solr_mem_mb)
-echo "solr startup idle mem: ${SOLR_STARTUP_IDLE_MB}MB"
 
 SCHEMA_BODY_FILE="$WORK/schema_resp.json"
 SCHEMA_STATUS=$(curl -sS -o "$SCHEMA_BODY_FILE" -w '%{http_code}' \
@@ -212,6 +210,8 @@ if ! check_schema_add_field_response "$SCHEMA_STATUS" "$SCHEMA_BODY"; then
   echo "solr schema add-field failed (status $SCHEMA_STATUS)" >&2
   exit 1
 fi
+SOLR_STARTUP_IDLE_MB=$(solr_mem_mb)
+echo "solr startup idle mem: ${SOLR_STARTUP_IDLE_MB}MB"
 
 echo "== indexing solr =="
 index_corpus "$SOLR_URL" "$SOLR_CORE"
