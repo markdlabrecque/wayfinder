@@ -775,6 +775,55 @@ tokenizer = "simple"
     }
 }
 
+/// Expiring guard on the *other* direction of the reservation, the one
+/// `every_builtin_field_type_name_is_reserved` cannot see. That test runs
+/// `builtin_type_names()` -> reserved; nothing runs `resolve_type` ->
+/// `builtin_type_names()`. `NON_LANGUAGE_BUILTIN_TYPES` is a hand-maintained
+/// copy of `resolve_type`'s non-language match arms, so adding an arm without
+/// extending the list reintroduces #170's exact bug -- silently, with the whole
+/// suite green. Adding a `boolean` arm is actively contemplated
+/// (`tests/search_api_preset.rs`: "Wayfinder has no boolean type").
+///
+/// So this asserts these names are *still unresolvable*: no built-in arm, no
+/// `LANGUAGES` entry, hence nothing to reserve. The moment one of them becomes
+/// resolvable this test fails and names the list to extend, and then it should
+/// be deleted (or the name moved into `MUST_BE_RESERVED_TYPE_NAMES` above)
+/// rather than relaxed -- it exists to expire.
+#[test]
+fn type_names_absent_from_the_reservation_list_are_still_unresolvable() {
+    for name in ["boolean", "bool", "binary", "location"] {
+        assert!(
+            !schema::builtin_type_names().contains(&name.to_string()),
+            "`{name}` is not expected in `builtin_type_names()`; if it was added there, this \
+             guard has expired -- move it into MUST_BE_RESERVED_TYPE_NAMES instead"
+        );
+        let toml = format!(
+            r#"{FULL_SCHEMA_TOML}
+[[fields]]
+name = "unresolvable_probe"
+type = "{name}"
+stored = true
+"#
+        );
+        let (_dir, path) = write_schema(&toml);
+        let msg = match schema::load(&path) {
+            Ok(_) => panic!(
+                "`{name}` now resolves to a built-in field type, so `resolve_type` gained an arm \
+                 for it. `NON_LANGUAGE_BUILTIN_TYPES` in src/schema.rs is a separate hand-written \
+                 copy of those arms and does not list `{name}`, so a custom [[field_types]] chain \
+                 named `{name}` can now silently shadow it -- issue #170's bug. Add `{name}` to \
+                 NON_LANGUAGE_BUILTIN_TYPES and to MUST_BE_RESERVED_TYPE_NAMES, then drop it from \
+                 this guard."
+            ),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(
+            msg.contains(name) && msg.contains("unsupported field type"),
+            "`{name}` must still be rejected as an unsupported field type, got: {msg}"
+        );
+    }
+}
+
 /// The guard must not over-reject. `resolve_type` matches built-in names with
 /// plain `==` in a `match`, so a name that merely *resembles* a built-in is
 /// not one and stays a legitimate custom chain name: a case variant, a

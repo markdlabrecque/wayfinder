@@ -478,6 +478,25 @@ kind = "lowercase"
         expected_exact_names(&["text_de_custom"]),
         "a non-shadowing custom chain is reported alongside every built-in"
     );
+    // The only assertion in the suite that a *custom* `[[field_types]]` chain
+    // reports Solr's `TextField` class: `EXPECTED_CLASSES` covers built-ins
+    // only, `schema_fieldtypes_reflects_a_live_custom_field_type` asserts the
+    // name alone, and `..._every_entry_has_name_and_class` only checks
+    // `class.is_string()`. Every custom chain resolves to `ResolvedType::Text`
+    // (`schema::resolve_type` returns that for any matching `[[field_types]]`
+    // entry), so `solr.TextField` is the class a client must read.
+    let custom = body["fieldTypes"]
+        .as_array()
+        .expect("fieldTypes must be a JSON array")
+        .iter()
+        .find(|entry| entry["name"] == "text_de_custom")
+        .unwrap_or_else(|| panic!("the custom chain must be reported, got: {body}"));
+    assert_eq!(
+        custom["class"].as_str(),
+        Some("solr.TextField"),
+        "a custom [[field_types]] chain is analyzed text, so it must report Solr's TextField \
+         class, got: {custom}"
+    );
 }
 
 // --- unknown core ---------------------------------------------------------

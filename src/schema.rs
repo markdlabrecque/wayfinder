@@ -614,9 +614,18 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     // `type = "double"` field from a numeric field to analyzed text, breaking
     // range queries and sorting with no error anywhere. Rejected outright
     // rather than allowed as an override, extending the `text_en` reservation
-    // (#51) to the whole set. The list comes from `builtin_type_names()` rather
-    // than a second hardcoded copy so adding a stemmer language cannot leave a
-    // built-in shadowable. `TEXT_EN_TOKENIZER` is not a schema type name but is
+    // (#51) to the whole set. The list comes from `builtin_type_names()`, whose
+    // language half is derived from `LANGUAGES`, so adding a stemmer language
+    // cannot leave a built-in shadowable. Its other half,
+    // `NON_LANGUAGE_BUILTIN_TYPES`, *is* a second hand-written copy of
+    // `resolve_type`'s match arms, and nothing in the type system pins the two
+    // in sync -- adding an arm without extending the list would reintroduce this
+    // bug. What catches that is the expiring guard
+    // `type_names_absent_from_the_reservation_list_are_still_unresolvable` in
+    // `tests/schema_layer.rs`: it asserts the plausible additions (`boolean`,
+    // `bool`, `binary`, `location`) are still unresolvable, so the moment one
+    // gains an arm the suite fails and names this list.
+    // `TEXT_EN_TOKENIZER` is not a schema type name but is
     // reserved alongside them: it is the tokenizer identity `text_en` registers
     // under, and a chain registering over it would redefine the built-in preset.
     let reserved_type_names: Vec<String> = builtin_type_names()
@@ -674,6 +683,11 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     // (issue #173). Exact duplicates only: overlapping-but-distinct globs
     // (`tm_*` alongside `tm_X3b_*` and `*`) are ordinary Solr configuration,
     // and longest-pattern-wins exists precisely to resolve that overlap.
+    // Precedence, deliberate: this runs before `validate_pattern`, so two
+    // identical *invalid* patterns report the duplicate rather than the
+    // pre-existing "is not supported". Accepted -- both diagnoses are true, the
+    // choice is deterministic, and either one sends the operator to the same
+    // line of schema.toml.
     let mut seen_patterns = HashSet::new();
     for rule in &parsed.dynamic_fields {
         if !seen_patterns.insert(rule.pattern.as_str()) {

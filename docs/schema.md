@@ -90,6 +90,26 @@ languages is a load-time error rather than a silent no-op.
 
 Use the type by name: `type = "text_en_custom"`.
 
+### Reserved names
+
+A `[[field_types]]` name may not be one of the built-in field type names, and there is no
+override or force flag — the schema fails to load, naming the offending type. That is because
+type resolution checks the schema's own `[[field_types]]` before the built-ins, so a chain
+named `double` would silently retype every `type = "double"` field from a numeric field to
+analyzed text, breaking range queries and sorting with no error anywhere. Rename the chain
+(`double_custom` and `custom_double` both load; only the exact, case-sensitive built-in name is
+refused).
+
+The reserved set is every name in `schema::builtin_type_names()` — the authority, and the same
+list `GET /solr/{core}/schema/fieldtypes` reports: `string`, `keyword`, `text_general`,
+`text_en`, `int`, `long`, `float`, `double`, `date`, and one `text_<code>` per non-English
+language above. The internal tokenizer identity `text_en` registers under is reserved alongside
+them, for the same reason.
+
+Note `boolean` is deliberately *not* reserved: Wayfinder has no boolean field type, so nothing
+resolves that name and a chain called `boolean` shadows nothing. This is not an oversight in
+the list — if a boolean built-in is ever added, the name becomes reserved with it.
+
 ## Dynamic fields
 
 `pattern` is a Solr-style glob with a `*` at exactly one end, or a bare `*` (`*_i`, `title_*`,
