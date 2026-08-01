@@ -37,6 +37,17 @@ impl Params {
             .map(|(_, v)| v.as_str())
     }
 
+    /// First value of Solr's per-field override form `f.<field>.<param>`, if
+    /// present — e.g. `per_field("category", "facet.missing")` reads
+    /// `f.category.facet.missing`.
+    ///
+    /// Keys off the *field* being faceted, never a `{!key=...}` response label
+    /// (finding 97, and issue #138's `facet_local_params_key_f_field.json` /
+    /// `_f_key.json`): callers must pass the resolved field name.
+    pub fn per_field(&self, field: &str, param: &str) -> Option<&str> {
+        self.get(&format!("f.{field}.{param}"))
+    }
+
     /// All values for `key`, in request order (for repeatable params like `fq`).
     pub fn get_all(&self, key: &str) -> Vec<&str> {
         self.pairs
@@ -114,6 +125,26 @@ impl Params {
         }
         Value::Object(map)
     }
+}
+
+/// Recognises Solr's per-field override shape `f.<field>.<param>` for the
+/// base params in `honoured`, returning the field and the base param it
+/// overrides. Anything not of that shape, or naming a base param outside
+/// `honoured`, is `None`.
+///
+/// The split is anchored on the *suffix*, not the first `.`, because field
+/// names may themselves contain dots — a dotted dynamic field
+/// (`f.ss_field.name.facet.missing`, see `src/schema.rs`'s dynamic patterns)
+/// would otherwise be truncated to `ss_field`.
+pub fn split_per_field_key<'a, 'b>(
+    key: &'a str,
+    honoured: &'b [&'b str],
+) -> Option<(&'a str, &'b str)> {
+    let rest = key.strip_prefix("f.")?;
+    honoured.iter().find_map(|param| {
+        let field = rest.strip_suffix(param)?.strip_suffix('.')?;
+        (!field.is_empty()).then_some((field, *param))
+    })
 }
 
 /// Decodes `application/x-www-form-urlencoded`: `+` is a space, `%XX` is a

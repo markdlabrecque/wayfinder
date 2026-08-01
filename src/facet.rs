@@ -270,7 +270,7 @@ fn facet_fields(
         Some(_) => false,
         None => requested_limit <= 0,
     };
-    let missing = params.get("facet.missing") == Some("true");
+    let global_missing = params.get("facet.missing") == Some("true");
 
     let base_query = BooleanQuery::from(
         base.iter()
@@ -313,6 +313,19 @@ fn facet_fields(
                 "Raising facet.mincount from 0 to 1, because field {field_name} is Points-based."
             ));
         }
+
+        // `f.<field>.facet.missing` overrides the global `facet.missing` for
+        // this field, unconditionally — it wins whether the global is unset,
+        // `true` or `false`, in both directions (issue #140, finding 97:
+        // `facet_missing_field_override_wins_over_global_true.json` /
+        // `_false.json`). It keys off `field_name`, the field actually being
+        // faceted, never `label` from a `{!key=...}` prefix
+        // (`facet_local_params_key_f_field.json` / `_f_key.json`), so an
+        // override naming a field nobody passed to `facet.field` is inert.
+        let missing = match params.per_field(field_name, "facet.missing") {
+            Some(value) => value == "true",
+            None => global_missing,
+        };
 
         let mut counts = index.term_facet(&column, kind, &base_query)?;
         counts.retain(|(_, _, count)| *count >= mincount);

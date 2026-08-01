@@ -1885,3 +1885,41 @@ echo "  (docker rm -f $FRAGSIZE_CONTAINER to stop)"
 #   '{"add":{"doc":{"id":"r7","body":"valid","title":"india"}},"add":{"doc":{"id":"r8","body":"valid","title":"juliett"}},"frobnicate":{}}'
 # capu update_select_after_repeated_add_unknown_key GET \
 #   "$R_CORE/select?q=id:r7+OR+id:r8&fl=id,title&sort=id+asc&wt=json"
+
+# --- f.<field>.facet.missing precedence (issue #140) ------------------------
+# Captured against a one-off solr:9 container (port 8992), same schema and
+# 5-doc corpus as the reference "content" core above (category multiValued
+# string, doc5 has no category) -- not runnable standalone, and the container
+# was removed afterwards; re-take the same way rather than re-running this
+# whole script.
+#
+#   F140_SOLR=http://localhost:8992/solr; F140_CORE=content
+#
+# What these settle (issue #140's open question 1 -- precedence):
+#   - `f.category.facet.missing` ALWAYS wins over the global `facet.missing`,
+#     unconditionally, not merely when the global is unset:
+#     `facet.missing=true&f.category.facet.missing=false` drops the null
+#     bucket (facet_missing_field_override_wins_over_global_true.json) and
+#     `facet.missing=false&f.category.facet.missing=true` adds it
+#     (facet_missing_field_override_wins_over_global_false.json).
+#   - The per-field override also works with no global param present at all
+#     (facet_missing_field_override_alone.json).
+#   - `f.<field>.facet.missing` for a field that was not itself requested via
+#     `facet.field` is silently inert -- no error, no effect on the fields
+#     that were requested (facet_missing_field_override_unrelated_field_no_effect.json,
+#     `f.body.facet.missing=true` alongside `facet.field=category` only).
+#   - With two `facet.field` values and only one `f.<field>.facet.missing`
+#     override, the override applies to its own field only -- the global
+#     still governs every other field in the same request. `id` (always
+#     present, so its null bucket is present-but-zero, per finding 41a's
+#     unconditional-append rule) proves the global side is still live, not
+#     just silently absent (facet_missing_field_override_mixed_multi_field.json).
+# Deliberately *not* manifest.tsv rows, same reasoning as #138's
+# facet_local_params_key_f_field.json / _f_key.json: Wayfinder does not
+# implement `f.<field>.facet.*` yet, so a row here would only buy a mandatory
+# EXPECTED_DIVERGENCES entry in a file this very issue is about to touch.
+# cap facet_missing_field_override_wins_over_global_true             'select?q=*:*&rows=0&facet=true&facet.field=category&facet.missing=true&f.category.facet.missing=false&wt=json'
+# cap facet_missing_field_override_wins_over_global_false            'select?q=*:*&rows=0&facet=true&facet.field=category&facet.missing=false&f.category.facet.missing=true&wt=json'
+# cap facet_missing_field_override_alone                             'select?q=*:*&rows=0&facet=true&facet.field=category&f.category.facet.missing=true&wt=json'
+# cap facet_missing_field_override_unrelated_field_no_effect         'select?q=*:*&rows=0&facet=true&facet.field=category&f.body.facet.missing=true&wt=json'
+# cap facet_missing_field_override_mixed_multi_field                 'select?q=*:*&rows=0&facet=true&facet.field=category&facet.field=id&facet.missing=true&f.category.facet.missing=false&wt=json'

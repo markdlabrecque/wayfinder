@@ -1208,8 +1208,17 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
             "mlt.fl.wildcard-plus-score",
             "mlt.match-include-and-offset",
             "mlt.maxntp",
+            // Issue #140: "select.facet.per-field-missing" is resolved --
+            // `f.<field>.facet.missing` now overrides the global for the field
+            // it names (`src/facet.rs`), and `check_params` accepts the
+            // `f.<field>.<param>` shape for the base params in
+            // `PER_FIELD_PARAMS`, so the probe's query no longer 400s under
+            // `strict_params = true`. Its predicate was tightened in the same
+            // change to require the trailing `null` bucket rather than the
+            // mere presence of the `facet_fields` container. Removed from this
+            // list rather than left, per this file's own "self-expiring"
+            // convention.
             "request.json-nl.flat",
-            "select.facet.per-field-missing",
             "select.spellcheck.collate",
             "select.spellcheck.dictionaries",
             "select.spellcheck.enable",
@@ -1308,8 +1317,14 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // body-ordered one, so `update.json-command-add-batch`'s two
     // `numFound == 1` checks both pass. Denominator unchanged -- the semantic
     // was already in the contract, just unmet.
+    // 63/75 -> 64/75 when issue #140 landed the `f.<field>.facet.missing`
+    // per-field override (`PER_FIELD_PARAMS` + the `f.<field>.<param>` shape
+    // in `check_params`, and the override resolution in `src/facet.rs`),
+    // flipping `select.facet.per-field-missing` -- which had been failing on a
+    // `strict_params` 400, not on the counts. Denominator unchanged -- the
+    // semantic was already in the contract, just unmet.
     assert_eq!(
-        report.overall.fraction, "63/75",
+        report.overall.fraction, "64/75",
         "initial coverage fraction"
     );
 }
@@ -1319,7 +1334,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
 /// (`is_object()`/`is_array()`), not that a real client consumer could read
 /// anything out of it. Tightening those three predicates to require their
 /// real leaf (`index.numDocs` as a u64; a non-empty term/frequency pair; a
-/// non-empty name list) must not drop the fraction below `63/75` -- these
+/// non-empty name list) must not drop the fraction below `64/75` -- these
 /// three items are covered *today*, against the real seeded corpus
 /// (`ProbeApp::PROBE_DOCS`) driving the real routed handlers, and a
 /// tightened probe must still see real, non-hollow data at each of them.
@@ -1337,7 +1352,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
 /// the assertion without also pointing the probe's request at a real field
 /// (as its sibling `terms.enumeration` request-semantic probe already does
 /// with `terms.fl=body`) flips `terms.terms` from covered to uncovered and
-/// drops the fraction by one, to `62/75` against the `63/75` pinned below. If
+/// drops the fraction by one, to `63/75` against the `64/75` pinned below. If
 /// this test goes red, that is the tightening missing its matching request
 /// fix, not a fixture to update.
 #[tokio::test]
@@ -1379,9 +1394,14 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
     // bumping it because one of the three probes below stopped reaching real
     // data is the failure this guards, and that would show up as
     // `response_fields` dropping.
+    // It went 63/75 -> 64/75 when issue #140 landed the
+    // `f.<field>.facet.missing` per-field override, which flipped exactly one
+    // further *request_semantics* item on its own merits:
+    // `select.facet.per-field-missing`. `response_fields` is again untouched
+    // across that change, at 13/15.
     assert_eq!(
         report["overall"]["fraction"],
-        Value::String("63/75".to_string()),
+        Value::String("64/75".to_string()),
         "tightening the three hollow-container probes must not, by itself, \
          change the coverage fraction -- if it drops, a probe's request (not \
          just its assertion) needs to change to reach real data, see \
@@ -1395,7 +1415,7 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
 /// #162 fixed for three response-field probes, but here on a
 /// request-semantics probe. Tightening it to also require `solr-mbeans` to
 /// be a JSON object, and conjoining a `/select` facet leg, must not drop the
-/// fraction below `63/75`: neither leg's *request* needs to change to reach
+/// fraction below `64/75`: neither leg's *request* needs to change to reach
 /// real data -- `admin_mbeans` in `src/lib.rs` builds `solr-mbeans`
 /// unconditionally, and the seeded probe corpus already facets `category` --
 /// so the item stays covered against the real seeded app.
@@ -1439,9 +1459,13 @@ async fn repeated_map_and_flat_stays_covered_against_the_real_seeded_app() {
     // `hl.mergeContiguous`/`hl.requireFieldMatch` allowlisting, and 62/75 ->
     // 63/75 when issue #154 made `/update`'s top-level command parse
     // duplicate-key tolerant. None of those changes is what moved it.
+    // It went 63/75 -> 64/75 when issue #140 landed the
+    // `f.<field>.facet.missing` per-field override, which flipped
+    // `select.facet.per-field-missing` on its own merits. That is likewise not
+    // this probe's doing.
     assert_eq!(
         report["overall"]["fraction"],
-        Value::String("63/75".to_string()),
+        Value::String("64/75".to_string()),
         "tightening this probe's assertion must not, by itself, change the \
          coverage fraction -- the real handler already emits an object-shaped \
          `solr-mbeans` regardless of `json.nl`, so nothing about the real \

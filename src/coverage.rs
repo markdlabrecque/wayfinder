@@ -947,12 +947,21 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
                 .await
         }
         "select.facet.per-field-missing" => {
+            // Presence of the `facet_fields` container proves nothing here --
+            // it is there without the override too (issue #162's tightening).
+            // The observable effect of `f.category.facet.missing=true` is the
+            // trailing `null` key in the flat counts array, so require that.
             probe
-                .has(
+                .response(
                     "select?q=*:*&facet=true&facet.field=category&f.category.facet.missing=true",
-                    "/facet_counts/facet_fields",
                 )
                 .await
+                .and_then(|body| {
+                    body.pointer("/facet_counts/facet_fields/category")?
+                        .as_array()
+                        .map(|counts| counts.iter().any(Value::is_null))
+                })
+                .unwrap_or(false)
         }
         "select.facet.sort-limit-mincount" => {
             let sorted_limited = probe

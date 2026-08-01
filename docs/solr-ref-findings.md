@@ -1685,3 +1685,29 @@ the container was removed afterwards). Fixtures `update_repeated_add_*.json` and
     value (`{"add":{"doc":{...},"doc":{...}}}`) still collapses to the last occurrence —
     unobserved in any capture or trace, and Solr's own `JsonLoader` reads a single `doc`
     per `add`. Marked `ponytail:` on `UpdateBody` in `src/lib.rs`.
+
+## Findings from the issue #140 `f.<field>.facet.missing` capture
+
+Claiming finding 97 (this block was written against 94 and has been renumbered twice: issue
+#139 landed 94/95 first, then issue #154 landed 96).
+
+Captured against a one-off `solr:9` container (port 8992), same schema and 5-doc corpus as the
+reference `content` core (`solr-ref/capture.sh`'s top block). No `manifest.tsv` rows, same
+reasoning as issue #138's `facet_local_params_key_f_field.json` / `_f_key.json`: Wayfinder does
+not implement `f.<field>.facet.*` yet, so a row would only buy a mandatory
+`EXPECTED_DIVERGENCES` entry in a file this issue is about to touch.
+
+97. **`f.<field>.facet.missing` always wins over the global `facet.missing`, unconditionally --
+    not merely when the global is unset.** `facet.missing=true&f.category.facet.missing=false`
+    drops the null bucket entirely (`facet_missing_field_override_wins_over_global_true.json`),
+    and the reverse, `facet.missing=false&f.category.facet.missing=true`, adds it
+    (`facet_missing_field_override_wins_over_global_false.json`). The override also works with
+    no global `facet.missing` present at all (`facet_missing_field_override_alone.json`). A
+    `f.<field>.facet.missing` naming a field that was never itself passed to `facet.field` is
+    silently inert: `facet.field=category` alongside `f.body.facet.missing=true` returns
+    `category`'s counts with no null bucket and no error/warning
+    (`facet_missing_field_override_unrelated_field_no_effect.json`). Issue #138's own capture
+    already settled the sibling question of whether `f.<field>.` keys off the field or the
+    `{!key=...}` response label -- it is the field
+    (`facet_local_params_key_f_field.json`/`_f_key.json`) -- so this issue's captures only needed
+    to add the true/false precedence and the unrelated-field-name cases.
