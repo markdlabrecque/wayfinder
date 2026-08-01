@@ -57,14 +57,19 @@ dest = "body"
 |---|---|
 | `string`, `keyword` | Not analyzed — one exact term. |
 | `text_general` | Tokenized, lowercased, not stemmed. |
-| `text_en` | Solr-compatible English analysis: lowercase, English stopword removal, then stemming. |
+| `text_en` | Solr-compatible English analysis: lowercase, English stopword removal, then stemming with the captured Porter terminal-`y` rule. |
 | `text_<code>` | Lowercased and stemmed for that language. Codes: `ar da nl en fi fr de el hu it no pt ro ru es sv ta tr`. |
 | `int`, `long` | 64-bit signed integer. |
 | `float`, `double` | 64-bit float. |
 | `date` | RFC3339 in UTC, e.g. `2026-07-28T12:00:00Z`. |
 
-`text_en` removes English stopwords before stemming, matching Solr. Other language presets
-remain stem-only; declare a custom chain when they need stopword removal.
+On static fields, `text_en` removes English stopwords and applies Porter's terminal-`y` rule
+(`day` → `dai`, while `sky` remains `sky`) before Tantivy's English stemmer. The shared
+`_dynamic_text` catch-all deliberately retains the v1 Snowball behavior (`day` remains `day`),
+matching that captured Drupal Search API stemming outcome—not its full analyzer chain. This is a
+storage ceiling: Tantivy gives all
+analyzed dynamic rules one catch-all analyzer, regardless of their declared text type. Other
+language presets remain stem-only; declare a custom chain when a static field needs stopwords.
 
 ## Custom analyzer chains
 
@@ -170,10 +175,12 @@ Tantivy cannot extend an existing index's schema in place, so v1 still requires 
 
 `[[copy_fields]]` and `[[field_types]]` never change the Tantivy schema — they govern index-time
 content and analysis — so they may be edited freely, and the change applies to documents indexed
-from then on. Wayfinder also persists an internal analyzer-contract marker. A pre-marker index
-whose static fields use built-in `text_en`, or whose dynamic rules are analyzed, must be reindexed:
-all analyzed dynamic rules share `_dynamic_text`, whose tokenizer changed. A pre-marker index
-without either changed analyzer path is adopted safely.
+from then on. Wayfinder also persists an internal analyzer-contract marker. A v1 index whose
+static fields use built-in `text_en` must be reindexed for v2: mixing v1 index-time terms with
+v2 query-time Porter analysis would make matches inconsistent. Normal v1 `_dynamic_text` indexes
+remain compatible because that catch-all intentionally retains its Snowball analyzer. Pre-v1 or
+legacy-dynamic indexes still require a reindex before an analyzed dynamic rule can use their older
+`en_stem` catch-all. Older raw-only indexes are adopted safely.
 
 `[[dynamic_fields]]` is *almost* in that category. Editing, adding or removing rules while at
 least one rule remains changes nothing structural. But the catch-all JSON fields exist only when

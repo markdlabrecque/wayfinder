@@ -20,7 +20,7 @@ use tantivy::schema::{
 };
 use tantivy::tokenizer::{
     Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer, StopWordFilter, TextAnalyzer,
-    TokenizerManager,
+    Token, TokenFilter, TokenStream, Tokenizer, TokenizerManager,
 };
 
 /// Catch-all Tantivy field holding every document field that resolved through a
@@ -106,17 +106,28 @@ const TEXT_GENERAL_TOKENIZER: &str = "default";
 /// long-token removal, lowercase, English stopword removal, then stemming.
 /// It intentionally does not override Tantivy's `en_stem`, which remains
 /// available for custom analyzer chains and upstream defaults.
-const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v1";
+const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v2";
+/// The shared dynamic-text catch-all retains the pre-v2 Snowball analyzer.
+/// Drupal Search API's captured configset uses Snowball and preserves singular
+/// `day`; all analyzed dynamic rules share this one tokenizer in Tantivy.
+const DYNAMIC_TEXT_TOKENIZER: &str = "wayfinder_text_en_v1";
 
-/// The on-disk analyzer contract for indexes built after `text_en` gained
-/// Solr-compatible stopword removal. This is separate from Tantivy's schema:
+/// The on-disk analyzer contract for indexes built with Wayfinder's
+/// Porter-compatible English preset. This is separate from Tantivy's schema:
 /// it lets startup identify pre-contract indexes before their old tokenizer
 /// identity can be adopted.
-pub const ANALYZER_CONTRACT: &str = "text_en_stopwords_v1";
-/// A safely adopted pre-v1 index whose unused `_dynamic_text` catch-all still
-/// has Tantivy's old `en_stem` identity. It is not full v1 certification: a
-/// later rule that starts writing analyzed dynamic values must reindex.
-pub const ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT: &str = "text_en_stopwords_v1_legacy_dynamic_text";
+pub const ANALYZER_CONTRACT: &str = "text_en_porter_compatible_v2";
+/// A safely adopted pre-v2 index whose unused `_dynamic_text` catch-all still
+/// has an older tokenizer identity. It is not full v2 certification: a later
+/// rule that starts writing analyzed dynamic values must reindex.
+pub const ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT: &str =
+    "text_en_porter_compatible_v2_legacy_dynamic_text";
+/// The v1 marker is recognized explicitly during upgrade, rather than treated
+/// as an unknown marker, so raw-only indexes can be adopted safely while
+/// indexes whose terms may use the old English analyzer fail closed.
+pub const ANALYZER_CONTRACT_V1: &str = "text_en_stopwords_v1";
+pub const ANALYZER_CONTRACT_V1_LEGACY_DYNAMIC_TEXT: &str =
+    "text_en_stopwords_v1_legacy_dynamic_text";
 
 #[derive(Debug, Deserialize)]
 struct SchemaFile {
@@ -280,20 +291,23 @@ impl WayfinderSchema {
             .is_some_and(|f| matches!(f.type_.as_str(), "string" | "keyword"))
     }
 
-    /// Whether this schema can contain data on an analyzer path whose
-    /// tokenizer identity changed in analyzer contract v1. Static fields are
-    /// affected only for built-in `text_en`; every analyzed dynamic rule is
-    /// affected because Tantivy stores it in the shared `_dynamic_text` field,
-    /// whose tokenizer is Wayfinder's versioned English analyzer regardless
-    /// of that rule's declared type.
-    pub fn uses_changed_analyzer_path(&self) -> bool {
+    /// Whether this schema can contain static data whose analyzer changed from
+    /// v1 Snowball stemming to v2's Porter-compatible terminal-`y` behavior.
+    pub fn uses_static_text_en(&self) -> bool {
         self.fields.iter().any(|field| field.type_ == "text_en")
-            || self.dynamic_fields.iter().any(|field| {
-                matches!(
-                    resolve_type(&field.type_, &self.field_types),
-                    Ok(ResolvedType::Text { .. })
-                )
-            })
+    }
+
+    /// Whether any configured dynamic rule can write analyzed text through
+    /// `_dynamic_text`. This path changed before analyzer contract v1, but it
+    /// deliberately retains v1 Snowball semantics in v2 for the captured
+    /// Search API configset.
+    pub fn uses_analyzed_dynamic_path(&self) -> bool {
+        self.dynamic_fields.iter().any(|field| {
+            matches!(
+                resolve_type(&field.type_, &self.field_types),
+                Ok(ResolvedType::Text { .. })
+            )
+        })
     }
 
     /// Whether this schema has the `_dynamic_text` catch-all. Before analyzer
@@ -472,6 +486,69 @@ fn validate_pattern(pattern: &str) -> Result<()> {
     Ok(())
 }
 
+/// Implements classic Porter step 1c before Tantivy's English Snowball
+/// stemmer: a terminal ASCII `y` becomes `i` only if the preceding stem has
+/// an ASCII vowel.
+///
+/// ponytail: this is the captured Porter terminal-y compatibility rule layered
+/// over Tantivy's English stemmer, not a full replacement tokenizer.
+#[derive(Clone)]
+struct PorterTerminalYFilter;
+
+impl TokenFilter for PorterTerminalYFilter {
+    type Tokenizer<T: Tokenizer> = PorterTerminalYTokenizer<T>;
+
+    fn transform<T: Tokenizer>(self, tokenizer: T) -> Self::Tokenizer<T> {
+        PorterTerminalYTokenizer { inner: tokenizer }
+    }
+}
+
+#[derive(Clone)]
+struct PorterTerminalYTokenizer<T> {
+    inner: T,
+}
+
+impl<T: Tokenizer> Tokenizer for PorterTerminalYTokenizer<T> {
+    type TokenStream<'a> = PorterTerminalYTokenStream<T::TokenStream<'a>>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        PorterTerminalYTokenStream {
+            tail: self.inner.token_stream(text),
+        }
+    }
+}
+
+struct PorterTerminalYTokenStream<T> {
+    tail: T,
+}
+
+impl<T: TokenStream> TokenStream for PorterTerminalYTokenStream<T> {
+    fn advance(&mut self) -> bool {
+        if !self.tail.advance() {
+            return false;
+        }
+        let text = &mut self.tail.token_mut().text;
+        if text.is_ascii()
+            && text.ends_with('y')
+            && text[..text.len() - 1]
+                .bytes()
+                .any(|byte| matches!(byte, b'a' | b'e' | b'i' | b'o' | b'u'))
+        {
+            text.pop();
+            text.push('i');
+        }
+        true
+    }
+
+    fn token(&self) -> &Token {
+        self.tail.token()
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        self.tail.token_mut()
+    }
+}
+
 /// Builds the `TextAnalyzer` for a `[[field_types]]` chain.
 fn build_analyzer(ft: &FieldTypeConfig) -> Result<TextAnalyzer> {
     let mut builder = match ft.tokenizer.as_str() {
@@ -537,13 +614,23 @@ fn language_by_name(name: &str) -> Option<Language> {
 fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager> {
     let manager = TokenizerManager::default();
     let english_stopwords =
-        StopWordFilter::new(Language::English).expect("Tantivy ships an English stopword list");
+        || StopWordFilter::new(Language::English).expect("Tantivy ships an English stopword list");
+    manager.register(
+        DYNAMIC_TEXT_TOKENIZER,
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(RemoveLongFilter::limit(40))
+            .filter(LowerCaser)
+            .filter(english_stopwords())
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
     manager.register(
         TEXT_EN_TOKENIZER,
         TextAnalyzer::builder(SimpleTokenizer::default())
             .filter(RemoveLongFilter::limit(40))
             .filter(LowerCaser)
-            .filter(english_stopwords)
+            .filter(english_stopwords())
+            .filter(PorterTerminalYFilter)
             .filter(Stemmer::new(Language::English))
             .build(),
     );
@@ -646,7 +733,10 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     // under, and a chain registering over it would redefine the built-in preset.
     let reserved_type_names: Vec<String> = builtin_type_names()
         .into_iter()
-        .chain(std::iter::once(TEXT_EN_TOKENIZER.to_string()))
+        .chain([
+            TEXT_EN_TOKENIZER.to_string(),
+            DYNAMIC_TEXT_TOKENIZER.to_string(),
+        ])
         .collect();
     if let Some(field_type) = parsed
         .field_types
@@ -792,8 +882,12 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     // dynamic rules" and "some dynamic rules" changes the Tantivy schema and so
     // needs a reindex — see `check_compatible`.
     for name in catch_all_fields(&parsed.dynamic_fields) {
+        // ponytail: Tantivy gives this shared JSON catch-all one analyzer for
+        // every analyzed dynamic rule. Keep the captured Search API configset's
+        // Snowball behavior (`day` stays `day`) here; static built-in `text_en`
+        // uses the v2 Porter-compatible analyzer independently.
         let tokenizer = if *name == DYNAMIC_TEXT_FIELD {
-            TEXT_EN_TOKENIZER
+            DYNAMIC_TEXT_TOKENIZER
         } else {
             "raw"
         };

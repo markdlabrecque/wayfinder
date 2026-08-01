@@ -46,7 +46,7 @@ const NON_ENGLISH_LANGUAGE_CODES: &[&str] = &[
 /// `string`/`keyword` (both resolve to `Str`), `text_general`, `int`/`long`,
 /// `float`/`double`, `date`. `text_en` is listed separately below since it is
 /// the one `text_*` preset with its own dedicated tokenizer identity
-/// (`wayfinder_text_en_v1`), not a `LANGUAGES`-table lookup.
+/// (`wayfinder_text_en_v2`), not a `LANGUAGES`-table lookup.
 const NON_LANGUAGE_BUILTIN_TYPES: &[&str] = &[
     "string",
     "keyword",
