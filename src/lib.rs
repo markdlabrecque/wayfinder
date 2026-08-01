@@ -1416,9 +1416,12 @@ async fn schema_fieldtypes(
     field_types.extend(
         schema::builtin_type_names()
             .iter()
-            // `resolve_type` checks `[[field_types]]` first, so a custom chain
-            // named after a built-in shadows it; report the one that wins,
-            // once.
+            // Unreachable since issue #170: `schema::parse` rejects a
+            // `[[field_types]]` name that collides with any built-in, so no
+            // custom chain can shadow one and this filter never drops a name.
+            // Kept as defence-in-depth -- if the reservation is ever narrowed,
+            // this still keeps a duplicate out of the `in_array` name list
+            // `isPartOfSchema` reads.
             .filter(|name| !custom.iter().any(|ft| &&ft.name == name))
             .map(|name| field_type_entry(name, solr_class_for_builtin(name))),
     );

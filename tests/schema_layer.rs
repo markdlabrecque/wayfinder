@@ -672,18 +672,47 @@ tokenizer = "simple"
         .expect("field type names differing only in case must not be treated as duplicates");
 }
 
-/// Characterization test, not new behaviour: `resolve_type` checks
-/// `[[field_types]]` before the built-in table, so a custom chain can shadow
-/// any built-in type name other than `text_en` (which `parse` already
-/// reserves explicitly) without complaint. Declaring a custom `[[field_types]]`
-/// named `double` silently retypes every field declared `type = "double"`
-/// from a numeric field to an analyzed text field using the custom chain
-/// instead of the `double` numeric type it names. This is issue #160's
-/// premise-check point 4: a real, separate gap from the duplicate-name bug
-/// this file otherwise tests, left un-widened here and flagged in the
-/// handoff rather than fixed as part of this issue.
+// --- every built-in field type name is reserved (issue #170) ----------------
+
+/// The names that must be rejected as `[[field_types]]` names no matter what
+/// `builtin_type_names()` happens to return. Spelled out here so the
+/// exhaustive test below cannot go vacuously green if that function ever
+/// returns an empty (or shrunken) list -- which is exactly the mutation the
+/// guard for this issue is most likely to be broken by. Kept small and
+/// deliberately spanning all four resolution shapes `resolve_type` has:
+/// `Str`, `Text` (a fixed preset, a `LANGUAGES`-derived preset, and the
+/// dedicated `text_en` one), `I64`, `F64`, and `Date`.
+const MUST_BE_RESERVED_TYPE_NAMES: &[&str] = &[
+    "string",
+    "keyword",
+    "text_general",
+    "text_en",
+    "int",
+    "long",
+    "float",
+    "double",
+    "date",
+    "text_de",
+    "text_fr",
+    "text_ta",
+];
+
+/// Was `custom_field_type_can_silently_shadow_a_non_text_en_builtin`: a
+/// characterization test that pinned the *pre*-#170 behaviour, in which
+/// `resolve_type`'s "custom chains before built-in match arms" order let a
+/// `[[field_types]]` entry named `double` silently retype every
+/// `type = "double"` field from an F64 numeric field into an analyzed text
+/// field (verified empirically: the schema loaded clean and
+/// `wf.tokenize("double", "Hello World")` returned the custom `simple`
+/// chain's terms), breaking range queries and sorting with no error anywhere.
+///
+/// Issue #170 resolves that by rejecting the shadowing outright, consistent
+/// with the codebase's one precedent (`text_en`, reserved since #51) rather
+/// than blessing it as an override mechanism. The old assertion is kept here
+/// inverted rather than deleted so the history of the decision stays in the
+/// suite.
 #[test]
-fn custom_field_type_can_silently_shadow_a_non_text_en_builtin() {
+fn formerly_silent_shadowing_of_a_non_text_en_builtin_is_now_rejected() {
     let toml = format!(
         r#"{FULL_SCHEMA_TOML}
 [[field_types]]
@@ -692,13 +721,511 @@ tokenizer = "simple"
 "#
     );
     let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path)
+        .expect_err("a custom field type must not shadow the built-in `double` numeric type");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("double") && msg.contains("reserved"),
+        "shadowing a built-in must fail with the reserved-field-type error naming the built-in, \
+         got: {msg}"
+    );
+}
+
+/// The `text_en` reservation was a one-name special case; every other built-in
+/// `resolve_type` accepts is shadowable in exactly the same way and must be
+/// reserved in exactly the same way. Driving this off `builtin_type_names()`
+/// keeps the guard and `GET /solr/{core}/schema/fieldtypes` from drifting
+/// apart when a stemmer language is added -- that list's *contents* are pinned
+/// independently against a real Solr trace in `tests/schema_fieldtypes.rs`,
+/// so this test only has to assert the reservation covers all of it, and
+/// `MUST_BE_RESERVED_TYPE_NAMES` keeps the loop from being vacuous.
+#[test]
+fn every_builtin_field_type_name_is_reserved() {
+    let builtins = schema::builtin_type_names();
+    for name in MUST_BE_RESERVED_TYPE_NAMES {
+        assert!(
+            builtins.contains(&(*name).to_string()),
+            "`{name}` must still be a built-in type name; `builtin_type_names()` returned \
+             {builtins:?}"
+        );
+    }
+
+    for name in &builtins {
+        let toml = format!(
+            r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "{name}"
+tokenizer = "simple"
+"#
+        );
+        let (_dir, path) = write_schema(&toml);
+        match schema::load(&path) {
+            Ok(_) => {
+                panic!("a custom field type named after the built-in `{name}` must be rejected")
+            }
+            Err(err) => {
+                let msg = format!("{err:#}");
+                assert!(
+                    msg.contains(name.as_str()) && msg.contains("reserved"),
+                    "shadowing built-in `{name}` must fail with the reserved-field-type error \
+                     naming it, got: {msg}"
+                );
+            }
+        }
+    }
+}
+
+/// Expiring guard on the *other* direction of the reservation, the one
+/// `every_builtin_field_type_name_is_reserved` cannot see. That test runs
+/// `builtin_type_names()` -> reserved; nothing runs `resolve_type` ->
+/// `builtin_type_names()`. `NON_LANGUAGE_BUILTIN_TYPES` is a hand-maintained
+/// copy of `resolve_type`'s non-language match arms, so adding an arm without
+/// extending the list reintroduces #170's exact bug -- silently, with the whole
+/// suite green. Adding a `boolean` arm is actively contemplated
+/// (`tests/search_api_preset.rs`: "Wayfinder has no boolean type").
+///
+/// So this asserts these names are *still unresolvable*: no built-in arm, no
+/// `LANGUAGES` entry, hence nothing to reserve. The moment one of them becomes
+/// resolvable this test fails and names the list to extend, and then it should
+/// be deleted (or the name moved into `MUST_BE_RESERVED_TYPE_NAMES` above)
+/// rather than relaxed -- it exists to expire.
+///
+/// This is a heuristic net, not a proof: a test cannot enumerate `resolve_type`'s
+/// `match` arms, so no fixed list of names can close the hole -- an arm for a name
+/// nobody thought of here still slips through. The list is therefore stocked with
+/// the names most likely to be added next: `boolean`/`bool` (actively contemplated)
+/// and the Solr point-type aliases `pint`/`plong`/`pfloat`/`pdouble`/`pdate`, which
+/// are modern Solr's names for types Wayfinder already has and so are the obvious
+/// wire-compat aliases to add (`pdate` already shows up as a real trace name in
+/// `tests/schema_fieldtypes.rs`). A passing guard means these names are still
+/// unresolved, not that the reservation list is complete.
+#[test]
+fn type_names_absent_from_the_reservation_list_are_still_unresolvable() {
+    for name in [
+        "boolean", "bool", "binary", "location", "pint", "plong", "pfloat", "pdouble", "pdate",
+    ] {
+        assert!(
+            !schema::builtin_type_names().contains(&name.to_string()),
+            "`{name}` is not expected in `builtin_type_names()`; if it was added there, this \
+             guard has expired -- move it into MUST_BE_RESERVED_TYPE_NAMES instead"
+        );
+        let toml = format!(
+            r#"{FULL_SCHEMA_TOML}
+[[fields]]
+name = "unresolvable_probe"
+type = "{name}"
+stored = true
+"#
+        );
+        let (_dir, path) = write_schema(&toml);
+        let msg = match schema::load(&path) {
+            Ok(_) => panic!(
+                "`{name}` now resolves to a built-in field type, so `resolve_type` gained an arm \
+                 for it. `NON_LANGUAGE_BUILTIN_TYPES` in src/schema.rs is a separate hand-written \
+                 copy of those arms and does not list `{name}`, so a custom [[field_types]] chain \
+                 named `{name}` can now silently shadow it -- issue #170's bug. Add `{name}` to \
+                 NON_LANGUAGE_BUILTIN_TYPES and to MUST_BE_RESERVED_TYPE_NAMES, then drop it from \
+                 this guard."
+            ),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(
+            msg.contains(name) && msg.contains("unsupported field type"),
+            "`{name}` must still be rejected as an unsupported field type, got: {msg}"
+        );
+    }
+}
+
+/// The guard must not over-reject. `resolve_type` matches built-in names with
+/// plain `==` in a `match`, so a name that merely *resembles* a built-in is
+/// not one and stays a legitimate custom chain name: a case variant, a
+/// prefix/suffix extension, and `text_<code>` for a language Tantivy has no
+/// stemmer for (so `resolve_type`'s generic branch rejects it, and it is not
+/// in `builtin_type_names()` either -- `tests/schema_fieldtypes.rs` pins
+/// `text_ja` as unsupported). If this starts failing, the reservation was
+/// widened past what `resolve_type` actually resolves.
+#[test]
+fn custom_field_type_names_that_only_resemble_a_builtin_still_load() {
+    for name in [
+        "Double",
+        "double_custom",
+        "custom_double",
+        "text_ja",
+        "text_zz",
+    ] {
+        let toml = format!(
+            r#"{FULL_SCHEMA_TOML}
+[[fields]]
+name = "resembling"
+type = "{name}"
+stored = true
+
+[[field_types]]
+name = "{name}"
+tokenizer = "simple"
+[[field_types.filters]]
+kind = "lowercase"
+"#
+        );
+        let (_dir, path) = write_schema(&toml);
+        let wf = schema::load(&path).unwrap_or_else(|err| {
+            panic!("`{name}` is not a built-in type name and must remain usable: {err:#}")
+        });
+        assert_eq!(
+            wf.tokenize(name, "Hello World"),
+            Some(vec!["hello".to_string(), "world".to_string()]),
+            "custom chain `{name}` must still resolve to its own analyzer"
+        );
+    }
+}
+
+// --- duplicate [[fields]] names (issue #173) ---------------------------------
+//
+// Corrected premise. Issue #173 states that two `[[fields]]` entries sharing a
+// `name` "each call `builder.add_*_field`, so two Tantivy fields are created
+// under one name", with `field_handles` last-wins leaving the first one
+// orphaned. Verified against tantivy-0.26.1: `SchemaBuilder::add_field`
+// (`src/schema/schema.rs:202`) *panics* -- "Field already exists in schema
+// dup" -- so no orphan is ever created and `field_handles` never gets a second
+// insert. The real defect is therefore worse in a different way: an operator
+// typo in schema.toml crashes the process from inside a dependency instead of
+// producing the ordinary `anyhow` schema-load error every other schema mistake
+// in this file produces. These tests pin the clean error; a panic fails them.
+
+/// The base case: two adjacent, identically-configured entries.
+#[test]
+fn duplicate_field_names_are_rejected_at_load_time() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[fields]]
+name = "dup_field"
+type = "int"
+stored = true
+
+[[fields]]
+name = "dup_field"
+type = "int"
+stored = true
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err =
+        schema::load(&path).expect_err("two [[fields]] entries sharing a name must be rejected");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("dup_field") && msg.contains("duplicate"),
+        "load must fail with the duplicate-field error naming the duplicated field, got: {msg}"
+    );
+}
+
+/// Mutation guard, per the shape #160's round-1 review caught: the base case
+/// above is survived by an adjacent-only `windows(2)` scan over the declared
+/// fields. Here the two duplicates are separated by an unrelated entry, and
+/// both are still identically configured so nothing but adjacency differs.
+#[test]
+fn duplicate_field_names_are_rejected_when_separated_by_other_fields() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[fields]]
+name = "dup_field"
+type = "int"
+stored = true
+
+[[fields]]
+name = "spacer_field"
+type = "int"
+stored = true
+
+[[fields]]
+name = "dup_field"
+type = "int"
+stored = true
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path)
+        .expect_err("two non-adjacent [[fields]] entries sharing a name must be rejected");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("dup_field") && msg.contains("duplicate"),
+        "load must fail with the duplicate-field error naming the duplicated field, got: {msg}"
+    );
+}
+
+/// Mutation guard for the other implementation #160's review found plausible:
+/// `FieldConfig` derives `PartialEq`, so a dedup keyed on the whole struct (or
+/// on `(name, type_)`) looks correct and survives the two tests above. A
+/// second declaration of `dup_field` is a duplicate *name* regardless of how
+/// it is configured -- and it is the more dangerous case, since the two
+/// declarations disagree about what the field is. Both types here are valid on
+/// their own, so the only error this schema can produce is the duplicate one:
+/// there is no later failure that could stand in for the guard.
+#[test]
+fn duplicate_field_names_are_rejected_when_differently_configured() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[fields]]
+name = "dup_field"
+type = "int"
+stored = true
+fast = true
+
+[[fields]]
+name = "dup_field"
+type = "text_en"
+stored = false
+multi_valued = true
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path).expect_err(
+        "two [[fields]] entries sharing a name must be rejected even when configured differently",
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("dup_field") && msg.contains("duplicate"),
+        "load must fail with the duplicate-field error naming the duplicated field, got: {msg}"
+    );
+}
+
+/// The guard must not over-reject: distinct field names are unrelated and the
+/// schema must still load, with every one of them resolvable.
+#[test]
+fn distinct_field_names_still_load() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[fields]]
+name = "extra_a"
+type = "int"
+stored = true
+
+[[fields]]
+name = "extra_b"
+type = "int"
+stored = true
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let wf = schema::load(&path).expect("schema with distinct field names must load");
+    for name in [
+        "id", "title", "body", "views", "rating", "created", "extra_a", "extra_b",
+    ] {
+        assert!(
+            wf.field(name).is_some(),
+            "`{name}` must resolve to a Tantivy field"
+        );
+    }
+}
+
+/// Tantivy field names are case-sensitive (`add_field` rejects only an exact
+/// repeat, as the panic above shows), so `Title` and `title` are two distinct
+/// fields and must both load -- the same case-sensitivity decision #160 made
+/// for `[[field_types]]` names. If this starts failing because duplicate
+/// detection normalises case, that is a deliberate widening needing its own
+/// decision, not a side effect of this guard.
+#[test]
+fn field_names_differing_only_in_case_are_not_duplicates() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[fields]]
+name = "Title"
+type = "text_en"
+stored = true
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
     let wf = schema::load(&path)
-        .expect("today, shadowing a non-text_en builtin is accepted, not rejected");
+        .expect("field names differing only in case must not be treated as duplicates");
+    assert!(
+        wf.field("Title").is_some() && wf.field("title").is_some(),
+        "both case variants must resolve to their own Tantivy field"
+    );
+}
+
+// --- duplicate [[dynamic_fields]] patterns (issue #173) ---------------------
+//
+// Unlike the static case, this one really is silent: dynamic rules share the
+// two catch-all JSON fields, so nothing panics, and `match_dynamic`'s
+// `max_by_key(|d| d.pattern.len())` returns the *last* rule among equal-length
+// patterns -- verified empirically, two `*_i` rules typed `int` then `text_en`
+// resolve `count_i` to `text_en`. The first declaration is silently dead, and
+// with differing types the two rules even disagree about which catch-all field
+// (`_dynamic` vs `_dynamic_text`) the values belong in.
+
+/// The base case: two adjacent, identically-configured rules.
+#[test]
+fn duplicate_dynamic_field_patterns_are_rejected_at_load_time() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[dynamic_fields]]
+pattern = "*_dup"
+type = "int"
+stored = true
+
+[[dynamic_fields]]
+pattern = "*_dup"
+type = "int"
+stored = true
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path)
+        .expect_err("two [[dynamic_fields]] entries sharing a pattern must be rejected");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("*_dup") && msg.contains("duplicate"),
+        "load must fail with the duplicate-pattern error naming the duplicated pattern, got: {msg}"
+    );
+}
+
+/// Mutation guard: an adjacent-only scan survives the base case. Separated by
+/// an unrelated rule, identically configured otherwise.
+#[test]
+fn duplicate_dynamic_field_patterns_are_rejected_when_separated_by_other_rules() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[dynamic_fields]]
+pattern = "*_dup"
+type = "int"
+stored = true
+
+[[dynamic_fields]]
+pattern = "*_spacer"
+type = "int"
+stored = true
+
+[[dynamic_fields]]
+pattern = "*_dup"
+type = "int"
+stored = true
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path)
+        .expect_err("two non-adjacent [[dynamic_fields]] rules sharing a pattern must be rejected");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("*_dup") && msg.contains("duplicate"),
+        "load must fail with the duplicate-pattern error naming the duplicated pattern, got: {msg}"
+    );
+}
+
+/// Mutation guard: a dedup keyed on more than the pattern survives the two
+/// tests above. Two rules with the same pattern and different types are the
+/// worst case, not an exempt one -- `match_dynamic` still picks exactly one of
+/// them, and here they disagree about the catch-all field
+/// (`int` -> `_dynamic`, `text_en` -> `_dynamic_text`). Both types are valid,
+/// so the duplicate error is the only error this schema can produce.
+#[test]
+fn duplicate_dynamic_field_patterns_are_rejected_when_differently_configured() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[dynamic_fields]]
+pattern = "*_dup"
+type = "int"
+stored = true
+fast = true
+
+[[dynamic_fields]]
+pattern = "*_dup"
+type = "text_en"
+stored = false
+multi_valued = true
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path).expect_err(
+        "two [[dynamic_fields]] rules sharing a pattern must be rejected even when configured \
+         differently",
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("*_dup") && msg.contains("duplicate"),
+        "load must fail with the duplicate-pattern error naming the duplicated pattern, got: {msg}"
+    );
+}
+
+/// The guard must reject *exact* duplicate patterns only. Overlapping-but-
+/// distinct globs are ordinary Solr configuration -- `tm_*` and `tm_X3b_*`
+/// both match `tm_X3b_en_body`, and Drupal's Search API generates exactly that
+/// shape -- and `match_dynamic`'s longest-pattern-wins rule exists precisely
+/// to resolve the overlap. A guard that rejected overlap, or that keyed on
+/// something coarser than the pattern string, breaks a legitimate schema.
+#[test]
+fn overlapping_dynamic_field_patterns_still_load() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[dynamic_fields]]
+pattern = "tm_*"
+type = "text_en"
+stored = true
+
+[[dynamic_fields]]
+pattern = "tm_X3b_*"
+type = "text_en"
+stored = true
+
+[[dynamic_fields]]
+pattern = "*"
+type = "string"
+stored = true
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let wf =
+        schema::load(&path).expect("overlapping but distinct dynamic patterns must still load");
+
+    // All three rules are live, resolved by longest-pattern-wins.
     assert_eq!(
-        wf.tokenize("double", "Hello World"),
-        Some(vec!["Hello".to_string(), "World".to_string()]),
-        "the field type named `double` resolves to the custom analyzed `simple`-tokenizer chain, \
-         not the numeric builtin, once shadowed"
+        wf.match_dynamic("tm_X3b_en_body")
+            .map(|d| d.pattern.as_str()),
+        Some("tm_X3b_*"),
+        "the longer overlapping pattern must win"
+    );
+    assert_eq!(
+        wf.match_dynamic("tm_title").map(|d| d.pattern.as_str()),
+        Some("tm_*"),
+        "the shorter overlapping pattern must still match what the longer one does not"
+    );
+    assert_eq!(
+        wf.match_dynamic("anything").map(|d| d.pattern.as_str()),
+        Some("*"),
+        "the catch-all pattern must still match"
+    );
+    // And the pre-existing overlapping pair in the base schema is untouched.
+    assert_eq!(
+        wf.match_dynamic("blurb_txt_i").map(|d| d.pattern.as_str()),
+        Some("*_txt_i"),
+        "`*_i` and `*_txt_i` overlap and must both remain live"
+    );
+}
+
+/// `glob_matches` compares patterns and names byte-for-byte, so `*_i` and
+/// `*_I` match different field names and are not duplicates. Same
+/// case-sensitivity decision as everywhere else in this file; a failure here
+/// means the guard normalises case, which is a separate decision.
+#[test]
+fn dynamic_field_patterns_differing_only_in_case_are_not_duplicates() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[dynamic_fields]]
+pattern = "*_I"
+type = "text_en"
+stored = true
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let wf = schema::load(&path)
+        .expect("dynamic patterns differing only in case must not be treated as duplicates");
+    assert_eq!(
+        wf.match_dynamic("count_I").map(|d| d.type_.as_str()),
+        Some("text_en"),
+        "the upper-case pattern must be live"
+    );
+    assert_eq!(
+        wf.match_dynamic("count_i").map(|d| d.type_.as_str()),
+        Some("int"),
+        "the lower-case pattern must be unaffected"
     );
 }
 

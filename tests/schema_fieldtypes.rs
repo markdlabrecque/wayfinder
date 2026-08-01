@@ -413,15 +413,20 @@ async fn schema_fieldtypes_does_not_leak_a_custom_type_from_another_schema() {
     );
 }
 
-/// A custom `[[field_types]]` chain named after a built-in *shadows* it:
+/// Was `schema_fieldtypes_custom_chain_shadowing_a_builtin_is_reported_once`,
+/// which pinned the pre-#170 behaviour at the endpoint level: a custom
+/// `[[field_types]]` chain named after a built-in shadowed it (because
 /// `schema::resolve_type` checks the schema's own chains before its built-in
-/// match arms, so `text_de` here is the custom chain, not the Snowball German
-/// preset. The response must report that name exactly once, with the custom
-/// chain's class -- reporting it twice would put a duplicate into the very
-/// `in_array` name list `isPartOfSchema` reads, and reporting only the
-/// built-in would describe a type this core cannot actually resolve.
+/// match arms), the core started, and this endpoint had to de-duplicate the
+/// name so `isPartOfSchema`'s `in_array` list stayed clean.
+///
+/// Issue #170 removes that situation at the source: shadowing a built-in is a
+/// schema-load error, so a core carrying such a schema never starts and there
+/// is no shadowed name for this endpoint to report at all. The test is kept,
+/// inverted, rather than deleted, so the reason the de-duplication case
+/// disappeared stays recorded next to the endpoint it used to constrain.
 #[tokio::test]
-async fn schema_fieldtypes_custom_chain_shadowing_a_builtin_is_reported_once() {
+async fn schema_fieldtypes_custom_chain_shadowing_a_builtin_is_rejected_at_load_time() {
     let dir = tempfile::TempDir::new().expect("create temp dir");
     let toml = format!(
         r#"{SCHEMA_TOML}
@@ -437,37 +442,60 @@ tokenizer = "simple"
 kind = "lowercase"
 "#
     );
-    let app = app_with_schema(dir.path(), &toml)
-        .expect("app with a built-in-shadowing custom field type must build");
-    let (status, body) = get(&app, "schema/fieldtypes?wt=json&json.nl=flat").await;
+    let err = match app_with_schema(dir.path(), &toml) {
+        Ok(_) => panic!("a schema shadowing the built-in `text_de` preset must not build an app"),
+        Err(err) => format!("{err:#}"),
+    };
+    assert!(
+        err.contains("text_de") && err.contains("reserved"),
+        "startup must fail with the reserved-field-type error naming `text_de`, got: {err}"
+    );
 
+    // A core whose custom chains shadow nothing still reports the exact,
+    // complete built-in name set -- the de-duplication this test used to
+    // exercise is unreachable, not merely untested.
+    let clean_dir = tempfile::TempDir::new().expect("create temp dir");
+    let clean_toml = format!(
+        r#"{SCHEMA_TOML}
+[[fields]]
+name = "shout"
+type = "text_de_custom"
+stored = true
+
+[[field_types]]
+name = "text_de_custom"
+tokenizer = "simple"
+[[field_types.filters]]
+kind = "lowercase"
+"#
+    );
+    let app = app_with_schema(clean_dir.path(), &clean_toml)
+        .expect("a custom chain that shadows no built-in must still build");
+    let (status, body) = get(&app, "schema/fieldtypes?wt=json&json.nl=flat").await;
     assert_eq!(status, axum::http::StatusCode::OK, "body: {body}");
-    let entries: Vec<&serde_json::Value> = body["fieldTypes"]
+    assert_eq!(
+        sorted_field_type_names(&body),
+        expected_exact_names(&["text_de_custom"]),
+        "a non-shadowing custom chain is reported alongside every built-in"
+    );
+    // The only assertion in the suite that a *custom* `[[field_types]]` chain
+    // reports Solr's `TextField` class: `EXPECTED_CLASSES` covers built-ins
+    // only, `schema_fieldtypes_reflects_a_live_custom_field_type` asserts the
+    // name alone, and `..._every_entry_has_name_and_class` only checks
+    // `class.is_string()`. Every custom chain resolves to `ResolvedType::Text`
+    // (`schema::resolve_type` returns that for any matching `[[field_types]]`
+    // entry), so `solr.TextField` is the class a client must read.
+    let custom = body["fieldTypes"]
         .as_array()
         .expect("fieldTypes must be a JSON array")
         .iter()
-        .filter(|e| e["name"].as_str() == Some("text_de"))
-        .collect();
-
+        .find(|entry| entry["name"] == "text_de_custom")
+        .unwrap_or_else(|| panic!("the custom chain must be reported, got: {body}"));
     assert_eq!(
-        entries.len(),
-        1,
-        "a custom chain shadowing built-in `text_de` must be reported exactly \
-         once, not once per source; got: {body}"
-    );
-    assert_eq!(
-        entries[0]["class"].as_str(),
+        custom["class"].as_str(),
         Some("solr.TextField"),
-        "the shadowing custom chain is analyzed text, got: {}",
-        entries[0]
-    );
-
-    // And the whole name list is still exact: shadowing must not grow it.
-    assert_eq!(
-        sorted_field_type_names(&body),
-        expected_exact_names(&[]),
-        "shadowing a built-in replaces it in the list rather than adding to \
-         it, so the exact name set is unchanged"
+        "a custom [[field_types]] chain is analyzed text, so it must report Solr's TextField \
+         class, got: {custom}"
     );
 }
 
