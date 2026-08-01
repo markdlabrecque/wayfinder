@@ -2149,3 +2149,79 @@ cap terms_body 'terms?terms=true&terms.fl=body&omitHeader=true&wt=json'
 # Reproduce (after recreating the opening schema/corpus on port 8998):
 # cap select_json_nl_flat 'select?q=*:*&rows=0&facet=true&facet.field=category&json.nl=flat&wt=json'
 # cap select_json_nl_repeated_map_flat 'select?q=*:*&rows=0&facet=true&facet.field=category&json.nl=map&json.nl=flat&wt=json'
+# --- /update/extract exploration (issue #171) -------------------------------
+# Captured 2026-08-01 against solr:9.10.1 with the first-party `extraction`
+# module enabled. This is intentionally a separate core/container: the stock
+# tracer-bullet core has no ExtractingRequestHandler, and indexing an extracted
+# document mutates the corpus. The checked-in payloads are tiny, inspectable
+# text fixtures; `broken.pdf` is deliberately malformed.
+#
+# These POSTs are multipart file uploads, so they cannot be represented by the
+# JSON-body-only `capx`/`manifest-errors.tsv` runner. They also exercise a route
+# Wayfinder does not implement yet, so putting them in the differential manifest
+# would turn an exploration fixture into a permanent expected divergence. Keep
+# the exact reproduction here until an implementation issue extends the runner.
+EXTRACT_CONTAINER=wayfinder-solr-171
+EXTRACT_SOLR=http://localhost:8998/solr
+EXTRACT_CORE=extract171
+# Always recreate this evidence core: accepting a same-named stale container
+# could silently preserve a different image, handler, schema, or indexed doc.
+docker rm -f "$EXTRACT_CONTAINER" >/dev/null 2>&1 || true
+docker run -d --name "$EXTRACT_CONTAINER" -p 8998:8983 \
+  -e SOLR_MODULES=extraction solr:9.10.1 solr-precreate "$EXTRACT_CORE" >/dev/null
+extract_ready=false
+for _ in $(seq 60); do
+  if curl -sf "$EXTRACT_SOLR/$EXTRACT_CORE/admin/ping?wt=json" >/dev/null 2>&1; then
+    extract_ready=true
+    break
+  fi
+  sleep 1
+done
+if [ "$extract_ready" != true ]; then
+  echo "extract Solr did not become ready" >&2
+  exit 1
+fi
+curl -sSf "$EXTRACT_SOLR/$EXTRACT_CORE/config" -H 'Content-Type: application/json' -d '{
+  "add-requesthandler": {
+    "name":"/update/extract",
+    "class":"solr.extraction.ExtractingRequestHandler",
+    "startup":"lazy",
+    "defaults": {
+      "lowernames":"true", "uprefix":"ignored_", "captureAttr":"true",
+      "fmap.a":"links", "fmap.div":"ignored_"
+    }
+  }
+}' >/dev/null
+curl -sSf "$EXTRACT_SOLR/$EXTRACT_CORE/schema" -H 'Content-Type: application/json' -d '{
+  "add-field": [
+    {"name":"body", "type":"text_en", "indexed":true, "stored":true},
+    {"name":"links", "type":"strings", "indexed":true, "stored":true}
+  ]
+}' >/dev/null
+
+cap_extract() { # cap_extract <name> <expected-status> <query> <input> [mime]
+  local name=$1 expected=$2 query=$3 input=$4 mime=${5:-application/octet-stream} actual
+  actual=$(curl -sS -X POST "$EXTRACT_SOLR/$EXTRACT_CORE/update/extract?$query" \
+    -F "file=@$HERE/extract-inputs/$input;type=$mime;filename=$input" \
+    -o "$OUT/$name.json" -w '%{http_code}')
+  if [ "$actual" != "$expected" ]; then
+    echo "$name: expected HTTP $expected, got $actual" >&2
+    exit 1
+  fi
+}
+cap_extract extract_plain_text_xml 200 \
+  'extractOnly=true&resource.name=sample.txt&wt=json' sample.txt
+cap_extract extract_plain_text_text 200 \
+  'extractOnly=true&extractFormat=text&resource.name=sample.txt&wt=json' sample.txt
+cap_extract extract_html_index 200 \
+  'literal.id=extract-html-captured&fmap.content=body&commit=true&resource.name=sample.html&wt=json' \
+  sample.html
+extract_select_status=$(curl -sS \
+  "$EXTRACT_SOLR/$EXTRACT_CORE/select?q=id:extract-html-captured&fl=id,body,links&wt=json" \
+  -o "$OUT/extract_html_select.json" -w '%{http_code}')
+if [ "$extract_select_status" != 200 ]; then
+  echo "extract_html_select: expected HTTP 200, got $extract_select_status" >&2
+  exit 1
+fi
+cap_extract extract_corrupt_pdf 500 \
+  'extractOnly=true&extractFormat=text&resource.name=broken.pdf&wt=json' broken.pdf

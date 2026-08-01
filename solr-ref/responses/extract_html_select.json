@@ -1,0 +1,21 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "q":"id:extract-html-captured",
+      "fl":"id,body,links",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "links":["rect","https://example.test/doc"],
+      "id":"extract-html-captured",
+      "body":" \n \n  \n  \n  \n  \n  \n  \n  \n  \n  \n  \n  \n Captured title \n \n  Ignored wrapper  Linked words  \n Main paragraph. \n  "
+    }]
+  }
+}

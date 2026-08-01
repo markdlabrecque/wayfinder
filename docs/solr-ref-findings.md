@@ -1903,3 +1903,24 @@ recreated verbatim. Fixture: `facet_local_params_duplicate_key.json`.
      the last value win. Wayfinder's ordered `LocalParams::params` plus first-match `get`
      already agrees. The fixture has a `manifest.tsv` row because it is an ordinary
      core-relative GET whose JSON the differential harness can represent faithfully.
+
+## Findings from issue #171 (`/update/extract` exploration)
+
+Captured 2026-08-01 against `solr:9.10.1` with the `extraction` module enabled and a
+Search-API-shaped `ExtractingRequestHandler`. Fixtures: `extract_plain_text_xml.json`,
+`extract_plain_text_text.json`, `extract_html_index.json`, `extract_html_select.json`, and
+`extract_corrupt_pdf.json`.
+
+109. **`extractOnly=true` returns the multipart part name as the content key plus a flat,
+     nested-valued metadata NamedList; the indexing path instead returns only a header.** A
+     Solarium-shaped multipart part named `file` produces `{responseHeader,file,file_metadata}`
+     even when `resource.name=sample.txt`: the resource name appears in metadata but does not
+     rename `file`. `file_metadata` is a flat alternating JSON array whose values are arrays,
+     preserving repeated Tika metadata. The default extracted value is XHTML; adding
+     `extractFormat=text` returns text with Tika's leading/trailing newlines intact. Without
+     `extractOnly`, `literal.id=extract-html-captured&fmap.content=body&commit=true` answers with
+     `responseHeader` only, and the companion select proves the literal ID and mapped body were
+     indexed; handler-default `captureAttr=true` plus `fmap.a=links` also captures anchor
+     attributes. A malformed PDF returns the normal HTTP/error-code 500 envelope. The multipart
+     fixtures stay out of `manifest-errors.tsv` until its JSON-body-only runner and Wayfinder's
+     absent route are extended; exact reproduction is appended to `capture.sh`.
