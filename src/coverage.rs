@@ -947,12 +947,21 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
                 .await
         }
         "select.facet.per-field-missing" => {
+            // Presence of the `facet_fields` container proves nothing here --
+            // it is there without the override too (issue #162's tightening).
+            // The observable effect of `f.category.facet.missing=true` is the
+            // trailing `null` key in the flat counts array, so require that.
             probe
-                .has(
+                .response(
                     "select?q=*:*&facet=true&facet.field=category&f.category.facet.missing=true",
-                    "/facet_counts/facet_fields",
                 )
                 .await
+                .and_then(|body| {
+                    body.pointer("/facet_counts/facet_fields/category")?
+                        .as_array()
+                        .map(|counts| counts.iter().any(Value::is_null))
+                })
+                .unwrap_or(false)
         }
         "select.facet.sort-limit-mincount" => {
             let sorted_limited = probe
@@ -1375,6 +1384,7 @@ pub async fn report() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::RawQuery;
     use axum::routing::get;
 
     #[test]
@@ -1727,6 +1737,153 @@ mod tests {
              response whose `solr-mbeans` is a genuine JSON object, alongside \
              an object-shaped `category` facet, as covered -- the tightened \
              check must not reject the shapes it is supposed to require"
+        );
+    }
+
+    // Issue #140: `select.facet.per-field-missing`'s probe asserts that
+    // `f.category.facet.missing=true` produces the trailing `null` bucket key
+    // in the flat counts array. The weaker predicate it must not degrade back
+    // to is `!counts.is_empty()` -- the `category` facet is non-empty against
+    // the seeded corpus whether or not the per-field override is honoured at
+    // all, so an emptiness check would report the item covered on an
+    // implementation that ignores `f.<field>.facet.missing` entirely.
+    //
+    // The real app cannot serve that shape at this path once the feature is
+    // in, so, following the #162/#167 stubs above, this drives the real
+    // (private) `semantic_covered` against a throwaway router serving
+    // `/solr/content/select` directly. Both the rejecting and the accepting
+    // case are pinned: without the accepting one a path or pointer typo would
+    // make the rejection pass vacuously.
+    //
+    // These stubs are deliberately query-*sensitive*, which is the lesson
+    // #167's sibling comment above records the hard way. A stub that matches
+    // on path alone pins the probe's predicate and nothing about its request,
+    // so the probe could ask for the global `facet.missing=true` -- or for
+    // nothing at all -- and every stub assertion would still pass. That is not
+    // hypothetical here: with a path-only stub, swapping this probe's query to
+    // the global param leaves the whole suite green, and so does reverting the
+    // feature in `src/facet.rs` on top of it, because the global was already
+    // implemented. The coverage artifact would then keep reporting
+    // `select.facet.per-field-missing` covered against an implementation that
+    // ignores `f.<field>.facet.missing` entirely -- exactly the green lie this
+    // file's probes exist to prevent.
+    fn counts_with_null_bucket() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({
+            "facet_counts": {"facet_fields": {"category": ["animals", 2, "tools", 1, null, 3]}}
+        }))
+    }
+
+    fn counts_without_null_bucket() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({
+            "facet_counts": {"facet_fields": {"category": ["animals", 2, "tools", 1]}}
+        }))
+    }
+
+    /// Whether the probe's raw query carries `pair` as a whole `key=value`
+    /// segment. Whole-segment, not substring: `facet.missing=true` must not
+    /// also match `f.category.facet.missing=true`, or the global-only stub
+    /// below would be unable to tell the two params apart -- which is the
+    /// distinction it exists to draw.
+    fn query_carries(query: Option<&str>, pair: &str) -> bool {
+        query
+            .unwrap_or_default()
+            .split('&')
+            .any(|segment| segment == pair)
+    }
+
+    /// Models a correct implementation: the null bucket appears if and only if
+    /// the *per-field* override asked for it.
+    async fn select_honouring_the_per_field_override(
+        RawQuery(query): RawQuery,
+    ) -> axum::Json<Value> {
+        if query_carries(query.as_deref(), "f.category.facet.missing=true") {
+            counts_with_null_bucket()
+        } else {
+            counts_without_null_bucket()
+        }
+    }
+
+    /// Models the pre-#140 implementation: the global `facet.missing` works,
+    /// the per-field override is ignored. The probe must read this as
+    /// *uncovered*, which it can only do by sending the per-field param and
+    /// not the global one.
+    async fn select_honouring_only_the_global_missing(
+        RawQuery(query): RawQuery,
+    ) -> axum::Json<Value> {
+        if query_carries(query.as_deref(), "facet.missing=true") {
+            counts_with_null_bucket()
+        } else {
+            counts_without_null_bucket()
+        }
+    }
+
+    /// Models an implementation that honours neither, regardless of query.
+    async fn select_ignoring_missing_entirely() -> axum::Json<Value> {
+        counts_without_null_bucket()
+    }
+
+    fn select_only_probe(select: axum::routing::MethodRouter) -> ProbeApp {
+        ProbeApp {
+            app: Router::new().route("/solr/content/select", select),
+            _workspace: ProbeWorkspace::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn per_field_missing_probe_rejects_counts_with_no_null_bucket() {
+        let probe = select_only_probe(get(select_ignoring_missing_entirely));
+        assert!(
+            !semantic_covered(&probe, "select.facet.per-field-missing").await,
+            "select.facet.per-field-missing must require the trailing `null` \
+             bucket key that `f.category.facet.missing=true` adds, not merely a \
+             non-empty `category` counts array -- the array is non-empty \
+             without the override too, so an emptiness check would call an \
+             implementation that ignores the per-field override covered"
+        );
+    }
+
+    #[tokio::test]
+    async fn per_field_missing_probe_rejects_an_empty_counts_array() {
+        let probe = select_only_probe(get(select_facet_category_missing));
+        assert!(
+            !semantic_covered(&probe, "select.facet.per-field-missing").await,
+            "select.facet.per-field-missing must not count a response with no \
+             `facet_counts/facet_fields/category` at all as covered"
+        );
+    }
+
+    /// The request-side guard, and the one that makes this probe evidence of
+    /// anything: against a server that honours the *global* `facet.missing`
+    /// but ignores the per-field override -- i.e. Wayfinder immediately
+    /// before this issue -- the item must read uncovered. A probe whose query
+    /// asks for the global param (or omits the per-field one) passes here
+    /// only because the global was already implemented, so this is what
+    /// stops the coverage artifact certifying an unimplemented feature.
+    #[tokio::test]
+    async fn per_field_missing_probe_rejects_a_server_that_honours_only_the_global() {
+        let probe = select_only_probe(get(select_honouring_only_the_global_missing));
+        assert!(
+            !semantic_covered(&probe, "select.facet.per-field-missing").await,
+            "select.facet.per-field-missing must probe with \
+             `f.category.facet.missing=true` and *not* the global \
+             `facet.missing=true` -- against a server implementing only the \
+             global, the item must read uncovered. If this fails, the probe's \
+             query is asking for the wrong param and the item would report \
+             covered with `f.<field>.facet.missing` unimplemented"
+        );
+    }
+
+    #[tokio::test]
+    async fn per_field_missing_probe_accepts_counts_with_the_null_bucket() {
+        let probe = select_only_probe(get(select_honouring_the_per_field_override));
+        assert!(
+            semantic_covered(&probe, "select.facet.per-field-missing").await,
+            "select.facet.per-field-missing must still count the shape it is \
+             supposed to require -- a flat counts array carrying the trailing \
+             `null` bucket, served in response to the per-field override -- as \
+             covered; if this fails the rejections above are passing vacuously \
+             (wrong path, wrong pointer, or a query that no longer sends \
+             `f.category.facet.missing=true`)"
         );
     }
 

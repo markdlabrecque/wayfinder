@@ -83,9 +83,12 @@ struct AppState {
 /// will 400 on a param Wayfinder actually supports. `sort` is fully implemented
 /// as of #2 — validated by #11, ordered by #2. The `facet.*` family landed with
 /// #3; still absent from it, and so still unlisted: `facet.method`,
-/// `facet.prefix`, `facet.pivot`, interval and heatmap faceting,
-/// `facet.range.other` / `.include` / `.hardend`, and `f.<field>.facet.*`
-/// per-field overrides.
+/// `facet.prefix`, `facet.pivot`, interval and heatmap faceting, and
+/// `facet.range.other` / `.include` / `.hardend`.
+///
+/// Solr's per-field override form `f.<field>.<param>` is a *shape*, not a fixed
+/// name, so it cannot live in this list — see `PER_FIELD_PARAMS` and
+/// `check_params`.
 const SELECT_PARAMS: &[&str] = &[
     "q",
     "df",
@@ -175,6 +178,28 @@ const SELECT_PARAMS: &[&str] = &[
     "omitHeader",
     "TZ",
 ];
+/// Base params Wayfinder also honours in Solr's per-field override form
+/// `f.<field>.<param>` (issue #140 — `search_api_solr` sends
+/// `f.ss_type.facet.missing=true`, never the bare global). `check_params`
+/// accepts `f.<field>.<p>` for every `p` here that the endpoint's own allowlist
+/// already contains, which is what keeps the shape from leaking to endpoints
+/// that do not implement the base param at all: `/update` has no
+/// `facet.missing`, so `f.x.facet.missing` still 400s there.
+///
+/// ponytail: exactly one entry, and that is the ceiling, not an oversight.
+/// Every other `f.<field>.facet.*` Solr accepts (`.limit`, `.mincount`,
+/// `.sort`, `.prefix`) is unimplemented here and must keep 400ing under
+/// `strict_params` — pinned by
+/// `strict_params_still_rejects_an_unrelated_f_dot_param`
+/// (`tests/facet_field_missing_override.rs`). Allowlisting a per-field param
+/// whose value is then ignored converts a loud 400 into a silently wrong
+/// answer: a client asking for `f.category.facet.limit=5` would get the global
+/// limit and no indication it was dropped. Upgrade path: implement the
+/// override where the global is read in `src/facet.rs` (the `facet.missing`
+/// resolution in `facet_fields` is the worked example — `Params::per_field`
+/// wins over the global unconditionally, finding 97), *then* add the base param
+/// name here in the same change. Adding a name here alone is the bug.
+const PER_FIELD_PARAMS: &[&str] = &["facet.missing"];
 /// `commitWithin` / `overwrite` / `softCommit` landed with #9. `omitHeader`
 /// landed with #143 — `search_api_solr` sends `omitHeader=false` on every
 /// `/update` (`solr-ref/search-api/trace/00001.json`). No `TZ`: the module
@@ -889,11 +914,21 @@ fn check_sort(state: &AppState, params: &Params) -> Result<Vec<SortClause>, WfEr
 /// Under `strict_params`, rejects the first request param Wayfinder does not
 /// implement — a development aid for finding gaps, off by default because Solr
 /// serves such requests normally and rejecting them would break real clients.
+///
+/// Two things are accepted: an exact name in `allowed`, and Solr's per-field
+/// override shape `f.<field>.<param>` where `<param>` is in both
+/// `PER_FIELD_PARAMS` and `allowed` (issue #140). The shape has to be matched
+/// rather than listed, since `<field>` is any field name the schema resolves.
 fn check_params(state: &AppState, allowed: &[&str], params: &Params) -> Result<(), WfError> {
     if !state.config.strict_params {
         return Ok(());
     }
-    match params.keys().find(|key| !allowed.contains(key)) {
+    let accepted = |key: &str| {
+        allowed.contains(&key)
+            || params::split_per_field_key(key, PER_FIELD_PARAMS)
+                .is_some_and(|(_, base)| allowed.contains(&base))
+    };
+    match params.keys().find(|key| !accepted(key)) {
         None => Ok(()),
         Some(unknown) => Err(WfError::bad_request(
             "wayfinder::UnknownParam",
