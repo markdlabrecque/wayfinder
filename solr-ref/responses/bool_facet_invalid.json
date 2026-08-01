@@ -1,0 +1,18 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":1,
+    "params":{
+      "q":"*:*",
+      "facet.field":"category",
+      "rows":"0",
+      "facet":"1",
+      "wt":"json"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"invalid boolean value: 1",
+    "code":400
+  }
+}

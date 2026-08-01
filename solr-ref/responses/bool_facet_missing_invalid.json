@@ -1,0 +1,25 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":1,
+    "params":{
+      "q":"*:*",
+      "facet.field":"category",
+      "facet.missing":"nope",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"invalid boolean value: nope",
+    "code":400
+  }
+}

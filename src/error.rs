@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use crate::params::Params;
 
 /// Which envelope wraps the `error` block.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Envelope {
     /// `/select`-style: `responseHeader` with the echoed request params.
     /// See `err_bad_syntax.json`.
@@ -38,7 +38,7 @@ pub enum Envelope {
 /// path — carries one pointer's worth of overhead for this instead of a
 /// `serde_json::Value` plus an `Option<String>`'s worth
 /// (`clippy::result_large_err`).
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct ErrorExtra {
     params: Value,
     /// `WithParams` errors use the same envelope switch as successes.
@@ -61,6 +61,7 @@ struct ErrorExtra {
     trace: Option<String>,
 }
 
+#[derive(Debug)]
 pub struct WfError {
     status: StatusCode,
     /// Wayfinder-honest analogue of Solr's `root-error-class`. Solr puts a Java
@@ -130,6 +131,31 @@ impl WfError {
         self
     }
 }
+
+/// Renders just `msg`, so a `WfError` raised deep inside an `anyhow`-based
+/// module (`src/facet.rs`, `src/stats.rs`) survives the trip out as its Solr
+/// message — the handler that catches it rebuilds the envelope anyway, from
+/// `e.to_string()`. Issue #187 needs this for `facet.missing`: the parse
+/// happens in `facet::facet_counts`, but the error has to come out through
+/// the non-`PreQueryFacetError` path so the base query's `response` block is
+/// attached (`bool_facet_missing_invalid.json`).
+///
+/// **The status code does not survive the trip.** A `WfError` that goes out
+/// through an `anyhow` result keeps only its message: the handler catching it
+/// builds a *fresh* `WfError` from `e.to_string()`, with whatever status that
+/// call site uses. `select`'s facet arm uses `bad_request`, so a
+/// `WfError::internal` raised inside `src/facet.rs` would silently come back
+/// as a 400. Today nothing does that — `facet.rs` raises only 400s this way,
+/// which is why the downgrade is invisible — but the next 500 raised inside
+/// an `anyhow` module must be returned as a `WfError` directly, not leaked
+/// through `?`, or it will quietly become a client error.
+impl std::fmt::Display for WfError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.msg)
+    }
+}
+
+impl std::error::Error for WfError {}
 
 impl IntoResponse for WfError {
     fn into_response(self) -> Response {

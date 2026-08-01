@@ -185,7 +185,7 @@ const SELECT_PARAMS: &[&str] = &[
 /// answer: a client asking for `f.category.facet.limit=5` would get the global
 /// limit and no indication it was dropped. Upgrade path: implement the
 /// override where the global is read in `src/facet.rs` (the `facet.missing`
-/// resolution in `facet_fields` is the worked example — `Params::per_field`
+/// resolution in `facet_fields` is the worked example — `Params::per_field_bool`
 /// wins over the global unconditionally, finding 97), *then* add the base param
 /// name here in the same change. Adding a name here alone is the bug.
 const PER_FIELD_PARAMS: &[&str] = &["facet.missing"];
@@ -560,7 +560,13 @@ async fn query_ui(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -
         rows: params.get("rows").unwrap_or(""),
         start: params.get("start").unwrap_or(""),
         facet_field: params.get("facet.field").unwrap_or(""),
-        facet: params.get("facet").is_some_and(|v| v == "true"),
+        // The form checkbox only, not a validation point: this handler always
+        // renders HTML, and an invalid `facet` value 400s inside the `select`
+        // call below, whose real envelope is what the page shows.
+        facet: params
+            .get("facet")
+            .and_then(params::parse_bool)
+            .unwrap_or(false),
     };
 
     let result = match submitted_query(&raw) {
@@ -929,14 +935,14 @@ fn check_params(state: &AppState, allowed: &[&str], params: &Params) -> Result<(
     // `omitHeader` under their default non-strict parameter policy.
     if allowed.contains(&"omitHeader") {
         params.validate_omit_header().map_err(|value| {
-            WfError::bad_request(
-                "wayfinder::InvalidParam",
-                format!(
-                    "invalid omitHeader value `{value}`; expected true, yes, on, false, no, or off"
-                ),
-            )
-            .with_params(params)
-            .suppress_response_header()
+            // Solr's own wording, from the Jetty page issue #179 captured for
+            // `omitHeader=1` (`omit_header_invalid_one.html`: `msg=invalid
+            // boolean value: 1`) — the same message every other invalid
+            // boolean gets, since it is the same `StrUtils.parseBool` failure
+            // (issue #187, finding 115).
+            WfError::bad_request("wayfinder::InvalidParam", params::invalid_bool_msg(value))
+                .with_params(params)
+                .suppress_response_header()
         })?;
     }
     if !state.config.strict_params {
@@ -1204,21 +1210,22 @@ async fn admin_mbeans(
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, MBEANS_PARAMS, &params)?;
 
-    // Deliberate deviation from this crate's usual `== Some("true")` test.
-    // The captured request path is verbatim
+    // The glued-param trace still matters here, it is just no longer a
+    // deviation (issue #187). The captured request path is verbatim
     // `admin/mbeans?stats=true?omitHeader=false&json.nl=map&json.nl=flat&wt=json`
     // -- `search_api_solr` concatenates a handler string that already carries a
     // query onto Solarium's own params -- so `stats` arrives with the raw value
     // `true?omitHeader=false`, and the captured RESPONSE shows Solr honoured
     // it anyway (`UPDATE.updateHandler.stats` is present with real values).
-    // A strict equality check would answer that live client with a bean list
-    // and no stats, i.e. an empty status report.
-    // ponytail: a truthy-*prefix* test, not Solr's real param parsing (which
-    // splits the glued query out into separate params). Ceiling -- `stats=true`
-    // and `stats=false` behave exactly as documented, and anything starting
-    // `true` counts as on; Wayfinder does not recover the `omitHeader=false`
-    // that got glued on, and does not honour it.
-    let want_stats = params.get("stats").is_some_and(|v| v.starts_with("true"));
+    // Solr's own `StrUtils.parseBool` is a prefix test, so the shared parser
+    // reads that glued value as `true` for the same reason real Solr did, and
+    // this site is now conformant rather than a special case.
+    // ponytail: Wayfinder does not recover the `omitHeader=false` that got
+    // glued on, and does not honour it. Ceiling -- real Solr splits the glued
+    // query back out into separate params; here it stays part of `stats`'s
+    // value, which changes nothing for `stats` itself but silently drops the
+    // `omitHeader` the client meant to send.
+    let want_stats = params.bool_or("stats", false)?;
 
     // `json.nl` needs no handling beyond being allowed: `Params::get` already
     // returns the FIRST value for a repeated key, which is what the trace
@@ -1785,12 +1792,32 @@ async fn update(
     check_core(&state, &core, &params, Envelope::NoParams)?;
     check_params(&state, UPDATE_PARAMS, &params).map_err(|e| e.envelope(Envelope::NoParams))?;
 
+    // Every boolean this handler reads, validated at entry so an invalid value
+    // 400s here rather than being silently read as `false` later.
+    // `omitHeader` is NOT among them: `check_params` above already validated
+    // it, for every allowlist containing the name (issue #214).
+    let bool_param = |key: &str, default: bool| {
+        params
+            .bool_or(key, default)
+            .map_err(|e| e.envelope(Envelope::NoParams))
+    };
+    // Bound separately and *then* OR-ed: writing this as
+    // `bool_param("commit", false)? || bool_param("softCommit", false)?`
+    // short-circuits, so `commit=true&softCommit=nope` would never parse
+    // `softCommit` at all and would 200 on an invalid boolean -- the exact
+    // silent acceptance issue #187 exists to remove. Every boolean this
+    // handler accepts is validated, whatever the others say.
+    let commit = bool_param("commit", false)?;
+    let soft_commit = bool_param("softCommit", false)?;
+    let commit_requested = commit || soft_commit;
+    // `overwrite=false` skips the default replace-by-uniqueKey step
+    // (finding 48b); Solr's default is `overwrite=true`.
+    let overwrite = bool_param("overwrite", true)?;
+
     // GET carries no body (finding 47): it is not a method error, but a
     // *content-stream* one — 400 "missing content stream" unless the only
     // thing being asked is a commit, which really commits and answers 200.
     if method == Method::GET {
-        let commit_requested =
-            params.get("commit") == Some("true") || params.get("softCommit") == Some("true");
         if !commit_requested {
             return Err(update_err(
                 "wayfinder::MissingContentStream",
@@ -1804,11 +1831,6 @@ async fn update(
         })?;
         return Ok(update_success(&params));
     }
-
-    // `overwrite=false` skips the default replace-by-uniqueKey step
-    // (finding 48b); every other value (including absent) is Solr's default
-    // `overwrite=true`.
-    let overwrite = params.get("overwrite") != Some("false");
 
     let commands =
         parse_update_commands(&body).map_err(|msg| update_err("wayfinder::BadUpdateBody", msg))?;
@@ -1874,9 +1896,7 @@ async fn update(
     // too (wire-visible behaviour matches Solr; durability is only ever
     // stronger, never weaker). A `commit` key in the body does the same, but
     // in body order, in the loop above.
-    let commit_now =
-        params.get("commit") == Some("true") || params.get("softCommit") == Some("true");
-    if commit_now {
+    if commit_requested {
         state.index.commit().map_err(|e| {
             WfError::internal("wayfinder::CommitError", e.to_string())
                 .with_params(&params)
@@ -1930,6 +1950,16 @@ async fn select(
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, SELECT_PARAMS, &params)?;
     let sort = check_sort(&state, &params)?;
+
+    // Read *before* the base query runs, matching Solr's own timing: an
+    // invalid value here answers with the error-only envelope, no `response`
+    // block (`bool_facet_invalid.json`) -- unlike `facet.missing`, which
+    // `facet::facet_counts` reads after the query and whose error therefore
+    // carries one. `omitHeader` is not read here: `check_params` above already
+    // validated it (issue #214).
+    let facet_requested = params.bool_or("facet", false)?;
+    let stats_requested = params.bool_or("stats", false)?;
+    let hl_requested = params.bool_or("hl", false)?;
 
     let default_field = params
         .get("df")
@@ -2116,7 +2146,7 @@ async fn select(
     // feature (issue #25) means the order keys are inserted in is now the order
     // they are emitted in, so `warnings` has to be known before the object
     // literal is written.
-    let facet_result = if params.get("facet") == Some("true") {
+    let facet_result = if facet_requested {
         Some(
             facet::facet_counts(&state.index, &state.config, &params, &default_field, &base)
                 .map_err(|e| {
@@ -2148,7 +2178,7 @@ async fn select(
     // `stats=true` gates the whole `stats` block the same way `facet=true`
     // gates `facet_counts` — `stats.field` alone does not turn it on (mirrors
     // `facet.field`'s own convention, and matches `stats_key_absent_without_stats_true`).
-    let stats_result = if params.get("stats") == Some("true") {
+    let stats_result = if stats_requested {
         Some(stats::stats(&state.index, &params, &base).map_err(|e| {
             WfError::bad_request("wayfinder::StatsError", e.to_string())
                 .with_params(&params)
@@ -2161,7 +2191,7 @@ async fn select(
     // `hl=true` gates the whole `highlighting` block (finding 52); it is
     // keyed by unique-key value over the docs actually returned on this
     // page, matching `response.docs`'s own pagination.
-    let highlighting_result = if params.get("hl") == Some("true") {
+    let highlighting_result = if hl_requested {
         let result = match &parsed {
             Some((query, _)) => highlight::highlighting(
                 &state.index,
@@ -2251,6 +2281,15 @@ async fn mlt(
     let params = Params::parse(query.as_deref().unwrap_or("")).allow_omit_header();
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, MLT_PARAMS, &params)?;
+
+    // Both of this handler's own booleans, validated at entry. `omitHeader` is
+    // `check_params`'s job (issue #214), not this handler's.
+    let mlt_boost = params.bool_or("mlt.boost", false)?;
+    // `mlt.match.include=false` drops the `match` key from the envelope
+    // entirely -- not an empty-and-present object (finding 100,
+    // `mlt_match_include_false.json` is `{responseHeader, response}`).
+    // Solr's default is `true`.
+    let include_match = params.bool_or("mlt.match.include", true)?;
 
     let default_field = params
         .get("df")
@@ -2391,7 +2430,7 @@ async fn mlt(
                 // Tantivy's own boost weighting (relative term score, best
                 // term normalised to 1.0) only when `mlt.boost=true`; equal
                 // weight (no `BoostQuery` wrapper at all) otherwise.
-                boost_factor: (params.get("mlt.boost") == Some("true")).then_some(1.0),
+                boost_factor: mlt_boost.then_some(1.0),
             };
             let (mlt_query, _scored_terms) = state
                 .index
@@ -2435,12 +2474,6 @@ async fn mlt(
             Value::Object(response)
         }
     };
-
-    // `mlt.match.include=false` drops the `match` key from the envelope
-    // entirely — not an empty-and-present object (finding 100,
-    // `mlt_match_include_false.json` is `{responseHeader, response}`). Only
-    // the literal `false` turns it off; Solr's default is `true`.
-    let include_match = params.get("mlt.match.include") != Some("false");
 
     // Issue #143: same suppression `/select` applies, on the same param.
     let mut body = if params.omit_header() {
@@ -2584,7 +2617,7 @@ async fn terms(
     check_terms_json_nl(&params).map_err(|e| e.with_params(&params))?;
 
     let mut terms_block = Map::new();
-    let terms_requested = params.get("terms") == Some("true");
+    let terms_requested = params.bool_or("terms", false)?;
     if terms_requested {
         for field_name in params.get_all("terms.fl") {
             check_terms_field(&state.index, field_name).map_err(|e| e.with_params(&params))?;

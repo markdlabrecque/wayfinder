@@ -181,3 +181,12 @@ dotted_dynamic_basic	200	select?q=tm_X3b_en_a.b:gamma&fl=id&sort=id+asc&wt=json
 dotted_dynamic_leading	200	select?q=tm_X3b_en_.leading:gamma&fl=id&sort=id+asc&wt=json
 dotted_dynamic_trailing	200	select?q=tm_X3b_en_trailing.:gamma&fl=id&sort=id+asc&wt=json
 dotted_dynamic_consecutive	200	select?q=tm_X3b_en_a..b:gamma&fl=id&sort=id+asc&wt=json
+bool_facet_missing_upper_true	200	select?q=*:*&rows=0&facet=true&facet.field=category&facet.missing=TRUE&wt=json
+bool_facet_missing_yes	200	select?q=*:*&rows=0&facet=true&facet.field=category&facet.missing=yes&wt=json
+bool_facet_missing_on	200	select?q=*:*&rows=0&facet=true&facet.field=category&facet.missing=on&wt=json
+bool_facet_missing_no	200	select?q=*:*&rows=0&facet=true&facet.field=category&facet.missing=no&wt=json
+bool_facet_missing_prefix	200	select?q=*:*&rows=0&facet=true&facet.field=category&facet.missing=truestuff&wt=json
+bool_facet_missing_invalid	400	select?q=*:*&rows=0&facet=true&facet.field=category&facet.missing=nope&wt=json
+bool_facet_on	200	select?q=*:*&rows=0&facet=on&facet.field=category&wt=json
+bool_facet_invalid	400	select?q=*:*&rows=0&facet=1&facet.field=category&wt=json
+bool_omit_header_yes	200	select?q=*:*&rows=0&omitHeader=yes&wt=json

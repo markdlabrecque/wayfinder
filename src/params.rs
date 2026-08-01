@@ -7,6 +7,8 @@
 
 use serde_json::{Map, Value, json};
 
+use crate::error::WfError;
+
 /// One decoded `key=value` pair from a query string, in request order.
 #[derive(Debug, Clone)]
 pub struct Params {
@@ -50,15 +52,43 @@ impl Params {
             .map(|(_, v)| v.as_str())
     }
 
-    /// First value of Solr's per-field override form `f.<field>.<param>`, if
-    /// present — e.g. `per_field("category", "facet.missing")` reads
-    /// `f.category.facet.missing`.
+    /// Reads `key` as a boolean through [`parse_bool`], or `None` when the
+    /// param is absent. An invalid value is Solr's 400 `invalid boolean
+    /// value: <raw>` (`bool_facet_invalid.json`), with this request's params
+    /// already echoed onto it — the `WithParams` envelope is what every
+    /// `/select`-family caller wants; `/update`'s `bool_param` closure
+    /// re-stamps `Envelope::NoParams` on top for all of its reads.
+    pub fn bool_opt(&self, key: &str) -> Result<Option<bool>, WfError> {
+        match self.get(key) {
+            None => Ok(None),
+            Some(raw) => match parse_bool(raw) {
+                Some(value) => Ok(Some(value)),
+                None => Err(WfError::bad_request(
+                    "wayfinder::InvalidBoolean",
+                    invalid_bool_msg(raw),
+                )
+                .with_params(self)),
+            },
+        }
+    }
+
+    /// [`Params::bool_opt`] with the param's Solr default filled in. Most
+    /// boolean params default to `false`; `overwrite` and `mlt.match.include`
+    /// default to `true`.
+    pub fn bool_or(&self, key: &str, default: bool) -> Result<bool, WfError> {
+        Ok(self.bool_opt(key)?.unwrap_or(default))
+    }
+
+    /// [`Params::bool_opt`] over Solr's per-field override form
+    /// `f.<field>.<param>` — e.g. `per_field_bool("category",
+    /// "facet.missing")` reads `f.category.facet.missing`. `None` when no
+    /// override was sent, so callers can fall back to the global param.
     ///
     /// Keys off the *field* being faceted, never a `{!key=...}` response label
     /// (finding 97, and issue #138's `facet_local_params_key_f_field.json` /
     /// `_f_key.json`): callers must pass the resolved field name.
-    pub fn per_field(&self, field: &str, param: &str) -> Option<&str> {
-        self.get(&format!("f.{field}.{param}"))
+    pub fn per_field_bool(&self, field: &str, param: &str) -> Result<Option<bool>, WfError> {
+        self.bool_opt(&format!("f.{field}.{param}"))
     }
 
     /// All values for `key`, in request order (for repeatable params like `fq`).
@@ -79,13 +109,24 @@ impl Params {
     ///
     /// An unsupported parameter or invalid value remains inert. Invalid values
     /// are explicitly suppressed by their validation-error policy instead.
+    ///
+    /// Ground truth for the accept side is `bool_omit_header_yes.json`
+    /// (issue #187) plus `search_api_solr`'s own traffic
+    /// (`solr-ref/search-api/trace/`): all twenty traces that send
+    /// `omitHeader=true` (`00002`-`00019`, `00021` on `/select`, `00022` on
+    /// `/mlt`, plus `00028` on `/terms`) have responses with no
+    /// `responseHeader` key at all, while `00001` (`/update`,
+    /// `omitHeader=false`) does carry one. Issue #214 settled the error side.
     pub fn omit_header(&self) -> bool {
         self.omit_header_allowed && matches!(self.parse_omit_header(), Ok(true))
     }
 
-    /// Validates Solr 9.10.1's `omitHeader` vocabulary: `true`/`yes`/`on`
-    /// and `false`/`no`/`off`, case-insensitively. Numeric and single-letter
-    /// boolean spellings are invalid for this parameter.
+    /// Validates `omitHeader` against Solr's boolean vocabulary -- the shared
+    /// [`parse_bool`], so this parameter accepts exactly what every other
+    /// boolean param does (issue #187, finding 115): `true`/`on`/`yes` and
+    /// `false`/`off` by case-insensitive prefix, `no` exactly, and nothing
+    /// else. Numeric and single-letter spellings (`1`, `t`, `y`) stay invalid
+    /// here, as they are everywhere else.
     pub fn validate_omit_header(&self) -> Result<(), &str> {
         self.parse_omit_header().map(|_| ())
     }
@@ -93,21 +134,7 @@ impl Params {
     fn parse_omit_header(&self) -> Result<bool, &str> {
         match self.get("omitHeader") {
             None => Ok(false),
-            Some(value)
-                if ["true", "yes", "on"]
-                    .iter()
-                    .any(|v| value.eq_ignore_ascii_case(v)) =>
-            {
-                Ok(true)
-            }
-            Some(value)
-                if ["false", "no", "off"]
-                    .iter()
-                    .any(|v| value.eq_ignore_ascii_case(v)) =>
-            {
-                Ok(false)
-            }
-            Some(value) => Err(value),
+            Some(value) => parse_bool(value).ok_or(value),
         }
     }
 
@@ -149,6 +176,41 @@ pub fn split_per_field_key<'a, 'b>(
         let field = rest.strip_suffix(param)?.strip_suffix('.')?;
         (!field.is_empty()).then_some((field, *param))
     })
+}
+
+/// Solr's `StrUtils.parseBool`, as measured against real `solr:9` for issue
+/// #187 (finding 115) — the one parser every boolean request param in this
+/// crate goes through. `None` means "invalid", which callers turn into Solr's
+/// 400 `invalid boolean value: <raw>`.
+///
+/// On the value lowercased:
+/// - starts with `true`, `on` or `yes` → `true` (`TRUE`, `oN`, `truestuff`,
+///   `onward`, `yesss` are all true)
+/// - starts with `false` or `off`, or *equals* `no` → `false` (`offside`,
+///   `falsey`, `NO` are false)
+/// - anything else, including the empty string, is invalid
+///
+/// The `no` arm is an exact match, not a prefix: `noo` is invalid, which is
+/// why this cannot be collapsed into the `false`/`off` prefix list. The
+/// ticket's own premise — that Solr accepts `1`/`0`/`t`/`f`/`y` — is wrong;
+/// captured Solr 400s on all five.
+pub fn parse_bool(raw: &str) -> Option<bool> {
+    let value = raw.to_ascii_lowercase();
+    if value.starts_with("true") || value.starts_with("on") || value.starts_with("yes") {
+        Some(true)
+    } else if value.starts_with("false") || value.starts_with("off") || value == "no" {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Solr's verbatim wording for a value [`parse_bool`] rejects
+/// (`bool_facet_invalid.json`, `bool_facet_missing_invalid.json`). Shared so
+/// the `WfError` path in `Params` and the `anyhow` path in `src/facet.rs`
+/// cannot drift apart.
+pub fn invalid_bool_msg(raw: &str) -> String {
+    format!("invalid boolean value: {raw}")
 }
 
 /// Decodes `application/x-www-form-urlencoded`: `+` is a space, `%XX` is a
@@ -268,5 +330,89 @@ mod tests {
             split_per_field_key("fx.category.facet.missing", HONOURED),
             None
         );
+    }
+}
+
+/// Issue #187: the shared boolean-param parser must match real Solr 9's
+/// `StrUtils.parseBool`, not the stricter `== "true"`/`starts_with("true")`
+/// checks scattered through `src/lib.rs`/`src/facet.rs` today.
+///
+/// Ground truth is `docs/solr-ref-findings.md`'s finding for this issue
+/// (captured against real `solr:9`, port 8996, 2026-08-01), not the ticket's
+/// own premise — the ticket claims Solr accepts `1`/`0`/`t`/`f`/`y`, which is
+/// wrong; measured behaviour is:
+/// - `true` if the lowercased value *starts with* `true`, `on`, or `yes`
+/// - `false` if it *starts with* `false` or `off`, or *equals* `no` exactly
+/// - anything else, including the empty string, is invalid
+///
+/// **Interpretation this test file has to make**: the spec names a shared
+/// parser in `src/params.rs` but not its exact signature. These tests call
+/// `parse_bool(raw: &str) -> Option<bool>` — `None` for anything invalid,
+/// leaving the `WfError`/`"invalid boolean value: <raw>"` construction to the
+/// `Params` accessor that calls it (which has the raw string in scope to
+/// format the message; the parser itself does not need to know it). This is
+/// the free function the module does not yet define — a compile failure
+/// (`cannot find function \`parse_bool\``) is the expected red here, not a
+/// test assertion failure, until it exists.
+#[cfg(test)]
+mod parse_bool_tests {
+    use super::parse_bool;
+
+    /// `true`/`TRUE`/`True`/`tRuE` (case-insensitivity), `truestuff` (a
+    /// `true`-prefixed value, not just the exact word), and the `on`/`yes`
+    /// families with the same case- and prefix-insensitivity.
+    const TRUE_VALUES: &[&str] = &[
+        "true",
+        "TRUE",
+        "True",
+        "tRuE",
+        "truestuff",
+        "on",
+        "ON",
+        "onward",
+        "yes",
+        "YES",
+        "yesss",
+    ];
+
+    /// `false`/`falsey`, `off`/`offside`, and the one exact-match exception:
+    /// `no` (and its case variants) is false, but — per `INVALID_VALUES`
+    /// below — `noo` is NOT, so `no` cannot be treated as merely another
+    /// `false`-prefixed family.
+    const FALSE_VALUES: &[&str] = &["false", "falsey", "off", "offside", "no", "NO", "No"];
+
+    /// Everything the ticket's own premise wrongly claimed Solr accepts
+    /// (`1`, `0`, `t`, `f`, `y`), plus `nope` (not `no`- or `false`-prefixed),
+    /// `noo` (not exactly `no`), `maybe`, `2`, and the empty string.
+    const INVALID_VALUES: &[&str] = &["1", "0", "t", "f", "y", "nope", "noo", "maybe", "2", ""];
+
+    #[test]
+    fn accepts_true_prefixed_case_insensitive_values() {
+        for v in TRUE_VALUES {
+            assert_eq!(parse_bool(v), Some(true), "expected `{v}` to parse as true");
+        }
+    }
+
+    #[test]
+    fn accepts_false_prefixed_values_and_the_exact_no_exception() {
+        for v in FALSE_VALUES {
+            assert_eq!(
+                parse_bool(v),
+                Some(false),
+                "expected `{v}` to parse as false"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_everything_solr_rejects_including_1_0_t_f_y_noo_and_empty() {
+        for v in INVALID_VALUES {
+            assert_eq!(
+                parse_bool(v),
+                None,
+                "expected `{v}` to be rejected -- Solr's real StrUtils.parseBool does NOT \
+                 accept 1/0/t/f/y (the ticket's premise is wrong; see docs/solr-ref-findings.md)"
+            );
+        }
     }
 }

@@ -2007,3 +2007,48 @@ capture) with the dedicated three-document corpus recorded at the end of
      (including all intervening text) and leaves the third separate because an unselected gap
      remains. It does not concatenate snippets with a synthetic separator or merge every
      fragment indiscriminately.
+## Finding from issue #187 (boolean param parsing)
+
+Captured 2026-08-01 against a one-off `solr:9` container (port 8996), with the tracer-bullet
+schema and five-document corpus from `solr-ref/capture.sh` recreated verbatim. Fixtures:
+`bool_facet_missing_upper_true.json`, `bool_facet_missing_yes.json`, `bool_facet_missing_on.json`,
+`bool_facet_missing_no.json`, `bool_facet_missing_prefix.json`, `bool_facet_missing_invalid.json`,
+`bool_facet_on.json`, `bool_facet_invalid.json`, `bool_omit_header_yes.json` -- all nine have
+`manifest.tsv` rows.
+
+115. **Solr's boolean params are prefix-matched and case-insensitive, and an unrecognised value
+     is a 400 -- but `1`/`0`/`t`/`f`/`y` are NOT recognised.** Issue #187's own premise said they
+     were; captured Solr rejects all five. On the value lowercased, `StrUtils.parseBool` answers
+     `true` when it *starts with* `true`, `on` or `yes` (`TRUE`, `Yes`, `oN`, `truestuff`,
+     `onward`, `yesss` are all true), `false` when it *starts with* `false` or `off` or *equals*
+     `no` exactly (`offside`, `falsey`, `NO` are false), and otherwise throws. The `no` arm is
+     the one exact match in the rule: `noo` is invalid, not false, so it cannot be folded into
+     the prefix list. The error is a 400 whose `error.msg` is `invalid boolean value: <raw
+     value>` verbatim, with `error.code` and `responseHeader.status` both 400.
+
+     **Where the 400 surfaces depends on when the param is read.** `facet` is read before the
+     base query runs, so `facet=1` answers with the error-only envelope -- `responseHeader` and
+     `error`, no `response` block (`bool_facet_invalid.json`). `facet.missing` is read inside
+     faceting, after the base query has already produced its hits, so `facet.missing=nope`
+     answers with issue #35's shape: the base query's real `response` block sits between
+     `responseHeader` and `error` (`bool_facet_missing_invalid.json`). Wayfinder reproduces the
+     split by reading `facet`/`stats`/`hl` at handler entry and letting `facet.missing`'s error
+     out through `facet::facet_counts`'s non-`PreQueryFacetError` path.
+
+     **Relationship to finding 112 (issue #179).** That finding probed `omitHeader` and
+     concluded its accepted values are case-insensitive `true`/`yes`/`on` and `false`/`no`/`off`.
+     This one refines it: the match is by *prefix*, not equality -- it simply never probed a
+     value like `truestuff`. The two agree on everything they both tested, including that
+     `1`/`0`/`t`/`f`/`y` are invalid. One rule, `StrUtils.parseBool`, governs every boolean
+     param; `Params::validate_omit_header` now routes through the same shared parser.
+
+     **Divergence, deliberate: an invalid `omitHeader` gets Jetty's HTML error page from Solr,
+     an ordinary JSON 400 from Wayfinder.** `omitHeader=1` never reaches a JSON response writer
+     in Solr, because header suppression is decided before that writer exists, so the container's
+     own HTML 400 page comes back instead (captured by issue #179 as
+     `omit_header_invalid_one.html`, deliberately outside `manifest-errors.tsv` since that
+     harness parses bodies as JSON). Wayfinder validates `omitHeader` in `check_params` and
+     answers with its normal JSON envelope. The status code matches; the body does not, and
+     reproducing Jetty's page is not worth it. The accept side *is* fixtured:
+     `bool_omit_header_yes.json` shows `omitHeader=yes` suppressing `responseHeader` exactly as
+     `omitHeader=true` does.
