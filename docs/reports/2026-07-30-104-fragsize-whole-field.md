@@ -14,7 +14,7 @@ single snippet — for **both** `hl.method=unified` (default) and `hl.method=ori
 which truncate a field this long.
 
 `src/highlight.rs` now special-cases an explicit `hl.fragsize=0` ahead of the existing
-`hl.method=original`-vs-everything-else split (finding 54), mapping it to a new
+`hl.method=original`-vs-everything-else split (finding 55), mapping it to a new
 `core_index::WHOLE_FIELD_MAX_CHARS` (`usize::MAX`) sentinel so `SnippetGenerator` never
 fragments, regardless of `hl.method`. A second-order bug surfaced fixing this: Tantivy's
 fragment stops at the last token's `offset_to`, dropping trailing non-token text (the field's

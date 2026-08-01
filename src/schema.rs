@@ -716,7 +716,7 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
                 // Not Tantivy's own `STRING` const: that leaves fieldnorms
                 // on, which BM25-length-norms a multivalued string field by
                 // its value count — Solr's `StrField` sets `omitNorms=true`
-                // and never does that (finding 45's `select_q_field_term`:
+                // and never does that (finding 59's `select_q_field_term`:
                 // `doc1`, with 2 `category` values, must rank no worse than
                 // `doc4`'s 1, tied on an equal score and insertion-order
                 // tie-broken, not favouring the fewer-valued doc).

@@ -1009,7 +1009,7 @@ async fn mm_absent_still_uses_normal_or_default() {
 #[tokio::test]
 async fn empty_mm_alongside_a_single_clause_q_does_not_400() {
     // The other half of issue #113's correction, added by the implementor
-    // after review round 1 (finding 85). Real Solr does not validate `mm`
+    // after review round 1 (finding 89). Real Solr does not validate `mm`
     // eagerly as a request param -- it only *parses* the spec when it has a
     // multi-clause boolean query to apply it to, so the identical `mm=` that
     // 400s above (`q=alpha beta gamma`, three clauses) 200s when `q` yields
@@ -1053,7 +1053,7 @@ async fn empty_mm_alongside_a_single_clause_q_does_not_400() {
 #[tokio::test]
 async fn empty_mm_alongside_star_all_matches_committed_fixture() {
     // Reviewer round-2 follow-up (issue #113): the round above only asserted
-    // `numFound` against prose (finding 85 / this file's own comments), not a
+    // `numFound` against prose (finding 89 / this file's own comments), not a
     // committed fixture -- the same class of gap that let round 1's bad
     // placement (guard before the `*:*` short-circuit) hide from a green
     // suite. `edismax_mm_empty_star` is a genuine `manifest.tsv` row (see
@@ -1082,7 +1082,7 @@ async fn empty_mm_alongside_star_all_matches_committed_fixture() {
 
 #[tokio::test]
 async fn empty_mm_400s_for_every_multi_clause_shape_regardless_of_occur() {
-    // Companion to the test above, same capture (finding 85): what makes an
+    // Companion to the test above, same capture (finding 89): what makes an
     // empty `mm` reachable is the clause *count*, not whether the clauses are
     // optional. All three of these 400 in real Solr.
     let (app, _dir) = edismax_app().await;
@@ -1103,7 +1103,7 @@ async fn empty_mm_400s_for_every_multi_clause_shape_regardless_of_occur() {
 #[tokio::test]
 async fn whitespace_only_mm_400s_like_an_empty_one() {
     // `mm=%20` is the adjacent shape review round 1 asked about: real Solr
-    // 400s on it with the same `NumberFormatException` as `mm=` (finding 85),
+    // 400s on it with the same `NumberFormatException` as `mm=` (finding 89),
     // which is why the guard trims before testing for emptiness rather than
     // checking `is_empty()` on the raw value.
     let (app, _dir) = edismax_app().await;

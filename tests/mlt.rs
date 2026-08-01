@@ -14,7 +14,7 @@
 //! here): `mlt=true` as a `/select` search component, and content-stream MLT
 //! (POSTing free text instead of selecting a doc via `q`).
 //!
-//! ## Envelope shape, per the captured fixtures (findings 51-58)
+//! ## Envelope shape, per the captured fixtures (findings 60-67)
 //!
 //! `{responseHeader, match, response[, interestingTerms]}`. `match` is the
 //! source document as its own nested search-result object
@@ -22,7 +22,7 @@
 //! when `q` did not resolve to a document. `response` holds the similar-docs
 //! result set in the same four-key shape, **except** when `q` matched no
 //! source document at all, in which case `response` is the bare JSON value
-//! `null` (finding 54) — not an empty object. `interestingTerms` only appears
+//! `null` (finding 63) — not an empty object. `interestingTerms` only appears
 //! at all when `mlt.interestingTerms` is set to a truthy value, as a bare
 //! top-level array sibling to `match`/`response`.
 //!
@@ -211,7 +211,7 @@ fn assert_matches_mlt_fixture_ignoring_score_magnitude(actual: Value, fixture_na
 /// `mlt_fl_rows_start` fixture's own data: `blank_bm25_score_magnitudes`
 /// blanks *both* sides of the comparison above, so a regression that changes
 /// `response.maxScore` from "the corpus-wide max over the full unpaginated
-/// MLT hit set" (finding 58) to "the max over just the returned page" would
+/// MLT hit set" (finding 67) to "the max over just the returned page" would
 /// still pass every blanked-equality assert in this file, including the
 /// manifest loop below. This asserts the real, un-blanked relationship
 /// instead: `response.maxScore` must exceed the returned page's own max
@@ -294,7 +294,7 @@ async fn mlt_fl_restricted_to_one_field_matches_fixture() {
 #[tokio::test]
 async fn mlt_mintf_mindf_maxdf_tuning_matches_ranked_fixture() {
     // Loosening mintf/mindf from the too-strict defaults surfaces 4 real
-    // matches from the astronomy cluster (finding 64) — compared by
+    // matches from the astronomy cluster (finding 64/65) — compared by
     // ranked-id list per PRD §8 ("compare ranked ID lists, not just result
     // sets"), reusing tests/differential.rs's own machinery
     // (`common::diff::diff_ranked_ids`) rather than inventing a second one.
@@ -326,7 +326,7 @@ async fn mlt_mintf_mindf_maxdf_tuning_matches_ranked_fixture() {
 #[tokio::test]
 async fn mlt_minwl_maxwl_narrows_the_match_set() {
     // Stacked on the same mintf=1/mindf=1 loosening as the tuning fixture
-    // above (finding 56): minwl=6/maxwl=10 excludes short shared words
+    // above (finding 65): minwl=6/maxwl=10 excludes short shared words
     // ("night", "sky") and narrows the astronomy cluster's 4 matches down to
     // 1 (`mlt12`).
     let (app, _dir) = mlt_app().await;
@@ -343,7 +343,7 @@ async fn mlt_minwl_maxwl_narrows_the_match_set() {
 
 #[tokio::test]
 async fn mlt_maxqt_caps_interesting_terms_to_zero_matches() {
-    // Capping to the top 2 interesting terms by weight (finding 56) narrows
+    // Capping to the top 2 interesting terms by weight (finding 65) narrows
     // the same loosened astronomy query all the way to 0 matches — a real,
     // captured Solr behaviour on this corpus, not a bug to soften.
     let (app, _dir) = mlt_app().await;
@@ -360,7 +360,7 @@ async fn mlt_maxqt_caps_interesting_terms_to_zero_matches() {
 
 #[tokio::test]
 async fn mlt_boost_changes_ranked_match_order() {
-    // finding 57: mlt.boost=true (loosened mintf/mindf) surfaces 3 matches in
+    // finding 66: mlt.boost=true (loosened mintf/mindf) surfaces 3 matches in
     // a specific order (mlt2, mlt6, mlt10) that a plain term-overlap count
     // would not necessarily produce. Ranked-id comparison, same rationale as
     // the mintf/mindf/maxdf test above.
@@ -386,7 +386,7 @@ async fn mlt_boost_changes_ranked_match_order() {
 
 #[tokio::test]
 async fn mlt_fl_rows_start_paginates_the_similar_docs_result_set() {
-    // finding 58: fl=id,score / rows=2 / start=1 against a 4-match query
+    // finding 67: fl=id,score / rows=2 / start=1 against a 4-match query
     // pages to (mlt15, mlt12), and both `match` and `response` carry
     // per-doc `score` plus a top-level `maxScore` once `fl` includes `score`
     // — `response.maxScore` is the corpus-wide max, not recomputed over the
@@ -408,7 +408,7 @@ async fn mlt_fl_rows_start_paginates_the_similar_docs_result_set() {
     assert_matches_mlt_fixture_ignoring_score_magnitude(body, "mlt_fl_rows_start");
 }
 
-// --- key order (finding 52: responseHeader, match, response[, interestingTerms]) --
+// --- key order (finding 61: responseHeader, match, response[, interestingTerms]) --
 
 /// The `/mlt` row's own manifest query (rather than hand-copying it), so
 /// editing `manifest.tsv` can't silently desynchronise this test from the
@@ -426,7 +426,7 @@ fn mlt_manifest_query(name: &str) -> String {
 
 #[tokio::test]
 async fn mlt_baseline_key_order_matches_solr() {
-    // finding 52: top-level `responseHeader, match, response` (no
+    // finding 61: top-level `responseHeader, match, response` (no
     // `interestingTerms` here, since `mlt.interestingTerms` was not
     // requested), plus `match`/`response`'s own inner
     // `numFound, start, numFoundExact, docs` order.
@@ -470,7 +470,7 @@ async fn mlt_interesting_terms_key_absent_by_default() {
 
 #[tokio::test]
 async fn mlt_interesting_terms_details_matches_fixture() {
-    // finding 53: `mlt.interestingTerms=details` adds a bare top-level
+    // finding 62: `mlt.interestingTerms=details` adds a bare top-level
     // `interestingTerms` array (empty here, since this particular query's
     // result set is also empty per finding 64) sibling to `match`/`response`.
     let (app, _dir) = mlt_app().await;
@@ -492,7 +492,7 @@ async fn mlt_interesting_terms_details_matches_fixture() {
 
 #[tokio::test]
 async fn mlt_doc_with_no_interesting_terms_still_returns_empty_response_object() {
-    // finding 54 (contrast case): a source doc that *does* exist but has no
+    // finding 63 (contrast case): a source doc that *does* exist but has no
     // meaningfully-shared vocabulary still gets an empty `response` *object*
     // (numFound: 0, docs: []) — not `null`. `null` is reserved for the case
     // below, where the source doc itself does not exist.
@@ -509,7 +509,7 @@ async fn mlt_doc_with_no_interesting_terms_still_returns_empty_response_object()
 
 #[tokio::test]
 async fn mlt_nonexistent_source_doc_returns_200_with_null_response() {
-    // finding 54: `q` resolving to zero source documents is a 200 with
+    // finding 63: `q` resolving to zero source documents is a 200 with
     // `match.numFound: 0` and the literal JSON value `null` for `response` —
     // not an error, and not the empty-object shape used when the source doc
     // exists but has no interesting terms.
@@ -828,7 +828,7 @@ async fn mlt_match_offset_past_the_last_hit_resolves_no_seed() {
     // (`.or(hits.first())`) and "clamp to the last hit" survive the whole
     // suite, and each would answer a different question silently.
     //
-    // The chosen behaviour is no seed at all, which is finding 54's existing
+    // The chosen behaviour is no seed at all, which is finding 63's existing
     // "q matched nothing" shape: `match.numFound` still reports the real hit
     // count for `q`, `match.docs` is empty, and `response` is the bare JSON
     // `null`. If a capture ever contradicts this, the fixture wins and this
@@ -854,7 +854,7 @@ async fn mlt_match_offset_past_the_last_hit_resolves_no_seed() {
     assert_eq!(
         body.get("response"),
         Some(&Value::Null),
-        "with no seed resolved, `response` is the bare null of finding 54, got: {body}"
+        "with no seed resolved, `response` is the bare null of finding 63, got: {body}"
     );
 }
 

@@ -31,7 +31,7 @@ pub enum Envelope {
 }
 
 /// The parts of a `WfError` that are set on only some error paths (the
-/// `WithParams` envelope's echoed request, and finding 45's one
+/// `WithParams` envelope's echoed request, and finding 59's one
 /// trace-carrying 500). Grouped and boxed as a single field on `WfError`
 /// rather than inlined, so every `WfError` — and every function returning
 /// `Result<_, WfError>`, which is most of `src/lib.rs`'s request-handling
@@ -49,7 +49,7 @@ struct ErrorExtra {
     /// (`facet_err_range_single.json`).
     response: Option<Value>,
     /// Set only for the one captured 500 whose error object carries `msg,
-    /// trace, code` with **no** `metadata` key at all (finding 45's
+    /// trace, code` with **no** `metadata` key at all (finding 59's
     /// `err_regex_bad_class.json`: a regex that parses as a query but fails
     /// automaton compilation) — every other error here, 400 or 500, keeps
     /// the `metadata` array. `trace` itself is free text (a Java stack
@@ -124,7 +124,7 @@ impl IntoResponse for WfError {
         let code = self.status.as_u16() as i64;
         // Flat alternating array, like Solr's (finding 10) — except the one
         // `trace`-carrying shape, which never had a `metadata` key to begin
-        // with (`err_regex_bad_class.json`, finding 45).
+        // with (`err_regex_bad_class.json`, finding 59).
         let error = match &self.extra.trace {
             Some(trace) => json!({
                 "msg": self.msg,

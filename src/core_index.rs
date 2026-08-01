@@ -1174,10 +1174,10 @@ impl CoreIndex {
     /// `BoostQuery` multiplying the whole thing.
     ///
     /// `qf`/`pf` field lists (and their `^boost` suffixes) come from
-    /// `edismax::parse_field_weights`; an unknown field name in either is
-    /// silently dropped rather than erroring, matching Wayfinder's general
-    /// unknown-param leniency (finding 8) applied to a sub-grammar with no
-    /// fixture pinning stricter behaviour. A leaf this function does not
+    /// `edismax::parse_field_weights`. An unknown field name in `qf` is a 400
+    /// (finding 84, extended to `q=*:*` by finding 88); in `pf` it is still
+    /// silently dropped, a Wayfinder leniency choice with no fixture pinning
+    /// stricter behaviour either way. A leaf this function does not
     /// specially handle (a fielded literal, a range, a set, `bf`'s function-
     /// query syntax) falls through to `build_ast`/`build_leaf` against just
     /// the default field, the same machinery `parse_query` itself uses —
@@ -1197,7 +1197,7 @@ impl CoreIndex {
     ) -> Result<Box<dyn Query>, QueryError> {
         // Real Solr 400s if *any* named `qf` field is undefined, even when
         // other fields in the same `qf` are valid (issue #111) -- unlike
-        // `pf`'s own unknown-field leniency (finding 8), which this does not
+        // `pf`'s own unknown-field leniency (a Wayfinder choice), which this does not
         // touch. Checked up front against the raw parsed names rather than
         // relying on `resolve_field_weights`'s drop-unknown filtering, which
         // exists for `pf` and for `qf`'s empty-spec default-field fallback.
@@ -1281,7 +1281,7 @@ impl CoreIndex {
         // `Some(" ")`) is a malformed spec, not an absent one: real Solr 400s
         // with `Invalid 'mm' spec. Expecting an integer.` (a
         // `NumberFormatException` -- fixture
-        // `solr-ref/responses/edismax_mm_empty_string.json`, finding 85).
+        // `solr-ref/responses/edismax_mm_empty_string.json`, finding 89).
         // Issue #113's own premise, that Solr ignores an empty `mm`, is wrong.
         // `mm` entirely absent (`None`) is the untouched case: no
         // `minimum_number_should_match` is set at all and the normal OR
@@ -1290,7 +1290,7 @@ impl CoreIndex {
         // to `None`.
         //
         // Placement is load-bearing and capture-derived, not a guess (finding
-        // 85): Solr only *parses* `mm` when it has a multi-clause boolean
+        // 89): Solr only *parses* `mm` when it has a multi-clause boolean
         // query to apply it to, so an empty `mm` alongside a `q` that yields
         // fewer than two clauses is never reached and 200s. Captured
         // one-clause 200s: `q=*:*` (short-circuited above), `q=` (the empty-
@@ -1733,7 +1733,7 @@ impl CoreIndex {
     /// literal is classified by `query::classify_literal` for fuzzy/wildcard/
     /// unclosed-regex; `UserInputLeaf::Exists` and an all-`Unbounded`
     /// `UserInputLeaf::Range` (`[* TO *]`) both become the field-exists idiom
-    /// (finding 43/44); `UserInputLeaf::Regex` (a *closed* `/pattern/`,
+    /// (finding 57/58); `UserInputLeaf::Regex` (a *closed* `/pattern/`,
     /// which the grammar itself already parsed out of a literal) becomes a
     /// `RegexQuery`. A leaf targeting a `[[dynamic_fields]]`-backed catch-all
     /// path (its field starts with `_dynamic.`/`_dynamic_text.` —
@@ -1834,8 +1834,8 @@ impl CoreIndex {
     }
 
     /// `field:*` / `field:[* TO *]` — every doc carrying any value for
-    /// `field` (finding 43's field-exists idiom; also the range-syntax
-    /// equivalent, finding 44's `range_str_star_both`). `ExistsQuery` needs
+    /// `field` (finding 57's field-exists idiom; also the range-syntax
+    /// equivalent, finding 58's `range_str_star_both`). `ExistsQuery` needs
     /// a fast (docValues) column, but Solr answers `field:*` from the
     /// postings on a plain indexed field with none (round-1 review's
     /// `exists_non_docvalues.json`: `body:*` = all five docs even though
@@ -1869,7 +1869,7 @@ impl CoreIndex {
         Ok(Box::new(ExistsQuery::new(field_name.to_string(), false)))
     }
 
-    /// `field:term~[N]` — finding 42. Lowercased (never stemmed) on an
+    /// `field:term~[N]` — finding 56. Lowercased (never stemmed) on an
     /// analyzed text field, left alone on an unanalyzed `string`/`keyword`
     /// one; on a numeric/date field, always a 200 with 0 hits (fuzzy syntax
     /// is accepted everywhere, it just never matches there — no term
@@ -1900,11 +1900,11 @@ impl CoreIndex {
         Ok(terms_to_should_query(field, matches))
     }
 
-    /// `[field:]glob` — finding 43. Lowercased (never stemmed) on an
+    /// `[field:]glob` — finding 57. Lowercased (never stemmed) on an
     /// analyzed text field, left alone on `string`/`keyword`; a numeric/date
     /// field 400s (`qwild_int.json`'s "Can't run prefix queries on numeric
     /// fields" — there is no term dictionary to walk there). Constant-score,
-    /// matching Lucene's own multi-term rewrite (finding 43).
+    /// matching Lucene's own multi-term rewrite (finding 57).
     fn build_wildcard(&self, field_name: &str, glob: &str) -> Result<Box<dyn Query>, QueryError> {
         let field = self.field_or_err(field_name)?;
         if self.wf_schema.value_kind(field_name) != Some(ValueKind::Text) {
@@ -1923,10 +1923,10 @@ impl CoreIndex {
             .map_err(|e| QueryError::Syntax(e.to_string()))
     }
 
-    /// `field:/pattern/` — finding 43/45. Anchored whole-term, case-sensitive,
+    /// `field:/pattern/` — finding 57/59. Anchored whole-term, case-sensitive,
     /// no analysis at all, over the *indexed* (post-analysis, e.g. stemmed)
     /// terms; constant-score. A pattern that fails automaton compilation
-    /// (e.g. an unbalanced character class) is finding 45's one 500, not a
+    /// (e.g. an unbalanced character class) is finding 59's one 500, not a
     /// 400 — this is the only place that error can come from, since a
     /// `/pattern` with no closing `/` never reaches this: the grammar's own
     /// `regex()` combinator only ever produces `UserInputLeaf::Regex` for a
@@ -1970,7 +1970,7 @@ impl CoreIndex {
     /// with one exception the scan does track: a double- or single-quoted
     /// span is copied through verbatim, `<ident>:` and all, never rewritten —
     /// a colon inside a quoted phrase is a literal phrase character, not a
-    /// field query (finding 45's `phrase_with_colon`; the regression test is
+    /// field query (finding 59's `phrase_with_colon`; the regression test is
     /// `tests/query_types.rs::dynamic_field_rewrite_must_not_apply_inside_a_quoted_phrase`).
     /// Everything else about this being a scan rather than a real parser
     /// still stands — revisit if/when the query layer needs more than that
@@ -2159,14 +2159,14 @@ impl CoreIndex {
     /// Generates up to `snippets_cap` distinct highlighted HTML snippets for
     /// `field_name` in the doc at `addr`, against `query`'s terms in that
     /// field (Solr's `hl`/`hl.fl`). `snippets_cap` is Solr's `hl.snippets`:
-    /// it caps and never pads (finding 52, `docs/solr-ref-findings.md`), so
+    /// it caps and never pads (finding 53, `docs/solr-ref-findings.md`), so
     /// a field with fewer matches than the cap simply returns fewer. It is a
     /// parameter rather than the caller's `take()` because each snippet costs
     /// a full `SnippetGenerator` pass over the field text (see the ponytail
     /// below) -- extracting past what the request asked for is wasted work on
     /// every highlighted doc. Returns an empty `Vec` -- never a single
     /// empty-string entry -- when the field carries no term overlap for this
-    /// doc (finding 51), when the field is not stored (silently, mirroring
+    /// doc (finding 52), when the field is not stored (silently, mirroring
     /// `render_doc`'s own omit-rather-than-null treatment of a missing stored
     /// value -- unfixture-backed, the conservative choice for a case no
     /// captured response exercises), or when `snippets_cap` is 0.
@@ -3610,7 +3610,7 @@ fast = true
 
     /// M >= N: a cap of 5 over exactly 3 real occurrences must yield exactly
     /// 3 snippets -- Solr's own `hl.snippets` never pads past what actually
-    /// exists in the field (finding 52, `src/highlight.rs` module docs), and
+    /// exists in the field (finding 53, `src/highlight.rs` module docs), and
     /// `highlight_field` must supply all 3 real fragments for the cap to have
     /// anything to reflect.
     #[test]

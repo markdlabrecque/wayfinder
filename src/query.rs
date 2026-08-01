@@ -73,7 +73,7 @@ pub enum LiteralKind {
     /// `term~` or `term~N` (`N` an integer or decimal). `distance_raw` is the
     /// text after the last `~`, still unparsed — resolving it to an edit
     /// distance is `resolve_fuzzy_distance`'s job, kept separate so
-    /// semantics (finding 42's out-of-range-clamp rule) live in one place
+    /// semantics (finding 56's out-of-range-clamp rule) live in one place
     /// independent of this classification.
     Fuzzy { term: String, distance_raw: String },
     /// `glob` containing an unescaped `*` or `?` anywhere (leading, trailing,
@@ -133,11 +133,11 @@ pub fn leaf_is_special_literal(leaf: &UserInputLeaf) -> bool {
 }
 
 /// Resolves a fuzzy `~`-suffix's raw distance text to an edit distance
-/// (finding 42): empty (`~` alone) is the Lucene/Solr default of 2; a valid
+/// (finding 56): empty (`~` alone) is the Lucene/Solr default of 2; a valid
 /// number is floored and clamped to Tantivy's actual supported maximum of 2
 /// (`FuzzyTermQuery::specialized_weight`'s `AUTOMATON_BUILDER` table only has
 /// three rows, 0/1/2) — this is why `~3` and the legacy-similarity-style
-/// `~0.8` are never syntax errors (finding 42's `err_fuzzy_dist3`/
+/// `~0.8` are never syntax errors (finding 56's `err_fuzzy_dist3`/
 /// `err_fuzzy_fractional`, both 200s with the exact-match set): Solr accepts
 /// them and answers the same as a small in-range distance would for this
 /// corpus's term dictionary, and clamping/flooring here reproduces that
@@ -155,7 +155,7 @@ pub fn resolve_fuzzy_distance(distance_raw: &str) -> u8 {
 /// Translates a Solr/Lucene wildcard glob (`*` = any run, `?` = exactly one
 /// char, everything else literal) into the equivalent anchored regex pattern
 /// for `tantivy::query::RegexQuery` (whose underlying `tantivy_fst::Regex`
-/// automaton already matches a term end-to-end, per finding 43's
+/// automaton already matches a term end-to-end, per finding 57's
 /// `regex_substring` fixture — no explicit `^`/`$` anchor needed or added).
 pub fn glob_to_regex(glob: &str) -> String {
     let mut out = String::with_capacity(glob.len() * 2);
@@ -227,14 +227,14 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
 /// An error building one of these constructs into a real Tantivy `Query`.
 /// Kept distinct from a plain `anyhow::Error` (which `CoreIndex::parse_query`
 /// still returns, via `From`) so `select`'s error mapping can tell finding
-/// 45's one 500 (`Internal`, a regex that parses but fails automaton
+/// 59's one 500 (`Internal`, a regex that parses but fails automaton
 /// compilation) apart from every other 400 `SyntaxError` here — every other
 /// kind of query-construction failure this module produces (unknown field,
 /// unclosed regex, prefix-on-a-numeric-field) is `Syntax`. `RegexCompile` is
 /// its own variant rather than folded into a general `Internal` (round-1
 /// review's cheap-extra (a)): a term-dictionary I/O error (`build_fuzzy`'s
 /// `matching_terms`, wrapped as `Internal`) is a real 500 too but must not
-/// come out dressed in finding 45's trace-carrying, no-`metadata` shape —
+/// come out dressed in finding 59's trace-carrying, no-`metadata` shape —
 /// that shape is specifically and only for a regex failing automaton
 /// compilation.
 #[derive(Debug)]

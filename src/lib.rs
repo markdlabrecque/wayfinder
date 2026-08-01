@@ -140,7 +140,7 @@ const SELECT_PARAMS: &[&str] = &[
     // allowlist-only entry -- there is deliberately no knob behind it,
     // because the `false` path has nothing to disable. `src/highlight.rs`
     // applies no field-match filtering (a doc matching through a
-    // non-highlighted field still gets its finding-51 entry, which *is*
+    // non-highlighted field still gets its finding-52 entry, which *is*
     // `hl.requireFieldMatch=false`'s behaviour) and does no fragment merging
     // (each `CoreIndex::highlight_field` fragment is emitted as its own
     // snippet, which *is* `hl.mergeContiguous=false`'s behaviour).
@@ -1886,7 +1886,7 @@ async fn update(
 }
 
 /// Maps a `CoreIndex::parse_query` failure to the right `WfError` shape:
-/// finding 45's one 500 (a regex that parses as a query but fails automaton
+/// finding 59's one 500 (a regex that parses as a query but fails automaton
 /// compilation — `query::QueryError::RegexCompile`, carried through
 /// `parse_query`'s `anyhow::Error` via `From`) gets the trace-carrying,
 /// no-`metadata` envelope `err_regex_bad_class.json` pins; any other
@@ -2229,7 +2229,7 @@ async fn select(
 /// document the same way `/select`'s `q` does; `mlt.fl` names which stored
 /// fields to mine for interesting terms (every declared field if absent);
 /// `fl`/`rows`/`start` page the similar-docs result set exactly as
-/// `/select` does. See `docs/solr-ref-findings.md` findings 51-58 for the
+/// `/select` does. See `docs/solr-ref-findings.md` findings 60-67 for the
 /// captured envelope shape this mirrors.
 async fn mlt(
     State(state): State<Arc<AppState>>,
@@ -2295,15 +2295,15 @@ async fn mlt(
     // reports the real `numFound` for `q` but only ever renders that one doc
     // (every captured fixture has `match.numFound: 1` with a one-element
     // `docs`; `match.numFound: 0` with an empty `docs` when `q` matched
-    // nothing, finding 54).
+    // nothing, finding 63).
     //
     // Which one is `mlt.match.offset`'s job (default 0, the top hit):
     // `mlt_match_offset.json` sends `mlt.match.offset=1` against a 5-hit `q`
     // and gets the *second* hit as the seed, with `match.start: 1` (finding
-    // 97) — the seed genuinely changes, it is not a cosmetic echo.
+    // 99) — the seed genuinely changes, it is not a cosmetic echo.
     //
     // ponytail: an offset past the last hit resolves no seed at all here (so
-    // `match.docs` is empty and `response` is `null`, finding 54's shape). No
+    // `match.docs` is empty and `response` is `null`, finding 63's shape). No
     // fixture pins real Solr's out-of-range behaviour; the ceiling is the
     // in-range case the capture covers, and
     // `tests/mlt.rs::mlt_match_offset_past_the_last_hit_resolves_no_seed` pins
@@ -2343,7 +2343,7 @@ async fn mlt(
     match_block.insert("docs".to_string(), json!(match_docs));
 
     // `response` is the literal JSON `null` when `q` matched no source
-    // document at all (finding 54) — not the empty-object shape used below
+    // document at all (finding 63) — not the empty-object shape used below
     // for a source doc with no interesting terms.
     let response_value: Value = match source {
         None => Value::Null,
@@ -2454,7 +2454,7 @@ async fn mlt(
     // ponytail: `CoreIndex::mlt_query` already returns the real scored terms
     // it built the query from (`_scored_terms` above) — the remaining gap is
     // not an API limitation, it is that no captured fixture pins the
-    // non-empty wire shape (finding 53: the one fixture that sets
+    // non-empty wire shape (finding 62: the one fixture that sets
     // `mlt.interestingTerms=details` also has zero result docs, so its
     // `interestingTerms` is `[]` regardless of what this renders). This
     // still renders an empty array, matching every fixture that exercises

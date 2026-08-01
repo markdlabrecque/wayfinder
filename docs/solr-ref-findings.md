@@ -233,7 +233,7 @@ Two distinct lists, both self-documenting, printed during their runs, never sile
   `facet::facet_counts` runs and attaches it to a `facet.query`/`facet.field` error, while a
   `facet.range` error — detected before the base query ever runs — is marked with
   `facet::PreQueryFacetError` so it is deliberately excluded and still renders with no
-  `response` key, matching `facet_err_range_single.json` and friends (see finding 43).
+  `response` key, matching `facet_err_range_single.json` and friends (see finding 50).
 
 ### Running the live error mode
 
@@ -520,8 +520,10 @@ Eleven new `manifest-errors.tsv` rows against the `facets` core (a `facets`-core
     counts in these fixtures (no zero-count numeric bucket exists for `min_doc_count: 0` to
     introduce), so this is a header-honesty fact rather than a counting one. Wayfinder now emits
     the same `responseHeader.warnings` key, verbatim wording, under the same gate (a `facet.field`
-    naming a non-string fast field, effective `facet.mincount == 0`). Per finding 21 above,
-    `warnings` leads `responseHeader` (`warnings, status, QTime, params`), not trails it.
+    naming a non-string fast field, effective `facet.mincount == 0`). `warnings` leads
+    `responseHeader` (`warnings, status, QTime, params`), not trails it — per this finding's own
+    fixture. Finding 21's `responseHeader` row is the no-warnings case (`status, QTime, params`)
+    and does not cover where `warnings` sits.
 
 30. **Numeric/date facet terms order by value, not by the rendered string.**
     `facet_field_numeric_sort_index_all.json` (`facet.sort=index`, whole corpus) orders `views` as
@@ -1042,7 +1044,7 @@ Claiming findings 60-67 (issue #8's query-types capture has 56-59, above).
     (`docs` empty and `numFound:0` if `q` matched nothing — see finding 63). `response` is the
     same four-key shape holding the *similar* documents, i.e. the actual MLT result set that
     `fl`/`rows`/`start`/`sort` semantics apply to. `_version_`/`_root_` appear on stored docs in
-    both blocks exactly as `/select` findings 8-9 describe — Wayfinder's default-`fl` decision
+    both blocks exactly as `/select` finding 9 describes — Wayfinder's default-`fl` decision
     presumably extends here unchanged, but that's the implementor's call to make explicit.
 
 62. **`interestingTerms` only appears at all when `mlt.interestingTerms` is set to a truthy value
@@ -1103,7 +1105,7 @@ Claiming findings 60-67 (issue #8's query-types capture has 56-59, above).
     `response` when `fl` includes `score`.** `mlt_fl_rows_start.json`
     (`mlt.mintf=1&mlt.mindf=1&fl=id,score&rows=2&start=1`, source doc `mlt11`, 4 total matches):
     `response.start:1`, `response.docs` holds exactly 2 entries (`mlt15`, `mlt12`, matching the
-    second page of the same order finding 61's `boost` case implies is real, not incidental), and
+    second page of the same order finding 66's `boost` case implies is real, not incidental), and
     `response.maxScore` is the corpus-wide max (1.6043521) — **not** recomputed over just the
     returned page, same as ordinary `/select` `fl=score` semantics (PRD ratified-divergence 4).
     `match` also carries `score`/`maxScore` for the one source doc once `fl` includes `score`,
@@ -1330,8 +1332,8 @@ fragment" to be different answers at all.
     code, which filtered a parsed `0` out as if it were absent and so fell back to
     `DEFAULT_FRAGSIZE` (100) under `hl.method=original` and to Tantivy's 150-char
     `SnippetGenerator` default otherwise — both of which truncate. Wayfinder now decides the zero
-    case *before* finding 54's `hl.method=original`-vs-everything-else split, mapping it to
-    `core_index::WHOLE_FIELD_MAX_CHARS` (`usize::MAX`); finding 54's ponytail scope limit is
+    case *before* finding 55's `hl.method=original`-vs-everything-else split, mapping it to
+    `core_index::WHOLE_FIELD_MAX_CHARS` (`usize::MAX`); finding 55's ponytail scope limit is
     unchanged and continues to govern `hl.fragsize > 0` exactly as before. The fixtures pin one
     detail that a `set_max_num_chars` sentinel alone does not deliver: the
     snippet keeps text *outside* the first/last token boundary (Tantivy's fragment stops at the
@@ -1395,8 +1397,9 @@ fragment" to be different answers at all.
     verbatim — same narrow, non-verbatim contract as `tests/error_shapes.rs`):
     `qf=title+nosuchfield` 400s with `"Query Field 'nosuchfield' is not a valid field name"` even
     though `title` in the same `qf` is a real field. Before this fix, `resolve_field_weights`'s
-    drop-unknown filtering (built for `pf`'s deliberate unknown-field leniency, finding 8, and
-    `qf`'s empty-spec default-field fallback) silently dropped `nosuchfield` and 200d using
+    drop-unknown filtering (built for `pf`'s deliberate unknown-field leniency — a Wayfinder
+    choice, not a captured Solr fact — and `qf`'s empty-spec default-field fallback) silently
+    dropped `nosuchfield` and 200d using
     `title` alone — the wrong-answer bug this issue tracks. The fix validates every raw `qf` name
     up front via `field_target` (the same static-before-dynamic resolution `resolve_field_weights`
     itself uses, so a `qf` naming only a dynamic field, issue #84, is unaffected) before falling
@@ -1646,7 +1649,7 @@ existing ground truth rather than a fixture claim.
       `00005`, `00006`, `00007` and `00009` all key it on
       `tm_X3b_en_body`/`tm_X3b_en_title` only. That is *stronger* evidence than an absent
       `df` would have been — the fallback candidate is present and still unused — so `hl.fl=*`
-      is resolved before, and independently of, finding 53's `df` default.
+      is resolved before, and independently of, finding 54's `df` default.
     - **Non-text fields are skipped, not rejected.** `sm_context_tags`
       (`solr-ref/search-api/configset/schema.xml:161`) is declared `type="strings"
       stored="true"`, i.e. a genuinely stored `StrField`, and it is present in the returned
@@ -1797,7 +1800,7 @@ identically, no new fields. Fixtures: `mlt_fq_scope.json`, `mlt_fq_seed_not_filt
 101. **`json.nl` reaches `/mlt` only through `interestingTerms`'s container shape, and only when
     it is empty that the difference is visible with Wayfinder's current (always-empty)
     rendering.** `mlt_json_nl_map_empty_terms.json` (`q=id:mlt1`, real Solr defaults — genuinely
-    0 interesting terms per finding 55/64 — `mlt.interestingTerms=details&json.nl=map`) renders
+    0 interesting terms per finding 62/64 — `mlt.interestingTerms=details&json.nl=map`) renders
     `interestingTerms` as `{ }`, not the default `flat` shape's `[ ]`
     (`mlt_interesting_terms_details.json`, same query minus `json.nl`, is `[ ]`). This is why
     `json.nl` cannot be filed as purely-cosmetic accepted-and-ignore the way `TZ`/`bf` are: a
