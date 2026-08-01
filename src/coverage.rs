@@ -1181,8 +1181,10 @@ async fn response_field_covered(probe: &ProbeApp, id: &str) -> bool {
                         })
                 })
             }),
-        // `SearchApiSolrBackend::getLuke()` reads `index.numDocs` and nothing
-        // else, so that leaf -- not the container -- is what coverage means.
+        // `SearchApiSolrBackend::viewSettings` reads `index.numDocs` and
+        // nothing else out of the Luke response (`getLuke()` itself is
+        // `SolrConnectorPluginBase::getLuke()`, which only fetches), so that
+        // leaf -- not the container -- is what coverage means.
         "admin.luke.index" => probe
             .response("content/admin/luke")
             .await
@@ -1197,7 +1199,9 @@ async fn response_field_covered(probe: &ProbeApp, id: &str) -> bool {
         // probe has to ask for a real field -- `terms=true` with no `terms.fl`
         // is documented (see `terms` in `src/lib.rs`) to return the hollow
         // `{"terms":{}}`, which proves nothing. Same field as the sibling
-        // `terms.enumeration` request-semantic probe.
+        // `terms.enumeration` request-semantic probe -- the two now issue
+        // byte-identical requests and differ only in what they assert about
+        // the response.
         "terms.terms" => probe
             .response("content/terms?terms=true&terms.fl=body")
             .await
@@ -1365,6 +1369,37 @@ mod tests {
         }
     }
 
+    // A hollow container is not the only way a leaf can be present but
+    // useless: the same client code breaks if the leaf is there with the
+    // wrong JSON type. `numDocs` as a string, term frequencies as strings,
+    // and a field type whose `name` is the empty string are all shapes a
+    // container-existence (or mere `is_some()`) check would wave through.
+    async fn wrong_type_index_num_docs() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"index": {"numDocs": "12"}}))
+    }
+
+    async fn wrong_type_term_counts() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"terms": {"body": ["quick", "2"]}}))
+    }
+
+    async fn wrong_type_fieldtype_name() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"fieldTypes": [{"name": ""}]}))
+    }
+
+    fn wrong_type_probe() -> ProbeApp {
+        let app = Router::new()
+            .route("/solr/content/admin/luke", get(wrong_type_index_num_docs))
+            .route("/solr/content/terms", get(wrong_type_term_counts))
+            .route(
+                "/solr/content/schema/fieldtypes",
+                get(wrong_type_fieldtype_name),
+            );
+        ProbeApp {
+            app,
+            _workspace: ProbeWorkspace::new(),
+        }
+    }
+
     fn hollow_terms_with_empty_field_probe() -> ProbeApp {
         let app = Router::new().route("/solr/content/terms", get(hollow_terms_field_with_no_terms));
         ProbeApp {
@@ -1414,6 +1449,39 @@ mod tests {
             "schema.fieldtypes.fieldTypes must require a non-empty name list, not \
              merely that `fieldTypes` is an array -- an empty `[]` must not count \
              as covered"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_luke_index_probe_rejects_a_string_num_docs() {
+        let probe = wrong_type_probe();
+        assert!(
+            !response_field_covered(&probe, "admin.luke.index").await,
+            "admin.luke.index must require `index.numDocs` to be a JSON number -- \
+             a present-but-stringly `\"12\"` is a type regression its consumer \
+             cannot use, so a mere presence check must not count it as covered"
+        );
+    }
+
+    #[tokio::test]
+    async fn terms_terms_probe_rejects_string_frequencies() {
+        let probe = wrong_type_probe();
+        assert!(
+            !response_field_covered(&probe, "terms.terms").await,
+            "terms.terms must require the frequency half of each term/frequency \
+             pair to be a JSON number -- `[\"quick\", \"2\"]` is a type regression \
+             that must not count as covered"
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_fieldtypes_fieldtypes_probe_rejects_an_empty_name() {
+        let probe = wrong_type_probe();
+        assert!(
+            !response_field_covered(&probe, "schema.fieldtypes.fieldTypes").await,
+            "schema.fieldtypes.fieldTypes must require each entry's `name` to be a \
+             non-empty string -- an entry naming itself `\"\"` is nothing \
+             `isPartOfSchema()` can match, so it must not count as covered"
         );
     }
 
