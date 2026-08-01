@@ -4,10 +4,10 @@
 //! needed for a handful of scalars.
 //!
 //! Usage:
-//!   render_report <solr_idle_mb> <solr_load_mb> <solr_cold_ms> \
-//!                 <solr_image_mb> <solr_index_mb> <solr_latencies_file> \
-//!                 <wf_idle_mb> <wf_load_mb> <wf_cold_ms> \
-//!                 <wf_image_mb> <wf_index_mb> <wf_latencies_file> \
+//!   render_report <solr_startup_idle_mb> <solr_post_index_mb> <solr_load_mb> \
+//!                 <solr_cold_ms> <solr_image_mb> <solr_index_mb> <solr_latencies_file> \
+//!                 <wf_startup_idle_mb> <wf_post_index_mb> <wf_load_mb> \
+//!                 <wf_cold_ms> <wf_image_mb> <wf_index_mb> <wf_latencies_file> \
 //!                 <corpus_size> <out_markdown_path>
 
 use wayfinder_bench::results::{BenchmarkResults, EngineMeasurements, render_markdown_table};
@@ -27,12 +27,12 @@ fn read_latencies(path: &str) -> Vec<f64> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() != 14 {
+    if args.len() != 16 {
         eprintln!(
-            "usage: render_report <solr_idle_mb> <solr_load_mb> <solr_cold_ms> \
-             <solr_image_mb> <solr_index_mb> <solr_latencies_file> \
-             <wf_idle_mb> <wf_load_mb> <wf_cold_ms> <wf_image_mb> <wf_index_mb> \
-             <wf_latencies_file> <corpus_size> <out_markdown_path>"
+            "usage: render_report <solr_startup_idle_mb> <solr_post_index_mb> <solr_load_mb> \
+             <solr_cold_ms> <solr_image_mb> <solr_index_mb> <solr_latencies_file> \
+             <wf_startup_idle_mb> <wf_post_index_mb> <wf_load_mb> <wf_cold_ms> \
+             <wf_image_mb> <wf_index_mb> <wf_latencies_file> <corpus_size> <out_markdown_path>"
         );
         std::process::exit(2);
     }
@@ -45,59 +45,87 @@ fn main() {
 
     let results = BenchmarkResults {
         solr: EngineMeasurements {
-            resident_mem_idle_mb: f(0),
-            resident_mem_load_mb: f(1),
-            cold_start_ms: f(2),
-            image_size_mb: f(3),
-            index_size_mb: f(4),
-            query_latencies_ms: read_latencies(&args[5]),
+            resident_mem_startup_idle_mb: f(0),
+            resident_mem_post_index_mb: f(1),
+            resident_mem_load_mb: f(2),
+            cold_start_ms: f(3),
+            image_size_mb: f(4),
+            index_size_mb: f(5),
+            query_latencies_ms: read_latencies(&args[6]),
         },
         wayfinder: EngineMeasurements {
-            resident_mem_idle_mb: f(6),
-            resident_mem_load_mb: f(7),
-            cold_start_ms: f(8),
-            image_size_mb: f(9),
-            index_size_mb: f(10),
-            query_latencies_ms: read_latencies(&args[11]),
+            resident_mem_startup_idle_mb: f(7),
+            resident_mem_post_index_mb: f(8),
+            resident_mem_load_mb: f(9),
+            cold_start_ms: f(10),
+            image_size_mb: f(11),
+            index_size_mb: f(12),
+            query_latencies_ms: read_latencies(&args[13]),
         },
-        corpus_size: args[12]
+        corpus_size: args[14]
             .parse::<u64>()
-            .unwrap_or_else(|e| panic!("bad corpus_size {}: {e}", args[12])),
+            .unwrap_or_else(|e| panic!("bad corpus_size {}: {e}", args[14])),
     };
 
     let table = render_markdown_table(&results);
     let corpus_size = results.corpus_size;
+    let startup_idle_mb = results.wayfinder.resident_mem_startup_idle_mb;
+    let startup_target_outcome = if startup_idle_mb < 50.0 {
+        format!(
+            "- Wayfinder met the PRD's <50 MB startup-idle resident-memory target at \
+             {startup_idle_mb:.1} MB.\n"
+        )
+    } else {
+        format!(
+            "- Wayfinder missed the PRD's <50 MB startup-idle resident-memory target at \
+             {startup_idle_mb:.1} MB.\n"
+        )
+    };
     let corpus_note = if corpus_size == 2_000_000 {
         let wayfinder_load_mb = results.wayfinder.resident_mem_load_mb;
-        let wayfinder_indexed_mb = results.wayfinder.resident_mem_idle_mb;
-        let wayfinder_rss_increase_mb = wayfinder_load_mb - wayfinder_indexed_mb;
-        let target_outcome = if wayfinder_load_mb < 500.0 {
+        let wayfinder_post_index_mb = results.wayfinder.resident_mem_post_index_mb;
+        let wayfinder_rss_delta_mb = wayfinder_load_mb - wayfinder_post_index_mb;
+        let rss_delta_note = if wayfinder_rss_delta_mb >= 0.0 {
+            format!(
+                "RSS increased by {wayfinder_rss_delta_mb:.1} MB between that sample and the \
+                 {wayfinder_load_mb:.1} MB maximum sampled during query load"
+            )
+        } else {
+            format!(
+                "RSS decreased by {:.1} MB between that sample and the \
+                 {wayfinder_load_mb:.1} MB maximum sampled during query load",
+                -wayfinder_rss_delta_mb
+            )
+        };
+        let query_load_target_outcome = if wayfinder_load_mb < 500.0 {
             format!(
                 "- Wayfinder met the PRD's <500 MB query-load resident-memory target at \
-                 {wayfinder_load_mb:.1} MB.\n"
+                 {wayfinder_load_mb:.1} MB; {rss_delta_note}.\n"
             )
         } else {
             format!(
                 "- Wayfinder missed the PRD's <500 MB query-load resident-memory target: \
-                 {wayfinder_indexed_mb:.1} MB was resident at the post-index idle sample, and RSS \
-                 increased by {wayfinder_rss_increase_mb:.1} MB between that sample and the \
-                 {wayfinder_load_mb:.1} MB maximum sampled during query load.\n"
+                 {wayfinder_post_index_mb:.1} MB was resident at the post-index sample, and \
+                 {rss_delta_note}.\n"
             )
         };
         format!(
             "- This is a long manual local run outside CI; indexing is expected to dominate wall \
              time.\n\
-             {target_outcome}\
+             {startup_target_outcome}\
+             {query_load_target_outcome}\
              - The harness does not distinguish allocator-resident memory from mmap-backed index \
              pages.\n"
         )
     } else {
-        "- **\"Resident memory, 2M docs under query load\" is only ever populated by a run \
-         with a 2M-doc corpus** (see the row's own \"not measured\" state above otherwise, \
-         and the \"Measurement path\" column for how each number was captured). The 2M corpus \
-         is not automated (see `bench/README.md`); real 2M numbers require running \
-         `bench/run.sh 42 2000000`.\n"
-            .to_owned()
+        format!(
+            "- **\"Resident memory, 2M docs under query load\" is only ever populated by a run \
+             with a 2M-doc corpus** (see the row's own \"not measured\" state above otherwise, \
+             and the \"Measurement path\" column for how each number was captured). The 2M corpus \
+             is not automated (see `bench/README.md`); real 2M numbers require running \
+             `bench/run.sh 42 2000000`.\n\
+             {startup_target_outcome}"
+        )
     };
     let doc = format!(
         "# Wayfinder vs Solr 9 -- benchmark results (issue #13)\n\n\
@@ -118,6 +146,6 @@ fn main() {
          image-size row, which measures the built image, not a running process), so the two \
          engines' numbers are not directly comparable on overhead alone.\n"
     );
-    std::fs::write(&args[13], doc).expect("write benchmarks.md");
-    println!("wrote {}", args[13]);
+    std::fs::write(&args[15], doc).expect("write benchmarks.md");
+    println!("wrote {}", args[15]);
 }

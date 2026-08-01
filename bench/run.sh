@@ -3,7 +3,8 @@
 #
 # Generates a deterministic 50k corpus, indexes it into both a native
 # release Wayfinder binary and a real Solr 9 (Docker), measures resident
-# memory (idle + under a facet+filter+highlight query load), cold start to
+# memory (startup idle, post-index before query load, and under a
+# facet+filter+highlight query load), cold start to
 # first query, p95 query latency, container image size, and index size on
 # disk -- then renders `docs/benchmarks.md` via `wayfinder_bench::results`.
 #
@@ -74,6 +75,31 @@ pids_rss_kb() { # sum RSS (KB) of a process and all its children, best-effort
   ps -o rss= -p "$pid" 2>/dev/null | awk '{s+=$1} END {print s+0}'
 }
 
+solr_mem_mb() {
+  # docker's MemUsage field has no space between the number and its unit
+  # (e.g. "2.10GiB", not "2.10 GiB"), so splitting on whitespace never
+  # isolates the unit -- match it against the raw token instead. Units are
+  # matched longest/most-specific-suffix first (TiB/GiB/MiB/KiB before the
+  # bare "B") so e.g. "KiB" doesn't fall through to the plain-bytes branch.
+  # An unrecognized unit fails loudly rather than silently defaulting to
+  # MiB scaling (issue #62).
+  docker stats --no-stream --format '{{.MemUsage}}' "$SOLR_CONTAINER" \
+    | awk -F'/' '{print $1}' \
+    | awk '{
+        s=$1;
+        if (s ~ /^[0-9.]+TiB$/) { gsub(/TiB/, "", s); v = s * 1024 * 1024; }
+        else if (s ~ /^[0-9.]+GiB$/) { gsub(/GiB/, "", s); v = s * 1024; }
+        else if (s ~ /^[0-9.]+MiB$/) { gsub(/MiB/, "", s); v = s; }
+        else if (s ~ /^[0-9.]+KiB$/) { gsub(/KiB/, "", s); v = s / 1024; }
+        else if (s ~ /^[0-9.]+B$/) { gsub(/B/, "", s); v = s / 1048576; }
+        else {
+          print "solr_mem_mb: unrecognized memory unit in \x27" s "\x27" > "/dev/stderr";
+          exit 1;
+        }
+        printf "%.2f", v
+      }'
+}
+
 wait_for_ping() { # url -> echoes cold-start ms on stdout
   local url=$1
   local start_ns
@@ -128,14 +154,17 @@ echo "== starting wayfinder =="
 WF_PID=$!
 WF_COLD_MS=$(wait_for_ping "http://$WF_BIND/solr/content/admin/ping?wt=json")
 echo "wayfinder cold start: ${WF_COLD_MS}ms"
+WF_STARTUP_IDLE_KB=$(pids_rss_kb "$WF_PID")
+WF_STARTUP_IDLE_MB=$(awk -v k="$WF_STARTUP_IDLE_KB" 'BEGIN { printf "%.2f", k / 1024 }')
+echo "wayfinder startup idle mem: ${WF_STARTUP_IDLE_MB}MB"
 
 echo "== indexing wayfinder =="
 index_corpus "http://$WF_BIND/solr" "$SOLR_CORE"
 
 sleep 1
-WF_IDLE_KB=$(pids_rss_kb "$WF_PID")
-WF_IDLE_MB=$(awk -v k="$WF_IDLE_KB" 'BEGIN { printf "%.2f", k / 1024 }')
-echo "wayfinder idle mem: ${WF_IDLE_MB}MB"
+WF_POST_INDEX_KB=$(pids_rss_kb "$WF_PID")
+WF_POST_INDEX_MB=$(awk -v k="$WF_POST_INDEX_KB" 'BEGIN { printf "%.2f", k / 1024 }')
+echo "wayfinder post-index mem: ${WF_POST_INDEX_MB}MB"
 
 WF_LATENCIES="$WORK/wf_latencies.txt"
 run_query_load "http://$WF_BIND/solr" "$SOLR_CORE" "$WF_LATENCIES" &
@@ -165,6 +194,8 @@ docker rm -f "$SOLR_CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$SOLR_CONTAINER" -p "$SOLR_HOST_PORT:8983" solr:9 solr-precreate "$SOLR_CORE" >/dev/null
 SOLR_COLD_MS=$(wait_for_ping "$SOLR_URL/$SOLR_CORE/admin/ping?wt=json")
 echo "solr cold start: ${SOLR_COLD_MS}ms"
+SOLR_STARTUP_IDLE_MB=$(solr_mem_mb)
+echo "solr startup idle mem: ${SOLR_STARTUP_IDLE_MB}MB"
 
 SCHEMA_BODY_FILE="$WORK/schema_resp.json"
 SCHEMA_STATUS=$(curl -sS -o "$SCHEMA_BODY_FILE" -w '%{http_code}' \
@@ -186,32 +217,8 @@ echo "== indexing solr =="
 index_corpus "$SOLR_URL" "$SOLR_CORE"
 
 sleep 1
-solr_mem_mb() {
-  # docker's MemUsage field has no space between the number and its unit
-  # (e.g. "2.10GiB", not "2.10 GiB"), so splitting on whitespace never
-  # isolates the unit -- match it against the raw token instead. Units are
-  # matched longest/most-specific-suffix first (TiB/GiB/MiB/KiB before the
-  # bare "B") so e.g. "KiB" doesn't fall through to the plain-bytes branch.
-  # An unrecognized unit fails loudly rather than silently defaulting to
-  # MiB scaling (issue #62).
-  docker stats --no-stream --format '{{.MemUsage}}' "$SOLR_CONTAINER" \
-    | awk -F'/' '{print $1}' \
-    | awk '{
-        s=$1;
-        if (s ~ /^[0-9.]+TiB$/) { gsub(/TiB/, "", s); v = s * 1024 * 1024; }
-        else if (s ~ /^[0-9.]+GiB$/) { gsub(/GiB/, "", s); v = s * 1024; }
-        else if (s ~ /^[0-9.]+MiB$/) { gsub(/MiB/, "", s); v = s; }
-        else if (s ~ /^[0-9.]+KiB$/) { gsub(/KiB/, "", s); v = s / 1024; }
-        else if (s ~ /^[0-9.]+B$/) { gsub(/B/, "", s); v = s / 1048576; }
-        else {
-          print "solr_mem_mb: unrecognized memory unit in \x27" s "\x27" > "/dev/stderr";
-          exit 1;
-        }
-        printf "%.2f", v
-      }'
-}
-SOLR_IDLE_MB=$(solr_mem_mb)
-echo "solr idle mem: ${SOLR_IDLE_MB}MB"
+SOLR_POST_INDEX_MB=$(solr_mem_mb)
+echo "solr post-index mem: ${SOLR_POST_INDEX_MB}MB"
 
 SOLR_LATENCIES="$WORK/solr_latencies.txt"
 run_query_load "$SOLR_URL" "$SOLR_CORE" "$SOLR_LATENCIES" &
@@ -236,8 +243,8 @@ docker rm -f "$SOLR_CONTAINER" >/dev/null 2>&1 || true
 # --- Render ----------------------------------------------------------------
 echo "== rendering docs/benchmarks.md =="
 "$BENCH_BIN/render_report" \
-  "$SOLR_IDLE_MB" "$SOLR_LOAD_MB" "$SOLR_COLD_MS" "$SOLR_IMAGE_MB" "$SOLR_INDEX_MB" "$SOLR_LATENCIES" \
-  "$WF_IDLE_MB" "$WF_LOAD_MB" "$WF_COLD_MS" "$WF_IMAGE_MB" "$WF_INDEX_MB" "$WF_LATENCIES" \
+  "$SOLR_STARTUP_IDLE_MB" "$SOLR_POST_INDEX_MB" "$SOLR_LOAD_MB" "$SOLR_COLD_MS" "$SOLR_IMAGE_MB" "$SOLR_INDEX_MB" "$SOLR_LATENCIES" \
+  "$WF_STARTUP_IDLE_MB" "$WF_POST_INDEX_MB" "$WF_LOAD_MB" "$WF_COLD_MS" "$WF_IMAGE_MB" "$WF_INDEX_MB" "$WF_LATENCIES" \
   "$SIZE" \
   "$ROOT/docs/benchmarks.md"
 

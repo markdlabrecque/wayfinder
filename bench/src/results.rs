@@ -18,7 +18,11 @@ pub fn p95(samples: &[f64]) -> f64 {
 /// One engine's raw measurements for a single benchmark run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineMeasurements {
-    pub resident_mem_idle_mb: f64,
+    /// RSS sampled after the engine's health check and before corpus indexing.
+    pub resident_mem_startup_idle_mb: f64,
+    /// RSS sampled after indexing commits and before query load begins.
+    pub resident_mem_post_index_mb: f64,
+    /// Maximum RSS sampled while query load runs.
     pub resident_mem_load_mb: f64,
     pub cold_start_ms: f64,
     pub query_latencies_ms: Vec<f64>,
@@ -44,17 +48,12 @@ pub struct BenchmarkResults {
 }
 
 /// Renders the exact 6-column markdown table pinned by
-/// `bench/tests/results_table.rs`: header + separator + the six PRD §8
-/// metric rows, in PRD order, plus one additional honest
-/// "{corpus_size} docs under query load" memory row for any run whose
-/// `corpus_size` is not exactly 2,000,000 (see issue #63 round-2 review,
-/// item 4) -- so the table has 8 lines for a literal-2M run and 9 lines
-/// otherwise. PRD's baseline/target text is reproduced ASCII-only
-/// (`2-4 GB`, `10-30 s`, `<=`, `1.2x`) per this repo's ASCII-only
-/// convention for committed text. The "Measurement path" column discloses,
-/// for every row, whether each engine's number came from a Docker
-/// container or a native host process -- the two paths carry different
-/// overhead (issue #13 round-2 review, item 5).
+/// `bench/tests/results_table.rs`. Each engine has three distinct resident
+/// memory phases: startup idle, post-index before query load, and under query
+/// load. The post-index row uses the actual corpus size and deliberately has
+/// no PRD baseline or target. A non-2M run also retains the fixed-2M row as
+/// "not measured" and renders its actual under-load row. PRD baseline/target
+/// text is ASCII-only (`2-4 GB`, `10-30 s`, `<=`, `1.2x`).
 pub fn render_markdown_table(results: &BenchmarkResults) -> String {
     let solr = &results.solr;
     let wf = &results.wayfinder;
@@ -62,8 +61,7 @@ pub fn render_markdown_table(results: &BenchmarkResults) -> String {
     let solr_p95 = p95(&solr.query_latencies_ms);
     let wf_p95 = p95(&wf.query_latencies_ms);
 
-    const MEM_PATH: &str =
-        "Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`).";
+    const MEM_PATH: &str = "Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). RSS includes allocator-resident memory plus mmap-backed index pages.";
     const COLD_START_PATH: &str = "Solr: Docker container (`docker run` to first successful ping). Wayfinder: native process (binary launch to first successful ping).";
     const LATENCY_PATH: &str = "Solr: HTTP to the Docker container's published port. Wayfinder: HTTP to the native process's bound port.";
     const IMAGE_PATH: &str =
@@ -76,8 +74,12 @@ pub fn render_markdown_table(results: &BenchmarkResults) -> String {
     );
     out.push_str("|---|---|---|---|---|---|\n");
     out.push_str(&format!(
-        "| Resident memory, idle | ~1 GB | < 50 MB | {:.1} MB | {:.1} MB | {MEM_PATH} |\n",
-        solr.resident_mem_idle_mb, wf.resident_mem_idle_mb
+        "| Resident memory, startup idle | ~1 GB | < 50 MB | {:.1} MB | {:.1} MB | {MEM_PATH} |\n",
+        solr.resident_mem_startup_idle_mb, wf.resident_mem_startup_idle_mb
+    ));
+    out.push_str(&format!(
+        "| Resident memory, post-index before query load ({} docs) | No PRD baseline | No PRD target | {:.1} MB | {:.1} MB | {MEM_PATH} |\n",
+        results.corpus_size, solr.resident_mem_post_index_mb, wf.resident_mem_post_index_mb
     ));
     if results.corpus_size == 2_000_000 {
         out.push_str(&format!(
