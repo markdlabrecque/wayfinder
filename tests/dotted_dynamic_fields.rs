@@ -1,10 +1,11 @@
 //! Issue #164 — a dynamic field name containing a `.` (e.g.
 //! `tm_X3b_en_a.b`, matched by the shipped `tm_X3b_en_*` glob in
-//! `presets/search-api.toml`) resolves as a valid field on both `/select` and
-//! `/terms`, but never matches anything indexed under it: `select?q=
-//! tm_X3b_en_a.b:gamma` returns `numFound: 0` and `terms?terms.fl=
-//! tm_X3b_en_a.b` returns `{"terms":{"tm_X3b_en_a.b":[]}}` even right after
-//! indexing a document with that exact key.
+//! `presets/search-api.toml`) resolved as a valid field on both `/select` and
+//! `/terms` before issue #164, but never matched anything indexed under it:
+//! `select?q=tm_X3b_en_a.b:gamma` returned `numFound: 0` and
+//! `terms?terms.fl=tm_X3b_en_a.b` returned
+//! `{"terms":{"tm_X3b_en_a.b":[]}}` even right after indexing a document with
+//! that exact key.
 //!
 //! ## Root cause (confirmed by reading source, not inferred from the ticket)
 //!
@@ -33,9 +34,10 @@
 //! `src/schema.rs` (the `JsonObjectOptions::default()` construction site for
 //! the dynamic catch-all containers, in `schema::parse`'s
 //! `catch_all_fields` loop) never calls `.set_expand_dots_enabled()`,
-//! so today the write path is one segment (`"tm_X3b_en_a.b"` literal) and the
-//! read path is two (`"tm_X3b_en_a"` \x01 `"b"`) — different byte sequences,
-//! so the term the query builds never matches the term indexing wrote.
+//! so before the fix the write path was one segment (`"tm_X3b_en_a.b"`
+//! literal) and the read path was two (`"tm_X3b_en_a"` \x01 `"b"`) —
+//! different byte sequences, so the term the query built never matched the
+//! term indexing wrote.
 //!
 //! **Maintainer decision: the fix goes in the write path** — enable
 //! `expand_dots` on the catch-all `JsonObjectOptions` in `src/schema.rs`, so
@@ -118,7 +120,7 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use common::{app_with_schema, get, post_docs};
+use common::{app_with_schema, assert_matches_fixture, get, post_docs};
 
 /// `id` (string, fast, stored, unique key) as the only static field, plus the
 /// exact `tm_X3b_en_*` dynamic rule `presets/search-api.toml:113-117` ships
@@ -167,35 +169,20 @@ async fn dotted_app(corpus: &Value) -> (Router, TempDir) {
 
 /// The ticket's exact repro: indexing `tm_X3b_en_a.b` (a dotted name matching
 /// the `tm_X3b_en_*` glob) must make it findable by `/select` afterwards.
-/// Today this returns `numFound: 0` because the write path (one JSON-path
-/// segment containing a literal dot) and the read path (two segments, split
-/// on the dot) encode different terms for the same name.
+/// Before issue #164 this returned `numFound: 0` because the write path (one
+/// JSON-path segment containing a literal dot) and the read path (two segments,
+/// split on the dot) encoded different terms for the same name.
 #[tokio::test]
 async fn dotted_dynamic_field_round_trips_through_select() {
     let corpus = json!([
-        {"id": "d1", "tm_X3b_en_a.b": ["gamma"]},
+        {"id": "doc1", "tm_X3b_en_a.b": ["gamma"]},
     ]);
     let (app, _dir) = dotted_app(&corpus).await;
 
-    let (status, body) = get(&app, "select?q=tm_X3b_en_a.b:gamma").await;
+    let path = "select?q=tm_X3b_en_a.b:gamma&fl=id&sort=id+asc&wt=json";
+    let (status, body) = get(&app, path).await;
     assert_eq!(status, StatusCode::OK, "got {body}");
-    assert_eq!(
-        body.pointer("/response/numFound").and_then(Value::as_u64),
-        Some(1),
-        "a document indexed with the dotted dynamic field name \
-         `tm_X3b_en_a.b` must be found by a query naming that exact field, \
-         got {body}"
-    );
-    let ids: Vec<&str> = body
-        .pointer("/response/docs")
-        .and_then(Value::as_array)
-        .map(|docs| {
-            docs.iter()
-                .filter_map(|d| d.pointer("/id").and_then(Value::as_str))
-                .collect()
-        })
-        .unwrap_or_default();
-    assert_eq!(ids, vec!["d1"], "got {body}");
+    assert_matches_fixture(body, "dotted_dynamic_basic");
 }
 
 /// The same defect via `/terms`: the analyzed term dictionary for the dotted
@@ -407,24 +394,20 @@ async fn distinct_dotted_dynamic_names_do_not_collide() {
 /// not an idealised one.
 #[tokio::test]
 async fn dotted_dynamic_field_edge_cases_round_trip() {
-    for name in [
-        "tm_X3b_en_.leading",
-        "tm_X3b_en_trailing.",
-        "tm_X3b_en_a..b",
+    for (name, id, fixture_name) in [
+        ("tm_X3b_en_.leading", "doc2", "dotted_dynamic_leading"),
+        ("tm_X3b_en_trailing.", "doc3", "dotted_dynamic_trailing"),
+        ("tm_X3b_en_a..b", "doc4", "dotted_dynamic_consecutive"),
     ] {
         let corpus = json!([
-            {"id": "d1", name: ["gamma"]},
+            {"id": id, name: ["gamma"]},
         ]);
         let (app, _dir) = dotted_app(&corpus).await;
 
-        let (status, body) = get(&app, &format!("select?q={name}:gamma")).await;
+        let path = format!("select?q={name}:gamma&fl=id&sort=id+asc&wt=json");
+        let (status, body) = get(&app, &path).await;
         assert_eq!(status, StatusCode::OK, "field {name:?}, got {body}");
-        assert_eq!(
-            body.pointer("/response/numFound").and_then(Value::as_u64),
-            Some(1),
-            "field {name:?} (leading/trailing/consecutive dot) must round-trip \
-             through /select exactly like any other dotted dynamic name, got {body}"
-        );
+        assert_matches_fixture(body, fixture_name);
 
         let (status, body) = get(&app, &format!("terms?terms=true&terms.fl={name}")).await;
         assert_eq!(status, StatusCode::OK, "field {name:?}, got {body}");

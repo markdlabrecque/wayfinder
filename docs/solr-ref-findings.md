@@ -1938,3 +1938,18 @@ Captured against a clean one-off `solr:9` container (port 8999,
      in the wildcard expansion set and then silently skipped: it produces a snippet on
      the wire. Wayfinder's issue #139 exclusion of raw strings is a real unintended
      divergence, not an equivalent implementation choice.
+
+## Finding from issue #177 (dotted dynamic field names)
+
+Captured against a one-off `solr:9` container (port 8999, `wayfinder-solr-177`, removed after
+capture), with the tracer-bullet schema and five-document corpus plus one unstored
+`tm_X3b_en_*` dynamic-field rule. Fixtures: `dotted_dynamic_basic.json`,
+`dotted_dynamic_leading.json`, `dotted_dynamic_trailing.json`, and
+`dotted_dynamic_consecutive.json`.
+
+111. **Solr accepts dots as ordinary characters in dynamic field names, including empty path-like
+     segments.** Fields named `tm_X3b_en_a.b`, `tm_X3b_en_.leading`,
+     `tm_X3b_en_trailing.`, and `tm_X3b_en_a..b` all index successfully and each exact fielded
+     query returns its one source document. Leading, trailing, and consecutive dots are not
+     rejected or collapsed. These four fixtures replace issue #164's Tantivy-source-derived
+     assumption with Solr wire evidence and are ordinary core-relative GETs in `manifest.tsv`.

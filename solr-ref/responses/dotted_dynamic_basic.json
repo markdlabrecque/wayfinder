@@ -1,0 +1,20 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":14,
+    "params":{
+      "q":"tm_X3b_en_a.b:gamma",
+      "fl":"id",
+      "sort":"id asc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":1,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"doc1"
+    }]
+  }
+}
