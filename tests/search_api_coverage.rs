@@ -1007,7 +1007,14 @@ async fn classification_guards_exercise_real_router_strict_param_and_renderer_be
     assert!(body.pointer("/response/docs/0/score").is_some());
     assert!(body.pointer("/highlighting").is_some());
 
-    let (status, body) = common::get(&app, "select?q=*:*&hl.requireFieldMatch=false").await;
+    // This half of the guard needs *any* param `SELECT_PARAMS` does not
+    // carry; it is about the strict-param rejection path, not about which
+    // particular `hl.*` param is unimplemented. It used `hl.requireFieldMatch`
+    // until issue #139 allowlisted that one (and `hl.mergeContiguous`),
+    // making it a 200 -- so it moves to `hl.maxAnalyzedChars`, still
+    // genuinely unsupported and explicitly listed as uncaptured in
+    // `docs/solr-ref-findings.md`. The assertions themselves are unchanged.
+    let (status, body) = common::get(&app, "select?q=*:*&hl.maxAnalyzedChars=100").await;
     assert_eq!(
         status,
         axum::http::StatusCode::BAD_REQUEST,
@@ -1191,9 +1198,6 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
             "mlt.maxntp",
             "request.json-nl.flat",
             "select.facet.per-field-missing",
-            "select.highlight.merge-contiguous",
-            "select.highlight.require-field-match",
-            "select.highlight.wildcard-fields",
             "select.spellcheck.collate",
             "select.spellcheck.dictionaries",
             "select.spellcheck.enable",
@@ -1275,8 +1279,17 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // `responseHeader` on `omitHeader=true`, flipping `request.omitHeader`
     // and `request.timezone.utc`. Denominator unchanged -- both were already
     // in the contract, just unmet.
+    // 59/75 -> 62/75 when issue #139 taught `src/highlight.rs` to expand
+    // `hl.fl=*` against the schema's highlightable (text-typed) fields
+    // rather than 400ing on the literal field name `*`, and added
+    // `hl.mergeContiguous`/`hl.requireFieldMatch` to `SELECT_PARAMS` so
+    // `strict_params = true` stops rejecting them. Denominator unchanged --
+    // `select.highlight.wildcard-fields`, `select.highlight.merge-contiguous`,
+    // and `select.highlight.require-field-match` were already in the frozen
+    // contract (added ahead of the implementation); three previously-
+    // uncovered items now answered.
     assert_eq!(
-        report.overall.fraction, "59/75",
+        report.overall.fraction, "62/75",
         "initial coverage fraction"
     );
 }
@@ -1286,7 +1299,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
 /// (`is_object()`/`is_array()`), not that a real client consumer could read
 /// anything out of it. Tightening those three predicates to require their
 /// real leaf (`index.numDocs` as a u64; a non-empty term/frequency pair; a
-/// non-empty name list) must not drop the fraction below `57/75` -- these
+/// non-empty name list) must not drop the fraction below `62/75` -- these
 /// three items are covered *today*, against the real seeded corpus
 /// (`ProbeApp::PROBE_DOCS`) driving the real routed handlers, and a
 /// tightened probe must still see real, non-hollow data at each of them.
@@ -1304,7 +1317,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
 /// the assertion without also pointing the probe's request at a real field
 /// (as its sibling `terms.enumeration` request-semantic probe already does
 /// with `terms.fl=body`) flips `terms.terms` from covered to uncovered and
-/// drops the fraction by one, to `58/75` against the `59/75` pinned below. If
+/// drops the fraction by one, to `61/75` against the `62/75` pinned below. If
 /// this test goes red, that is the tightening missing its matching request
 /// fix, not a fixture to update.
 #[tokio::test]
@@ -1332,7 +1345,11 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
     // The constant tracks landed features; the assertion's job is unchanged.
     // It went 57/75 -> 59/75 when issue #143 landed `omitHeader`/`TZ`, which
     // flipped exactly two *request_semantics* items to covered on their own
-    // merits: `request.omitHeader` and `request.timezone.utc`. The
+    // merits: `request.omitHeader` and `request.timezone.utc`, and 59/75 ->
+    // 62/75 when issue #139 landed `hl.fl=*` expansion plus the
+    // `hl.mergeContiguous`/`hl.requireFieldMatch` allowlist entries, which
+    // flipped three more items in the *request_semantics* and
+    // *select.highlight* buckets. The
     // `response_fields` section this test actually guards is untouched at
     // 13/15 across that change, which is the point -- bumping the number for a
     // feature that genuinely adds coverage elsewhere is correct; bumping it
@@ -1341,7 +1358,7 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
     // dropping.
     assert_eq!(
         report["overall"]["fraction"],
-        Value::String("59/75".to_string()),
+        Value::String("62/75".to_string()),
         "tightening the three hollow-container probes must not, by itself, \
          change the coverage fraction -- if it drops, a probe's request (not \
          just its assertion) needs to change to reach real data, see \
@@ -1355,7 +1372,7 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
 /// #162 fixed for three response-field probes, but here on a
 /// request-semantics probe. Tightening it to also require `solr-mbeans` to
 /// be a JSON object, and conjoining a `/select` facet leg, must not drop the
-/// fraction below `59/75`: neither leg's *request* needs to change to reach
+/// fraction below `62/75`: neither leg's *request* needs to change to reach
 /// real data -- `admin_mbeans` in `src/lib.rs` builds `solr-mbeans`
 /// unconditionally, and the seeded probe corpus already facets `category` --
 /// so the item stays covered against the real seeded app.
@@ -1394,11 +1411,13 @@ async fn repeated_map_and_flat_stays_covered_against_the_real_seeded_app() {
     // As with the sibling guard above, the constant tracks landed features
     // and the assertion's job is unchanged: it went 57/75 -> 59/75 on
     // `origin/main` when issue #143 landed `omitHeader`/`TZ`, which flipped
-    // `request.omitHeader` and `request.timezone.utc` on their own merits.
-    // This change is not what moved it.
+    // `request.omitHeader` and `request.timezone.utc` on their own merits,
+    // and 59/75 -> 62/75 when issue #139 landed `hl.fl=*` expansion plus the
+    // `hl.mergeContiguous`/`hl.requireFieldMatch` allowlisting. Neither
+    // change is what moved it.
     assert_eq!(
         report["overall"]["fraction"],
-        Value::String("59/75".to_string()),
+        Value::String("62/75".to_string()),
         "tightening this probe's assertion must not, by itself, change the \
          coverage fraction -- the real handler already emits an object-shaped \
          `solr-mbeans` regardless of `json.nl`, so nothing about the real \
