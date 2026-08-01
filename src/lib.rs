@@ -139,6 +139,9 @@ const PING_PARAMS: &[&str] = &["wt"];
 /// `/admin/info/system` (server-level) and `<core>/admin/system`
 /// (core-scoped fallback) — issue #59's version-handshake endpoints.
 const ADMIN_INFO_PARAMS: &[&str] = &["wt", "json.nl"];
+/// `<core>/schema/fieldtypes` (issue #156). The captured request
+/// (`solr-ref/search-api/trace/00020.json`) sends exactly these two.
+const SCHEMA_FIELDTYPES_PARAMS: &[&str] = &["wt", "json.nl"];
 /// `/mlt` params in scope for issue #6 (PRD §5's MoreLikeThis row). `q`
 /// selects the source doc with the same query-parsing semantics as
 /// `/select`'s `q` (hence `df` alongside it); `fl`/`rows`/`start` page the
@@ -170,6 +173,7 @@ macro_rules! search_api_routes {
             ("/solr/{core}/admin/ping", ping, any_method),
             ("/solr/admin/info/system", admin_info_system, any_method),
             ("/solr/{core}/admin/system", core_admin_system, any_method),
+            ("/solr/{core}/schema/fieldtypes", schema_fieldtypes, any_method),
         }
     };
 }
@@ -995,6 +999,132 @@ async fn core_admin_system(
         "jvm": jvm,
         "security": security,
         "system": system,
+    });
+    Ok(axum::Json(body).into_response())
+}
+
+/// The `class` Wayfinder reports for a built-in type name. Solr class names,
+/// because that is the vocabulary the wire format is written in — but they
+/// describe Solr's taxonomy, not Wayfinder's storage: `int`/`long` are both
+/// an i64 in Tantivy, and `float`/`double` are both an f64. The distinction
+/// survives here only because the type *names* do.
+fn solr_class_for_builtin(name: &str) -> &'static str {
+    match name {
+        "string" | "keyword" => "solr.StrField",
+        "int" => "solr.IntPointField",
+        "long" => "solr.LongPointField",
+        "float" => "solr.FloatPointField",
+        "double" => "solr.DoublePointField",
+        "date" => "solr.DatePointField",
+        // `text_general`, `text_en` and every `text_<code>` preset: analyzed
+        // text, which is Solr's `TextField`.
+        _ => "solr.TextField",
+    }
+}
+
+/// One `fieldTypes[]` entry, in the shape
+/// `solr-ref/search-api/trace/00020.json` shows.
+///
+/// `name` and `class` are the only keys real Solr puts on every entry, and
+/// the only two this response ever varies. The three flags below are the
+/// *type-level defaults* Wayfinder genuinely applies, which is what Solr's
+/// own type-level `stored`/`multiValued`/`docValues` mean too: in Wayfinder
+/// they are per-field `[[fields]]` flags that all default to false, while
+/// indexing is unconditional (every declared field gets indexing options —
+/// `schema::build`), so `indexed` is true for every type there is.
+///
+/// Deliberately absent: `indexAnalyzer`/`queryAnalyzer`/`analyzer`, which
+/// real Solr fills with Lucene factory chains
+/// (`solr.StandardTokenizerFactory`, `solr.SnowballPorterFilterFactory`, ...).
+/// Wayfinder's analysis is Tantivy's, not Lucene's, so any chain emitted here
+/// would be fiction — and no client reads it (see `schema_fieldtypes`). This
+/// omission is the documented deliberate divergence for this endpoint
+/// (PRD §5).
+///
+/// Deliberately *added*, the other direction: real Solr emits these four
+/// sparsely — in `trace/00020.json` `indexed` appears on 4 of 41 entries and
+/// `docValues` on 12 — because Solr only serialises an attribute that was
+/// written into `managed-schema`, leaving the rest implied by the Lucene
+/// `class` default. Wayfinder emits all four on every entry instead, on
+/// purpose: reproducing the sparseness would mean encoding Lucene's per-class
+/// default table (`solr.BinaryField` implies X, `solr.BoolField` implies Y...)
+/// for classes Wayfinder has no implementation of, which is fiction of the
+/// same kind as the analyzer chains, whereas these four values are Wayfinder's
+/// real uniform type-level defaults. It is harmless to the one real consumer:
+/// `isPartOfSchema` does an `in_array` over `name` and reads no attribute at
+/// all, and every Solr client tolerates a present-but-default attribute since
+/// Solr itself emits them whenever a schema author wrote them out explicitly.
+/// Recorded as an addition (not just an omission) in PRD §5.
+fn field_type_entry(name: &str, class: &str) -> Value {
+    json!({
+        "name": name,
+        "class": class,
+        "indexed": true,
+        "stored": false,
+        "multiValued": false,
+        "docValues": false,
+    })
+}
+
+/// `/solr/{core}/schema/fieldtypes` — the field types this core can actually
+/// resolve (issue #156, resolving #142 as In).
+///
+/// The one real consumer is `search_api_solr`'s
+/// `SearchApiSolrBackend::isPartOfSchema('fieldTypes', 'text_<lang>', ...)`,
+/// which does an `in_array()` **name-membership** check and nothing else —
+/// it never looks at analyzers. Its caller `getSchemaLanguageStatistics()`
+/// turns each hit into a green "language supported" row in Drupal's admin UI.
+/// So the names are load-bearing and everything else is not, which sets the
+/// honesty rule for this handler: report exactly the types Wayfinder really
+/// resolves — the live schema's `[[field_types]]` chains plus every built-in
+/// `schema::resolve_type` accepts — and nothing invented to look more
+/// Solr-like. Padding the list would flip today's misreport-downward (the
+/// 404 makes every language read as unsupported) into a misreport-upward,
+/// which is worse, because nobody investigates green.
+///
+/// Same precedent as `admin_info_jvm_system_security`: real values where a
+/// real consumer exists (the `name`s, derived per request from
+/// `AppState.index.wf_schema` — the same struct `/ui/schema` reads, not a
+/// second schema-reading path), static plausible placeholders where none does
+/// (`class` and the three default flags, see `field_type_entry`).
+///
+/// Scope boundary — do not widen: this is the only schema endpoint in the
+/// coverage contract, and the only one with client evidence. `/schema`,
+/// `/schema/fields`, `/schema/dynamicfields`, `/schema/copyfields` and the
+/// rest of Solr's Schema API stay on the Solr 9.x parity roadmap (PRD §5).
+/// This route existing is not an invitation to add its siblings.
+async fn schema_fieldtypes(
+    State(state): State<Arc<AppState>>,
+    AxPath(core): AxPath<String>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, WfError> {
+    let params = Params::parse(query.as_deref().unwrap_or(""));
+    check_core(&state, &core, &params, Envelope::WithParams)?;
+    check_params(&state, SCHEMA_FIELDTYPES_PARAMS, &params)?;
+
+    let custom = &state.index.wf_schema.field_types;
+    let mut field_types: Vec<Value> = custom
+        .iter()
+        // A custom chain is always analyzed text (`resolve_type` maps it to
+        // `ResolvedType::Text`).
+        .map(|ft| field_type_entry(&ft.name, "solr.TextField"))
+        .collect();
+    field_types.extend(
+        schema::builtin_type_names()
+            .iter()
+            // `resolve_type` checks `[[field_types]]` first, so a custom chain
+            // named after a built-in shadows it; report the one that wins,
+            // once.
+            .filter(|name| !custom.iter().any(|ft| &&ft.name == name))
+            .map(|name| field_type_entry(name, solr_class_for_builtin(name))),
+    );
+
+    let body = json!({
+        "responseHeader": {
+            "status": 0,
+            "QTime": 0,
+        },
+        "fieldTypes": field_types,
     });
     Ok(axum::Json(body).into_response())
 }

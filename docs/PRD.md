@@ -582,9 +582,17 @@ index data Wayfinder genuinely has, so it is expected to match, and a manifest r
 legitimate follow-up once a capture against the differential core exists.
 
 The honesty constraint cuts both ways. `schema/fieldtypes` must list exactly the languages
-Wayfinder really stems (the 16 in `schema.rs`'s `LANGUAGES`), because the module turns a name in
+Wayfinder really stems, which is the 18 in `schema.rs`'s `LANGUAGES` table (English plus 17
+non-English `text_<code>` presets) -- not the 16 an earlier draft of this section and issue #156
+both claimed; `LANGUAGES` also carries `ta` and `tr`, and `resolve_type` accepts them, so the
+handler reports 18 and the tests assert 18. The count matters because the module turns a name in
 that list into a green "supported" row. Padding it would convert today's misreport-downward into a
-misreport-upward, which is worse: nobody investigates green.
+misreport-upward, which is worse: nobody investigates green; under-reporting `ta`/`tr` would hide
+two languages Wayfinder genuinely supports. The endpoint's recorded divergences are therefore an
+omission *and* an addition: it omits the Lucene analyzer chains
+(`indexAnalyzer`/`queryAnalyzer`/`analyzer`), which Wayfinder cannot describe truthfully, and it
+adds `indexed`/`stored`/`multiValued`/`docValues` to every entry where Solr emits them sparsely,
+because those four are Wayfinder's real uniform type-level defaults and no client reads them.
 
 **The coverage instrument.** The capture yields the denominator: the set of params, endpoints,
 and response fields the module can emit across its configured features. Coverage is the fraction

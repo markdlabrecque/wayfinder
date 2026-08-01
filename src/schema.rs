@@ -63,6 +63,42 @@ const LANGUAGES: &[(&str, Language)] = &[
     ("tr", Language::Turkish),
 ];
 
+/// The built-in type names `resolve_type` accepts that are not derived from
+/// the `LANGUAGES` table. Kept adjacent to `resolve_type`'s match arms: the
+/// two are the same list written twice, and `builtin_type_names` is what
+/// `/schema/fieldtypes` reports, so a new arm must be added here too.
+const NON_LANGUAGE_BUILTIN_TYPES: &[&str] = &[
+    "string",
+    "keyword",
+    "text_general",
+    "text_en",
+    "int",
+    "long",
+    "float",
+    "double",
+    "date",
+];
+
+/// Every built-in field type `resolve_type` accepts: the non-language types
+/// above plus one `text_<code>` per non-English entry in `LANGUAGES`. The
+/// language half is derived from `LANGUAGES` itself rather than re-listed, so
+/// adding a stemmer automatically reports it and no hand-maintained copy can
+/// drift into claiming a language Wayfinder cannot actually stem (issue #156's
+/// honesty constraint).
+pub fn builtin_type_names() -> Vec<String> {
+    let mut names: Vec<String> = NON_LANGUAGE_BUILTIN_TYPES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    names.extend(
+        LANGUAGES
+            .iter()
+            .filter(|(code, _)| *code != "en")
+            .map(|(code, _)| format!("text_{code}")),
+    );
+    names
+}
+
 /// Tantivy's own `default` analyzer: simple tokenizer, long tokens dropped,
 /// lowercased, no stemming. Solr calls this shape `text_general`.
 const TEXT_GENERAL_TOKENIZER: &str = "default";
