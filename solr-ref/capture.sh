@@ -2256,8 +2256,8 @@ cap dotted_dynamic_consecutive 'select?q=tm_X3b_en_a..b:gamma&fl=id&sort=id+asc&
 # --- omitHeader on errors and boolean spellings (issue #179) ---------------
 # Captured 2026-08-01 against `solr:9.10.1` in a clean one-off container
 # (`wayfinder-solr-179`, port 9010, removed afterwards). No schema or corpus is
-# needed: querying an undefined field supplies the stable 400. Both JSON rows
-# belong in manifest-errors.tsv because they are error responses, even though
+# needed: querying an undefined field supplies the stable 400. All three JSON
+# rows belong in manifest-errors.tsv because they are error responses, even though
 # they are core-relative GETs.
 #
 # `true` settles this issue's original question: Solr suppresses
