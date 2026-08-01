@@ -205,13 +205,21 @@ const HL_FL_WILDCARD: &str = "*";
 ///
 /// Evidence that `*` is not a `df` fallback, from the captured Search API
 /// traffic: the traced core's `/select` handler sets `df` to `id`
-/// (`solr-ref/search-api/configset/solrconfig_extra.xml`), yet every
-/// wildcard trace with snippets keys them on `tm_X3b_en_body`/
-/// `tm_X3b_en_title` and never on `id` (`solr-ref/search-api/trace/`
-/// `00002`, `00005`, `00006`, `00007`, `00009`). Those same responses are
-/// also 200s over docs storing plenty of non-text fields (`ss_type`,
-/// `sm_context_tags`, `its_nid`, ...), none of which appear under
-/// `highlighting` -- which is the silent-skip behaviour above, captured.
+/// (`solr-ref/search-api/configset/solrconfig_extra.xml:113`), so a real
+/// fallback candidate is in force, yet every wildcard trace with snippets
+/// keys them on `tm_X3b_en_body`/`tm_X3b_en_title` and never on `id`
+/// (`solr-ref/search-api/trace/` `00002`, `00005`, `00006`, `00007`,
+/// `00009`).
+///
+/// Evidence for the silent skip: `sm_context_tags`
+/// (`solr-ref/search-api/configset/schema.xml:161`) is a `stored="true"`
+/// `strings` field present in the docs of every wildcard trace that returns
+/// docs, so Solr's stored-field expansion demonstrably swept up a
+/// non-analyzed field -- and every one of those responses is a 200 with no
+/// `highlighting` entry for it. The other non-text names in those docs
+/// (`ss_type`, `its_nid`, `bs_sticky`, `ds_created`, dynamic `sm_*`) prove
+/// nothing here: they are `stored="false"` and reach `docs` via docValues,
+/// so the stored-only filter already excludes them. See finding 94.
 fn resolve_hl_fl<'a>(schema: &'a WayfinderSchema, fl_raw: &'a str) -> Result<Vec<&'a str>> {
     let mut fields: Vec<&'a str> = Vec::new();
     for token in fl_raw
@@ -245,11 +253,21 @@ fn resolve_hl_fl<'a>(schema: &'a WayfinderSchema, fl_raw: &'a str) -> Result<Vec
 /// own insertion-ordered expansion set.
 ///
 /// `is_raw_string` excludes `string`/`keyword` fields even though they share
-/// `ValueKind::Text` with analyzed types: they are Solr's `StrField`, which
-/// is not analyzed and so contributes no snippet. Excluding them here rather
-/// than letting them fall through to a no-overlap non-result keeps a
-/// `q=category:animals`-style request from emitting a marker-wrapped whole
-/// raw value that no fixture pins.
+/// `ValueKind::Text` with analyzed types, and this is a **deliberate
+/// divergence, not a no-op**: Wayfinder's snippet path does produce output
+/// for a raw string field, so leaving them in would make
+/// `q=category:animals&hl.fl=*` emit `{"category":["<em>animals</em>"]}` --
+/// a marker-wrapped whole raw value. Solr's `StrField` is not analyzed, but
+/// no captured fixture settles what Solr emits for one under `hl.fl=*`: the
+/// traced corpus's only genuinely stored non-`tm_` fields are
+/// `sm_context_tags`, `id` and `_root_`, and no captured `q` ever matches one
+/// of their values, so every trace's `{}` is equally consistent with
+/// inclusion and exclusion (finding 94). `00005`/`00007` look discriminating
+/// but are not -- their `sm_*` fields are `stored="false"` and reach `docs`
+/// via docValues, so Solr's stored-only expansion never saw them. The
+/// exclusion is pinned only by
+/// `tests/highlighting.rs::hl_wildcard_fl_does_not_error_on_a_matched_non_text_field`,
+/// which says so.
 ///
 /// ponytail: static `[[fields]]` only, and only the bare `*` token --
 /// no `[[dynamic_fields]]` instances and no partial globs (`tm_*`). Real
