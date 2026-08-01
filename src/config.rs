@@ -31,6 +31,7 @@ pub struct ServerConfig {
     pub resources: Resources,
     pub commit: Commit,
     pub admin: Admin,
+    #[serde(skip)]
     pub auth: Option<AuthConfig>,
 }
 
@@ -58,43 +59,53 @@ impl fmt::Debug for AuthConfig {
     }
 }
 
-impl<'de> Deserialize<'de> for AuthConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawAuthConfig {
-            username: String,
-            password: String,
+impl AuthConfig {
+    fn from_credentials(username: &str, password: &str) -> Result<Self> {
+        if username.is_empty() || password.is_empty() {
+            bail!("auth.username and auth.password must both be non-empty");
         }
-
-        let raw = RawAuthConfig::deserialize(deserializer)?;
-        if raw.username.is_empty() || raw.password.is_empty() {
-            return Err(serde::de::Error::custom(
-                "auth.username and auth.password must both be non-empty",
-            ));
+        if username.contains(':') {
+            bail!("auth.username must not contain `:`");
         }
-        if raw.username.contains(':') {
-            return Err(serde::de::Error::custom(
-                "auth.username must not contain `:`",
-            ));
-        }
-        if has_ascii_control(&raw.username) || has_ascii_control(&raw.password) {
-            return Err(serde::de::Error::custom(
-                "auth.username and auth.password must not contain ASCII control characters",
-            ));
+        if has_ascii_control(username) || has_ascii_control(password) {
+            bail!("auth.username and auth.password must not contain ASCII control characters");
         }
 
         let mut hasher = Sha256::new();
-        hasher.update(raw.username.as_bytes());
+        hasher.update(username.as_bytes());
         hasher.update(b":");
-        hasher.update(raw.password.as_bytes());
+        hasher.update(password.as_bytes());
         Ok(Self {
             credential_digest: hasher.finalize().into(),
         })
     }
+}
+
+/// Parses the separately extracted `[auth]` table without passing credential
+/// values through serde's diagnostics, which may render their values.
+fn parse_auth(value: toml::Value) -> Result<AuthConfig> {
+    let table = value
+        .as_table()
+        .ok_or_else(|| anyhow::anyhow!("auth must be a table"))?;
+
+    for key in table.keys() {
+        if key != "username" && key != "password" {
+            bail!("unknown auth key `{key}`");
+        }
+    }
+
+    let username = table
+        .get("username")
+        .ok_or_else(|| anyhow::anyhow!("auth.username is required"))?
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("auth.username must be a string"))?;
+    let password = table
+        .get("password")
+        .ok_or_else(|| anyhow::anyhow!("auth.password is required"))?
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("auth.password must be a string"))?;
+
+    AuthConfig::from_credentials(username, password)
 }
 
 /// RFC 7617 forbids control characters in both components of Basic credentials.
@@ -260,9 +271,16 @@ impl ServerConfig {
         // Parse without deserializing first: TOML's source-aware syntax errors
         // include excerpts of `raw`, which could disclose configured credentials.
         // Deserializing the value afterward retains useful unknown-field names.
-        let value: toml::Value =
+        let mut value: toml::Value =
             toml::from_str(raw).map_err(|_| anyhow::anyhow!("invalid server config TOML"))?;
-        let config: ServerConfig = value.try_into().context("parsing server config TOML")?;
+        let auth = value
+            .as_table_mut()
+            .expect("a TOML document is always a table")
+            .remove("auth")
+            .map(parse_auth)
+            .transpose()?;
+        let mut config: ServerConfig = value.try_into().context("parsing server config TOML")?;
+        config.auth = auth;
         config.validate()?;
         Ok(config)
     }
@@ -419,6 +437,53 @@ mod tests {
                 .as_ref()
                 .expect("[auth] must be present")
                 .matches(b"operator:secret:with:colons")
+        );
+    }
+
+    #[test]
+    fn auth_rejects_non_string_credentials_without_echoing_them() {
+        let numeric_sentinel = "8675309123456789";
+        let err = ServerConfig::parse(&format!(
+            "[auth]\nusername = \"operator\"\npassword = {numeric_sentinel}\n"
+        ))
+        .expect_err("numeric passwords must be rejected");
+        let message = format!("{err:#}");
+        assert!(message.contains("auth.password must be a string"));
+        assert!(
+            !message.contains(numeric_sentinel),
+            "semantic errors must not echo credential values: {message}"
+        );
+
+        let err = ServerConfig::parse(
+            "[auth]\nusername = \"operator\"\npassword = 1979-05-27T07:32:00Z\n",
+        )
+        .expect_err("datetime passwords must be rejected");
+        assert!(format!("{err:#}").contains("auth.password must be a string"));
+    }
+
+    #[test]
+    fn auth_must_be_a_table() {
+        let err =
+            ServerConfig::parse("auth = \"operator:secret\"\n").expect_err("auth must be a table");
+        assert!(format!("{err:#}").contains("auth must be a table"));
+    }
+
+    #[test]
+    fn auth_requires_exactly_username_and_password() {
+        let err = ServerConfig::parse("[auth]\nusername = \"operator\"\n")
+            .expect_err("auth.password is required");
+        assert!(format!("{err:#}").contains("auth.password is required"));
+
+        let sentinel = "AUTH_UNKNOWN_SECRET_MUST_NOT_LEAK";
+        let err = ServerConfig::parse(&format!(
+            "[auth]\nusername = \"operator\"\npassword = \"secret\"\ntoken = \"{sentinel}\"\n"
+        ))
+        .expect_err("unknown auth keys must be rejected");
+        let message = format!("{err:#}");
+        assert!(message.contains("unknown auth key `token`"));
+        assert!(
+            !message.contains(sentinel),
+            "unknown-key errors must not echo credential values: {message}"
         );
     }
 

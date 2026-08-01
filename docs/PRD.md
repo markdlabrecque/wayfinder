@@ -813,9 +813,10 @@ own scoping pass if ever pursued):
   start on an incompatible schema change; a UI that could trigger one is a different, much larger
   feature.
 - Document edit/delete from the UI (the update pipeline stays API-only).
-- Authentication/authorization. Solr's own admin UI has none by default either — this phase matches
-  that posture and documents it as a deployment responsibility (reverse proxy / firewall / network
-  policy), not something Wayfinder arbitrates. Flagged as a risk below, not silently assumed away.
+- Fine-grained authorization and user/role administration remain out of scope for the dashboard.
+  The phase originally left all authentication to deployment infrastructure, but issue #229 later
+  added optional server-wide HTTP Basic authentication. When configured, it protects the admin UI
+  alongside the Solr routes; only the two explicit health paths remain public.
 - Multi-instance/cluster views. Out of scope for the same reason SolrCloud is (§1 non-goals) — one
   process, one core.
 

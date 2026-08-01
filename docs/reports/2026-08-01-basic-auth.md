@@ -17,9 +17,10 @@ following `4d1e19d` (`feat(auth): add basic authentication`).
 
 - `src/config.rs`: adds optional `[auth]`; retains only a SHA-256 digest of
   `username:password` and compares a presented digest with `subtle::ConstantTimeEq::ct_eq`.
-  It rejects absent-in-section, empty, colon-containing username, and ASCII-control-character
-  credentials; passwords may contain colons. Parsing TOML through `toml::Value` first prevents a
-  syntax error from echoing credentials. `AuthConfig`'s debug output does not expose values.
+  It rejects missing, non-string, empty, colon-containing username, and ASCII-control-character
+  credentials; passwords may contain colons. It extracts `[auth]` from `toml::Value` before generic
+  deserialization so syntax and semantic errors cannot echo or coerce credential values.
+  `AuthConfig`'s debug output does not expose values.
 - `src/lib.rs`: applies auth middleware to the application surface, accepts case-insensitive
   `Basic` scheme syntax with one valid base64 payload, returns 401 with
   `WWW-Authenticate: Basic realm="solr"` and Wayfinder's JSON `WfError` envelope on failure, and
@@ -68,12 +69,15 @@ expecting Jetty HTML will differ; the project does not support that response for
 
 - Initial red evidence: `cargo test --test basic_auth` initially failed because `auth` was an
   unknown server-config field.
-- Implementer-reported final verification at the checkpoint:
+- Mutation evidence: `AuthConfig::matches` was deliberately changed to accept every credential;
+  `cargo test --test basic_auth` failed in `basic_auth_requires_well_formed_matching_credentials`
+  (exit 101), proving wrong credentials cannot bypass unnoticed. The mutation was reverted.
+- Implementer verification after each review bounce remained green:
   - `cargo fmt --check` — exit 0.
   - `cargo test --test basic_auth` — exit 0.
   - `cargo clippy --all-targets -- -D warnings` — exit 0.
   - `cargo test` — exit 0.
-- The Implementer ran the full gate with all `PI_SUBAGENT_*` and `PI_WORKFLOW_*` variables unset only in the spawned test process, preserving runtime identity while keeping foreground-harness tests hermetic.
+- Full gates ran with all `PI_SUBAGENT_*` and `PI_WORKFLOW_*` variables unset only in the spawned test process, preserving runtime identity while keeping foreground-harness tests hermetic.
 - Documentation validation: `git diff --check` passed; `cargo test --test finding_citations` passed (2 tests).
 
 Review round 1 raised these must-fix findings, resolved in `01447db`:
@@ -86,9 +90,13 @@ Review round 1 raised these must-fix findings, resolved in `01447db`:
    `toml::Value` first and replace syntax errors with a generic message, guarded by a sentinel
    no-leak test.
 
-The handoff identifies the round-1 findings and their resolutions but does not provide an explicit
-post-resolution reviewer approval verdict. No PR exists yet. Technical verification is green as
-reported above; final review/PR/CI status remains outstanding rather than implied by this report.
+Review round 2 verified the route, middleware, validation, constant-time comparison, dependency,
+and test contracts, then found one remaining semantic TOML leak: serde could echo an integer
+credential value or coerce a TOML datetime after syntax parsing. The foreground chose the
+recoverable **fix** path at the two-round review cap. The final implementation extracts and
+validates `[auth]` before generic deserialization, with integer/datetime/no-leak regressions; its
+full gate passed. Round 2 also identified stale PRD dashboard text and missing README divergence
+wording, both corrected. No reviewer round beyond the configured cap was claimed.
 
 ## Unresolved risks and follow-ups
 
@@ -98,7 +106,5 @@ reported above; final review/PR/CI status remains outstanding rather than implie
   remain unauthenticated and disclose service health.
 - **JSON auth-401 divergence.** Wayfinder intentionally does not reproduce Solr's Jetty HTML
   auth-failure body (PRD divergence 9/finding 118).
-- **Process follow-up.** Obtain explicit final reviewer verdict and PR CI evidence before merge;
-  neither was supplied to this Reporter handoff.
 
 No other deferred follow-ups, accepted deviations, failed gates, or posting failure are known.

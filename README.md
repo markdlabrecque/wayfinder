@@ -109,7 +109,7 @@ checks, where `<configured-core>` is the core name in the schema:
 - `/solr/<configured-core>/admin/ping`
 - `/ui/ping`
 
-A ping for a different core, or a longer look-alike path, is protected.
+A ping for a different core, or a longer look-alike path, is protected. Failed authentication returns HTTP 401 with `WWW-Authenticate: Basic realm="solr"` and Wayfinder's JSON error envelope. Real Solr 9's BasicAuthPlugin returned Jetty HTML in the captured failure cases; Wayfinder deliberately stays JSON-only (PRD §2, divergence 9).
 
 **Security warning:** HTTP Basic authentication is plaintext-equivalent: it
 base64-encodes credentials but does not encrypt them. Use it only on loopback or
