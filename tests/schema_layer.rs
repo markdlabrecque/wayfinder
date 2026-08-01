@@ -547,6 +547,118 @@ fn unsupported_field_type_errors_naming_the_field() {
     );
 }
 
+// --- duplicate [[field_types]] names (issue #160, found by the #156 round-2
+// reviewer) -------------------------------------------------------------------
+
+/// `resolve_type` picks a `[[field_types]]` match with `.find(|ft| ft.name ==
+/// type_)`, which returns the *first* match in declaration order — so two
+/// entries sharing a `name` silently make the second one dead code. That is a
+/// config error worth failing on: the schema author who wrote the second
+/// block clearly intended it to take effect. This is the root cause behind
+/// `GET /solr/{core}/schema/fieldtypes` emitting a duplicated name twice in
+/// its `fieldTypes` array (issue #156, round 2).
+#[test]
+fn duplicate_field_type_names_are_rejected_at_load_time() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "text_custom_dup"
+tokenizer = "simple"
+[[field_types.filters]]
+kind = "lowercase"
+
+[[field_types]]
+name = "text_custom_dup"
+tokenizer = "simple"
+[[field_types.filters]]
+kind = "stopwords"
+language = "english"
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path)
+        .expect_err("two [[field_types]] entries sharing a name must be rejected");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("text_custom_dup"),
+        "duplicate-field-type error must name the duplicated type, got: {msg}"
+    );
+}
+
+/// The guard must not over-reject: distinct `[[field_types]]` names are
+/// unrelated to each other and the schema must still load.
+#[test]
+fn distinct_field_type_names_still_load() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "text_custom_a"
+tokenizer = "simple"
+
+[[field_types]]
+name = "text_custom_b"
+tokenizer = "simple"
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    schema::load(&path).expect("schema with distinct field type names must load");
+}
+
+/// `resolve_type` matches `[[field_types]]` names with plain `==` (no
+/// lowercasing), so duplicate detection must be exactly as case-sensitive as
+/// resolution itself: two names differing only in case are not duplicates and
+/// must not be rejected by the new guard. If this ever starts failing because
+/// duplicate detection normalises case, that is a deliberate widening beyond
+/// what `resolve_type` actually does and needs its own decision, not a silent
+/// side effect of this guard.
+#[test]
+fn field_type_names_differing_only_in_case_are_not_duplicates() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "text_Custom_dup"
+tokenizer = "simple"
+
+[[field_types]]
+name = "text_custom_dup"
+tokenizer = "simple"
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    schema::load(&path)
+        .expect("field type names differing only in case must not be treated as duplicates");
+}
+
+/// Characterization test, not new behaviour: `resolve_type` checks
+/// `[[field_types]]` before the built-in table, so a custom chain can shadow
+/// any built-in type name other than `text_en` (which `parse` already
+/// reserves explicitly) without complaint. Declaring a custom `[[field_types]]`
+/// named `double` silently retypes every field declared `type = "double"`
+/// from a numeric field to an analyzed text field using the custom chain
+/// instead of the `double` numeric type it names. This is issue #160's
+/// premise-check point 4: a real, separate gap from the duplicate-name bug
+/// this file otherwise tests, left un-widened here and flagged in the
+/// handoff rather than fixed as part of this issue.
+#[test]
+fn custom_field_type_can_silently_shadow_a_non_text_en_builtin() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "double"
+tokenizer = "simple"
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let wf = schema::load(&path)
+        .expect("today, shadowing a non-text_en builtin is accepted, not rejected");
+    assert_eq!(
+        wf.tokenize("double", "Hello World"),
+        Some(vec!["Hello".to_string(), "World".to_string()]),
+        "the field type named `double` resolves to the custom analyzed `simple`-tokenizer chain, \
+         not the numeric builtin, once shadowed"
+    );
+}
+
 // --- unique_key must be string-typed (issue #9 review round 1, five-minute
 // item) ---------------------------------------------------------------------
 

@@ -9,7 +9,7 @@
 //! Out of scope (PRD §3): runtime schema mutation, `schema.xml`, per-field
 //! similarity.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -617,6 +617,19 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
             "field type `{}` is reserved for Wayfinder's built-in text_en analyzer",
             field_type.name
         );
+    }
+    // `resolve_type` picks the *first* `[[field_types]]` entry whose name
+    // matches, so a second entry sharing that name is silently dead code --
+    // and `build_tokenizers` would register it over the first. Case-sensitive,
+    // exactly like the `==` that `resolve_type` resolves with.
+    let mut seen_field_types = HashSet::new();
+    for field_type in &parsed.field_types {
+        if !seen_field_types.insert(field_type.name.as_str()) {
+            bail!(
+                "duplicate field type `{}`: two [[field_types]] entries share that name",
+                field_type.name
+            );
+        }
     }
     let tokenizers = build_tokenizers(&parsed.field_types)?;
 
