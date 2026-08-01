@@ -56,8 +56,8 @@ impl Params {
     /// param is absent. An invalid value is Solr's 400 `invalid boolean
     /// value: <raw>` (`bool_facet_invalid.json`), with this request's params
     /// already echoed onto it — the `WithParams` envelope is what every
-    /// `/select`-family caller wants; `/update`'s two callers re-stamp
-    /// `Envelope::NoParams` on top.
+    /// `/select`-family caller wants; `/update`'s `bool_param` closure
+    /// re-stamps `Envelope::NoParams` on top for all of its reads.
     pub fn bool_opt(&self, key: &str) -> Result<Option<bool>, WfError> {
         match self.get(key) {
             None => Ok(None),

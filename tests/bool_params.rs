@@ -395,9 +395,12 @@ async fn omit_header_yes_suppresses_the_response_header() {
 //
 // Nothing below has a Solr fixture, and that is deliberate rather than a gap.
 // Finding 113 pins the *rule*; these pin that each read site actually applies
-// it. Two of them exist because the code they guard is validation-only, which
-// `CLAUDE.md` requires be mutation-tested: deleting the guard must break a
-// test, not just fail to be exercised.
+// it. The code they guard is validation-only, which `CLAUDE.md` requires be
+// mutation-tested: deleting the guard must break a test, not merely fail to be
+// exercised. Each test's doc comment names the mutation it was verified to
+// kill -- a claim worth distrusting until re-checked, since an earlier revision
+// of this file asserted a mutation guard over code that turned out to be
+// unreachable.
 //
 // The expected message is Solr's verbatim wording from the two captured error
 // fixtures (`invalid boolean value: <raw>`); the status is the 400 those
@@ -422,6 +425,24 @@ fn assert_invalid_bool_400(status: StatusCode, body: &Value, raw: &str, what: &s
         body.pointer("/error/code").and_then(Value::as_i64),
         Some(400),
         "{what}: error.code must be 400; got {body}"
+    );
+}
+
+/// [`assert_invalid_bool_400`] plus issue #214's suppression policy: an
+/// invalid `omitHeader` answers with **no `responseHeader` at all**.
+///
+/// That is what distinguishes this path from every other invalid boolean.
+/// `check_params`'s error calls `.suppress_response_header()`; the ordinary
+/// `Params::bool_or` error does not. Asserting the absence here therefore pins
+/// *which* validation answered -- if the shared boolean parser ever stopped
+/// feeding `validate_omit_header` and some other read site started 400ing
+/// first, the message would still match but the header would come back.
+fn assert_invalid_omit_header_400(status: StatusCode, body: &Value, raw: &str, what: &str) {
+    assert_invalid_bool_400(status, body, raw, what);
+    assert!(
+        body.get("responseHeader").is_none(),
+        "{what}: an invalid omitHeader must suppress responseHeader entirely \
+         (issue #214's policy, reached through the #187 shared parser); got {body}"
     );
 }
 
@@ -516,33 +537,47 @@ async fn select_rejects_each_invalid_boolean() {
     }
 }
 
-/// **Mutation guard for the four entry-point `omitHeader` validations.**
+/// **Guards the single `check_params` `omitHeader` validation, reached through
+/// four different allowlists.**
 ///
-/// `Params::omit_header` is called at render time and cannot fail, so an
-/// invalid value would otherwise be read as "keep the header" and answered
-/// 200 -- silently, on every one of these endpoints. The only thing making it
-/// a 400 is a `bool_or("omitHeader", …)` call at each handler's entry, which
-/// nothing else in the suite exercises: delete any one of the four and this
-/// test fails for that endpoint alone.
+/// There is exactly one validation site, not four. `check_params` (`src/lib.rs`)
+/// calls `Params::validate_omit_header` whenever the endpoint's allowlist
+/// contains the name, and `SELECT_PARAMS`/`UPDATE_PARAMS`/`MLT_PARAMS`/
+/// `TERMS_PARAMS` all do -- so what these four requests prove is that each
+/// endpoint reaches that one check, not that each has a check of its own.
 ///
-/// This is Wayfinder's documented divergence (finding 113): real Solr answers
-/// an invalid `omitHeader` with a Jetty *HTML* error page, because header
-/// suppression is decided before the JSON response writer exists. The status
-/// matches; only the body shape differs, which is why there is no fixture and
-/// no `manifest.tsv` row. The assertions below are therefore Wayfinder's own
-/// JSON envelope, not a captured Solr one.
+/// An earlier revision of this file claimed to guard four per-handler
+/// `bool_or("omitHeader", …)` calls and said "delete any one of the four and
+/// this test fails for that endpoint alone". That was false: `check_params`
+/// runs first in all four handlers, so those calls were unreachable and
+/// deleting all four changed nothing. They have since been removed.
+///
+/// Mutation actually killed, verified by doing it: deleting the
+/// `if allowed.contains(&"omitHeader") { … validate_omit_header … }` block in
+/// `check_params` fails this test on all four endpoints at once. Narrowing the
+/// guard to one allowlist fails it for the other three. Dropping the
+/// `.suppress_response_header()` on that error fails the header assertion in
+/// [`assert_invalid_omit_header_400`] while leaving status and message intact.
+///
+/// The response *body* is Wayfinder's own JSON envelope, not a captured Solr
+/// one, and deliberately so (finding 113): real Solr answers an invalid
+/// `omitHeader` with a Jetty HTML error page, because header suppression is
+/// decided before the JSON response writer exists. Only the status is shared,
+/// which is why there is no fixture and no `manifest.tsv` row. Solr's *message*
+/// is still matched, from the captured
+/// `solr-ref/responses/omit_header_invalid_one.html`.
 #[tokio::test]
 async fn every_handler_rejects_an_invalid_omit_header() {
     let (app, _dir) = indexed_app().await;
 
     let (status, body) = get(&app, "select?q=*:*&rows=0&omitHeader=1&wt=json").await;
-    assert_invalid_bool_400(status, &body, "1", "select?omitHeader=1");
+    assert_invalid_omit_header_400(status, &body, "1", "select?omitHeader=1");
 
     let (status, body) = get(&app, "mlt?q=id:doc1&mlt.fl=body&omitHeader=1&wt=json").await;
-    assert_invalid_bool_400(status, &body, "1", "mlt?omitHeader=1");
+    assert_invalid_omit_header_400(status, &body, "1", "mlt?omitHeader=1");
 
     let (status, body) = get(&app, "terms?terms=true&terms.fl=body&omitHeader=1&wt=json").await;
-    assert_invalid_bool_400(status, &body, "1", "terms?omitHeader=1");
+    assert_invalid_omit_header_400(status, &body, "1", "terms?omitHeader=1");
 
     let (status, body) = request(
         &app,
@@ -551,5 +586,5 @@ async fn every_handler_rejects_an_invalid_omit_header() {
         Some(r#"[{"id":"bool3","body":"hello"}]"#),
     )
     .await;
-    assert_invalid_bool_400(status, &body, "1", "update?omitHeader=1");
+    assert_invalid_omit_header_400(status, &body, "1", "update?omitHeader=1");
 }

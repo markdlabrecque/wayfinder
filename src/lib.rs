@@ -1792,10 +1792,10 @@ async fn update(
     check_core(&state, &core, &params, Envelope::NoParams)?;
     check_params(&state, UPDATE_PARAMS, &params).map_err(|e| e.envelope(Envelope::NoParams))?;
 
-    // Every boolean this handler reads, validated once at entry so an invalid
-    // value 400s here rather than being silently read as `false` later --
-    // `omitHeader` in particular is read at render time by
-    // `Params::omit_header`, which cannot fail (see its doc comment).
+    // Every boolean this handler reads, validated at entry so an invalid value
+    // 400s here rather than being silently read as `false` later.
+    // `omitHeader` is NOT among them: `check_params` above already validated
+    // it, for every allowlist containing the name (issue #214).
     let bool_param = |key: &str, default: bool| {
         params
             .bool_or(key, default)
@@ -1813,7 +1813,6 @@ async fn update(
     // `overwrite=false` skips the default replace-by-uniqueKey step
     // (finding 48b); Solr's default is `overwrite=true`.
     let overwrite = bool_param("overwrite", true)?;
-    bool_param("omitHeader", false)?;
 
     // GET carries no body (finding 47): it is not a method error, but a
     // *content-stream* one — 400 "missing content stream" unless the only
@@ -1956,12 +1955,11 @@ async fn select(
     // invalid value here answers with the error-only envelope, no `response`
     // block (`bool_facet_invalid.json`) -- unlike `facet.missing`, which
     // `facet::facet_counts` reads after the query and whose error therefore
-    // carries one. `omitHeader` is validated here too because its render-time
-    // reader (`Params::omit_header`) cannot fail.
+    // carries one. `omitHeader` is not read here: `check_params` above already
+    // validated it (issue #214).
     let facet_requested = params.bool_or("facet", false)?;
     let stats_requested = params.bool_or("stats", false)?;
     let hl_requested = params.bool_or("hl", false)?;
-    params.bool_or("omitHeader", false)?;
 
     let default_field = params
         .get("df")
@@ -2284,15 +2282,14 @@ async fn mlt(
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, MLT_PARAMS, &params)?;
 
-    // Both of this handler's booleans, plus the render-time-only `omitHeader`
-    // (`Params::omit_header` cannot fail), validated at entry.
+    // Both of this handler's own booleans, validated at entry. `omitHeader` is
+    // `check_params`'s job (issue #214), not this handler's.
     let mlt_boost = params.bool_or("mlt.boost", false)?;
     // `mlt.match.include=false` drops the `match` key from the envelope
     // entirely -- not an empty-and-present object (finding 100,
     // `mlt_match_include_false.json` is `{responseHeader, response}`).
     // Solr's default is `true`.
     let include_match = params.bool_or("mlt.match.include", true)?;
-    params.bool_or("omitHeader", false)?;
 
     let default_field = params
         .get("df")
@@ -2620,10 +2617,7 @@ async fn terms(
     check_terms_json_nl(&params).map_err(|e| e.with_params(&params))?;
 
     let mut terms_block = Map::new();
-    // `omitHeader` validated alongside, since its render-time reader below
-    // (`Params::omit_header`) cannot fail.
     let terms_requested = params.bool_or("terms", false)?;
-    params.bool_or("omitHeader", false)?;
     if terms_requested {
         for field_name in params.get_all("terms.fl") {
             check_terms_field(&state.index, field_name).map_err(|e| e.with_params(&params))?;
