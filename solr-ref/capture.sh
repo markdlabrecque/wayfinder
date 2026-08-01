@@ -1803,3 +1803,22 @@ echo "  (docker rm -f $FRAGSIZE_CONTAINER to stop)"
 # cap facet_local_params_key_unknown 'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dk%7Dnosuchfield&wt=json'
 # cap facet_local_params_key_f_field 'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dmylabel%7Dcategory&f.category.facet.missing=true&wt=json'
 # cap facet_local_params_key_f_key   'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dmylabel%7Dcategory&f.mylabel.facet.missing=true&wt=json'
+#
+# Three more, taken the same way (one-off solr:9, port 8993) after stage 1
+# flagged them as the assertions with no ground truth behind them:
+#   - facet_local_params_key_as_other_field.json: `{!key=body}category` labels
+#     the `category` counts "body". The key is *never* resolved as a field,
+#     even when it names a different declared one -- which is what makes
+#     "strip the prefix and use the field name" impossible to pass.
+#   - facet_local_params_key_unterminated.json: `{!key=mylabel category` (no
+#     closing brace) is a 400 SyntaxError, "Expected identifier at pos 22",
+#     *not* a field name taken verbatim.
+#   - facet_local_params_key_empty_remainder.json: `{!key=mylabel}` with
+#     nothing after the brace is `undefined field: ""` -- the empty remainder
+#     is what gets validated.
+# Wayfinder 400s on the latter two as well, though with its own message; the
+# differential harness tolerates `error.msg`, so their manifest rows pin the
+# status only.
+# cap facet_local_params_key_as_other_field  'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dbody%7Dcategory&wt=json'
+# cap facet_local_params_key_unterminated    'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dmylabel%20category&wt=json'
+# cap facet_local_params_key_empty_remainder 'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dmylabel%7D&wt=json'

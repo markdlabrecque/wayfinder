@@ -160,3 +160,6 @@ admin_system	200	admin/system?wt=json&json.nl=flat
 facet_local_params_key	200	select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dmylabel%7Dcategory&wt=json
 facet_local_params_key_same	200	select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dcategory%7Dcategory&wt=json
 facet_local_params_key_unknown	400	select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dk%7Dnosuchfield&wt=json
+facet_local_params_key_as_other_field	200	select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dbody%7Dcategory&wt=json
+facet_local_params_key_unterminated	400	select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dmylabel%20category&wt=json
+facet_local_params_key_empty_remainder	400	select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dmylabel%7D&wt=json
