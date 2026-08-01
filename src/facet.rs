@@ -206,20 +206,6 @@ fn facet_queries(
 /// given twice takes the first, where Solr's map-based `parseLocalParams`
 /// would likely take the last — unverified, and issue #150 owns settling it.
 ///
-/// ponytail: **colliding labels collapse.** Two values whose labels are equal
-/// (`{!key=x}category` plus `{!key=x}id`, or `{!key=id}category` plus a bare
-/// `id`) both `insert` into the same `facet_fields` key below, so the last write
-/// wins and one requested facet vanishes with no error and no warning. Solr's
-/// `NamedList` is a list of pairs and can emit the same name twice; the `Map`
-/// here is `serde_json`'s `preserve_order` `IndexMap`, which keeps insertion
-/// order (so ordering itself is faithful) but cannot hold a duplicate key at
-/// all. `facet_queries` above already collapses identically on two equal
-/// `facet.query` values, so this is a pre-existing shape in this file rather
-/// than a regression this change introduces — but the prefix makes it much
-/// easier to hit, since a client picks the labels. Nothing captured sends a
-/// collision, and the honest fix (emit duplicates, or refuse the request)
-/// depends on which of those Solr actually does; capture it before choosing.
-/// Issue #149 owns that capture, for both `facet.field` and `facet.query`.
 fn split_facet_key(value: &str) -> (String, &str) {
     match local_params::parse_block(value) {
         Some((local, consumed)) => {
@@ -284,6 +270,13 @@ fn facet_fields(
         // The label reaches the response envelope; the field reaches
         // resolution, validation and every error message (issue #138).
         let (label, field_name) = split_facet_key(value);
+        // Finding 102: Solr can emit duplicate `facet_fields` object members,
+        // but serde_json's Map cannot represent them. Refuse before validating
+        // or aggregating the second field rather than silently overwriting the
+        // first; `facet.query` intentionally remains coalesced above.
+        if out.contains_key(&label) {
+            bail!("colliding facet.field response label: {label}");
+        }
         check_facetable(&index.wf_schema, field_name, true)?;
         // The Tantivy column to actually aggregate over: `field_name` itself
         // for a static field, or the catch-all JSON path for a field that
