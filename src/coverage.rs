@@ -806,6 +806,38 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
         "select.q.plain-query" => {
             probe.number("select?q=quick", "/response/numFound").await == Some(2)
         }
+        // Fixture-derived, per issue #147. `q={!edismax}quick+rocket` is one
+        // unquoted clause (`+` is an ordinary term character mid-token in
+        // Lucene's `_TERM_CHAR` set) analysing to two tokens, so the expected
+        // count turns entirely on whether edismax builds a phrase or a boolean
+        // OR for it. `solr-ref/responses/edismax_unquoted_multitoken.json`
+        // (manifest row `edismax_unquoted_multitoken`, real `solr:9`) answers
+        // that with `numFound=6` over the capture corpus's ten docs -- every
+        // doc carrying *either* token, and zero of them carrying the two
+        // adjacent -- so it is the OR reading, and the phrase reading is ruled
+        // out on that corpus rather than merely thought unlikely. The
+        // `_TERM_CHAR` step is captured too:
+        // `solr-ref/responses/edismax_unquoted_multitoken_debug.json`, the same
+        // request with `debugQuery=true`, parses to a *single*
+        // `DisjunctionMaxQuery(((title:quick title:rocket) | (body:quick
+        // body:rocket)))` -- one clause spanning both tokens (two clauses would
+        // give two disjunctions), each field's pair a SHOULD, not a
+        // `PhraseQuery`. That capture has no manifest row: `debugQuery` output
+        // is not stable enough for the differential harness to GET verbatim, so
+        // `solr-ref/capture.sh` carries its curl command as a comment instead.
+        // Applied to `PROBE_DOCS`, where "quick" and "rocket" both occur only in
+        // doc1 and doc2, OR gives 2 (the phrase reading would give 0, since
+        // neither doc has them adjacent). What this probe therefore cannot catch:
+        // doc1 and doc2 each carry **both** terms, so an AND reading also gives
+        // 2. `PROBE_DOCS` is a phrase-vs-not regression net only, never evidence
+        // about OR-vs-AND; only the capture corpus separates those (its six
+        // matches include docs carrying just one term, so AND would be 0). Both
+        // readings agreeing here is why the count alone is not the provenance --
+        // the two fixtures above are, and `tests/edismax_capture_provenance.rs`
+        // requires this comment to keep naming them. This value was previously
+        // the speculative `Some(2)` written in `bb44cc4` (#105) for an entry
+        // that could not pass then; it now traces to the captures, which is
+        // what CLAUDE.md requires.
         "select.q.local-params-edismax.and" => {
             probe
                 .number(

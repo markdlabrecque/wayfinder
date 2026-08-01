@@ -1,0 +1,98 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":4,
+    "params":{
+      "q":"({!edismax qf='title body'}+\"quick\")",
+      "df":"id",
+      "fl":"id",
+      "sort":"id asc",
+      "wt":"json",
+      "debugQuery":"true"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"pA"
+    },{
+      "id":"pB"
+    }]
+  },
+  "debug":{
+    "rawquerystring":"({!edismax qf='title body'}+\"quick\")",
+    "querystring":"({!edismax qf='title body'}+\"quick\")",
+    "parsedquery":"+(+DisjunctionMaxQuery((title:quick | body:quick)))",
+    "parsedquery_toString":"+(+(title:quick | body:quick))",
+    "explain":{
+      "pA":"\n0.6362719 = max of:\n  0.6362719 = weight(body:quick in 4) [SchemaSimilarity], result of:\n    0.6362719 = score(freq=1.0), computed as boost * idf * tf from:\n      1.4816046 = idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:\n        2 = n, number of documents containing term\n        10 = N, total number of documents with field\n      0.42944783 = tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:\n        1.0 = freq, occurrences of term within document\n        1.2 = k1, term saturation parameter\n        0.75 = b, length normalization parameter\n        4.0 = dl, length of field\n        3.5 = avgdl, average length of field\n",
+      "pB":"\n0.6362719 = max of:\n  0.6362719 = weight(body:quick in 5) [SchemaSimilarity], result of:\n    0.6362719 = score(freq=1.0), computed as boost * idf * tf from:\n      1.4816046 = idf, computed as log(1 + (N - n + 0.5) / (n + 0.5)) from:\n        2 = n, number of documents containing term\n        10 = N, total number of documents with field\n      0.42944783 = tf, computed as freq / (freq + k1 * (1 - b + b * dl / avgdl)) from:\n        1.0 = freq, occurrences of term within document\n        1.2 = k1, term saturation parameter\n        0.75 = b, length normalization parameter\n        4.0 = dl, length of field\n        3.5 = avgdl, average length of field\n"
+    },
+    "QParser":"LuceneQParser",
+    "timing":{
+      "time":4.0,
+      "prepare":{
+        "time":0.0,
+        "query":{
+          "time":0.0
+        },
+        "facet":{
+          "time":0.0
+        },
+        "facet_module":{
+          "time":0.0
+        },
+        "mlt":{
+          "time":0.0
+        },
+        "highlight":{
+          "time":0.0
+        },
+        "stats":{
+          "time":0.0
+        },
+        "expand":{
+          "time":0.0
+        },
+        "terms":{
+          "time":0.0
+        },
+        "debug":{
+          "time":0.0
+        }
+      },
+      "process":{
+        "time":4.0,
+        "query":{
+          "time":0.0
+        },
+        "facet":{
+          "time":0.0
+        },
+        "facet_module":{
+          "time":0.0
+        },
+        "mlt":{
+          "time":0.0
+        },
+        "highlight":{
+          "time":0.0
+        },
+        "stats":{
+          "time":0.0
+        },
+        "expand":{
+          "time":0.0
+        },
+        "terms":{
+          "time":0.0
+        },
+        "debug":{
+          "time":3.0
+        }
+      }
+    }
+  }
+}

@@ -303,6 +303,35 @@ where
 /// immediately after the block's `}` up to, but not including, the first
 /// terminator.
 ///
+/// Both the "bind the next run only" rule and each terminator below are
+/// confirmed by Solr's own parse tree, not inferred from `numFound`
+/// consistency (issue #147). Two `debugQuery=true` captures, one per
+/// terminator, taken against a real `solr:9` with `capture.sh`'s edismax block
+/// schema and 10-doc corpus and with `qf=title body` against `df=id` so the
+/// parsed query names the field each token resolved through:
+/// - `solr-ref/responses/edismax_shape_b_debug_parsedquery.json` —
+///   `q=({!edismax qf='title body'}+"quick" +"rocket")`, the **whitespace**
+///   terminator (trace 00003's shape). `parsedquery` is
+///   `(+(+DisjunctionMaxQuery((title:quick | body:quick)))) +id:rocket`: only
+///   `+"quick"` reached the nested edismax query, and `+"rocket"` — after the
+///   run — was resolved by the outer lucene parser against `df=id`, matching
+///   nothing (`numFound=0`). A "bind the whole remainder" reading would have
+///   fanned `rocket` out over `qf` and never touched `df`.
+/// - `solr-ref/responses/edismax_shape_b_debug_parsedquery_paren_terminated.json`
+///   — `q=({!edismax qf='title body'}+"quick")`, the **`)` at run-local paren
+///   depth 0** terminator (trace 00006's shape, no whitespace after `}` at
+///   all). `parsedquery` is `+(+DisjunctionMaxQuery((title:quick |
+///   body:quick)))` with `numFound=2` (`pA pB`): the `)` closed the query's
+///   opening paren and contributed no clause of its own. A whitespace-only
+///   terminator would have bound `+"quick")` and handed the nested parser an
+///   unbalanced paren instead of a 200.
+///
+/// Both are checked by `tests/edismax.rs`'s `shape_b_debug_parsedquery_*`
+/// tests. Neither is a `manifest.tsv` row: Wayfinder emits no `debug` section,
+/// so the whole-body sweeps could only pass by widening a normaliser over a
+/// real capability gap (same exclusion as `edismax_qf_partial_invalid`, #111).
+/// The commands are commented at the end of `solr-ref/capture.sh`.
+///
 /// Terminators, all of them capture-derived rather than assumed:
 /// - whitespace outside a quoted phrase, *at any paren depth*.
 ///   `+"quick" +"rocket"` (traces 00003/00004) binds `+"quick"` only, which is
