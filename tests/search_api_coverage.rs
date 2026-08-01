@@ -1204,9 +1204,23 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
             // captured trace that sends it (`solr-ref/search-api/trace/00002`
             // through `00022`). Removed from this list rather than left, per
             // this file's own "self-expiring" convention.
-            "mlt.filters",
+            // Issue #141: "mlt.filters" and "mlt.match-include-and-offset"
+            // are resolved -- `/mlt` now honours `fq` (filtering the
+            // similar-docs set only, never the seed -- finding 98),
+            // `mlt.match.include=false` (dropping the `match` key outright --
+            // finding 100) and `mlt.match.offset` (seeding from the nth `q`
+            // hit, echoed in `match.start` -- finding 99), with all three
+            // registered in `MLT_PARAMS`. Both probes were tightened in the
+            // same change from a bare 200 to the response shapes those params
+            // actually alter. Removed from this list rather than left, per
+            // this file's own "self-expiring" convention.
+            //
+            // The two `mlt.*` entries below stay: `mlt.fl.wildcard-plus-score`
+            // is issue #188 (`render_doc` has no `fl` wildcard at all, a
+            // `/select` gap too) and `mlt.maxntp` is issue #189 (no Tantivy
+            // equivalent; deliberately still 400ing under `strict_params`
+            // rather than silently ignored). Both were descoped from #141.
             "mlt.fl.wildcard-plus-score",
-            "mlt.match-include-and-offset",
             "mlt.maxntp",
             // Issue #140: "select.facet.per-field-missing" is resolved --
             // `f.<field>.facet.missing` now overrides the global for the field
@@ -1323,8 +1337,15 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // flipping `select.facet.per-field-missing` -- which had been failing on a
     // `strict_params` 400, not on the counts. Denominator unchanged -- the
     // semantic was already in the contract, just unmet.
+    // 64/75 -> 66/75 when issue #141 wired `fq`, `mlt.match.include` and
+    // `mlt.match.offset` into `/mlt` (plus `json.nl` through
+    // `interestingTerms`) and registered them in `MLT_PARAMS`, flipping
+    // `mlt.filters` and `mlt.match-include-and-offset`. Denominator unchanged
+    // -- both were already in the frozen contract, just unmet. The issue's
+    // other two entries did NOT flip and were descoped:
+    // `mlt.fl.wildcard-plus-score` to #188 and `mlt.maxntp` to #189.
     assert_eq!(
-        report.overall.fraction, "64/75",
+        report.overall.fraction, "66/75",
         "initial coverage fraction"
     );
 }
@@ -1334,10 +1355,12 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
 /// (`is_object()`/`is_array()`), not that a real client consumer could read
 /// anything out of it. Tightening those three predicates to require their
 /// real leaf (`index.numDocs` as a u64; a non-empty term/frequency pair; a
-/// non-empty name list) must not drop the fraction below `64/75` -- these
+/// non-empty name list) must not drop the fraction below `66/75` -- these
 /// three items are covered *today*, against the real seeded corpus
 /// (`ProbeApp::PROBE_DOCS`) driving the real routed handlers, and a
 /// tightened probe must still see real, non-hollow data at each of them.
+/// (The pinned figure has since moved with landed features -- see the inline
+/// comment on the assertion -- but the guard's job is unchanged.)
 ///
 /// This is deliberately a live regression guard rather than a red test:
 /// `src/coverage.rs`'s own `#[cfg(test)]` unit tests already pin the failing
@@ -1352,7 +1375,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
 /// the assertion without also pointing the probe's request at a real field
 /// (as its sibling `terms.enumeration` request-semantic probe already does
 /// with `terms.fl=body`) flips `terms.terms` from covered to uncovered and
-/// drops the fraction by one, to `63/75` against the `64/75` pinned below. If
+/// drops the fraction by one, to `65/75` against the `66/75` pinned below. If
 /// this test goes red, that is the tightening missing its matching request
 /// fix, not a fixture to update.
 #[tokio::test]
@@ -1399,9 +1422,13 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
     // further *request_semantics* item on its own merits:
     // `select.facet.per-field-missing`. `response_fields` is again untouched
     // across that change, at 13/15.
+    // It went 64/75 -> 66/75 when issue #141 wired
+    // `fq`/`mlt.match.include`/`mlt.match.offset` into `/mlt`, flipping
+    // `mlt.filters` and `mlt.match-include-and-offset` -- two more
+    // *request_semantics* items, `response_fields` still 13/15.
     assert_eq!(
         report["overall"]["fraction"],
-        Value::String("64/75".to_string()),
+        Value::String("66/75".to_string()),
         "tightening the three hollow-container probes must not, by itself, \
          change the coverage fraction -- if it drops, a probe's request (not \
          just its assertion) needs to change to reach real data, see \
@@ -1415,7 +1442,7 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
 /// #162 fixed for three response-field probes, but here on a
 /// request-semantics probe. Tightening it to also require `solr-mbeans` to
 /// be a JSON object, and conjoining a `/select` facet leg, must not drop the
-/// fraction below `64/75`: neither leg's *request* needs to change to reach
+/// fraction below `66/75`: neither leg's *request* needs to change to reach
 /// real data -- `admin_mbeans` in `src/lib.rs` builds `solr-mbeans`
 /// unconditionally, and the seeded probe corpus already facets `category` --
 /// so the item stays covered against the real seeded app.
@@ -1463,9 +1490,13 @@ async fn repeated_map_and_flat_stays_covered_against_the_real_seeded_app() {
     // `f.<field>.facet.missing` per-field override, which flipped
     // `select.facet.per-field-missing` on its own merits. That is likewise not
     // this probe's doing.
+    // It went 64/75 -> 66/75 when issue #141 wired
+    // `fq`/`mlt.match.include`/`mlt.match.offset` into `/mlt`, flipping
+    // `mlt.filters` and `mlt.match-include-and-offset`. Also not this probe's
+    // doing.
     assert_eq!(
         report["overall"]["fraction"],
-        Value::String("64/75".to_string()),
+        Value::String("66/75".to_string()),
         "tightening this probe's assertion must not, by itself, change the \
          coverage fraction -- the real handler already emits an object-shaped \
          `solr-mbeans` regardless of `json.nl`, so nothing about the real \

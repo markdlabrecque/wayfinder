@@ -1,0 +1,24 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0
+  },
+  "match":{
+    "numFound":5,
+    "start":1,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"mlt12",
+      "body":"the telescope revealed distant galaxies and bright stars",
+      "category":["astronomy"],
+      "_version_":1872308630320054272,
+      "_root_":"mlt12"
+    }]
+  },
+  "response":{
+    "numFound":0,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  }
+}

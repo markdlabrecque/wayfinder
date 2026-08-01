@@ -26,26 +26,21 @@
 //! at all when `mlt.interestingTerms` is set to a truthy value, as a bare
 //! top-level array sibling to `match`/`response`.
 //!
-//! ## A known gap this file cannot close alone
+//! ## Why the `mlt_*` manifest rows are diffed here, not in `differential.rs`
 //!
-//! `solr-ref/manifest.tsv` now carries the ten `mlt_*` rows (plain
-//! core-relative GETs, per `CLAUDE.md`'s compatibility-contract section), so
+//! `solr-ref/manifest.tsv` carries every `mlt_*` row (plain core-relative
+//! GETs, per `CLAUDE.md`'s compatibility-contract section), but
 //! `tests/differential.rs::hermetic_whole_query_set_matches_committed_fixtures`
-//! picks them up too — but that test runs every manifest row against
-//! `common::indexed_app()`'s 5-doc tracer-bullet corpus, which has none of
-//! `mlt1`..`mlt20`. Extending `indexed_app()`'s corpus to a superset is not a
-//! safe fix: dozens of existing fixtures (`facet_*`, `select_all`, etc.) pin
-//! exact `numFound`/facet counts against exactly 5 docs. The correct fix is
-//! almost certainly teaching that hermetic loop to skip `mlt_*`-named entries
-//! in favour of this file's own dedicated-corpus loop
-//! (`hermetic_mlt_manifest_entries_match_committed_fixtures` below) — the same
-//! pattern `tests/differential.rs` already uses for `manifest-errors.tsv` rows
-//! that need a non-canonical corpus (`FACETS_SCHEMA_TOML`, lines 44-51 there).
-//! That plumbing change lives in `tests/differential.rs`, which per the task
-//! spec is left for the implementor rather than made here. Until it lands,
-//! `hermetic_whole_query_set_matches_committed_fixtures` will (correctly) fail
-//! on every `mlt_*` entry the moment `/mlt` starts returning `200`s that don't
-//! match the 5-doc corpus.
+//! runs each manifest row against `common::indexed_app()`'s 5-doc
+//! tracer-bullet corpus, which has none of `mlt1`..`mlt20`. Extending that
+//! corpus to a superset is not a safe fix: dozens of existing fixtures
+//! (`facet_*`, `select_all`, etc.) pin exact `numFound`/facet counts against
+//! exactly 5 docs. So that loop skips `mlt_`-prefixed entries
+//! (`tests/differential.rs`, the `entry.name.starts_with("mlt_")` guard) and
+//! this file's own dedicated-corpus loop
+//! (`hermetic_mlt_manifest_entries_match_committed_fixtures` below) owns them
+//! instead — the same split `differential.rs` already uses for
+//! `manifest-errors.tsv` rows needing a non-canonical corpus.
 
 mod common;
 
@@ -569,6 +564,453 @@ async fn mlt_specific_params_are_not_rejected_as_unknown() {
     );
 }
 
+#[tokio::test]
+async fn mlt_issue_141_params_are_not_rejected_as_unknown() {
+    // Issue #141's four *implemented* params (`fq`, `mlt.match.include`,
+    // `mlt.match.offset`, `json.nl`) must be registered in `MLT_PARAMS` —
+    // same guard as `mlt_specific_params_are_not_rejected_as_unknown` above,
+    // kept separate so a reviewer can see exactly which params this issue
+    // adds.
+    //
+    // `mlt.maxntp` is deliberately *not* here: it is issue #189, and
+    // `mlt_maxntp_stays_rejected_until_issue_189_implements_it` below is the
+    // expiring guard that keeps it 400ing. Registering a param the handler
+    // cannot honour would convert a loud 400 into a silent wrong answer.
+    let dir = TempDir::new().expect("temp dir");
+    let schema_path = dir.path().join("schema.toml");
+    std::fs::write(&schema_path, MLT_SCHEMA_TOML).expect("write schema.toml");
+    let config_path = dir.path().join("wayfinder.toml");
+    std::fs::write(&config_path, "strict_params = true\n").expect("write wayfinder.toml");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    let app =
+        wayfinder::app_with_config(&schema_path, &data_dir, &config_path).expect("app must build");
+    let (status, body) = common::post_docs(&app, &mlt_corpus()).await;
+    assert_eq!(status, StatusCode::OK, "indexing must succeed, got {body}");
+
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:astronomy&\
+         mlt.match.include=false&mlt.match.offset=0&json.nl=flat&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "fq/mlt.match.include/mlt.match.offset/json.nl must be registered params on /mlt, not \
+         rejected under strict_params (issue #141): {body}"
+    );
+}
+
+// --- issue #141: fq scopes the similar-docs result set, not seed resolution -
+
+#[tokio::test]
+async fn mlt_fq_narrows_the_similar_docs_result_set() {
+    // finding 98: fq=category:astronomy narrows the unfiltered astronomy
+    // cluster (mlt13, mlt15, mlt12, mlt17 — see mlt_mintf_mindf_maxdf) down
+    // to 3, dropping mlt17 (the one non-astronomy doc in that set).
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:astronomy&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_matches_mlt_fixture(body, "mlt_fq_scope");
+}
+
+#[tokio::test]
+async fn mlt_fq_does_not_restrict_which_document_q_resolves_as_seed() {
+    // finding 98: fq=category:cooking excludes mlt11's own category
+    // (astronomy) — real Solr still resolves `match.docs[0]` to mlt11. `fq`
+    // only ever filters `response` (the similar-docs set), never the seed
+    // resolution driven by `q` alone.
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:cooking&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.pointer("/match/docs/0/id").and_then(Value::as_str),
+        Some("mlt11"),
+        "fq must not exclude the seed doc from `match`, even when the seed doc itself fails the \
+         filter, got: {body}"
+    );
+    assert_matches_mlt_fixture(body, "mlt_fq_seed_not_filtered");
+}
+
+#[tokio::test]
+async fn mlt_multiple_fq_params_and_together() {
+    // finding 98: two fq params that no single doc satisfies both of
+    // (astronomy AND outdoors) must empty `response` to 0 — same AND
+    // semantics as /select's fq (CLAUDE.md's `parse_query`/`filter_queries`
+    // loop in `select`).
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:astronomy&\
+         fq=category:outdoors&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_matches_mlt_fixture(body, "mlt_fq_multiple_and");
+}
+
+#[tokio::test]
+async fn mlt_malformed_fq_is_a_400_not_a_silently_dropped_filter() {
+    // Same rejection `/select` gives the same malformed filter
+    // (`tests/json_key_order.rs::error_envelope_key_order_matches_solr` uses
+    // this exact `fq` against `err_bad_syntax`). Worth its own test because
+    // the failure mode of dropping the parse error is invisible otherwise: an
+    // unparseable filter would silently widen the result set back to the
+    // unfiltered one.
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:[unclosed&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a malformed fq on /mlt must 400, not be dropped: {body}"
+    );
+    assert_eq!(
+        body.pointer("/error/code").and_then(Value::as_u64),
+        Some(400),
+        "the error envelope must carry the 400 code, got: {body}"
+    );
+
+    // The same malformed filter must still 400 when `q` resolves *no* seed
+    // doc — the `fq` parse deliberately sits outside the `q` arm in
+    // `src/lib.rs::mlt`, and nothing else in this suite exercises that.
+    // Mutation-tested: wrapping the parse loop in `if !hits.is_empty()`
+    // survived the entire suite until this case existed, silently downgrading
+    // a malformed filter to a 200-with-null-response whenever `q` missed.
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:nosuchdoc&mlt.fl=body&fq=category:[unclosed&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a malformed fq must 400 even when `q` resolves no seed doc, got: {body}"
+    );
+    assert_eq!(
+        body.pointer("/error/code").and_then(Value::as_u64),
+        Some(400),
+        "the no-seed error envelope must carry the 400 code, got: {body}"
+    );
+
+    // Strongest form of the same claim: no `q` param at all. Mutation-tested:
+    // gating the parse loop on `params.get("q").is_some()` survived the whole
+    // suite until this case existed, because every other case sends a `q`.
+    let (status, body) = get(&app, "mlt?mlt.fl=body&fq=category:[unclosed&wt=json").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a malformed fq must 400 even with no `q` param at all, got: {body}"
+    );
+
+    // Every `fq` is validated, not just the first. Mutation-tested: swallowing
+    // the parse error for all but the first `fq` survived the suite until this
+    // case existed, since the multi-fq test above sends two *valid* filters.
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:animals&fq=category:[unclosed&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a malformed *second* fq must 400 just like a malformed first one, got: {body}"
+    );
+}
+
+// --- issue #141: mlt.match.include=false drops the match key entirely -----
+
+#[tokio::test]
+async fn mlt_match_include_false_omits_the_match_key_entirely() {
+    // finding 100: mlt.match.include=false removes `match` from the envelope
+    // outright — not an empty-and-present object. `response` is unaffected.
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.match.include=false&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.get("match").is_none(),
+        "mlt.match.include=false must omit `match` entirely, got: {body}"
+    );
+    assert_matches_mlt_fixture(body, "mlt_match_include_false");
+}
+
+#[tokio::test]
+async fn mlt_match_include_true_is_the_default_and_keeps_the_match_key() {
+    // Only the literal `false` turns `match` off — `true` is Solr's documented
+    // default, so sending it explicitly must be indistinguishable from not
+    // sending it at all. No fixture captures the explicit-`true` request (it
+    // asks for the default), so the ground truth here is the *same request
+    // without the param*, compared whole rather than key-by-key.
+    //
+    // This exists because a gate keyed on the param's mere presence, rather
+    // than on its value, passes every other test in this file: nothing else
+    // ever sends `mlt.match.include=true` (mutation-tested — replacing the
+    // value check with `params.get("mlt.match.include").is_none()` survived
+    // the whole suite until this test).
+    let (app, _dir) = mlt_app().await;
+    let (status, explicit) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.match.include=true&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        explicit
+            .pointer("/match/docs/0/id")
+            .and_then(Value::as_str)
+            .is_some(),
+        "mlt.match.include=true must keep the `match` block, got: {explicit}"
+    );
+
+    let (status, default) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        normalize_mlt(explicit),
+        normalize_mlt(default),
+        "mlt.match.include=true must be indistinguishable from the param being absent"
+    );
+}
+
+// --- issue #141: mlt.match.offset picks a different seed document ---------
+
+#[tokio::test]
+async fn mlt_match_offset_selects_the_nth_match_as_seed() {
+    // finding 99: q=category:astronomy resolves 5 docs; mlt.match.offset=1
+    // picks the *second* one (mlt12, doc order) as the seed, not the first
+    // (mlt11, offset 0/absent) — and match.start reflects the offset (1),
+    // not the usual 0.
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=category:astronomy&mlt.fl=body&mlt.match.offset=1&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.pointer("/match/docs/0/id").and_then(Value::as_str),
+        Some("mlt12"),
+        "mlt.match.offset=1 must pick the second q-match (mlt12) as the seed doc, got: {body}"
+    );
+    assert_eq!(
+        body.pointer("/match/start").and_then(Value::as_u64),
+        Some(1),
+        "match.start must reflect mlt.match.offset, got: {body}"
+    );
+    assert_matches_mlt_fixture(body, "mlt_match_offset");
+}
+
+#[tokio::test]
+async fn mlt_match_offset_past_the_last_hit_resolves_no_seed() {
+    // Pins *Wayfinder's chosen* behaviour, not captured Solr: no fixture
+    // covers an out-of-range `mlt.match.offset`, and the `ponytail:` on
+    // `src/lib.rs::mlt` names that as the ceiling. Without this test the
+    // ceiling is unenforceable — both "fall back to the top hit"
+    // (`.or(hits.first())`) and "clamp to the last hit" survive the whole
+    // suite, and each would answer a different question silently.
+    //
+    // The chosen behaviour is no seed at all, which is finding 54's existing
+    // "q matched nothing" shape: `match.numFound` still reports the real hit
+    // count for `q`, `match.docs` is empty, and `response` is the bare JSON
+    // `null`. If a capture ever contradicts this, the fixture wins and this
+    // test is what will have to change.
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=category:astronomy&mlt.fl=body&mlt.match.offset=99&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.pointer("/match/numFound").and_then(Value::as_u64),
+        Some(5),
+        "match.numFound must still be q's real hit count, got: {body}"
+    );
+    assert_eq!(
+        body.pointer("/match/docs").and_then(Value::as_array),
+        Some(&Vec::new()),
+        "an out-of-range mlt.match.offset must resolve no seed doc — not the first hit, not the \
+         last — got: {body}"
+    );
+    assert_eq!(
+        body.get("response"),
+        Some(&Value::Null),
+        "with no seed resolved, `response` is the bare null of finding 54, got: {body}"
+    );
+}
+
+// --- issue #141: json.nl reshapes interestingTerms's container ------------
+
+#[tokio::test]
+async fn mlt_json_nl_map_renders_interesting_terms_as_object_when_empty() {
+    // finding 101: real Solr's default rendering of an empty interestingTerms
+    // set is `[ ]` (json.nl=flat, the default — see
+    // mlt_interesting_terms_details.json); json.nl=map renders the same
+    // empty set as `{ }` instead. Wayfinder's interestingTerms is always `[]`
+    // today regardless of json.nl, so this must diverge until json.nl is
+    // threaded into that rendering.
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt1&mlt.fl=body&mlt.interestingTerms=details&json.nl=map&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.get("interestingTerms").is_some_and(Value::is_object),
+        "json.nl=map must render an empty interestingTerms set as `{{}}`, not `[]`, got: {body}"
+    );
+    assert_matches_mlt_fixture(body, "mlt_json_nl_map_empty_terms");
+}
+
+#[tokio::test]
+async fn mlt_json_nl_flat_renders_interesting_terms_as_the_default_array() {
+    // The other half of finding 101: `flat` is Solr's `json.nl` default, so
+    // sending it explicitly must produce the array shape
+    // `mlt_interesting_terms_details.json` captures for the same query with
+    // no `json.nl` at all — only `map` changes the container.
+    //
+    // Mutation-tested: keying the container on `json.nl` being *present*
+    // rather than on it being `map` (`params.get("json.nl").is_some()`)
+    // survived the whole suite until this test, because
+    // `mlt_json_nl_map_empty_terms` is the only fixture that sends the param.
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt1&mlt.fl=body&mlt.interestingTerms=details&json.nl=flat&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.get("interestingTerms"),
+        Some(&Value::Array(Vec::new())),
+        "json.nl=flat is the default named-list shape and must render `[]`, got: {body}"
+    );
+    assert_matches_mlt_fixture(body, "mlt_interesting_terms_details");
+}
+
+// --- issue #188 (descoped from #141): `fl=*` is not a wildcard yet ---------
+
+/// Expiring guard, not a feature test. `fl=*,score` on real Solr returns
+/// every stored/docValues field *and* `score`
+/// (`solr-ref/responses/mlt_fl_wildcard_score.json`,
+/// `solr-ref/search-api/trace/00010.json`) — `*` is a wildcard, not a literal
+/// field name. `CoreIndex::render_doc` treats `fl` as a literal allowlist
+/// with no `*` handling at all, so `fl=*,score` returns *only* `score` and
+/// drops every real field. That is a `render_doc` gap shared with `/select`
+/// (verified there directly, same result), so it was descoped from #141 into
+/// **issue #188** rather than patched on `/mlt`'s handler alone.
+///
+/// This pins the broken behaviour deliberately, so it deletes itself: the
+/// moment #188 teaches `render_doc` about `*`, `body` starts coming back and
+/// this test fails, naming itself and the `MLT_EXPECTED_DIVERGENCES` entry
+/// for `mlt_fl_wildcard_score` as the two things to remove. The fixture stays
+/// committed for #188 to build against — and the manifest loop compares it
+/// with BM25 score magnitudes blanked (see `SCORE_MAGNITUDE_EXEMPT` there),
+/// so removing the entry leaves a real, passing fixture comparison rather
+/// than a permanent ratified-divergence failure.
+///
+/// Note for #188: the `mlt.fl.wildcard-plus-score` coverage probe
+/// (`src/coverage.rs`) asserts only that `/response/docs/0/score` exists, so
+/// it cannot see this bug either — it is uncovered today only because that
+/// query's default `mlt.mintf`/`mlt.mindf` return no similar docs at all.
+/// Tightening the probe belongs with the fix.
+#[tokio::test]
+async fn mlt_fl_wildcard_plus_score_still_drops_every_field_until_issue_188() {
+    let (app, _dir) = mlt_app().await;
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fl=*,score&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let seed = body
+        .pointer("/match/docs/0")
+        .expect("the seed doc must still be resolved and rendered");
+    assert!(
+        seed.get("body").is_none() && seed.get("id").is_none(),
+        "issue #188 has landed `fl` wildcard support. Replace this guard with a real fixture \
+         assertion -- `assert_matches_mlt_fixture_ignoring_score_magnitude(body, \
+         \"mlt_fl_wildcard_score\")`, NOT `assert_matches_mlt_fixture`: this request sends \
+         `fl=*,score` and BM25 magnitude is PRD ratified-divergence 4, which #188 does not \
+         change. Then drop `mlt_fl_wildcard_score` from MLT_EXPECTED_DIVERGENCES, leaving it in \
+         the manifest loop's `SCORE_MAGNITUDE_EXEMPT` set for the same reason. Got: {body}"
+    );
+    assert!(
+        seed.get("score").is_some(),
+        "`score` is the one `fl=*,score` element `render_doc` does understand today, got: {body}"
+    );
+}
+
+// --- issue #189 (descoped from #141): mlt.maxntp has no Tantivy knob -------
+
+/// Expiring guard, not a feature test. Tantivy 0.26.1's `MoreLikeThis` struct
+/// has no `maxNumTokensParsed`-style field (read directly from
+/// `tantivy-0.26.1/src/query/more_like_this/more_like_this.rs`: only min/max
+/// doc/term frequency, `max_query_terms`, min/max word length,
+/// `boost_factor`, `stop_words`), and real Solr's `mlt.maxntp` genuinely
+/// narrows results at a low value — `mlt.maxntp=1` against `mlt11` takes the
+/// astronomy cluster from 4 matches to 0 (findings block for issue #141).
+///
+/// So it is *not* a safe accepted-and-ignore the way `TZ`/`bf` are:
+/// allowlisting it would turn a loud 400 into a silent wrong answer. It is
+/// descoped to **issue #189** and must keep 400ing under
+/// `strict_params = true` until that issue implements it for real. This test
+/// fails the moment `mlt.maxntp` is added to `MLT_PARAMS`, which is exactly
+/// when it should be deleted; `solr-ref/responses/mlt_maxntp_noop.json` stays
+/// committed for #189 to build against.
+#[tokio::test]
+async fn mlt_maxntp_stays_rejected_until_issue_189_implements_it() {
+    let dir = TempDir::new().expect("temp dir");
+    let schema_path = dir.path().join("schema.toml");
+    std::fs::write(&schema_path, MLT_SCHEMA_TOML).expect("write schema.toml");
+    let config_path = dir.path().join("wayfinder.toml");
+    std::fs::write(&config_path, "strict_params = true\n").expect("write wayfinder.toml");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    let app =
+        wayfinder::app_with_config(&schema_path, &data_dir, &config_path).expect("app must build");
+    let (status, body) = common::post_docs(&app, &mlt_corpus()).await;
+    assert_eq!(status, StatusCode::OK, "indexing must succeed, got {body}");
+
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&mlt.maxntp=5000&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "mlt.maxntp must keep 400ing under strict_params until issue #189 implements it — if this \
+         is now a 200, delete this guard and assert `mlt_maxntp_noop.json` for real. Got: {body}"
+    );
+    assert!(
+        body.pointer("/error/msg")
+            .and_then(Value::as_str)
+            .is_some_and(|msg| msg.contains("mlt.maxntp")),
+        "the rejection must name the unsupported param, got: {body}"
+    );
+}
+
 // --- overwritten docs must not desync doc_freq vs. alive-doc count ---------
 
 #[tokio::test]
@@ -627,6 +1069,18 @@ fn manifest_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("solr-ref/manifest.tsv")
 }
 
+/// `mlt_*` manifest rows Wayfinder deliberately does not match yet, each with
+/// the issue that owns the gap. Same self-expiring contract as
+/// `tests/differential.rs::EXPECTED_DIVERGENCES`: an entry whose fixture
+/// *starts* matching fails the loop below, so the entry cannot rot into a
+/// permanently green lie — the row must be removed when its issue lands.
+const MLT_EXPECTED_DIVERGENCES: &[(&str, &str)] = &[(
+    "mlt_fl_wildcard_score",
+    "issue #188: `CoreIndex::render_doc` has no `fl` wildcard support, so `fl=*,score` returns \
+     only `score` and drops every other field — a gap shared with `/select`, descoped from #141. \
+     See `mlt_fl_wildcard_plus_score_still_drops_every_field_until_issue_188` above.",
+)];
+
 #[tokio::test]
 async fn hermetic_mlt_manifest_entries_match_committed_fixtures() {
     let (app, _dir) = mlt_app().await;
@@ -636,7 +1090,7 @@ async fn hermetic_mlt_manifest_entries_match_committed_fixtures() {
         .collect();
     assert!(
         !entries.is_empty(),
-        "expected at least the ten mlt_* rows capture.sh's MLT block appends to manifest.tsv"
+        "expected the mlt_* rows capture.sh's MLT blocks append to manifest.tsv"
     );
 
     let mut failures = Vec::new();
@@ -650,15 +1104,30 @@ async fn hermetic_mlt_manifest_entries_match_committed_fixtures() {
             continue;
         }
 
-        // `mlt_fl_rows_start` is the one manifest row requesting `fl=score`;
-        // its BM25 magnitude is exempt from exact comparison for the same
-        // ratified reason `assert_matches_mlt_fixture_ignoring_score_magnitude`
-        // documents above (PRD ratified-divergence 4). The real (un-blanked)
-        // `maxScore` semantics are still checked directly, so this loop
-        // can't be fooled by a regression that blanking alone would hide.
-        let (expected, actual) = if entry.name == "mlt_fl_rows_start" {
+        // The two manifest rows requesting a `score` in `fl`
+        // (`mlt_fl_rows_start`'s `fl=id,score`, `mlt_fl_wildcard_score`'s
+        // `fl=*,score`). Their BM25 magnitudes are exempt from exact
+        // comparison for the same ratified reason
+        // `assert_matches_mlt_fixture_ignoring_score_magnitude` documents
+        // above (PRD ratified-divergence 4).
+        //
+        // `mlt_fl_wildcard_score` has to be in this set for its
+        // `MLT_EXPECTED_DIVERGENCES` entry to be able to *expire*: score
+        // magnitude is a permanent divergence issue #188 can never fix, so
+        // without blanking, that entry's diff list would stay non-empty
+        // forever and the loop would go on reading "still diverging" long
+        // after the wildcard gap it names had closed. Blanked, the entry
+        // tracks exactly the `fl=*` gap and nothing else.
+        //
+        // For `mlt_fl_rows_start` the real (un-blanked) `maxScore` semantics
+        // are still checked directly, so this loop can't be fooled by a
+        // regression that blanking alone would hide.
+        const SCORE_MAGNITUDE_EXEMPT: &[&str] = &["mlt_fl_rows_start", "mlt_fl_wildcard_score"];
+        let (expected, actual) = if SCORE_MAGNITUDE_EXEMPT.contains(&entry.name.as_str()) {
             let normalized_actual = normalize_mlt(actual);
-            assert_mlt_fl_rows_start_maxscore_semantics(&normalized_actual);
+            if entry.name == "mlt_fl_rows_start" {
+                assert_mlt_fl_rows_start_maxscore_semantics(&normalized_actual);
+            }
             (
                 blank_bm25_score_magnitudes(normalize_mlt(fixture(&entry.name))),
                 blank_bm25_score_magnitudes(normalized_actual),
@@ -667,8 +1136,24 @@ async fn hermetic_mlt_manifest_entries_match_committed_fixtures() {
             (normalize_mlt(fixture(&entry.name)), normalize_mlt(actual))
         };
         let report = diff(&expected, &actual);
-        if !report.diffs.is_empty() {
-            failures.push(format!("{}: {:?}", entry.name, report.diffs));
+        match MLT_EXPECTED_DIVERGENCES
+            .iter()
+            .find(|(name, _)| *name == entry.name)
+        {
+            Some((_, reason)) => {
+                if report.diffs.is_empty() {
+                    failures.push(format!(
+                        "{}: listed in MLT_EXPECTED_DIVERGENCES but now matches its fixture — \
+                         delete the entry (and its guard test). Reason given: {reason}",
+                        entry.name
+                    ));
+                }
+            }
+            None => {
+                if !report.diffs.is_empty() {
+                    failures.push(format!("{}: {:?}", entry.name, report.diffs));
+                }
+            }
         }
     }
 

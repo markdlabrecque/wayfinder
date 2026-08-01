@@ -307,6 +307,20 @@ const MLT_PARAMS: &[&str] = &[
     // (`solr-ref/search-api/trace/00022.json`).
     "omitHeader",
     "TZ",
+    // Issue #141. Each of these four is *implemented* below, not merely
+    // allowlisted: `fq` filters the similar-docs set only (finding 98),
+    // `mlt.match.include=false` drops the `match` key outright (finding 100),
+    // `mlt.match.offset` selects which `q` hit seeds the query (finding 99),
+    // and `json.nl` shapes `interestingTerms`'s container (finding 101).
+    "fq",
+    "mlt.match.include",
+    "mlt.match.offset",
+    "json.nl",
+    // ponytail: `mlt.maxntp` is deliberately absent, so `strict_params = true`
+    // keeps 400ing it (issue #189). Tantivy 0.26's `MoreLikeThis` has no
+    // `maxNumTokensParsed` equivalent, and real Solr's `mlt.maxntp` genuinely
+    // narrows results at a low value (finding block for issue #141) —
+    // allowlisting it would turn a loud 400 into a silent wrong answer.
 ];
 
 /// `/terms` params in scope for issue #155 (Solr's TermsComponent). `terms`
@@ -2245,6 +2259,20 @@ async fn mlt(
         .unwrap_or(10)
         .min(state.config.query.rows_limit);
 
+    // `fq` on `/mlt` filters the *similar-docs* set only — never the seed
+    // resolution (finding 98): `mlt_fq_seed_not_filtered.json` sends an `fq`
+    // that excludes the seed doc's own category and real Solr still resolves
+    // `match` to it. Parsed here (not inside the `q` arm) so a malformed `fq`
+    // is a 400 whether or not `q` resolved anything, the same as `/select`.
+    // Repeated `fq` params AND together, also as on `/select`
+    // (`mlt_fq_multiple_and.json`).
+    let mut filter_queries = Vec::new();
+    for fq in params.get_all("fq") {
+        filter_queries.push(state.index.parse_query(fq, &default_field).map_err(|e| {
+            WfError::bad_request("wayfinder::SyntaxError", e.to_string()).with_params(&params)
+        })?);
+    }
+
     // `q` resolves the source document exactly as `/select`'s `q` does — no
     // `q` matches nothing (findings fact per `/select`, extended here rather
     // than defaulting to `*:*`).
@@ -2260,12 +2288,28 @@ async fn mlt(
         }
     };
 
-    // Solr's `/mlt` resolves exactly one source document from `q` (the top
-    // hit) — `match` reports the real `numFound` for `q` but only ever
-    // renders that one doc (every captured fixture has `match.numFound: 1`
-    // with a one-element `docs`; `match.numFound: 0` with an empty `docs`
-    // when `q` matched nothing, finding 54).
-    let source = hits.first().copied();
+    // Solr's `/mlt` resolves exactly one source document from `q` — `match`
+    // reports the real `numFound` for `q` but only ever renders that one doc
+    // (every captured fixture has `match.numFound: 1` with a one-element
+    // `docs`; `match.numFound: 0` with an empty `docs` when `q` matched
+    // nothing, finding 54).
+    //
+    // Which one is `mlt.match.offset`'s job (default 0, the top hit):
+    // `mlt_match_offset.json` sends `mlt.match.offset=1` against a 5-hit `q`
+    // and gets the *second* hit as the seed, with `match.start: 1` (finding
+    // 97) — the seed genuinely changes, it is not a cosmetic echo.
+    //
+    // ponytail: an offset past the last hit resolves no seed at all here (so
+    // `match.docs` is empty and `response` is `null`, finding 54's shape). No
+    // fixture pins real Solr's out-of-range behaviour; the ceiling is the
+    // in-range case the capture covers, and
+    // `tests/mlt.rs::mlt_match_offset_past_the_last_hit_resolves_no_seed` pins
+    // this choice so it cannot drift to `.or(hits.first())` or a clamp.
+    let match_offset: usize = params
+        .get("mlt.match.offset")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let source = hits.get(match_offset).copied();
 
     let max_score = |hits: &[(Score, tantivy::DocAddress)]| {
         hits.iter()
@@ -2277,7 +2321,7 @@ async fn mlt(
 
     let mut match_block = Map::new();
     match_block.insert("numFound".to_string(), json!(hits.len()));
-    match_block.insert("start".to_string(), json!(0));
+    match_block.insert("start".to_string(), json!(match_offset));
     if wants_score && let Some(score) = max_score(&hits) {
         match_block.insert("maxScore".to_string(), json!(score));
     }
@@ -2341,9 +2385,12 @@ async fn mlt(
                 WfError::internal("wayfinder::DocError", e.to_string()).with_params(&params)
             })?;
 
-            let mut mlt_hits = state.index.search(&mlt_query, &[], &[]).map_err(|e| {
-                WfError::internal("wayfinder::SearchError", e.to_string()).with_params(&params)
-            })?;
+            let mut mlt_hits = state
+                .index
+                .search(&mlt_query, &filter_queries, &[])
+                .map_err(|e| {
+                    WfError::internal("wayfinder::SearchError", e.to_string()).with_params(&params)
+                })?;
             // The seed document itself is not a "similar" result.
             mlt_hits.retain(|(_, a)| *a != addr);
 
@@ -2374,18 +2421,26 @@ async fn mlt(
         }
     };
 
+    // `mlt.match.include=false` drops the `match` key from the envelope
+    // entirely — not an empty-and-present object (finding 100,
+    // `mlt_match_include_false.json` is `{responseHeader, response}`). Only
+    // the literal `false` turns it off; Solr's default is `true`.
+    let include_match = params.get("mlt.match.include") != Some("false");
+
     // Issue #143: same suppression `/select` applies, on the same param.
     let mut body = if params.omit_header() {
-        json!({ "match": match_block })
+        json!({})
     } else {
         json!({
             "responseHeader": {
                 "status": 0,
                 "QTime": 0,
             },
-            "match": match_block,
         })
     };
+    if include_match {
+        body["match"] = Value::Object(match_block);
+    }
     body["response"] = response_value;
 
     // Real Solr's `mlt.interestingTerms` value set is `none | list | details`
@@ -2402,11 +2457,24 @@ async fn mlt(
     // still renders an empty array, matching every fixture that exercises
     // the key today; wiring `_scored_terms` into a real per-term shape needs
     // a fixture with a non-empty result set to pin the shape against first.
+    //
+    // `json.nl` reaches `/mlt` through exactly this key, and (while the term
+    // set is always empty) only through its *container type*: real Solr
+    // renders the empty set as `[ ]` under the default `flat` and as `{ }`
+    // under `map` (finding 101, `mlt_json_nl_map_empty_terms.json` against
+    // `mlt_interesting_terms_details.json`). Solr's other named-list writers
+    // (`arrarr`/`arrmap`/`arrntv`) are array-shaped, so everything but `map`
+    // renders `[]` — the two shapes a fixture pins are the only two that can
+    // differ here today.
     if matches!(
         params.get("mlt.interestingTerms"),
         Some("list") | Some("details")
     ) {
-        body["interestingTerms"] = json!([]);
+        body["interestingTerms"] = if params.get("json.nl") == Some("map") {
+            json!({})
+        } else {
+            json!([])
+        };
     }
 
     Ok(axum::Json(body).into_response())
