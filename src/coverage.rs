@@ -652,10 +652,68 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
             let core_admin = probe.ok("content/admin/system?json.nl=flat").await;
             update && select && mlt && admin_info && core_admin
         }
+        // Two legs, because neither alone carries the item.
+        //
+        // The mbeans leg keeps fidelity to the trace that motivates the
+        // contract entry (`solr-ref/search-api/trace/00025.json`, which sends
+        // `json.nl=map&json.nl=flat` in that order), but it cannot evidence
+        // *which* value wins: `admin_mbeans` renders `solr-mbeans` as an
+        // object unconditionally and has no `flat` named-list variant to
+        // differ from, so it reads the same whether Wayfinder honours
+        // first-value-wins, ignores `json.nl`, or mishandles the repetition.
+        // What it does buy is that the item can no longer read as covered
+        // purely because a route exists (which is how it flipped when #158
+        // landed `GET /solr/{core}/admin/mbeans`). It stays
+        // captured-equivalent rather than byte-identical by omitting
+        // `stats=true`, which only controls a `stats` sub-object nested
+        // *inside* `solr-mbeans`, not its presence or shape -- the sibling
+        // `admin.mbeans.solr-mbeans` probe omits it for the same reason.
+        //
+        // The `/select` facet leg is what discriminates.
+        // `JsonNl::from_params` (`src/facet.rs`) reads `json.nl` and
+        // `render_buckets` emits an object for `map` and an alternating array
+        // for `flat`, so with `map` sent first this pointer is an object under
+        // first-value-wins and an array under last-value-wins, under "ignore
+        // `json.nl`", and under any handling that drops the repeated key.
+        //
+        // Applying first-value-wins to `/select` is an inference from trace
+        // `00025.json` plus `Params::get` (`src/params.rs`), which returns the
+        // first value for a repeated key -- not from a `/select` capture of a
+        // repeated `json.nl`, because no such capture exists. The inference
+        // holds because the resolution is request-parsing behaviour that runs
+        // before any endpoint-specific code, so it cannot vary by endpoint;
+        // the same reasoning already backs `src/lib.rs`. Capturing repeated
+        // `json.nl` against real Solr belongs to #153.
+        //
+        // ponytail: two mutants survive this probe, both by construction
+        // rather than for want of a test.
+        //
+        // 1. Cutting the second `json.nl` value from the `/select` leg
+        //    (`json.nl=map&json.nl=flat` -> `json.nl=map`). First-value-wins
+        //    makes `f(map, flat)` and `f(map)` produce byte-identical
+        //    responses, so no response-shape probe can tell a correctly
+        //    resolved *repeated* `json.nl` from a request that only ever
+        //    sent the winner.
+        // 2. Cutting the query string off the mbeans leg. `admin_mbeans`
+        //    reads only `stats`/`cat`/`key`; `json.nl` is merely allowlisted
+        //    there, so its presence changes no byte of the response.
+        //
+        // Everything else is pinned: the value that wins, the shape it
+        // produces, that `json.nl` is sent at all on the discriminating leg,
+        // and both legs' presence in the conjunction.
         "request.json-nl.repeated-map-and-flat" => {
-            probe
-                .ok("content/admin/mbeans?json.nl=flat&json.nl=map")
+            let mbeans = probe
+                .response("content/admin/mbeans?json.nl=map&json.nl=flat")
                 .await
+                .is_some_and(|body| body.get("solr-mbeans").is_some_and(Value::is_object));
+            let facet = probe
+                .response("select?q=*:*&facet=true&facet.field=category&json.nl=map&json.nl=flat")
+                .await
+                .is_some_and(|body| {
+                    body.pointer("/facet_counts/facet_fields/category")
+                        .is_some_and(Value::is_object)
+                });
+            mbeans && facet
         }
         "request.timezone.utc" => {
             probe.ok("select?q=*:*&TZ=UTC").await
@@ -1482,6 +1540,193 @@ mod tests {
             "schema.fieldtypes.fieldTypes must require each entry's `name` to be a \
              non-empty string -- an entry naming itself `\"\"` is nothing \
              `isPartOfSchema()` can match, so it must not count as covered"
+        );
+    }
+
+    // Issue #167: `request.json-nl.repeated-map-and-flat`'s probe
+    // (`semantic_covered`, src/coverage.rs, the
+    // `"request.json-nl.repeated-map-and-flat" => probe.ok(...)` arm) only
+    // asserts an HTTP 200 on
+    // `content/admin/mbeans?json.nl=flat&json.nl=map`. It flipped to covered
+    // as a side effect of #158 routing `GET /solr/{core}/admin/mbeans` at
+    // all, with nothing verifying `solr-mbeans` is even present, let alone
+    // shaped as an object -- the shape the trace (`00025.json`) settled on.
+    // Same class of bug as #162 (an existence/200 check standing in for a
+    // shape check), same stub-router fix pattern: the real handler cannot be
+    // coaxed into emitting a non-object `solr-mbeans` (`admin_mbeans` in
+    // `src/lib.rs` builds it unconditionally, regardless of `json.nl` or
+    // `stats`), so this drives the real (private) `semantic_covered`
+    // function against a throwaway stub router serving the wrong shape at
+    // the same path `content/admin/mbeans` resolves to
+    // (`/solr/content/admin/mbeans`).
+    //
+    // The probe now also has a `/select` facet leg, which is the half that
+    // actually discriminates first-value-wins. Its failing shapes are
+    // stubbed the same way, at `/solr/content/select`: the real app cannot
+    // serve them without `json.nl` handling itself regressing, which is what
+    // `repeated_map_and_flat_stays_covered_against_the_real_seeded_app`
+    // (`tests/search_api_coverage.rs`) guards instead.
+    async fn mbeans_response_missing_solr_mbeans() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"responseHeader": {"status": 0, "QTime": 0}}))
+    }
+
+    async fn mbeans_response_solr_mbeans_array() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"solr-mbeans": []}))
+    }
+
+    async fn mbeans_response_solr_mbeans_null() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"solr-mbeans": null}))
+    }
+
+    async fn mbeans_response_solr_mbeans_object() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"solr-mbeans": {"CORE": {}, "UPDATE": {}}}))
+    }
+
+    // The probe is a conjunction of an mbeans leg and a `/select` facet leg,
+    // so a stub router serving only one path leaves the other leg 404ing and
+    // every stub assertion passes vacuously. Each stub therefore serves both
+    // paths, holding one leg at the shape the probe wants while the other
+    // carries the defect under test.
+    async fn select_facet_category_object() -> axum::Json<Value> {
+        axum::Json(
+            serde_json::json!({"facet_counts": {"facet_fields": {"category": {"animals": 1}}}}),
+        )
+    }
+
+    async fn select_facet_category_flat_array() -> axum::Json<Value> {
+        axum::Json(
+            serde_json::json!({"facet_counts": {"facet_fields": {"category": ["animals", 1]}}}),
+        )
+    }
+
+    async fn select_facet_category_missing() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"facet_counts": {"facet_fields": {}}}))
+    }
+
+    fn repeated_json_nl_probe(
+        mbeans: axum::routing::MethodRouter,
+        select: axum::routing::MethodRouter,
+    ) -> ProbeApp {
+        let app = Router::new()
+            .route("/solr/content/admin/mbeans", mbeans)
+            .route("/solr/content/select", select);
+        ProbeApp {
+            app,
+            _workspace: ProbeWorkspace::new(),
+        }
+    }
+
+    fn mbeans_missing_probe() -> ProbeApp {
+        repeated_json_nl_probe(
+            get(mbeans_response_missing_solr_mbeans),
+            get(select_facet_category_object),
+        )
+    }
+
+    fn mbeans_array_probe() -> ProbeApp {
+        repeated_json_nl_probe(
+            get(mbeans_response_solr_mbeans_array),
+            get(select_facet_category_object),
+        )
+    }
+
+    fn mbeans_null_probe() -> ProbeApp {
+        repeated_json_nl_probe(
+            get(mbeans_response_solr_mbeans_null),
+            get(select_facet_category_object),
+        )
+    }
+
+    fn mbeans_object_probe() -> ProbeApp {
+        repeated_json_nl_probe(
+            get(mbeans_response_solr_mbeans_object),
+            get(select_facet_category_object),
+        )
+    }
+
+    fn facet_flat_array_probe() -> ProbeApp {
+        repeated_json_nl_probe(
+            get(mbeans_response_solr_mbeans_object),
+            get(select_facet_category_flat_array),
+        )
+    }
+
+    fn facet_missing_probe() -> ProbeApp {
+        repeated_json_nl_probe(
+            get(mbeans_response_solr_mbeans_object),
+            get(select_facet_category_missing),
+        )
+    }
+
+    #[tokio::test]
+    async fn repeated_map_and_flat_probe_rejects_a_response_missing_solr_mbeans() {
+        let probe = mbeans_missing_probe();
+        assert!(
+            !semantic_covered(&probe, "request.json-nl.repeated-map-and-flat").await,
+            "request.json-nl.repeated-map-and-flat must require `solr-mbeans` to \
+             be present in the response, not merely that the request 200s -- a \
+             200 with no `solr-mbeans` key at all must not count as covered"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_map_and_flat_probe_rejects_a_non_object_solr_mbeans_array() {
+        let probe = mbeans_array_probe();
+        assert!(
+            !semantic_covered(&probe, "request.json-nl.repeated-map-and-flat").await,
+            "request.json-nl.repeated-map-and-flat must require `solr-mbeans` to \
+             be a JSON object -- the shape the trace settled on -- not merely \
+             present; a JSON array must not count as covered"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_map_and_flat_probe_rejects_a_null_solr_mbeans() {
+        let probe = mbeans_null_probe();
+        assert!(
+            !semantic_covered(&probe, "request.json-nl.repeated-map-and-flat").await,
+            "request.json-nl.repeated-map-and-flat must require `solr-mbeans` to \
+             be a JSON object, not merely present -- JSON null must not count as \
+             covered"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_map_and_flat_probe_rejects_a_flat_array_category_facet() {
+        let probe = facet_flat_array_probe();
+        assert!(
+            !semantic_covered(&probe, "request.json-nl.repeated-map-and-flat").await,
+            "request.json-nl.repeated-map-and-flat must require the \
+             `/select` facet leg to render `category` as an object -- the \
+             `json.nl=map` shape, because `map` is the first of the repeated \
+             values. An alternating flat array is what last-value-wins, \
+             ignoring `json.nl`, or dropping the repeated key would each \
+             produce, and must not count as covered"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_map_and_flat_probe_rejects_a_missing_category_facet() {
+        let probe = facet_missing_probe();
+        assert!(
+            !semantic_covered(&probe, "request.json-nl.repeated-map-and-flat").await,
+            "request.json-nl.repeated-map-and-flat must require the \
+             `/select` facet leg to actually produce \
+             `facet_counts/facet_fields/category` -- a 200 with no bucket \
+             list to shape proves nothing about how the repeated `json.nl` \
+             resolved, and must not count as covered"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_map_and_flat_probe_accepts_an_object_solr_mbeans_and_object_facet() {
+        let probe = mbeans_object_probe();
+        assert!(
+            semantic_covered(&probe, "request.json-nl.repeated-map-and-flat").await,
+            "request.json-nl.repeated-map-and-flat must still count a 200 \
+             response whose `solr-mbeans` is a genuine JSON object, alongside \
+             an object-shaped `category` facet, as covered -- the tightened \
+             check must not reject the shapes it is supposed to require"
         );
     }
 
