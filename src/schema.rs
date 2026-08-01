@@ -715,7 +715,28 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
         } else {
             "raw"
         };
+        // Dot expansion has to be on: the read path splits a dynamic field
+        // name on `.` unconditionally. `Term::from_field_json_path`
+        // (tantivy-0.26.1 `schema/term.rs:78`) always runs `split_json_path`,
+        // which splits on every unescaped `.` regardless of the `expand_dots`
+        // argument, so a query for `tm_X3b_en_a.b` always addresses the two
+        // segments `tm_X3b_en_a` \x01 `b`. Indexing pushes the whole dynamic
+        // name as one JSON key, so without this the write side stores a
+        // single segment containing a literal `.` and the two never meet
+        // (issue #164: `numFound: 0`, empty `/terms`). With it,
+        // `JsonPathWriter::push` does a byte-for-byte `.` -> \x01 swap inside
+        // that one push, producing exactly the read path's bytes.
+        //
+        // ponytail: this changes the on-disk encoding of dotted dynamic field
+        // names. An existing index holding documents with a dotted dynamic
+        // name must be reindexed -- `check_compatible` compares schema TOML,
+        // not the Tantivy schema, so it will happily adopt such an index and
+        // the old one-segment terms will simply stay unfindable. Ceiling: no
+        // migration and no detection of the stale encoding. Non-dotted names
+        // (the overwhelming majority) are unaffected -- `push` on a
+        // dot-free segment is a no-op.
         let opts = JsonObjectOptions::default()
+            .set_expand_dots_enabled()
             .set_stored()
             .set_fast(Some(tokenizer))
             .set_indexing_options(
