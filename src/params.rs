@@ -270,3 +270,87 @@ mod tests {
         );
     }
 }
+
+/// Issue #187: the shared boolean-param parser must match real Solr 9's
+/// `StrUtils.parseBool`, not the stricter `== "true"`/`starts_with("true")`
+/// checks scattered through `src/lib.rs`/`src/facet.rs` today.
+///
+/// Ground truth is `docs/solr-ref-findings.md`'s finding for this issue
+/// (captured against real `solr:9`, port 8996, 2026-08-01), not the ticket's
+/// own premise — the ticket claims Solr accepts `1`/`0`/`t`/`f`/`y`, which is
+/// wrong; measured behaviour is:
+/// - `true` if the lowercased value *starts with* `true`, `on`, or `yes`
+/// - `false` if it *starts with* `false` or `off`, or *equals* `no` exactly
+/// - anything else, including the empty string, is invalid
+///
+/// **Interpretation this test file has to make**: the spec names a shared
+/// parser in `src/params.rs` but not its exact signature. These tests call
+/// `parse_bool(raw: &str) -> Option<bool>` — `None` for anything invalid,
+/// leaving the `WfError`/`"invalid boolean value: <raw>"` construction to the
+/// `Params` accessor that calls it (which has the raw string in scope to
+/// format the message; the parser itself does not need to know it). This is
+/// the free function the module does not yet define — a compile failure
+/// (`cannot find function \`parse_bool\``) is the expected red here, not a
+/// test assertion failure, until it exists.
+#[cfg(test)]
+mod parse_bool_tests {
+    use super::parse_bool;
+
+    /// `true`/`TRUE`/`True`/`tRuE` (case-insensitivity), `truestuff` (a
+    /// `true`-prefixed value, not just the exact word), and the `on`/`yes`
+    /// families with the same case- and prefix-insensitivity.
+    const TRUE_VALUES: &[&str] = &[
+        "true",
+        "TRUE",
+        "True",
+        "tRuE",
+        "truestuff",
+        "on",
+        "ON",
+        "onward",
+        "yes",
+        "YES",
+        "yesss",
+    ];
+
+    /// `false`/`falsey`, `off`/`offside`, and the one exact-match exception:
+    /// `no` (and its case variants) is false, but — per `INVALID_VALUES`
+    /// below — `noo` is NOT, so `no` cannot be treated as merely another
+    /// `false`-prefixed family.
+    const FALSE_VALUES: &[&str] = &["false", "falsey", "off", "offside", "no", "NO", "No"];
+
+    /// Everything the ticket's own premise wrongly claimed Solr accepts
+    /// (`1`, `0`, `t`, `f`, `y`), plus `nope` (not `no`- or `false`-prefixed),
+    /// `noo` (not exactly `no`), `maybe`, `2`, and the empty string.
+    const INVALID_VALUES: &[&str] = &["1", "0", "t", "f", "y", "nope", "noo", "maybe", "2", ""];
+
+    #[test]
+    fn accepts_true_prefixed_case_insensitive_values() {
+        for v in TRUE_VALUES {
+            assert_eq!(parse_bool(v), Some(true), "expected `{v}` to parse as true");
+        }
+    }
+
+    #[test]
+    fn accepts_false_prefixed_values_and_the_exact_no_exception() {
+        for v in FALSE_VALUES {
+            assert_eq!(
+                parse_bool(v),
+                Some(false),
+                "expected `{v}` to parse as false"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_everything_solr_rejects_including_1_0_t_f_y_noo_and_empty() {
+        for v in INVALID_VALUES {
+            assert_eq!(
+                parse_bool(v),
+                None,
+                "expected `{v}` to be rejected -- Solr's real StrUtils.parseBool does NOT \
+                 accept 1/0/t/f/y (the ticket's premise is wrong; see docs/solr-ref-findings.md)"
+            );
+        }
+    }
+}
