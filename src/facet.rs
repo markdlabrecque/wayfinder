@@ -256,7 +256,13 @@ fn facet_fields(
         Some(_) => false,
         None => requested_limit <= 0,
     };
-    let global_missing = params.get("facet.missing") == Some("true");
+    // Issue #187: Solr's own boolean parsing, so `facet.missing=yes`/`on`/
+    // `TRUE`/`truestuff` all count as on and `nope` is a 400. The `WfError`
+    // is deliberately let out through this module's `anyhow` result rather
+    // than returned directly: `select` rebuilds it from `e.to_string()` on
+    // the non-`PreQueryFacetError` path, which is what attaches the base
+    // query's `response` block (`bool_facet_missing_invalid.json`).
+    let global_missing = params.bool_or("facet.missing", false)?;
 
     let base_query = BooleanQuery::from(
         base.iter()
@@ -315,10 +321,9 @@ fn facet_fields(
         // faceted, never `label` from a `{!key=...}` prefix
         // (`facet_local_params_key_f_field.json` / `_f_key.json`), so an
         // override naming a field nobody passed to `facet.field` is inert.
-        let missing = match params.per_field(field_name, "facet.missing") {
-            Some(value) => value == "true",
-            None => global_missing,
-        };
+        let missing = params
+            .per_field_bool(field_name, "facet.missing")?
+            .unwrap_or(global_missing);
 
         let mut counts = index.term_facet(&column, kind, &base_query)?;
         counts.retain(|(_, _, count)| *count >= mincount);
