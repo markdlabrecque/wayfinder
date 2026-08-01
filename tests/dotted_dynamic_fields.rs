@@ -425,5 +425,14 @@ async fn dotted_dynamic_field_edge_cases_round_trip() {
             "field {name:?} (leading/trailing/consecutive dot) must round-trip \
              through /select exactly like any other dotted dynamic name, got {body}"
         );
+
+        let (status, body) = get(&app, &format!("terms?terms=true&terms.fl={name}")).await;
+        assert_eq!(status, StatusCode::OK, "field {name:?}, got {body}");
+        assert_eq!(
+            body.pointer(&format!("/terms/{name}")),
+            Some(&json!(["gamma", 1])),
+            "field {name:?} (leading/trailing/consecutive dot) must round-trip \
+             through /terms exactly like any other dotted dynamic name, got {body}"
+        );
     }
 }
