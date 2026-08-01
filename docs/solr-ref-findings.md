@@ -1568,16 +1568,20 @@ fragment" to be different answers at all.
     answers 200 with `parsedquery` `+(+DisjunctionMaxQuery((title:quick | body:quick)))` and no
     `df=id` clause, i.e. the `)` closed the query's opening paren and contributed no clause of its
     own -- so the terminator is Solr's behaviour, not an inference from `numFound`. The whitespace
-    half has its own capture, `solr-ref/responses/edismax_shape_b_debug_parsedquery.json`
-    (see finding 90). `"` is *not* a
+    half at run-local paren depth zero has its own capture,
+    `solr-ref/responses/edismax_shape_b_debug_parsedquery.json` (see finding 90). `"` is *not* a
     terminator: every captured bound run is a quoted phrase, optionally `+`-prefixed, and the
     quotes belong to the nested query's own text. This is what
-    `local_params::bound_token_len` implements. Note the whitespace terminator applies at
-    *any* paren depth, so a bound run that opens a paren and then contains whitespace
-    (`{!edismax ...}(+"quick" +"fox")`) is cut at the whitespace and leaves the outer parser
-    unbalanced text, i.e. a 400. No captured trace sends that shape, so real Solr's answer
-    for it is unverified and nothing pins it; it is named as a ceiling in
-    `src/local_params.rs`'s module doc rather than guessed at.
+    `local_params::bound_token_len` implements. **Issue #197 directly captured that whitespace
+    terminates at any paren depth.**
+    `solr-ref/responses/edismax_shape_b_debug_nested_paren.json` sends
+    `q=({!edismax qf='title body'}(+"quick" +"fox"))`, whose first whitespace after the block is
+    inside the bound run's open paren. Real Solr answers 400: the depth-one whitespace cut leaves
+    the outer parser the unbalanced remainder `+"fox"))`. Had whitespace waited for depth zero,
+    the nested edismax parser would have received the complete balanced expression and the query
+    would have parsed. The fixture carries `debugQuery=true` but, correctly for a parse failure,
+    has no `debug` section; its commented one-off command is at the end of `capture.sh`, not in a
+    manifest whose whole-body comparison would require Wayfinder to implement debug output.
 
 92. **`autoGeneratePhraseQueries` defaults to *off*, so an unquoted string that analyzes to
     several tokens is a boolean OR over those tokens, not a phrase query.** **Settled by
@@ -1607,7 +1611,7 @@ fragment" to be different answers at all.
     issue #137's `{!edismax}quick+rocket` probe. This matters because `+` and `-` are
     ordinary term characters *mid-token* in Lucene's
     `_TERM_CHAR` set, so `quick+rocket` is **one** clause whose analysis yields two terms --
-    not two clauses. **That step is captured too, not read off the grammar**: the same request
+    not two clauses. **That `+` step is captured too, not read off the grammar**: the same request
     with `debugQuery=true`, `solr-ref/responses/edismax_unquoted_multitoken_debug.json`, parses to
     `+DisjunctionMaxQuery(((title:quick title:rocket) | (body:quick body:rocket)))` -- exactly
     **one** `DisjunctionMaxQuery` spanning both analysed tokens. edismax fans each clause out over
@@ -1615,9 +1619,15 @@ fragment" to be different answers at all.
     (`+(DisjunctionMaxQuery((title:quick | body:quick)) DisjunctionMaxQuery((title:rocket | body:rocket)))`);
     counting them discriminates the readings directly. It also shows the OR structurally rather
     than only through a count: inside each `qf` field the two tokens are a SHOULD pair
-    (`(title:quick title:rocket)`), not a `PhraseQuery`. This matters because it is the step that
-    generalises the answer past this one query to issue #137's actual `state-of-the-art` case.
-    Like the two Shape-B debug captures it is deliberately **not** a `manifest.tsv` row (Wayfinder
+    (`(title:quick title:rocket)`), not a `PhraseQuery`. Issue #197 separately captured the `-`
+    form rather than continuing to generalise from `+` by grammar alone:
+    `solr-ref/responses/edismax_midtoken_minus_debug.json` sends the motivating
+    `q=state-of-the-art` and parses to
+    `+DisjunctionMaxQuery(((title:state title:art) | (body:state body:art)))`. Exactly one
+    `DisjunctionMaxQuery` spans every analysed token, so the hyphens are ordinary mid-token
+    characters at query-clause parsing time; the `text_en` analyzer then removes the stopwords
+    `of` and `the`, leaving `state` and `art` in that one clause. Like the Shape-B debug captures
+    it is deliberately **not** a `manifest.tsv` row (Wayfinder
     emits no `debug` section); the command is commented at the end of `solr-ref/capture.sh` and
     `tests/edismax.rs::unquoted_multitoken_debug_parsedquery_shows_one_clause_over_both_tokens`
     asserts on it. Wayfinder's `build_field_disjunction` previously made a `PhraseQuery`

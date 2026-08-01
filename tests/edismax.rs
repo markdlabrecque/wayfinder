@@ -1556,6 +1556,18 @@ const UNQUOTED_MULTITOKEN_DEBUG_FIXTURE: &str = "edismax_unquoted_multitoken_deb
 /// `debug` section.
 const UNQUOTED_MULTITOKEN_DEBUG_PATH: &str = "select?q=quick%2Brocket&defType=edismax&qf=title+body&debugQuery=true&fl=id&sort=id+asc&wt=json";
 
+/// Issue #197's direct evidence that `-`, like #147's captured `+`, is an
+/// ordinary term character mid-token.
+const MIDTOKEN_MINUS_DEBUG_FIXTURE: &str = "edismax_midtoken_minus_debug";
+const MIDTOKEN_MINUS_DEBUG_PATH: &str = "select?q=state-of-the-art&defType=edismax&qf=title+body&debugQuery=true&fl=id&sort=id+asc&wt=json";
+
+/// Issue #197's nested-paren Shape-B request. If whitespace terminates only at
+/// depth zero, the whole balanced expression reaches edismax and parses; Solr's
+/// 400 proves the depth-one whitespace cut leaves unbalanced outer text.
+const SHAPE_B_NESTED_PAREN_DEBUG_FIXTURE: &str = "edismax_shape_b_debug_nested_paren";
+const SHAPE_B_NESTED_PAREN_DEBUG_PATH: &str = "select?q=(%7B!edismax+qf%3D%27title+body%27%7D(%2B%22quick%22+%2B%22fox%22))&df=id&debugQuery=true&fl=id&sort=id+asc&wt=json";
+const SHAPE_B_NESTED_PAREN_DEBUG_Q: &str = "({!edismax qf='title body'}(+\"quick\" +\"fox\"))";
+
 fn fixture_file(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("solr-ref/responses")
@@ -1956,5 +1968,66 @@ async fn shape_b_debug_parsedquery_shows_a_closing_paren_terminating_the_bound_r
         "the matching document ids must be exactly Solr's -- this is the Shape-B capture whose \
          result set is non-degenerate, so it is the one that can actually catch a binding rule \
          that terminates the run in the wrong place"
+    );
+}
+
+#[test]
+fn midtoken_minus_debug_parsedquery_shows_one_clause_over_all_tokens() {
+    let expected = require_capture(MIDTOKEN_MINUS_DEBUG_FIXTURE, MIDTOKEN_MINUS_DEBUG_PATH);
+    assert_eq!(
+        expected
+            .pointer("/debug/rawquerystring")
+            .and_then(Value::as_str),
+        Some("state-of-the-art"),
+        "the fixture must identify the literal mid-token `-` query"
+    );
+    let parsed = expected
+        .pointer("/debug/parsedquery")
+        .and_then(Value::as_str)
+        .expect("mid-token-minus fixture has debug.parsedquery");
+    assert_eq!(
+        parsed.matches("DisjunctionMaxQuery").count(),
+        1,
+        "multiple dismax nodes would mean Solr split the hyphenated input into clauses: {parsed}"
+    );
+    for field in ["title", "body"] {
+        for token in ["state", "art"] {
+            assert!(
+                parsed.contains(&format!("{field}:{token}")),
+                "Solr's one clause must analyse to `{field}:{token}`: {parsed}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn shape_b_whitespace_terminates_inside_nested_parens() {
+    let expected = require_capture(
+        SHAPE_B_NESTED_PAREN_DEBUG_FIXTURE,
+        SHAPE_B_NESTED_PAREN_DEBUG_PATH,
+    );
+    assert_eq!(
+        expected
+            .pointer("/responseHeader/params/q")
+            .and_then(Value::as_str),
+        Some(SHAPE_B_NESTED_PAREN_DEBUG_Q),
+        "the 400 fixture must identify the nested-paren Shape-B request"
+    );
+    assert_eq!(
+        expected.pointer("/error/code").and_then(Value::as_u64),
+        Some(400),
+        "real Solr must reject the unbalanced remainder produced by the depth-one whitespace cut"
+    );
+    assert!(
+        expected.get("debug").is_none(),
+        "Solr cannot emit a debug parse tree when parsing fails"
+    );
+
+    let (app, _dir) = edismax_app().await;
+    let (status, actual) = get(&app, SHAPE_B_NESTED_PAREN_DEBUG_PATH).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        actual.pointer("/error/code").and_then(Value::as_u64),
+        Some(400)
     );
 }

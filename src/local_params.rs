@@ -53,13 +53,12 @@
 //! implemented; no capture uses it, and it would currently bind the
 //! following token anyway.
 //!
-//! ponytail: the bound run ends at the first whitespace *at any paren depth*,
-//! so a run that itself contains whitespace inside parens —
-//! `({!edismax qf='...'}(+"quick" +"fox"))` — is cut at that whitespace and
-//! leaves the outer parser an unbalanced `+"fox"))`, i.e. a 400. No captured
-//! trace sends a bound run containing whitespace inside parens, so what real
-//! Solr answers for it is unverified here and nothing pins it; the 400 is the
-//! ceiling, not a claim about Solr.
+//! The bound run ends at the first whitespace *at any paren depth*. Issue
+//! #197 captures the nested form directly in
+//! `solr-ref/responses/edismax_shape_b_debug_nested_paren.json`:
+//! `({!edismax qf='...'}(+"quick" +"fox"))` is cut at the depth-one whitespace,
+//! leaving the outer parser an unbalanced `+"fox"))`, and real Solr answers
+//! 400. This is capture-derived behavior, not a ponytail ceiling.
 //!
 //! The block grammar itself (`parse_block`) is general — type plus
 //! `k=v`/`k='v v'`/`k="v v"` pairs — because issue #138 needs the same
@@ -326,21 +325,26 @@ where
 ///   opening paren and contributed no clause of its own. A whitespace-only
 ///   terminator would have bound `+"quick")` and handed the nested parser an
 ///   unbalanced paren instead of a 200.
+/// - `solr-ref/responses/edismax_shape_b_debug_nested_paren.json` —
+///   `q=({!edismax qf='title body'}(+"quick" +"fox"))`, with the first bound-run
+///   whitespace at **paren depth 1**. Real Solr answers 400 because the cut
+///   leaves the outer parser the unbalanced remainder `+"fox"))`; a
+///   depth-zero-only whitespace rule would bind the complete balanced inner
+///   expression and parse successfully.
 ///
-/// Both are checked by `tests/edismax.rs`'s `shape_b_debug_parsedquery_*`
-/// tests. Neither is a `manifest.tsv` row: Wayfinder emits no `debug` section,
-/// so the whole-body sweeps could only pass by widening a normaliser over a
-/// real capability gap (same exclusion as `edismax_qf_partial_invalid`, #111).
-/// The commands are commented at the end of `solr-ref/capture.sh`.
+/// All three are checked by `tests/edismax.rs`'s `shape_b_*` tests. None is a
+/// `manifest.tsv` row: Wayfinder emits no `debug` section, and the third is an
+/// error envelope whose Java parser text cannot match Wayfinder verbatim. The
+/// whole-body sweeps could only pass by widening a normaliser over real gaps
+/// (same exclusion as `edismax_qf_partial_invalid`, #111). The commands are
+/// commented at the end of `solr-ref/capture.sh`.
 ///
 /// Terminators, all of them capture-derived rather than assumed:
 /// - whitespace outside a quoted phrase, *at any paren depth*.
 ///   `+"quick" +"rocket"` (traces 00003/00004) binds `+"quick"` only, which is
-///   the whole reason those traces answer 0. Because the whitespace arm does
-///   not consult `depth`, a run that opens a paren and then contains
-///   whitespace is still cut at that whitespace: `(+"quick" +"fox"))` binds
-///   `(+"quick"` and leaves the outer parser unbalanced text, i.e. a 400. No
-///   captured trace sends that shape — see the module doc's ponytail ceiling.
+///   the whole reason those traces answer 0. The issue #197 fixture above pins
+///   the depth-independent half: `(+"quick" +"fox"))` binds `(+"quick"` and
+///   leaves the outer parser unbalanced text, i.e. a 400.
 /// - a `)` at paren depth 0, i.e. one that would close a paren opened *before*
 ///   the run. Every captured `q` wraps the whole query in `(...)`, so trace
 ///   00006's `({!edismax ...}+"quick")` has no whitespace after the bound run
