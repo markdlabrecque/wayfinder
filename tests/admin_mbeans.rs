@@ -462,6 +462,56 @@ async fn mbeans_deletes_by_id_and_deletes_by_query_increment_independently() {
     );
 }
 
+/// Mutation guard for `CoreIndex::delete_by_query`'s ordering
+/// (`src/core_index.rs`): the `fetch_add` sits AFTER
+/// `let parsed = self.parse_query(...)?;` precisely so a query that never
+/// parsed never became a delete and must not count. That guard was asserted
+/// only in a comment -- hoisting the `fetch_add` above the parse left the
+/// whole suite green. Project rule: code whose whole value is failing
+/// correctly gets mutation-tested. Verified by hoisting: with the
+/// `fetch_add` moved above the parse, this test fails with
+/// `deletesByQuery == 1`.
+#[tokio::test]
+async fn mbeans_deletes_by_query_does_not_count_a_query_that_failed_to_parse() {
+    let dir = TempDir::new().expect("temp dir");
+    let core = "mbeans_bad_delete_query";
+    let app = build_mbeans_app(dir.path(), core, None).expect("app must build");
+
+    let (status, body) = post_m(
+        &app,
+        core,
+        "update?commit=true",
+        &json!([{"id": "b1", "body": "alpha"}]).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "seed: {body}");
+
+    // An unclosed `/regex` is an ordinary parse failure (see
+    // `tests/query_types.rs::regex_unclosed_is_a_400_syntax_error`), so
+    // `delete_by_query` bails at `parse_query` before touching the writer.
+    let (status, body) = post_m(
+        &app,
+        core,
+        "update?commit=true",
+        &json!({"delete": {"query": "body:/unclosed"}}).to_string(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a delete-by-query whose query cannot be parsed must be an error, got: {body}"
+    );
+
+    let (status, body) = get_m(&app, core, "admin/mbeans?stats=true&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body.pointer("/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesByQuery"),
+        Some(&json!(0)),
+        "a query that failed to parse never became a delete, so deletesByQuery must still be 0, \
+         got: {body}"
+    );
+}
+
 // --- INDEX.size / CORE.coreName: real state, non-default core name ---------
 
 /// Reverses `human_size`'s `"{value:.1} {unit}"` (`src/admin_ui.rs`) rendering
@@ -615,6 +665,54 @@ async fn mbeans_soft_auto_commit_max_time_is_absent_when_unset() {
          when soft autocommit is disabled, and SolrConnectorPluginBase's `isset(...)` guard \
          (SolrConnectorPluginBase.php:789-792) only falls back to its own `-1` default when the \
          key is missing, so `-1` is never a value Solr puts on the wire, got: {body}"
+    );
+}
+
+// --- unknown core -------------------------------------------------------------
+
+/// Mutation guard for the `check_core` call in the handler (`src/lib.rs`),
+/// mirroring `tests/admin_luke.rs::luke_unknown_core_is_a_json_404`. Sibling
+/// #156 shipped without this guard and the reviewer caught it; here, deleting
+/// the `check_core` line leaves the whole rest of the suite green while
+/// `GET /solr/nosuchcore/admin/mbeans` happily reports the real core's stats
+/// (and its `CORE.coreName`) under any core name at all. Verified by
+/// deletion: without `check_core` this test fails with 200.
+#[tokio::test]
+async fn mbeans_unknown_core_is_a_json_404() {
+    let dir = TempDir::new().expect("temp dir");
+    let core = "mbeans_real_core";
+    let app = build_mbeans_app(dir.path(), core, Some(SOFT_AUTOCOMMIT_ON)).expect("app must build");
+
+    let (status, body) = get_m(
+        &app,
+        "nosuchcore",
+        "admin/mbeans?stats=true&wt=json&json.nl=map",
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an unknown core must 404, got: {body}"
+    );
+    let header = body
+        .get("responseHeader")
+        .unwrap_or_else(|| panic!("the WithParams envelope carries responseHeader, got: {body}"));
+    assert_eq!(header["status"].as_u64(), Some(404), "body: {body}");
+    assert!(
+        header.get("params").is_some(),
+        "this route uses the WithParams envelope, so params are echoed, got: {body}"
+    );
+    assert_eq!(body["error"]["code"].as_i64(), Some(404), "body: {body}");
+    assert!(
+        body["error"]["msg"]
+            .as_str()
+            .is_some_and(|m| m.contains("nosuchcore")),
+        "error.msg must name the unknown core, got: {body}"
+    );
+    assert!(
+        body.get("solr-mbeans").is_none(),
+        "an unknown core must not leak the real core's mbeans stats, got: {body}"
     );
 }
 

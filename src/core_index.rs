@@ -908,6 +908,9 @@ impl CoreIndex {
         writer.delete_query(parsed)?;
         // After the writer accepted it, not before: a query that failed to
         // parse (the `?` above) never became a delete, so it must not count.
+        // Mutation-tested by
+        // `tests/admin_mbeans.rs::mbeans_deletes_by_query_does_not_count_a_query_that_failed_to_parse`
+        // -- hoisting this line above the parse makes that test fail with 1.
         self.deletes_by_query.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
