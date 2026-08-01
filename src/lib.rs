@@ -1040,6 +1040,21 @@ fn solr_class_for_builtin(name: &str) -> &'static str {
 /// would be fiction — and no client reads it (see `schema_fieldtypes`). This
 /// omission is the documented deliberate divergence for this endpoint
 /// (PRD §5).
+///
+/// Deliberately *added*, the other direction: real Solr emits these four
+/// sparsely — in `trace/00020.json` `indexed` appears on 4 of 41 entries and
+/// `docValues` on 12 — because Solr only serialises an attribute that was
+/// written into `managed-schema`, leaving the rest implied by the Lucene
+/// `class` default. Wayfinder emits all four on every entry instead, on
+/// purpose: reproducing the sparseness would mean encoding Lucene's per-class
+/// default table (`solr.BinaryField` implies X, `solr.BoolField` implies Y...)
+/// for classes Wayfinder has no implementation of, which is fiction of the
+/// same kind as the analyzer chains, whereas these four values are Wayfinder's
+/// real uniform type-level defaults. It is harmless to the one real consumer:
+/// `isPartOfSchema` does an `in_array` over `name` and reads no attribute at
+/// all, and every Solr client tolerates a present-but-default attribute since
+/// Solr itself emits them whenever a schema author wrote them out explicitly.
+/// Recorded as an addition (not just an omission) in PRD §5.
 fn field_type_entry(name: &str, class: &str) -> Value {
     json!({
         "name": name,
