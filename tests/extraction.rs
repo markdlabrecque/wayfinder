@@ -1128,6 +1128,50 @@ fn zip_budget_charges_actual_bytes_against_the_cumulative_limit_despite_zero_dec
     );
 }
 
+/// Added by the implementor stage: the mutation harness proved the two tests
+/// above do not bind the *accumulation* inside one entry. Both charge a
+/// single time per entry, so `entry_actual = bytes` (assign instead of
+/// add-assign) survived them — and that mutant is precisely the real attack:
+/// a walker reading a zero-declared entry in chunks would have each chunk
+/// checked in isolation and the entry as a whole never bounded at all.
+#[test]
+fn zip_budget_accumulates_actual_bytes_across_the_chunks_of_a_single_entry() {
+    let mut limits = permissive_limits();
+    limits.zip_max_entry_bytes = 10_000;
+    limits.zip_max_cumulative_bytes = 1_000_000_000; // isolates the per-entry guard
+    let mut zip = ZipBudget::new(limits);
+
+    let entry = ZipEntryMeta {
+        name: "streamed.bin",
+        compressed_size: 0,
+        uncompressed_size: 0,
+    };
+    zip.admit(&entry).expect("0/0 entry passes the pre-filter");
+
+    // Ten 1000-byte chunks exactly fill the 10,000-byte per-entry limit. No
+    // single chunk is anywhere near it.
+    for chunk in 0..10 {
+        zip.charge_actual(1000).unwrap_or_else(|e| {
+            panic!("chunk {chunk}: charging up to the per-entry limit must succeed, got {e:?}")
+        });
+    }
+    let result = zip.charge_actual(1);
+    assert!(
+        matches!(
+            result,
+            Err(ExtractError::ZipBudget(ZipViolation::EntryTooLarge))
+        ),
+        "one more byte after 10,000 already charged for this entry must fail as EntryTooLarge: \
+         actual bytes must accumulate across an entry's chunks, not be checked one chunk at a \
+         time, got {result:?}"
+    );
+    assert_eq!(
+        zip.cumulative_actual(),
+        10_000,
+        "the rejected charge must not have been added to the running total"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Item B — ZIP entry count vs a skip-and-continue walker
 // ---------------------------------------------------------------------
@@ -1474,5 +1518,44 @@ fn detect_still_recognizes_a_plain_non_html_xml_document_as_xml() {
         got,
         ContentType::Xml,
         "a plain non-HTML XML document must still detect as Xml, got {got:?}"
+    );
+}
+
+/// Added by the implementor stage: the mutation harness proved the
+/// non-regression test above does not bind the *tag delimiter* check, because
+/// its sample XML contains no `<html`-prefixed name at all. Dropping the
+/// delimiter check survived it, and that mutant steals any XML vocabulary
+/// with an `html`-prefixed element from the XML extractor.
+#[test]
+fn detect_does_not_mistake_an_html_prefixed_xml_element_for_an_html_root() {
+    let bytes = b"<?xml version=\"1.0\"?>\n\
+                  <htmlContent><htmlFragment>not html</htmlFragment></htmlContent>";
+    let got = detect(None, "feed.xml", bytes);
+    assert_eq!(
+        got,
+        ContentType::Xml,
+        "an XML vocabulary whose element names merely start with `html` must still detect as \
+         Xml -- the root check must require a tag delimiter after `<html`, got {got:?}"
+    );
+}
+
+/// Added by the implementor stage, for the same reason: nothing in the suite
+/// bound the *anchoring* of the no-declaration branch. Searching the whole
+/// leading window there (rather than only the start of the document) survived
+/// every existing test, and that mutant lets any text file that merely
+/// mentions `<html>` override its declared `text/plain` and get routed to an
+/// HTML parser.
+#[test]
+fn detect_does_not_sniff_html_from_a_mention_of_html_inside_plain_text() {
+    let mut bytes =
+        b"Notes on markup.\n\nA document's root element is written <html> in HTML.\n".to_vec();
+    bytes.extend_from_slice(&b"filler ".repeat(50));
+    let got = detect(Some("text/plain"), "notes.txt", &bytes);
+    assert_eq!(
+        got,
+        ContentType::PlainText,
+        "a plain-text file that merely mentions `<html>` must stay PlainText: with no XML \
+         declaration, only a document that *opens* with an html root may be sniffed as Html, \
+         got {got:?}"
     );
 }
