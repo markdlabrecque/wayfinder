@@ -156,28 +156,52 @@ Search API server host as the Compose service name.
 
 ## Backup
 
-Wayfinder has no `/replication` or snapshot endpoint. A backup is a copy of the entire data
-directory plus the schema and server config needed to reopen it.
+A backup is a snapshot of the entire data directory plus the schema and server config needed to
+reopen it. Wayfinder provides an online snapshot command; the portable stop-copy-start procedure
+below remains the fallback on platforms where atomic no-replace directory publication is not
+available.
+
+### Safe online snapshot
+
+Create the destination on the same filesystem as its parent and ensure it does not already exist:
+
+```sh
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+backup="/srv/backups/wayfinder/content-$stamp"
+sudo install -d -m 0700 "$backup"
+sudo -u wayfinder wayfinder snapshot /var/lib/wayfinder/content "$backup/data"
+sudo cp -a /etc/wayfinder/content-schema.toml "$backup/schema.toml"
+sudo cp -a /etc/wayfinder/content.toml "$backup/wayfinder.toml"
+sudo sh -c "cd '$backup' && find . -type f ! -path ./SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS"
+```
+
+The command selects one committed Tantivy generation while briefly holding Tantivy's metadata
+lock, opens every referenced immutable segment, releases the lock, and copies through those open
+handles. Indexing, commits, merges, and queries continue during the copy. A private sibling staging
+directory is validated and atomically published with no-replace semantics, so an existing
+destination is never merged with or overwritten. Updates not committed when the generation is
+selected belong to a later snapshot.
+
+The snapshot already includes the index's persisted schema and analyzer marker. Keep the
+operator-owned schema and server config alongside it as shown, because those are the explicit
+restore inputs; protect the config because it may contain Basic credentials. Periodically restore
+and query a snapshot rather than treating a successful command as sufficient evidence.
 
 ### A live recursive copy is not safe
 
-Tantivy atomically replaces `meta.json` when committing, but a directory copy is not an atomic
-filesystem snapshot. Commits and merges can remove files while the copy traverses them, or the
+The snapshot command is a protocol, not a wrapper around recursive copy. Tantivy atomically
+replaces `meta.json` when committing, but `cp`, `rsync`, and `tar` do not create an atomic
+filesystem snapshot. Commits and merges can remove files while they traverse the directory, or a
 copy can capture new metadata without every segment that metadata references.
 
 This was tested under continuous committed indexing load for issue [#233]: 20 ordinary recursive
 copies were made and then opened as independent Wayfinder cores. Thirteen restored; seven failed
-during the copy because temporary or segment files disappeared. A controlled metadata-last copy
-failed to open because `meta.json` referenced an uncopied `.term` file. After graceful shutdown,
-the same copy-and-restore check reopened all 2,560 documents. [#239] tracks a future safe online
-snapshot mechanism.
-
-Do not use `cp`, `rsync`, or `tar` directly against a running, writable data directory. A storage
-snapshot is suitable only if the storage system guarantees a point-in-time snapshot of the whole
-directory; validate its restore procedure independently.
+during traversal, and a controlled metadata-last copy referenced an uncopied `.term` file. Do not
+use a raw recursive copy against a running writable data directory. A storage snapshot is suitable
+only if it guarantees a point-in-time snapshot of the whole directory and its restore procedure is
+independently validated.
 
 [#233]: https://github.com/markdlabrecque/wayfinder/issues/233
-[#239]: https://github.com/markdlabrecque/wayfinder/issues/239
 
 ### Portable stop-copy-start procedure
 

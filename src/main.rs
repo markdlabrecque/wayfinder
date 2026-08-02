@@ -1,6 +1,9 @@
 //! Production binary entry point for the Wayfinder HTTP server.
 //!
-//! Usage: `wayfinder <schema.toml> <data-dir> [bind-addr]`
+//! Usage:
+//! - Server: `wayfinder <schema.toml> <data-dir> [bind-addr]`
+//! - Online snapshot: `wayfinder snapshot <live-data-dir> <fresh-destination-dir>`
+//!
 //! `bind-addr` defaults to `127.0.0.1:8983` (Solr's default port).
 //!
 //! The server config (PRD §6) comes from `WAYFINDER_CONFIG`; unset means all
@@ -65,6 +68,21 @@ async fn main() -> anyhow::Result<()> {
             "{}",
             serde_json::to_string(&wayfinder::coverage_report().await)?
         );
+        return Ok(());
+    }
+    if first.as_deref() == Some("snapshot") {
+        let source = PathBuf::from(args.next().ok_or_else(|| {
+            anyhow::anyhow!("usage: wayfinder snapshot <live-data-dir> <fresh-destination-dir>")
+        })?);
+        let destination = PathBuf::from(args.next().ok_or_else(|| {
+            anyhow::anyhow!("usage: wayfinder snapshot <live-data-dir> <fresh-destination-dir>")
+        })?);
+        if args.next().is_some() {
+            return Err(anyhow::anyhow!(
+                "usage: wayfinder snapshot <live-data-dir> <fresh-destination-dir>"
+            ));
+        }
+        wayfinder::snapshot::create(&source, &destination)?;
         return Ok(());
     }
     let schema_path =
