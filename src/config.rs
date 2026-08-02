@@ -227,10 +227,20 @@ pub struct Admin {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Extraction {
-    /// Bytes of uploaded document accepted before the stream is cut with a
-    /// 413. Enforced by `extract::stream_to_tempfile`, not by axum's
-    /// `DefaultBodyLimit` — the extract route disables the global limit so
-    /// this is the single guard.
+    /// Bytes of multipart *content* accepted before the stream is cut with a
+    /// 413.
+    ///
+    /// Two layers guard the route, and this knob is the inner one. The outer
+    /// layer is a transport ceiling — the route's `DefaultBodyLimit` is set
+    /// from `extract::ExtractLimits::route_body_ceiling`, which is
+    /// `max_body_bytes` plus 1 MiB of framing head-room, because `multer`
+    /// consumes a part's headers before a `Field` exists and the handler is
+    /// therefore never offered those bytes to count. The inner layer, and
+    /// what actually enforces `max_body_bytes` itself, is the request-wide
+    /// `consumed` counter threaded through `extract::copy_counted`: every
+    /// part's content is charged to it, the document's and the skipped
+    /// non-file fields' alike, so the limit is a total across the request
+    /// rather than a per-part allowance.
     pub max_body_bytes: u64,
     /// Concurrent extractions. Over the limit sheds load with a 503 rather
     /// than queueing.

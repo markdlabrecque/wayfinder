@@ -12,13 +12,17 @@
 //! and `common::diff::normalize_extract`, never hand-typed, per CLAUDE.md's
 //! compatibility contract.
 //!
-//! Every test here is expected to fail today (RED): the route
-//! `/solr/{core}/update/extract` does not exist yet (`src/lib.rs`'s
-//! `search_api_routes!` has no entry for it), so every request in this file
-//! currently gets axum's unmatched-route 404 instead of the behaviour under
-//! test. This is a deliberately *shared* failure reason across the whole
-//! file — see the individual test comments for anything that would need a
-//! second reason once the route exists.
+//! What the suite covers, in file order: the seven in-scope success fixtures
+//! plus the corrupt-PDF row (a recorded status divergence, not a match); the
+//! `EXTRACT_PARAMS` allowlist under `strict_params`, `check_core`, and a
+//! route-order guard that `/update` itself still works; the `extractOnly`
+//! gate; multipart intake errors; the resource budgets from the
+//! `[extraction]` config section (`max_body_bytes` — including its exact
+//! boundary and the request-wide accounting across parts —
+//! `max_concurrency`, `max_output_bytes`, `deadline_secs`) and the
+//! route-level transport ceiling that bounds part headers the handler never
+//! sees; and charset precedence (BOM > declared > detected), including the
+//! 64 KiB detection window's boundary.
 
 mod common;
 
@@ -497,12 +501,9 @@ async fn extract_rejects_a_malformed_multipart_envelope() {
 
 // --- budgets, mutation-tested through the HTTP route (spec item 1, 9) ------
 //
-// All four gated through a new `[extraction]` config section (spec item 9),
-// which does not exist yet in `src/config.rs` — every test below currently
-// fails at `build_app_with_config`'s `wayfinder::app_with_config` call with a
-// TOML "unknown field" deserialization error (a legitimate, behaviour-level
-// red result: the config section really doesn't exist, this isn't a typo in
-// the test), not a compile error in this file.
+// All gated through the `[extraction]` config section (spec item 9), so each
+// test drives the budget it names from operator-visible configuration rather
+// than from `ExtractLimits`'s defaults.
 
 #[tokio::test]
 async fn extract_body_over_configured_max_body_bytes_is_413() {
@@ -530,6 +531,58 @@ async fn extract_body_over_configured_max_body_bytes_is_413() {
          BodyTooLarge envelope, got {status}: {body}"
     );
     assert_eq!(body["error"]["code"].as_i64(), Some(413));
+}
+
+/// Boundary guard for `copy_counted`'s `consumed + len > max_bytes` test:
+/// `max_body_bytes` is the largest body that is *accepted*, not the smallest
+/// that is refused. Without this, relaxing the comparison to `>=` — refusing
+/// a document of exactly the configured size — passes the whole suite.
+///
+/// The three sizes are asserted together so the pair of neighbours pins the
+/// boundary rather than merely sampling near it: `max_body_bytes - 1` and
+/// `max_body_bytes` are 200, `max_body_bytes + 1` is 413. Only the file
+/// part's content is charged (part headers ride the route-level transport
+/// ceiling instead), so the payload size is exactly the charged size.
+///
+/// The content is plain ASCII text well inside the default
+/// `max_output_bytes`/`max_output_scalars`, so a 200 here is a real
+/// extraction and not some other budget's 400 sneaking in — the assertions
+/// check the extracted text came back, not just the status.
+#[tokio::test]
+async fn extract_body_exactly_at_max_body_bytes_is_accepted() {
+    let config_toml = "[extraction]\nmax_body_bytes = 100\n";
+
+    for (len, expected) in [
+        (99_usize, StatusCode::OK),
+        (100, StatusCode::OK),
+        (101, StatusCode::PAYLOAD_TOO_LARGE),
+    ] {
+        let (app, _dir) = build_app_with_config(Some(config_toml))
+            .expect("extraction.max_body_bytes must be a valid config knob");
+        let content = vec![b'a'; len];
+        let (status, body) = request_multipart(
+            &app,
+            &format!("{CORE}/update/extract?extractOnly=true&extractFormat=text&wt=json"),
+            "file",
+            "boundary.txt",
+            "",
+            &content,
+        )
+        .await;
+        assert_eq!(
+            status, expected,
+            "a {len}-byte document against max_body_bytes=100 must be {expected}, \
+             got {status}: {body}"
+        );
+        if expected == StatusCode::OK {
+            assert!(
+                body["file"].as_str().unwrap_or_default().contains("aaa"),
+                "an accepted body must actually be extracted, got: {body}"
+            );
+        } else {
+            assert_eq!(body["error"]["code"].as_i64(), Some(413), "body: {body}");
+        }
+    }
 }
 
 /// Builds a multipart body from `(name, filename, content)` triples.
@@ -580,6 +633,40 @@ async fn extract_non_file_parts_are_charged_against_max_body_bytes() {
         StatusCode::PAYLOAD_TOO_LARGE,
         "non-file parts over extraction.max_body_bytes must 413, not be drained and answered \
          400 MissingContentStream, got {status}: {body}"
+    );
+    assert_eq!(body["error"]["code"].as_i64(), Some(413), "body: {body}");
+}
+
+/// The budget is *request-wide*, not per-part: two parts that each fit
+/// individually must still 413 when their total does not.
+///
+/// The sibling test above cannot see this. Its five 100-byte parts each bust
+/// a 40-byte cap on their own, so it passes identically under per-part
+/// accounting — swapping `copy_counted`'s shared `consumed` for a per-call
+/// local counter leaves it green. Here neither the 60-byte non-file part nor
+/// the 60-byte file part exceeds `max_body_bytes = 100`; only their sum does,
+/// so the assertion holds exactly when the counter is shared across parts.
+#[tokio::test]
+async fn extract_body_budget_is_shared_across_parts() {
+    let config_toml = "[extraction]\nmax_body_bytes = 100\n";
+    let (app, _dir) = build_app_with_config(Some(config_toml))
+        .expect("extraction.max_body_bytes must be a valid config knob");
+
+    let parts: Vec<(&str, &str, Vec<u8>)> = vec![
+        ("meta", "", vec![b'm'; 60]),
+        ("file", "a.txt", vec![b'a'; 60]),
+    ];
+    let (status, body) = request_multipart_with_raw_body(
+        &app,
+        &format!("{CORE}/update/extract?extractOnly=true&extractFormat=text&wt=json"),
+        &multipart_parts(&parts),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "60 bytes of non-file field plus a 60-byte document is 120 bytes against a 100-byte \
+         max_body_bytes and must 413; a per-part budget would extract it, got {status}: {body}"
     );
     assert_eq!(body["error"]["code"].as_i64(), Some(413), "body: {body}");
 }
@@ -789,6 +876,54 @@ async fn charset_bom_beats_declared_charset() {
     assert_eq!(
         actual_encoding, expected_encoding,
         "declared charset=ISO-8859-1 must not override a UTF-8 BOM"
+    );
+}
+
+/// Detection must not change its answer at the 64 KiB window boundary.
+///
+/// `resolve_charset` feeds only the first `CHARSET_DETECT_WINDOW`
+/// (`64 * 1024`) bytes to `chardetng`, which answers `UTF-8` for ASCII-only
+/// input while Tika labels the same input `ISO-8859-1`. The ASCII override
+/// that reconciles the two must therefore scan *all* the bytes, not just the
+/// window: judging ASCII-ness from the window alone flips the label from
+/// `ISO-8859-1` to `UTF-8` at exactly 65,537 bytes — one byte past the
+/// window — for a document whose content class never changed. That is a
+/// wire-visible difference in `file_metadata`'s `Content-Encoding`, so this
+/// test uploads `64 KiB + 1` bytes of pure ASCII, the first size at which
+/// the two readings disagree.
+///
+/// The expected label comes from the ASCII `extract_plain_text_text`
+/// fixture, per CLAUDE.md: crossing the window must produce the same label
+/// Solr gave for a small ASCII document.
+#[tokio::test]
+async fn charset_ascii_past_the_detection_window_keeps_the_iso_8859_1_label() {
+    let (app, _dir) = default_app().await;
+    let bytes = vec![b'a'; 64 * 1024 + 1];
+    let (status, actual) = request_multipart(
+        &app,
+        &format!("{CORE}/update/extract?extractOnly=true&extractFormat=text&wt=json"),
+        "file",
+        "big-ascii.txt",
+        "",
+        &bytes,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {status}: {actual}");
+
+    let content_encoding = |v: &Value| {
+        v["file_metadata"].as_array().and_then(|arr| {
+            arr.windows(2)
+                .find(|w| w[0].as_str() == Some("Content-Encoding"))
+                .and_then(|w| w[1].as_array().and_then(|vals| vals.last().cloned()))
+        })
+    };
+    let expected = content_encoding(&fixture("extract_plain_text_text"))
+        .expect("extract_plain_text_text fixture must have a Content-Encoding entry");
+    assert_eq!(
+        content_encoding(&actual).unwrap_or(Value::Null),
+        expected,
+        "an all-ASCII upload one byte past the 64 KiB detection window must keep the same \
+         Content-Encoding a small ASCII document gets, got: {actual}"
     );
 }
 
