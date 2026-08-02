@@ -31,6 +31,7 @@ pub struct ServerConfig {
     pub resources: Resources,
     pub commit: Commit,
     pub admin: Admin,
+    pub extraction: Extraction,
     #[serde(skip)]
     pub auth: Option<AuthConfig>,
 }
@@ -212,6 +213,65 @@ pub struct Admin {
     /// reasoning). This value is intentionally unclamped: an operator who
     /// overrides it is trusted to know the compatibility risk.
     pub reported_solr_version: String,
+}
+
+/// `/update/extract` resource limits (issue #258). Every knob here overrides
+/// one field of `crate::extract::ExtractLimits`, whose own doc comments carry
+/// the reasoning behind each default — this table is the operator-facing
+/// surface, not a second source of truth for the numbers.
+///
+/// Only the five limits the route actually consumes are exposed. The ZIP and
+/// structural counters in `ExtractLimits` stay defaulted on purpose: no
+/// extractor reads them yet (ZIP/OOXML/PDF/RTF are later phases), and an
+/// operator knob that provably does nothing is worse than no knob.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Extraction {
+    /// Bytes of uploaded document accepted before the stream is cut with a
+    /// 413. Enforced by `extract::stream_to_tempfile`, not by axum's
+    /// `DefaultBodyLimit` — the extract route disables the global limit so
+    /// this is the single guard.
+    pub max_body_bytes: u64,
+    /// Concurrent extractions. Over the limit sheds load with a 503 rather
+    /// than queueing.
+    pub max_concurrency: usize,
+    /// Unicode scalars of extracted text per document.
+    pub max_output_scalars: usize,
+    /// Bytes of extracted text per document.
+    pub max_output_bytes: usize,
+    /// Wall-clock seconds one extraction may take. `0` is a valid value and
+    /// means "already expired" — every extraction 503s — rather than
+    /// "unlimited"; an unlimited deadline is exactly the thing this budget
+    /// exists to prevent, so it has no spelling here.
+    pub deadline_secs: u64,
+}
+
+impl Default for Extraction {
+    fn default() -> Self {
+        let limits = crate::extract::ExtractLimits::default();
+        Extraction {
+            max_body_bytes: limits.max_body_bytes,
+            max_concurrency: limits.max_concurrency,
+            max_output_scalars: limits.max_output_scalars,
+            max_output_bytes: limits.max_output_bytes,
+            deadline_secs: limits.deadline.as_secs(),
+        }
+    }
+}
+
+impl Extraction {
+    /// Folds the configured overrides onto `ExtractLimits::default()`, so the
+    /// limits this section does not expose keep their phase-0 defaults.
+    pub fn limits(&self) -> crate::extract::ExtractLimits {
+        crate::extract::ExtractLimits {
+            max_body_bytes: self.max_body_bytes,
+            max_concurrency: self.max_concurrency,
+            max_output_scalars: self.max_output_scalars,
+            max_output_bytes: self.max_output_bytes,
+            deadline: std::time::Duration::from_secs(self.deadline_secs),
+            ..crate::extract::ExtractLimits::default()
+        }
+    }
 }
 
 impl Default for Admin {

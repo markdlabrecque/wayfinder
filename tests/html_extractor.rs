@@ -19,7 +19,7 @@
 //! `dispatch(ContentType::Html)`/`extract()` end to end and is genuinely red
 //! today, since `dispatch` has no HTML arm yet.
 
-use wayfinder::extract::{Budget, ExtractError, ExtractInput, ExtractLimits, detect, extract};
+use wayfinder::extract::{Budget, ExtractInput, ExtractLimits, detect, extract};
 
 fn budget() -> Budget {
     Budget::new(ExtractLimits::default())
@@ -146,51 +146,4 @@ fn absent_title_leaves_metadata_title_none() {
         "no <title> element must leave metadata.title unset, got {:?}",
         extracted.metadata.title
     );
-}
-
-/// Mutation-adjacent guard: today, `dispatch(ContentType::Html)` returns
-/// `None`, so `extract()` on ordinary declared `text/html` input comes back
-/// `ExtractError::UnsupportedFormat { content_type: ContentType::Html }`
-/// specifically (not some other error) — pinning the CURRENT behaviour
-/// precisely, so the implementor's change is verifiably the one line
-/// (`dispatch`'s `Html` arm) the spec names, not a broader accidental
-/// change to `detect`/`dispatch`'s shape elsewhere.
-///
-/// This test is expected to flip from pass to fail to pass again across the
-/// TDD cycle: it passes on `main` before this issue starts, must be deleted
-/// or updated once `dispatch(Html)` returns `Some(...)`  — flagged
-/// explicitly here rather than silently left as a stale assertion, since a
-/// green run of `xhtml_declared_document_reaches_the_html_extractor` above
-/// and a green run of this one at the same time would be contradictory.
-#[test]
-fn html_currently_has_no_extractor_dispatch_returns_none() {
-    let content_type = wayfinder::extract::ContentType::Html;
-    assert!(
-        wayfinder::extract::dispatch(content_type).is_none(),
-        "this test pins TODAY's behaviour (no HTML extractor yet); once the implementor wires \
-         dispatch(Html) => Some(&HTML_EXTRACTOR), this assertion must be removed as part of that \
-         change, not left behind as a contradiction with xhtml_declared_document_reaches_the_html_extractor"
-    );
-}
-
-/// Companion sanity check that `ExtractError::UnsupportedFormat` still names
-/// `Html` specifically today (not, say, `Unknown`) — confirms `detect()` is
-/// doing its job even though `dispatch()` has nothing to hand back yet.
-#[test]
-fn plain_declared_html_currently_reports_unsupported_format_html() {
-    let html = b"<html><head></head><body><p>text</p></body></html>";
-    let input = ExtractInput {
-        declared_type: Some("text/html"),
-        resource_name: "sample.html",
-        bytes: html,
-    };
-    let mut b = budget();
-    match extract(&input, &mut b) {
-        Err(ExtractError::UnsupportedFormat { content_type }) => {
-            assert_eq!(content_type, wayfinder::extract::ContentType::Html);
-        }
-        other => panic!(
-            "expected UnsupportedFormat{{content_type: Html}} today (no HTML extractor yet), got {other:?}"
-        ),
-    }
 }

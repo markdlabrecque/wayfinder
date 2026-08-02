@@ -79,6 +79,14 @@ struct AppState {
     /// clock cannot be walked backwards by an NTP step the way a
     /// `SystemTime` difference can.
     started_at: Instant,
+    /// The budgets `/update/extract` runs every extraction under, resolved
+    /// once from `[extraction]` in the server config.
+    extract_limits: extract::ExtractLimits,
+    /// The dedicated extraction thread pool. Built once here, not per
+    /// request: its whole purpose is a *bounded, shared* pool, and a
+    /// per-request one would give every concurrent request its own
+    /// `max_concurrency` slots.
+    extraction: extract::ExtractionRuntime,
 }
 
 /// Opaque handle to the state shared by an [`AppServer`]'s router.
@@ -261,6 +269,27 @@ const UPDATE_PARAMS: &[&str] = &[
     "wt",
     "json.nl",
 ];
+/// `<core>/update/extract` (issue #258). Deliberately **not** a superset of
+/// `UPDATE_PARAMS`: this route only extracts, so every param whose meaning is
+/// "and then index the result" is absent and `strict_params = true` 400s it.
+/// That means no `commit`/`commitWithin`/`softCommit`/`overwrite`, and none of
+/// Solr's ExtractingRequestHandler literal/mapping family (`literal.*`,
+/// `fmap.*`, `uprefix`, `lowernames`, `captureAttr`, `capture`, `xpath`,
+/// `defaultField`, `boost.*`, `ignoreTikaException`) — accepting a param that
+/// silently does nothing would be a worse divergence than rejecting it, since
+/// the client would believe its field mapping had been applied.
+///
+/// `extractOnly` is required rather than merely allowed (see `update_extract`);
+/// `extractFormat` selects `xml` (default) or `text`; `resource.name` names the
+/// document for Tika's detector and for the echoed `resourceName` metadata.
+const EXTRACT_PARAMS: &[&str] = &[
+    "extractOnly",
+    "extractFormat",
+    "resource.name",
+    "wt",
+    "omitHeader",
+    "json.nl",
+];
 const PING_PARAMS: &[&str] = &["wt"];
 /// `/admin/info/system` (server-level) and `<core>/admin/system`
 /// (core-scoped fallback) — issue #59's version-handshake endpoints.
@@ -304,32 +333,55 @@ fn update_method(method: &str) -> bool {
     matches!(method, "POST" | "GET")
 }
 
+/// Per-route body-limit policy. The fourth column of `search_api_routes!`.
+///
+/// `inherit_body_limit` is the normal case: the route says nothing, so the
+/// global `DefaultBodyLimit::max(resources.max_body_size)` layer applies.
+/// `no_body_limit` disables that layer for one route, which only
+/// `/update/extract` wants — its ceiling is `extraction.max_body_bytes`,
+/// counted byte by byte while streaming to a temp file (`stream_to_tempfile`),
+/// so it can answer the captured 413 envelope instead of axum's bare
+/// `LengthLimitError`. A route-level `DefaultBodyLimit::max(...)` would *not*
+/// do: it is applied inside the global one and would simply overwrite it, so
+/// there is no way to spell "some other finite limit" here without also
+/// re-deciding the global policy per route.
+type RouteMethods = axum::routing::MethodRouter<Arc<AppState>>;
+
+fn inherit_body_limit(route: RouteMethods) -> RouteMethods {
+    route
+}
+
+fn no_body_limit(route: RouteMethods) -> RouteMethods {
+    route.layer(DefaultBodyLimit::disable())
+}
+
 macro_rules! search_api_routes {
     ($apply:ident) => {
         $apply! {
-            ("/solr/{core}/update", update, update_method),
-            ("/solr/{core}/select", select, any_method),
-            ("/solr/{core}/mlt", mlt, any_method),
-            ("/solr/{core}/terms", terms, any_method),
-            ("/solr/{core}/admin/ping", ping, any_method),
-            ("/solr/admin/info/system", admin_info_system, any_method),
-            ("/solr/{core}/admin/system", core_admin_system, any_method),
-            ("/solr/{core}/schema/fieldtypes", schema_fieldtypes, any_method),
-            ("/solr/{core}/admin/luke", admin_luke, any_method),
-            ("/solr/{core}/admin/mbeans", admin_mbeans, any_method),
+            ("/solr/{core}/update", update, update_method, inherit_body_limit),
+            ("/solr/{core}/update/extract", update_extract, update_method, no_body_limit),
+            ("/solr/{core}/select", select, any_method, inherit_body_limit),
+            ("/solr/{core}/mlt", mlt, any_method, inherit_body_limit),
+            ("/solr/{core}/terms", terms, any_method, inherit_body_limit),
+            ("/solr/{core}/admin/ping", ping, any_method, inherit_body_limit),
+            ("/solr/admin/info/system", admin_info_system, any_method, inherit_body_limit),
+            ("/solr/{core}/admin/system", core_admin_system, any_method, inherit_body_limit),
+            ("/solr/{core}/schema/fieldtypes", schema_fieldtypes, any_method, inherit_body_limit),
+            ("/solr/{core}/admin/luke", admin_luke, any_method, inherit_body_limit),
+            ("/solr/{core}/admin/mbeans", admin_mbeans, any_method, inherit_body_limit),
         }
     };
 }
 
 macro_rules! route_specs {
-    ($(($path:literal, $handler:ident, $accepts_method:ident)),+ $(,)?) => {
+    ($(($path:literal, $handler:ident, $accepts_method:ident, $body_limit:ident)),+ $(,)?) => {
         &[$(RouteSpec { path: $path, accepts_method: $accepts_method }),+]
     };
 }
 
 macro_rules! wire_routes {
-    ($(($path:literal, $handler:ident, $accepts_method:ident)),+ $(,)?) => {
-        Router::new()$(.route($path, any($handler)))+
+    ($(($path:literal, $handler:ident, $accepts_method:ident, $body_limit:ident)),+ $(,)?) => {
+        Router::new()$(.route($path, $body_limit(any($handler))))+
     };
 }
 
@@ -428,11 +480,15 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
         auth: config.auth.clone(),
         core_name: core_name.clone(),
     };
+    let extract_limits = config.extraction.limits();
+    let extraction = extract::ExtractionRuntime::new(&extract_limits);
     let state = Arc::new(AppState {
         core_name,
         index,
         config,
         started_at: Instant::now(),
+        extract_limits,
+        extraction,
     });
 
     // `any`, not `get`/`post`: Solr's request handlers are method-agnostic —
@@ -2076,6 +2132,233 @@ async fn update(
     }
 
     Ok(update_success(&params))
+}
+
+/// Adapts one axum multipart field to `extract::ChunkSource`, so the upload
+/// is counted and spilled to a temp file by the same `stream_to_tempfile`
+/// the phase-0 budget tests exercise — rather than a second byte-counting
+/// loop written here, which is exactly how the two would drift apart.
+struct FieldChunks<'a>(axum::extract::multipart::Field<'a>);
+
+impl extract::ChunkSource for FieldChunks<'_> {
+    async fn next_chunk(&mut self) -> Option<std::io::Result<axum::body::Bytes>> {
+        match self.0.chunk().await {
+            Ok(Some(chunk)) => Some(Ok(chunk)),
+            Ok(None) => None,
+            Err(e) => Some(Err(std::io::Error::other(e))),
+        }
+    }
+}
+
+/// The default `Content-Type` for a part that declares none — Tika's own
+/// fallback, and what every captured no-`Content-Type` extract echoes back
+/// as `stream_content_type` (`extract_plain_text_xml.json`).
+const OCTET_STREAM: &str = "application/octet-stream";
+
+/// `POST /solr/{core}/update/extract?extractOnly=true` (issue #258).
+///
+/// Extraction only. Solr's ExtractingRequestHandler *also* indexes what it
+/// extracts unless `extractOnly=true`; Wayfinder requires the param and 400s
+/// without it. That is a **ratified divergence** (PRD): answering 200 to an
+/// indexing request while silently indexing nothing would be the worse
+/// failure, because the client's next query would come back empty with no
+/// error anywhere to explain it.
+///
+/// Shape of the work, in the order the budgets need it:
+///
+/// 1. Params and core, exactly as `/update` validates them (`Envelope::NoParams` —
+///    this is an `/update` path and Solr never echoes params on one).
+/// 2. Multipart intake: the **first part with a non-empty filename** is the
+///    document. Streamed to a temp file through `stream_to_tempfile`, which
+///    fails with `BodyTooLarge` at the first chunk that crosses
+///    `extraction.max_body_bytes` — before the whole body is buffered, and
+///    without trusting `Content-Length`.
+/// 3. The parse, and only the parse, runs under an `ExtractionRuntime` permit.
+///    Holding a concurrency slot across the body read would let a slow client
+///    occupy an extraction slot without extracting anything, which is a
+///    trivially cheap way to hold the pool down.
+/// 4. Rendering, back on the request task.
+///
+/// The `Budget` is constructed *inside* the closure because it is `!Sync` by
+/// design (its counters are `Cell`s) — it must never be held across an
+/// `.await`, and building it on the pool thread makes that unrepresentable
+/// rather than merely discouraged.
+async fn update_extract(
+    State(state): State<Arc<AppState>>,
+    AxPath(core): AxPath<String>,
+    method: Method,
+    RawQuery(query): RawQuery,
+    multipart: Result<axum::extract::Multipart, axum::extract::multipart::MultipartRejection>,
+) -> Result<Response, WfError> {
+    check_update_method(&method)?;
+    let params = Params::parse(query.as_deref().unwrap_or("")).allow_omit_header();
+    let extract_err = |class: &'static str, msg: String| {
+        WfError::bad_request(class, msg)
+            .with_params(&params)
+            .envelope(Envelope::NoParams)
+    };
+    check_core(&state, &core, &params, Envelope::NoParams)?;
+    check_params(&state, EXTRACT_PARAMS, &params).map_err(|e| e.envelope(Envelope::NoParams))?;
+
+    // The resolved boolean, not the param's presence: `extractOnly=false`
+    // asks for the indexing behaviour just as plainly as omitting it does.
+    if !params
+        .bool_or("extractOnly", false)
+        .map_err(|e| e.envelope(Envelope::NoParams))?
+    {
+        return Err(extract_err(
+            "wayfinder::ExtractOnlyRequired",
+            "extractOnly=true is required: this handler extracts document content and does \
+             not index it"
+                .to_string(),
+        ));
+    }
+    let as_text = match params.get("extractFormat") {
+        None | Some("xml") => false,
+        Some("text") => true,
+        Some(other) => {
+            return Err(extract_err(
+                "wayfinder::InvalidParam",
+                format!("invalid extractFormat value: {other}"),
+            ));
+        }
+    };
+
+    let mut multipart = multipart.map_err(|e| {
+        extract_err(
+            "wayfinder::BadContentStream",
+            format!("expected a multipart/form-data upload: {e}"),
+        )
+    })?;
+
+    let mut temp = tempfile::NamedTempFile::new().map_err(|e| {
+        WfError::internal(
+            "wayfinder::ExtractionIo",
+            format!("creating upload temp file: {e}"),
+        )
+        .with_params(&params)
+        .envelope(Envelope::NoParams)
+    })?;
+
+    let mut found: Option<(String, String, String, u64)> = None;
+    loop {
+        let field = multipart.next_field().await.map_err(|e| {
+            extract_err(
+                "wayfinder::BadContentStream",
+                format!("malformed multipart body: {e}"),
+            )
+        })?;
+        let Some(field) = field else { break };
+        // An empty `filename=""` is a form field that happens to carry the
+        // parameter, not an uploaded document — treated as "no file part"
+        // rather than as a document named "".
+        let file_name = field.file_name().unwrap_or_default().to_string();
+        if file_name.is_empty() {
+            continue;
+        }
+        let part_name = field.name().unwrap_or_default().to_string();
+        // The raw header, not `Field::content_type()`: the latter goes through
+        // the `mime` crate, which lowercases parameter values, and the
+        // captured response echoes the client's `Content-Type` **verbatim**
+        // (`extract_declared_charset_text.json` keeps `charset=ISO-8859-1`
+        // uppercase in both `Content-Type` and `stream_content_type`).
+        let declared_type = field
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .unwrap_or_else(|| OCTET_STREAM.to_string());
+        let mut chunks = FieldChunks(field);
+        let written = extract::stream_to_tempfile(
+            &mut chunks,
+            &mut temp,
+            state.extract_limits.max_body_bytes,
+        )
+        .await
+        .map_err(|e| WfError::from(e).with_params(&params))?;
+        found = Some((part_name, file_name, declared_type, written));
+        break;
+    }
+    let Some((part_name, file_name, declared_type, stream_size)) = found else {
+        return Err(extract_err(
+            "wayfinder::MissingContentStream",
+            "multipart body carries no file part to extract".to_string(),
+        ));
+    };
+
+    // `resource.name` overrides the part's filename for detection and for the
+    // echoed `resourceName` (that is what the param is for); the filename is
+    // still reported separately as `stream_source_info`.
+    let resource_name = params
+        .get("resource.name")
+        .unwrap_or(&file_name)
+        .to_string();
+
+    // ponytail: the document is streamed to a temp file and then read back
+    // whole, because `Extractor::extract` takes `&[u8]`. Bounded by
+    // `extraction.max_body_bytes` (32 MiB by default), so it is a real
+    // ceiling rather than an unbounded one — but it is still a full copy in
+    // RAM, and the temp file is currently only buying the streaming *count*.
+    // Trigger: the first extractor that can work incrementally (the phase-2a
+    // ZIP walker, per `ZipBudget`'s documented call sequence) wants a reader,
+    // at which point `ExtractInput` grows a stream variant and this read
+    // goes away.
+    let bytes = std::fs::read(temp.path()).map_err(|e| {
+        WfError::internal(
+            "wayfinder::ExtractionIo",
+            format!("reading upload temp file: {e}"),
+        )
+        .with_params(&params)
+        .envelope(Envelope::NoParams)
+    })?;
+
+    let limits = state.extract_limits;
+    let job_type = declared_type.clone();
+    let job_resource = resource_name.clone();
+    let doc = state
+        .extraction
+        .spawn_extraction(limits.deadline, move || {
+            let mut budget = extract::Budget::new(limits);
+            extract::extract_document(Some(&job_type), &job_resource, &bytes, &mut budget)
+        })
+        .await
+        .and_then(|inner| inner)
+        .map_err(|e| WfError::from(e).with_params(&params))?;
+
+    let render = extract::ExtractRender {
+        part_name: &part_name,
+        resource_name: &resource_name,
+        stream_source_info: &file_name,
+        declared_type: &declared_type,
+        stream_size,
+        doc: &doc,
+    };
+    let file = if as_text {
+        render.text()
+    } else {
+        render.xhtml()
+    };
+    // Solr renders `file_metadata` as a flat NamedList: `[key, [values], ...]`,
+    // which is what every captured extract shows and what `json.nl=flat`
+    // (the default) means for this writer.
+    let mut metadata: Vec<Value> = Vec::new();
+    for (key, values) in render.file_metadata() {
+        metadata.push(Value::String(key));
+        metadata.push(Value::Array(
+            values.into_iter().map(Value::String).collect(),
+        ));
+    }
+
+    let mut body = Map::new();
+    if !params.omit_header() {
+        body.insert(
+            "responseHeader".to_string(),
+            json!({"status": 0, "QTime": 0}),
+        );
+    }
+    body.insert("file".to_string(), Value::String(file));
+    body.insert("file_metadata".to_string(), Value::Array(metadata));
+    Ok(axum::Json(Value::Object(body)).into_response())
 }
 
 /// Maps a `CoreIndex::parse_query` failure to the right `WfError` shape:
