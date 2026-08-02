@@ -190,7 +190,7 @@ async fn extraction_runtime_rejects_the_n_plus_first_concurrent_extraction() {
         let runtime = runtime.clone();
         tokio::spawn(async move {
             runtime
-                .spawn_extraction(|| {
+                .spawn_extraction(Duration::from_secs(5), || {
                     std::thread::sleep(Duration::from_millis(50));
                     "a"
                 })
@@ -201,7 +201,7 @@ async fn extraction_runtime_rejects_the_n_plus_first_concurrent_extraction() {
         let runtime = runtime.clone();
         tokio::spawn(async move {
             runtime
-                .spawn_extraction(|| {
+                .spawn_extraction(Duration::from_secs(5), || {
                     std::thread::sleep(Duration::from_millis(50));
                     "b"
                 })
@@ -212,7 +212,9 @@ async fn extraction_runtime_rejects_the_n_plus_first_concurrent_extraction() {
     // slots before the third is attempted.
     tokio::time::sleep(Duration::from_millis(10)).await;
 
-    let third = runtime.spawn_extraction(|| "c").await;
+    let third = runtime
+        .spawn_extraction(Duration::from_secs(5), || "c")
+        .await;
 
     assert!(
         matches!(third, Err(ExtractError::TooBusy)),
@@ -246,15 +248,21 @@ async fn extraction_runtime_returns_every_slot_once_the_extractions_complete() {
     let runtime = std::sync::Arc::new(wayfinder::extract::ExtractionRuntime::new(&limits));
 
     // Fill the pool, then drain it.
-    let first = runtime.spawn_extraction(|| "a").await;
-    let second = runtime.spawn_extraction(|| "b").await;
+    let first = runtime
+        .spawn_extraction(Duration::from_secs(5), || "a")
+        .await;
+    let second = runtime
+        .spawn_extraction(Duration::from_secs(5), || "b")
+        .await;
     assert_eq!(first.ok(), Some("a"));
     assert_eq!(second.ok(), Some("b"));
 
     // Every slot must be free again: `max_concurrency` fresh extractions in
     // a row, each of which would be `TooBusy` if a permit had leaked.
     for round in 0..limits.max_concurrency {
-        let again = runtime.spawn_extraction(|| "c").await;
+        let again = runtime
+            .spawn_extraction(Duration::from_secs(5), || "c")
+            .await;
         assert_eq!(
             again.as_ref().ok(),
             Some(&"c"),
@@ -275,7 +283,7 @@ async fn extraction_runtime_contains_a_panicking_parser_and_keeps_the_pool_at_fu
     let runtime = std::sync::Arc::new(wayfinder::extract::ExtractionRuntime::new(&limits));
 
     let panicked = runtime
-        .spawn_extraction(|| panic!("parser exploded"))
+        .spawn_extraction(Duration::from_secs(5), || panic!("parser exploded"))
         .await
         .map(|(): ()| ());
     assert!(
@@ -285,7 +293,9 @@ async fn extraction_runtime_contains_a_panicking_parser_and_keeps_the_pool_at_fu
     );
 
     for round in 0..limits.max_concurrency {
-        let after = runtime.spawn_extraction(|| "ok").await;
+        let after = runtime
+            .spawn_extraction(Duration::from_secs(5), || "ok")
+            .await;
         assert_eq!(
             after.as_ref().ok(),
             Some(&"ok"),
@@ -308,7 +318,7 @@ async fn extraction_runs_on_a_dedicated_named_thread_not_the_shared_tokio_blocki
     let runtime = wayfinder::extract::ExtractionRuntime::new(&limits);
 
     let name = runtime
-        .spawn_extraction(|| {
+        .spawn_extraction(Duration::from_secs(5), || {
             std::thread::current()
                 .name()
                 .map(str::to_string)
@@ -989,5 +999,480 @@ async fn extract_error_parse_maps_to_the_corrupt_pdf_envelope_shape() {
     assert!(
         !metadata.is_empty(),
         "error.metadata must be non-empty, matching the fixture's shape"
+    );
+}
+
+// =======================================================================
+// #257 follow-up: extraction hardening (security pass 3)
+// =======================================================================
+//
+// New guards pinned below, one block per spec item (A-F). None of the
+// tests above are touched except the mechanical `spawn_extraction` call
+// sites updated for item C's new `deadline` parameter (search this file's
+// diff for `Duration::from_secs(5)` inserted immediately after
+// `spawn_extraction(`) — their assertions are unchanged.
+
+// ---------------------------------------------------------------------
+// Item A — ZIP budget: the 0/0 declared-metadata bypass
+// ---------------------------------------------------------------------
+
+#[test]
+fn zip_budget_charges_actual_bytes_against_the_per_entry_limit_despite_zero_declared_metadata() {
+    let mut limits = permissive_limits();
+    limits.zip_max_entries = 4096;
+    limits.zip_max_entry_bytes = 1_000_000; // 1 MB actual per-entry limit
+    limits.zip_max_cumulative_bytes = 1_000_000_000_000; // generous: isolates the per-entry guard
+    let mut zip = ZipBudget::new(limits);
+
+    // 4096 entries, all declaring compressed_size == 0, uncompressed_size ==
+    // 0 -- exactly what a data-descriptor entry (general-purpose bit 3), or
+    // a forged central directory, declares. Cheap: metadata structs, never
+    // a real archive. Every one passes `admit()`, because the declared-size
+    // check and the ratio check are both guarded by `uncompressed_size > 0`
+    // and skip entirely for a 0/0 entry -- that is the bypass this guard
+    // closes at the actual-bytes layer, not at `admit()`.
+    for i in 0..4095 {
+        let name = format!("entry{i}.bin");
+        let entry = ZipEntryMeta {
+            name: &name,
+            compressed_size: 0,
+            uncompressed_size: 0,
+        };
+        zip.admit(&entry).unwrap_or_else(|e| {
+            panic!("entry {i}: a 0/0-declared entry must pass the declared-metadata pre-filter, got {e:?}")
+        });
+        // Modest real decompressed output for this entry, comfortably under
+        // the 1 MB per-entry actual limit.
+        zip.charge_actual(1000).unwrap_or_else(|e| {
+            panic!("entry {i}: charging 1000 actual bytes must stay under zip_max_entry_bytes, got {e:?}")
+        });
+    }
+    assert_eq!(
+        zip.cumulative_uncompressed(),
+        0,
+        "declared metadata must contribute nothing for a 0/0-declared entry, even after 4095 of \
+         them were admitted"
+    );
+
+    // The 4096th entry: still declares 0/0 and is still admitted by the
+    // pre-filter, but its real deflate stream expands to 2 MB -- over the 1
+    // MB per-entry actual limit. This must be stopped, regardless of what
+    // it declared.
+    let last_name = "entry4095.bin";
+    let last_entry = ZipEntryMeta {
+        name: last_name,
+        compressed_size: 0,
+        uncompressed_size: 0,
+    };
+    zip.admit(&last_entry)
+        .expect("the 4096th 0/0-declared entry must also pass the declared-metadata pre-filter");
+    let result = zip.charge_actual(2_000_000);
+    assert!(
+        matches!(
+            result,
+            Err(ExtractError::ZipBudget(ZipViolation::EntryTooLarge))
+        ),
+        "2,000,000 actual decompressed bytes over a zip_max_entry_bytes of 1,000,000 must fail \
+         as ZipBudget(EntryTooLarge) even though the entry declared uncompressed_size: 0, \
+         got {result:?}"
+    );
+}
+
+#[test]
+fn zip_budget_charges_actual_bytes_against_the_cumulative_limit_despite_zero_declared_metadata() {
+    let mut limits = permissive_limits();
+    limits.zip_max_entries = 100;
+    limits.zip_max_entry_bytes = 10_000_000; // generous: isolates the cumulative guard
+    limits.zip_max_cumulative_bytes = 5_000_000;
+    let mut zip = ZipBudget::new(limits);
+
+    // Five entries, each declaring 0/0 and each actually expanding to
+    // 1,000,000 bytes -- individually well under the 10 MB per-entry limit,
+    // but five of them exactly fill the 5,000,000-byte cumulative limit.
+    for i in 0..5 {
+        let name = format!("part{i}.bin");
+        let entry = ZipEntryMeta {
+            name: &name,
+            compressed_size: 0,
+            uncompressed_size: 0,
+        };
+        zip.admit(&entry).unwrap_or_else(|e| {
+            panic!("entry {i}: a 0/0-declared entry must be admitted, got {e:?}")
+        });
+        zip.charge_actual(1_000_000).unwrap_or_else(|e| {
+            panic!(
+                "entry {i}: charging up to the cumulative actual limit of 5,000,000 must \
+                 succeed, got {e:?}"
+            )
+        });
+    }
+
+    // A 6th entry, also declaring 0/0, whose actual bytes take the running
+    // cumulative actual total to 6,000,000 -- over the 5,000,000 limit.
+    let sixth = ZipEntryMeta {
+        name: "part5.bin",
+        compressed_size: 0,
+        uncompressed_size: 0,
+    };
+    zip.admit(&sixth)
+        .expect("the 6th 0/0-declared entry must also pass the declared-metadata pre-filter");
+    let result = zip.charge_actual(1_000_000);
+    assert!(
+        matches!(
+            result,
+            Err(ExtractError::ZipBudget(ZipViolation::CumulativeTooLarge))
+        ),
+        "actual decompressed bytes taking the cumulative running total to 6,000,000 (over a \
+         zip_max_cumulative_bytes of 5,000,000) must fail as ZipBudget(CumulativeTooLarge), \
+         even though every entry declared uncompressed_size: 0, got {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Item B — ZIP entry count vs a skip-and-continue walker
+// ---------------------------------------------------------------------
+
+#[test]
+fn zip_budget_entry_count_terminates_a_skip_and_continue_walker_even_when_every_entry_is_rejected()
+{
+    let mut limits = permissive_limits();
+    limits.zip_max_entries = 5;
+    let mut zip = ZipBudget::new(limits);
+
+    // An archive of nothing but `..\evil`-shaped entries: every single
+    // attempt fails path validation. A walker that skips a rejected entry
+    // and keeps going must still be stopped by the entry-count guard -- if
+    // `entries_seen` only ever advances on a successful admission (as it did
+    // before this fix), this loop has no bound at all.
+    let mut results = Vec::new();
+    for _ in 0..=limits.zip_max_entries {
+        let entry = ZipEntryMeta {
+            name: "..\\evil",
+            compressed_size: 10,
+            uncompressed_size: 10,
+        };
+        results.push(zip.admit(&entry));
+    }
+
+    for (i, result) in results.iter().take(limits.zip_max_entries).enumerate() {
+        assert!(
+            matches!(
+                result,
+                Err(ExtractError::ZipBudget(ZipViolation::InvalidPath))
+            ),
+            "attempt {i}, within zip_max_entries, must still fail on its own merits as \
+             InvalidPath, got {result:?}"
+        );
+    }
+    let last = results.last().expect("at least one attempt was made");
+    assert!(
+        matches!(
+            last,
+            Err(ExtractError::ZipBudget(ZipViolation::TooManyEntries))
+        ),
+        "the attempt one past zip_max_entries must terminate the walk as TooManyEntries instead \
+         of looping forever on a walker that skips every rejected entry and keeps going -- \
+         `entries_seen` (or an equivalent attempted-entry count) must advance even for a \
+         rejected entry, got {last:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Item C — a wedged parser must not pin its caller forever
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn spawn_extraction_times_out_a_job_that_never_returns_while_the_slot_stays_occupied() {
+    let mut limits = permissive_limits();
+    limits.max_concurrency = 1;
+    let runtime = wayfinder::extract::ExtractionRuntime::new(&limits);
+
+    // A deterministic hang, not a sleep or a busy loop: `thread::park()` in
+    // a loop blocks the worker thread forever (a spurious wakeup just parks
+    // again), matching the "opaque parser that never returns" case the spec
+    // names (PDF is the real-world instance). Unlike a channel-based hang,
+    // this has no dependency on any value's drop order back in this test
+    // function, which matters once the test itself is expected to panic
+    // below: nothing here can be inadvertently dropped/closed by that
+    // unwind and let the job return early.
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        runtime.spawn_extraction(Duration::from_millis(50), move || -> () {
+            loop {
+                std::thread::park();
+            }
+        }),
+    )
+    .await
+    .expect(
+        "spawn_extraction itself must resolve with a timeout error once its baked-in deadline \
+         (plus grace) elapses -- it must not pend forever waiting on a wedged parser that never \
+         sends and never drops its OneshotTx",
+    );
+
+    assert!(
+        matches!(result, Err(ExtractError::DeadlineExceeded)),
+        "a job that never returns must yield a timeout error to the caller, got {result:?}"
+    );
+
+    // Second half of the claim, and the whole point of the split: the pool
+    // slot the wedged job is holding must NOT have been freed by the
+    // caller's timeout. The permit is released only on the worker thread
+    // when/if the job actually returns; the future timing out changes
+    // nothing about the still-blocked worker. With max_concurrency == 1,
+    // a fresh extraction attempted right after must find the pool full.
+    let second = runtime
+        .spawn_extraction(Duration::from_secs(5), || "ok")
+        .await;
+    assert!(
+        matches!(second, Err(ExtractError::TooBusy)),
+        "the pool slot occupied by the wedged job must remain unavailable after the caller's \
+         timeout fired -- only the future timed out, not the worker thread -- got {second:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Item E — the budget must be unforgeable through its public API
+// ---------------------------------------------------------------------
+//
+// A true "cannot be reassigned" proof is a compile-time property (a shared
+// reference cannot assign to a field), which this crate has no compile-fail
+// test harness (e.g. trybuild) to assert directly, and the task spec rules
+// out adding one ("no new dependencies"). What is asserted here instead,
+// as the best runtime-observable proxy: the *only* surface `Budget` now
+// exposes for driving a structural counter is these delegating methods, and
+// that surface enforces the exact same limits `BoundedCounter` always did,
+// with no reset or bypass reachable through it -- including under
+// repeated hostile hammering on an already-tripped counter.
+
+#[test]
+fn budget_xml_depth_delegating_methods_enforce_the_limit_and_cannot_be_worn_down_past_it() {
+    let limits = ExtractLimits {
+        max_xml_depth: 3,
+        ..permissive_limits()
+    };
+    let budget = Budget::new(limits);
+
+    for depth in 0..3 {
+        budget.enter_xml_element().unwrap_or_else(|e| {
+            panic!("depth {depth}: entering up to the limit must succeed, got {e:?}")
+        });
+    }
+    let over = budget.enter_xml_element();
+    assert!(
+        matches!(
+            over,
+            Err(ExtractError::StructuralLimit(StructuralLimitKind::XmlDepth))
+        ),
+        "the 4th enter_xml_element() over a max_xml_depth of 3 must fail naming XmlDepth, \
+         got {over:?}"
+    );
+
+    // A hostile extractor restricted to this public API cannot wear the
+    // limit down, force a silent reset, or otherwise bypass it by simply
+    // hammering the same call: every subsequent call must keep failing
+    // identically.
+    for attempt in 0..1000 {
+        let repeat = budget.enter_xml_element();
+        assert!(
+            matches!(
+                repeat,
+                Err(ExtractError::StructuralLimit(StructuralLimitKind::XmlDepth))
+            ),
+            "attempt {attempt}: a hostile extractor hammering enter_xml_element() through the \
+             public API alone must never succeed in raising the limit or resetting the count, \
+             got {repeat:?}"
+        );
+    }
+
+    // Leaving is the legitimate way to free capacity, and must still work
+    // after the hammering above -- proving the limit is genuinely
+    // depth-based (decrementable through the sanctioned method), not a
+    // one-shot lockout that leave_xml_element() also can't recover from.
+    budget.leave_xml_element();
+    let re_enter = budget.enter_xml_element();
+    assert!(
+        re_enter.is_ok(),
+        "leave_xml_element() must free one level of depth, allowing a legitimate re-entry, \
+         got {re_enter:?}"
+    );
+}
+
+#[test]
+fn budget_cumulative_counters_only_increase_through_their_delegating_methods() {
+    let limits = ExtractLimits {
+        max_xml_events: 3,
+        max_sheets: 3,
+        max_cells: 3,
+        max_pdf_pages: 3,
+        ..permissive_limits()
+    };
+    let budget = Budget::new(limits);
+
+    // Each of the four cumulative counters (xml_events, sheets, cells,
+    // pdf_pages) shares the same shape: no leave()/decrement counterpart at
+    // all is exposed for them, so once tripped, repeated calls through the
+    // only available method must keep failing -- there is no way to wear
+    // the count back down or reset it via the public API.
+    for _ in 0..3 {
+        budget
+            .count_xml_event()
+            .expect("counting up to max_xml_events must succeed");
+    }
+    for attempt in 0..50 {
+        let result = budget.count_xml_event();
+        assert!(
+            matches!(
+                result,
+                Err(ExtractError::StructuralLimit(
+                    StructuralLimitKind::XmlEvents
+                ))
+            ),
+            "attempt {attempt}: count_xml_event() past the limit must keep failing as \
+             XmlEvents on every repeated call, with no reset reachable through the public API, \
+             got {result:?}"
+        );
+    }
+
+    for _ in 0..3 {
+        budget
+            .count_sheet()
+            .expect("counting up to max_sheets must succeed");
+    }
+    let sheets_over = budget.count_sheet();
+    assert!(
+        matches!(
+            sheets_over,
+            Err(ExtractError::StructuralLimit(StructuralLimitKind::Sheets))
+        ),
+        "got {sheets_over:?}"
+    );
+
+    for _ in 0..3 {
+        budget
+            .count_cell()
+            .expect("counting up to max_cells must succeed");
+    }
+    let cells_over = budget.count_cell();
+    assert!(
+        matches!(
+            cells_over,
+            Err(ExtractError::StructuralLimit(StructuralLimitKind::Cells))
+        ),
+        "got {cells_over:?}"
+    );
+
+    for _ in 0..3 {
+        budget
+            .count_pdf_page()
+            .expect("counting up to max_pdf_pages must succeed");
+    }
+    let pages_over = budget.count_pdf_page();
+    assert!(
+        matches!(
+            pages_over,
+            Err(ExtractError::StructuralLimit(StructuralLimitKind::PdfPages))
+        ),
+        "got {pages_over:?}"
+    );
+}
+
+#[test]
+fn budget_rtf_group_depth_delegating_methods_round_trip_like_xml_depth() {
+    let limits = ExtractLimits {
+        max_rtf_group_depth: 2,
+        ..permissive_limits()
+    };
+    let budget = Budget::new(limits);
+
+    budget
+        .enter_rtf_group()
+        .expect("entering up to the limit must succeed");
+    budget
+        .enter_rtf_group()
+        .expect("entering up to the limit must succeed");
+    let over = budget.enter_rtf_group();
+    assert!(
+        matches!(
+            over,
+            Err(ExtractError::StructuralLimit(
+                StructuralLimitKind::RtfGroupDepth
+            ))
+        ),
+        "the 3rd enter_rtf_group() over a max_rtf_group_depth of 2 must fail naming \
+         RtfGroupDepth, got {over:?}"
+    );
+
+    budget.leave_rtf_group();
+    let re_enter = budget.enter_rtf_group();
+    assert!(
+        re_enter.is_ok(),
+        "leave_rtf_group() must free one level of nesting, allowing a legitimate re-entry, \
+         got {re_enter:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Item F — XHTML dispatch: signature-first, but Html beats bare Xml
+// ---------------------------------------------------------------------
+
+#[test]
+fn detect_prefers_html_for_xhtml_with_an_xml_declaration_declared_as_text_html() {
+    // The headline bug case named in the spec: an XHTML document served as
+    // text/html, opening with an XML declaration. The `<?xml` signature
+    // must not outrank the fact that this is really HTML the phase-1 HTML
+    // extractor needs to see.
+    let bytes = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                  <html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>t</title></head>\
+                  <body><p>hi</p></body></html>";
+    let got = detect(Some("text/html"), "page.xhtml", bytes);
+    assert_eq!(
+        got,
+        ContentType::Html,
+        "XHTML declared text/html, with an XML declaration and an <html> root, must detect as \
+         Html, not Xml -- otherwise it is silently unavailable to the HTML extractor"
+    );
+}
+
+#[test]
+fn detect_prefers_html_for_xhtml_with_an_xml_declaration_and_no_declared_type() {
+    let bytes = b"<?xml version=\"1.0\"?>\n\
+                  <html xmlns=\"http://www.w3.org/1999/xhtml\"><body>hi</body></html>";
+    let got = detect(None, "page.xhtml", bytes);
+    assert_eq!(
+        got,
+        ContentType::Html,
+        "XHTML with an XML declaration and an <html> root must detect as Html even with no \
+         declared type at all, got {got:?}"
+    );
+}
+
+#[test]
+fn detect_prefers_html_for_xhtml_without_an_xml_declaration() {
+    // No `<?xml` prologue at all -- valid XHTML, since the declaration is
+    // optional. A misleading declared type (text/plain) and an unhelpful
+    // extension prove this is genuinely content-sniffed as Html, not merely
+    // falling through to a coincidentally-correct declared type.
+    let bytes = b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><head></head>\
+                  <body><p>hi</p></body></html>";
+    let got = detect(Some("text/plain"), "mystery", bytes);
+    assert_eq!(
+        got,
+        ContentType::Html,
+        "XHTML with no XML declaration, opening directly with an <html> root, must still \
+         detect as Html despite a misleading declared type and extension, got {got:?}"
+    );
+}
+
+#[test]
+fn detect_still_recognizes_a_plain_non_html_xml_document_as_xml() {
+    // The non-regression check: the Html-preference fix must not swallow
+    // ordinary XML that has no <html> root at all.
+    let bytes = b"<?xml version=\"1.0\"?>\n<catalog><item id=\"1\"/></catalog>";
+    let got = detect(None, "catalog.xml", bytes);
+    assert_eq!(
+        got,
+        ContentType::Xml,
+        "a plain non-HTML XML document must still detect as Xml, got {got:?}"
     );
 }

@@ -634,6 +634,63 @@ impl Budget {
     pub fn output_scalars(&self) -> usize {
         self.output_scalars
     }
+
+    // -- #257 follow-up item E: delegating methods on `&self` -----------
+    //
+    // Stubs only (`todo!()`): the test-writer stage adds the minimal public
+    // signatures a hostile-extractor test needs to compile against, per the
+    // task spec ("delegating methods on `Budget` ... enforced by which
+    // methods exist rather than by a doc comment"). The implementor stage
+    // gives these real bodies (interior mutability, `Cell`-backed counters)
+    // and decides whether the six `BoundedCounter` fields become private and
+    // whether `Extractor` moves to `&Budget` — neither of those is done here.
+
+    /// Enters one level of XML element nesting, failing once
+    /// `max_xml_depth` would be exceeded.
+    pub fn enter_xml_element(&self) -> Result<(), ExtractError> {
+        todo!("item E: delegate to xml_depth.increment via interior mutability")
+    }
+
+    /// Leaves one level of XML element nesting. Saturating, like
+    /// `BoundedCounter::decrement`.
+    pub fn leave_xml_element(&self) {
+        todo!("item E: delegate to xml_depth.decrement via interior mutability")
+    }
+
+    /// Counts one XML parser event, failing once `max_xml_events` would be
+    /// exceeded. No decrementing counterpart: this bounds total work, not
+    /// nesting.
+    pub fn count_xml_event(&self) -> Result<(), ExtractError> {
+        todo!("item E: delegate to xml_events.increment via interior mutability")
+    }
+
+    /// Counts one spreadsheet sheet, failing once `max_sheets` would be
+    /// exceeded.
+    pub fn count_sheet(&self) -> Result<(), ExtractError> {
+        todo!("item E: delegate to sheets.increment via interior mutability")
+    }
+
+    /// Counts one spreadsheet cell, failing once `max_cells` would be
+    /// exceeded.
+    pub fn count_cell(&self) -> Result<(), ExtractError> {
+        todo!("item E: delegate to cells.increment via interior mutability")
+    }
+
+    /// Enters one level of RTF group nesting, failing once
+    /// `max_rtf_group_depth` would be exceeded.
+    pub fn enter_rtf_group(&self) -> Result<(), ExtractError> {
+        todo!("item E: delegate to rtf_group_depth.increment via interior mutability")
+    }
+
+    /// Leaves one level of RTF group nesting. Saturating.
+    pub fn leave_rtf_group(&self) {
+        todo!("item E: delegate to rtf_group_depth.decrement via interior mutability")
+    }
+
+    /// Counts one PDF page, failing once `max_pdf_pages` would be exceeded.
+    pub fn count_pdf_page(&self) -> Result<(), ExtractError> {
+        todo!("item E: delegate to pdf_pages.increment via interior mutability")
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -769,7 +826,22 @@ impl ExtractionRuntime {
     /// free; otherwise `Err(ExtractError::TooBusy)` immediately. The slot is
     /// held for the whole duration of `f` and released on the worker thread,
     /// so it reflects real in-flight work rather than pending futures.
-    pub async fn spawn_extraction<F, T>(&self, f: F) -> Result<T, ExtractError>
+    ///
+    /// #257 follow-up item C: `deadline` is the baked-in timeout — the
+    /// caller cannot forget it, unlike a `tokio::time::timeout` wrapped
+    /// around the call site by convention. On expiry (deadline plus a small
+    /// internal grace margin) this must resolve with a timeout error to the
+    /// caller *without* freeing the pool slot: the permit is released only
+    /// by the worker thread when/if the job actually returns, so a job that
+    /// never returns leaves the slot burnt, which is the documented residual
+    /// risk, not a hung request.
+    ///
+    /// Stub only (`todo!()` via the ignored parameter): the test-writer
+    /// stage adds the minimal signature the timeout test needs to compile
+    /// against, without implementing the race against `rx.await`. The
+    /// existing behavior (no timeout) is otherwise unchanged, so every
+    /// pre-existing test above still passes with a generous `deadline`.
+    pub async fn spawn_extraction<F, T>(&self, _deadline: Duration, f: F) -> Result<T, ExtractError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
@@ -1052,6 +1124,27 @@ impl ZipBudget {
         self.entries_seen += 1;
         self.cumulative_uncompressed = cumulative;
         Ok(())
+    }
+
+    /// #257 follow-up item A: charges `bytes` of *actual* decompressed
+    /// output read for the entry most recently admitted by `admit()`,
+    /// enforcing both `zip_max_entry_bytes` and `zip_max_cumulative_bytes`
+    /// against real bytes rather than declared metadata. A caller is
+    /// expected to call this repeatedly (once per decompressed chunk) for
+    /// the entry it just admitted, and to call `admit()` again before
+    /// moving on to the next entry — that call is what resets the
+    /// per-entry actual running total.
+    ///
+    /// Stub only (`todo!()`): the test-writer stage adds the minimal public
+    /// signature the zero-declared-entry tests need to compile against. The
+    /// implementor stage gives it a real body (an internal per-entry actual
+    /// counter alongside `cumulative_uncompressed`) and honest doc comments
+    /// on `admit()` about being a pre-filter only.
+    pub fn charge_actual(&mut self, bytes: u64) -> Result<(), ExtractError> {
+        todo!(
+            "item A: enforce zip_max_entry_bytes and zip_max_cumulative_bytes against {bytes} \
+             actual decompressed bytes, independent of declared metadata"
+        )
     }
 }
 
