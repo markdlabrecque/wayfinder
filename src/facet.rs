@@ -1099,6 +1099,12 @@ fast = true
             .expect("the plan phase must succeed with zero committed segments");
         assert_eq!(plan.fields.len(), 1);
         assert_eq!(plan.fields[0].label, "category");
+        // `column` and `kind` are the two resolutions the render phase
+        // actually consumes (the aggregated Tantivy column, and the bucket-key
+        // rendering rule), so a plan that "succeeded" without resolving them
+        // would satisfy the label assertion alone while being useless.
+        assert_eq!(plan.fields[0].column, "category");
+        assert_eq!(plan.fields[0].kind, Some(ValueKind::Text));
     }
 
     /// The `TermsAggregation` the plan phase builds must be the exact shape

@@ -2193,6 +2193,21 @@ impl CoreIndex {
     /// The bucket limit is sized to the whole fused request
     /// (`fused_bucket_limit`), because Tantivy's is a *per-request* budget
     /// summed across every top-level aggregation, not a per-aggregation one.
+    ///
+    /// ponytail: `fused_bucket_limit`'s `n * MAX_FACET_TERMS` is the right
+    /// budget only while every aggregation handed in is a
+    /// [`terms_aggregation`] — `size == MAX_FACET_TERMS`, no sub-aggregations
+    /// — which is exactly what `facet::plan_facet_fields` builds and all this
+    /// method has any caller for today. It is `pub` and takes arbitrary
+    /// `Aggregations` though, and the equivalence breaks for anything else: a
+    /// sub-aggregation makes one entry's `get_bucket_count` `1 +
+    /// sub.get_bucket_count()` *per bucket*
+    /// (`agg_result.rs`/`intermediate_agg_result.rs`), far past its own
+    /// `size`, so N such aggregations would blow a budget of `N *
+    /// MAX_FACET_TERMS` while each was individually within its old per-pass
+    /// headroom. Revisit this sizing (sum each agg's own worst-case bucket
+    /// count instead of assuming a flat `size`) before fusing in any
+    /// aggregation that is not a flat terms agg.
     pub fn search_top_with_aggs(
         &self,
         query: &dyn Query,
@@ -2202,14 +2217,23 @@ impl CoreIndex {
         aggs: Aggregations,
     ) -> Result<(TopOutcome, AggregationResults)> {
         let searcher = self.reader.searcher();
-        // The memory budget is deliberately *not* scaled the same way. It
-        // guards peak process memory, and the unfused path's per-pass budgets
-        // were sequential: one 500MB ceiling at a time, exactly what one
-        // shared 500MB ceiling over a single fused pass still enforces.
-        // Multiplying it by the field count would turn a fixed server
-        // ceiling into an unbounded, request-controlled one. A fused request
-        // that does trip it falls back to the unfused path in `select`, which
-        // reproduces the old per-pass behaviour and envelope exactly.
+        // The memory budget is deliberately *not* scaled the same way, and
+        // that is a real (accepted) behaviour change, not a no-op: the unfused
+        // path ran one pass at a time and dropped each guard before the next,
+        // so its peak was `max_i(mem_i)`, while the fused pass holds every
+        // aggregation's segment collectors at once and charges them to one
+        // counter, making the peak `sum_i(mem_i)`. Three facet fields at 200MB
+        // each passed before and trip the 500MB ceiling now.
+        //
+        // Scaling the ceiling by the field count is still the wrong fix: it
+        // guards actual process memory, so multiplying it turns a fixed server
+        // ceiling into an unbounded, request-controlled one — the fused pass
+        // really would be holding N * 500MB. The divergence is handled at the
+        // other end instead: `select` recognises the aggregation-class error
+        // (`is_aggregation_error`) and re-runs the request unfused, where the
+        // sequential per-pass budgets apply exactly as they always did and the
+        // response — status, error class, envelope, or a 200 with real counts
+        // — is whatever the old path would have produced.
         let limits = AggregationLimitsGuard::new(None, Some(fused_bucket_limit(aggs.len())));
         let collectors = (
             TopScoredHits::new(sort.to_vec(), limit),
@@ -4748,12 +4772,20 @@ fast = true
     ///
     /// Asserted as a function of the aggregation count rather than by
     /// building 65001 real buckets, which would not stay hermetic or fast.
-    /// That leaves one gap -- this cannot see whether `search_top_with_aggs`
-    /// still *calls* it, since Tantivy's `get_bucket_limit` is crate-private
-    /// to Tantivy. The tripwire for that is `-D warnings`: `fused_bucket_limit`
-    /// has exactly one production caller, so reverting that call site to
-    /// `AggregationLimitsGuard::default()` fails CI's own clippy line with
+    /// That leaves a gap this test cannot close on its own: it never observes
+    /// the limit `search_top_with_aggs` actually constructs, since Tantivy's
+    /// `get_bucket_limit` is crate-private to Tantivy. `-D warnings` catches
+    /// only the crudest regression -- `fused_bucket_limit` has exactly one
+    /// production caller, so *deleting* that call (reverting to
+    /// `AggregationLimitsGuard::default()`) fails CI's clippy line with
     /// `function `fused_bucket_limit` is never used` (verified by doing it).
+    /// It does **not** catch the more likely regression: hardcoding
+    /// `fused_bucket_limit(1)` at the call site keeps the function "used",
+    /// keeps every assertion here green, and silently reinstates the round-1
+    /// bug for two or more facet fields. What actually closes that is the
+    /// end-to-end
+    /// `two_facet_fields_over_a_dictionary_larger_than_one_fields_budget`
+    /// below, which fails on both mutations.
     #[test]
     fn the_fused_bucket_limit_scales_with_the_number_of_aggregations() {
         assert_eq!(
