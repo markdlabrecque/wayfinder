@@ -75,7 +75,7 @@ pub fn render_markdown_table(results: &BenchmarkResults) -> String {
     const COLD_LATENCY_PATH: &str = "Solr: HTTP to the Docker container's published port, after a core RELOAD flushed Solr's caches. Wayfinder: HTTP to the native process's bound port. Every query in this pass is distinct.";
     const IMAGE_PATH: &str =
         "Both: Docker image size (`docker inspect`), not a running-container measurement.";
-    const INDEX_PATH: &str = "Solr: size inside the Docker container's data volume (`docker exec du`). Wayfinder: size of the native process's data directory on the host (`du`).";
+    const INDEX_PATH: &str = "Solr: Lucene `data/index` directory inside the Docker container (`docker exec du`); excludes tlog. Wayfinder: Tantivy/native data directory on the host (`du`), including tiny Wayfinder schema/analyzer metadata.";
 
     let mut out = String::new();
     out.push_str(

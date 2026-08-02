@@ -401,7 +401,7 @@ assert_cache_pass_behavior warm \
   $(( SOLR_WARM_LOOKUPS_AFTER - SOLR_WARM_LOOKUPS_BEFORE )) \
   "$N_QUERIES"
 
-SOLR_INDEX_KB=$(docker exec "$SOLR_CONTAINER" du -sk "/var/solr/data/$SOLR_CORE/data" | awk '{print $1}')
+SOLR_INDEX_KB=$(docker exec "$SOLR_CONTAINER" du -sk "/var/solr/data/$SOLR_CORE/data/index" | awk '{print $1}')
 SOLR_INDEX_MB=$(awk -v k="$SOLR_INDEX_KB" 'BEGIN { printf "%.2f", k / 1024 }')
 
 SOLR_IMAGE_BYTES="$(docker inspect --format='{{.Size}}' solr:9)"
