@@ -2133,9 +2133,13 @@ contains `quack`/`garden`. The self-contained setup is appended to `solr-ref/cap
      `[name, value, name, value, ...]` array by default and a map only under `json.nl=map`, so a
      parser must pick one and cannot straddle both. Note also that `admin/metrics` is
      server-level, not core-relative: the core appears as a registry key `solr.core.<core>`
-     inside `metrics`. The queryResultCache counters are fully qualified as
-     `CACHE.searcher.queryResultCache.{lookups,hits,inserts,hitratio,size}` -- the `.searcher`
-     scope is part of the key.
+     inside `metrics`. Mind the shape difference between the two endpoints. Under
+     `admin/metrics` the counters are a **nested bean**: `metrics` -> `solr.core.<core>` ->
+     `CACHE.searcher.queryResultCache` -> `{lookups, hits, inserts, hitratio, size, ...}`.
+     Under `admin/mbeans` the same counters appear as **flat, fully-qualified string keys**
+     inside a bean's `stats` map, e.g. `CACHE.searcher.queryResultCache.hits`. Either way the
+     `.searcher` scope is part of the path -- an unscoped `CACHE.queryResultCache` matches
+     nothing.
 
      Both halves of this cost a full bad measurement round: a benchmark harness built to the
      unparameterised URL and the unscoped key aborted an hour into a 2M-document run.
