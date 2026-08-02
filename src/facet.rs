@@ -126,6 +126,39 @@ pub fn facet_counts(
     default_field: &str,
     base: &BaseClauses,
 ) -> Result<(Value, Vec<String>)> {
+    facet_counts_inner(index, config, params, default_field, base, None)
+}
+
+/// [`facet_counts`] with `facet.field` answered from the aggregation results
+/// the main `/select` pass already produced (issue #246), instead of from a
+/// second walk over the same doc set. Every other sub-object — `facet.query`,
+/// `facet.range` — keeps its own pass and its own error precedence, so the
+/// emitted block is byte-identical to [`facet_counts`]'s.
+pub fn facet_counts_fused(
+    index: &CoreIndex,
+    config: &ServerConfig,
+    params: &Params,
+    default_field: &str,
+    base: &BaseClauses,
+    fused: (
+        &FacetFieldsPlan,
+        &tantivy::aggregation::agg_result::AggregationResults,
+    ),
+) -> Result<(Value, Vec<String>)> {
+    facet_counts_inner(index, config, params, default_field, base, Some(fused))
+}
+
+fn facet_counts_inner(
+    index: &CoreIndex,
+    config: &ServerConfig,
+    params: &Params,
+    default_field: &str,
+    base: &BaseClauses,
+    fused: Option<(
+        &FacetFieldsPlan,
+        &tantivy::aggregation::agg_result::AggregationResults,
+    )>,
+) -> Result<(Value, Vec<String>)> {
     let nl = JsonNl::from_params(params);
 
     // Evaluation order is `facet.range` -> `facet.query` -> `facet.field`
@@ -136,10 +169,19 @@ pub fn facet_counts(
     // separate, order-sensitive contract (`tests/json_key_order.rs`) — so the
     // results are hoisted into bindings here, evaluated range-first, and only
     // placed into the `json!` object in the unchanged key order.
+    //
+    // `fused` carries issue #246's already-computed `facet.field` buckets when
+    // `select` was able to plan them before the main search; `None` is the
+    // unfused path, which runs `facet_fields`' own aggregation passes here.
     let facet_ranges = facet_ranges(index, params, base, nl)
         .map_err(|e| anyhow::Error::new(PreQueryFacetError(e)))?;
     let facet_queries = facet_queries(index, params, default_field, base)?;
-    let (facet_fields, warnings) = facet_fields(index, config, params, base, nl)?;
+    let (facet_fields, warnings) = match fused {
+        Some((plan, agg_results)) => {
+            render_facet_fields(index, config, params, base, plan, agg_results)?
+        }
+        None => facet_fields(index, config, params, base, nl)?,
+    };
     let mut counts = Map::new();
     counts.insert("facet_queries".to_string(), facet_queries);
     counts.insert("facet_fields".to_string(), facet_fields);
@@ -228,34 +270,98 @@ fn facet_fields(
     base: &BaseClauses,
     nl: JsonNl,
 ) -> Result<(Value, Vec<String>)> {
-    let fields = params.get_all("facet.field");
-    if fields.is_empty() {
+    let plan = plan_facet_fields(index, params)?;
+    if plan.fields.is_empty() {
         return Ok((json!({}), Vec::new()));
+    }
+
+    let base_query = BooleanQuery::from(
+        base.iter()
+            .map(|(occur, query)| (*occur, query.box_clone()))
+            .collect::<BaseClauses>(),
+    );
+
+    let shaping = BucketShaping::from_params(config, params);
+    let mut out = Map::new();
+    for field in &plan.fields {
+        let counts = index.term_facet(&field.column, field.kind, &base_query)?;
+        out.insert(
+            field.label.clone(),
+            shape_field(index, base, field, counts, &shaping, nl)?,
+        );
+    }
+    Ok((Value::Object(out), plan.warnings.clone()))
+}
+
+/// One `facet.field` value, resolved and validated (issue #246's plan phase).
+/// Everything here is decided purely from the request params and the schema —
+/// no query runs — so the caller can build the aggregation request *before*
+/// the main `/select` search and fuse the two into one pass.
+#[derive(Debug)]
+pub struct FacetFieldPlan {
+    /// The key this facet's buckets appear under in `facet_fields`, i.e. the
+    /// `{!key=...}` label if there is one, otherwise the field name.
+    pub label: String,
+    /// The field as written in the request, minus any local-params prefix —
+    /// what validation, the `f.<field>.facet.*` overrides and every error
+    /// message name. Carried on the plan (rather than dropped once `column`
+    /// is resolved) because it, not `column`, is the request-visible
+    /// identity of this facet: `column` may be a dynamic field's shared
+    /// catch-all path. Nothing in the render phase needs it yet — the
+    /// rendering rules are all column- and kind-driven — so it is currently
+    /// read only by `plan_facet_fields`' own tests.
+    #[allow(dead_code)]
+    pub field_name: String,
+    /// The Tantivy column actually aggregated over: `field_name` itself, or a
+    /// dynamic field's catch-all JSON path (issue #66).
+    pub column: String,
+    /// The schema-declared kind backing `column`, which decides the bucket
+    /// key rendering (`ValueKind::F64`'s Java `Double.toString`, dates).
+    pub kind: Option<ValueKind>,
+    /// This field's key inside the shared `Aggregations` map. Unique per
+    /// requested value, not per field: `facet.field=category&
+    /// facet.field={!key=other}category` is two aggregations over one column.
+    pub agg_name: String,
+    /// The effective `facet.missing` for this field, after the
+    /// `f.<field>.facet.missing` override.
+    pub missing: bool,
+}
+
+/// The whole `facet.field` request, planned: one entry per requested value,
+/// the single `Aggregations` map that computes all of them in one pass, and
+/// the `responseHeader.warnings` the plan itself earned.
+#[derive(Debug)]
+pub struct FacetFieldsPlan {
+    pub fields: Vec<FacetFieldPlan>,
+    pub aggregations: tantivy::aggregation::agg_req::Aggregations,
+    pub warnings: Vec<String>,
+}
+
+/// Plan/validate phase of `facet.field` (issue #246): resolves every requested
+/// value to its label, column and `ValueKind`, applies the collision and
+/// facetability checks, earns the Points-based `mincount` warning, and builds
+/// the terms aggregations — all without executing a single query, so `select`
+/// can attach the aggregations to the main search pass instead of paying for a
+/// second walk over the same doc set.
+///
+/// Every error this returns is one `facet_fields` itself would have returned,
+/// with the same wording: `select` discards a failed plan and falls back to
+/// the unfused path, which re-derives the identical error at its original
+/// point in the request lifecycle.
+pub fn plan_facet_fields(index: &CoreIndex, params: &Params) -> Result<FacetFieldsPlan> {
+    let values = params.get_all("facet.field");
+    if values.is_empty() {
+        return Ok(FacetFieldsPlan {
+            fields: Vec::new(),
+            aggregations: tantivy::aggregation::agg_req::Aggregations::default(),
+            warnings: Vec::new(),
+        });
     }
 
     let mincount: u64 = params
         .get("facet.mincount")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    let requested_limit: i64 = params
-        .get("facet.limit")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_FACET_LIMIT);
-    // `query.facet_limit_max` is a Wayfinder cap with no Solr equivalent, so
-    // (like `rows_limit`) an over-limit request is clamped rather than
-    // rejected, and `-1` means "as many as the server allows".
-    let limit = if requested_limit < 0 {
-        config.query.facet_limit_max
-    } else {
-        (requested_limit as usize).min(config.query.facet_limit_max)
-    };
-    // Solr's `facet.sort` default is `count` when the requested limit is
-    // positive and `index` otherwise.
-    let by_index = match params.get("facet.sort") {
-        Some("index") => true,
-        Some(_) => false,
-        None => requested_limit <= 0,
-    };
     // Issue #187: Solr's own boolean parsing, so `facet.missing=yes`/`on`/
     // `TRUE`/`truestuff` all count as on and `nope` is a 400. The `WfError`
     // is deliberately let out through this module's `anyhow` result rather
@@ -264,15 +370,10 @@ fn facet_fields(
     // query's `response` block (`bool_facet_missing_invalid.json`).
     let global_missing = params.bool_or("facet.missing", false)?;
 
-    let base_query = BooleanQuery::from(
-        base.iter()
-            .map(|(occur, query)| (*occur, query.box_clone()))
-            .collect::<BaseClauses>(),
-    );
-
-    let mut out = Map::new();
+    let mut fields: Vec<FacetFieldPlan> = Vec::new();
+    let mut aggregations = tantivy::aggregation::agg_req::Aggregations::default();
     let mut warnings = Vec::new();
-    for value in fields {
+    for (i, value) in values.into_iter().enumerate() {
         // The label reaches the response envelope; the field reaches
         // resolution, validation and every error message (issue #138).
         let (label, field_name) = split_facet_key(value);
@@ -280,7 +381,7 @@ fn facet_fields(
         // but serde_json's Map cannot represent them. Refuse before validating
         // or aggregating the second field rather than silently overwriting the
         // first; `facet.query` intentionally remains coalesced above.
-        if out.contains_key(&label) {
+        if fields.iter().any(|f| f.label == label) {
             bail!("colliding facet.field response label: {label}");
         }
         check_facetable(&index.wf_schema, field_name, true)?;
@@ -325,32 +426,145 @@ fn facet_fields(
             .per_field_bool(field_name, "facet.missing")?
             .unwrap_or(global_missing);
 
-        let mut counts = index.term_facet(&column, kind, &base_query)?;
-        counts.retain(|(_, _, count)| *count >= mincount);
-        if by_index {
-            counts.sort_by(|a, b| a.1.cmp(&b.1));
-        } else {
-            counts.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
-        }
-        counts.truncate(limit);
+        // Keyed by request position, not by field name: two `facet.field`
+        // values may legitimately name the same column under different
+        // `{!key=}` labels, and a name collision here would silently give
+        // them one shared bucket list.
+        let agg_name = format!("wf_facet_{i}");
+        aggregations.insert(
+            agg_name.clone(),
+            crate::core_index::terms_aggregation(&column),
+        );
 
-        let mut buckets: Vec<(Option<String>, u64)> = counts
-            .into_iter()
-            .map(|(term, _, count)| (Some(term), count))
-            .collect();
-        if missing {
-            // Solr emits the `null` bucket last and unconditionally — it is not
-            // subject to `facet.mincount` or `facet.limit`. Its count is the
-            // number of *hits* with no value in the field, read from the fast
-            // field column (`ExistsQuery`), never from stored values.
-            let has_value = ExistsQuery::new(column.clone(), false);
-            let absent = index.count(&narrowed(base, Occur::MustNot, Box::new(has_value)))?;
-            buckets.push((None, absent as u64));
-        }
-
-        out.insert(label, render_buckets(&buckets, nl));
+        fields.push(FacetFieldPlan {
+            label,
+            field_name: field_name.to_string(),
+            column,
+            kind,
+            agg_name,
+            missing,
+        });
     }
-    Ok((Value::Object(out), warnings))
+    Ok(FacetFieldsPlan {
+        fields,
+        aggregations,
+        warnings,
+    })
+}
+
+/// Render phase of `facet.field` (issue #246): takes the buckets the fused
+/// `/select` pass already computed and applies `facet.mincount` /
+/// `facet.sort` / `facet.limit` / `facet.missing` to them, producing exactly
+/// the `facet_fields` object — and the same warnings — the unfused
+/// `facet_fields` would have produced from its own separate passes.
+pub fn render_facet_fields(
+    index: &CoreIndex,
+    config: &ServerConfig,
+    params: &Params,
+    base: &BaseClauses,
+    plan: &FacetFieldsPlan,
+    agg_results: &tantivy::aggregation::agg_result::AggregationResults,
+) -> Result<(Value, Vec<String>)> {
+    if plan.fields.is_empty() {
+        return Ok((json!({}), Vec::new()));
+    }
+    let nl = JsonNl::from_params(params);
+    let shaping = BucketShaping::from_params(config, params);
+
+    let mut out = Map::new();
+    for field in &plan.fields {
+        let counts = crate::core_index::render_term_facet_buckets(
+            &field.column,
+            field.kind,
+            agg_results,
+            &field.agg_name,
+        )?;
+        out.insert(
+            field.label.clone(),
+            shape_field(index, base, field, counts, &shaping, nl)?,
+        );
+    }
+    Ok((Value::Object(out), plan.warnings.clone()))
+}
+
+/// The response-shaping half of `facet.field`: `facet.mincount`,
+/// `facet.limit` (clamped by `query.facet_limit_max`) and `facet.sort`. Read
+/// once per request and applied to every field, by both the fused and the
+/// unfused path.
+struct BucketShaping {
+    mincount: u64,
+    limit: usize,
+    by_index: bool,
+}
+
+impl BucketShaping {
+    fn from_params(config: &ServerConfig, params: &Params) -> BucketShaping {
+        let mincount: u64 = params
+            .get("facet.mincount")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let requested_limit: i64 = params
+            .get("facet.limit")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_FACET_LIMIT);
+        // `query.facet_limit_max` is a Wayfinder cap with no Solr equivalent,
+        // so (like `rows_limit`) an over-limit request is clamped rather than
+        // rejected, and `-1` means "as many as the server allows".
+        let limit = if requested_limit < 0 {
+            config.query.facet_limit_max
+        } else {
+            (requested_limit as usize).min(config.query.facet_limit_max)
+        };
+        // Solr's `facet.sort` default is `count` when the requested limit is
+        // positive and `index` otherwise.
+        let by_index = match params.get("facet.sort") {
+            Some("index") => true,
+            Some(_) => false,
+            None => requested_limit <= 0,
+        };
+        BucketShaping {
+            mincount,
+            limit,
+            by_index,
+        }
+    }
+}
+
+/// Filters, orders, truncates and renders one field's raw term buckets, and
+/// appends the `facet.missing` bucket if this field asked for one. The buckets
+/// come either from a standalone `term_facet` pass or from the fused
+/// `/select` aggregation — identical either way, which is the whole premise
+/// issue #246 rests on.
+fn shape_field(
+    index: &CoreIndex,
+    base: &BaseClauses,
+    field: &FacetFieldPlan,
+    mut counts: Vec<(String, crate::core_index::FacetOrderKey, u64)>,
+    shaping: &BucketShaping,
+    nl: JsonNl,
+) -> Result<Value> {
+    counts.retain(|(_, _, count)| *count >= shaping.mincount);
+    if shaping.by_index {
+        counts.sort_by(|a, b| a.1.cmp(&b.1));
+    } else {
+        counts.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+    }
+    counts.truncate(shaping.limit);
+
+    let mut buckets: Vec<(Option<String>, u64)> = counts
+        .into_iter()
+        .map(|(term, _, count)| (Some(term), count))
+        .collect();
+    if field.missing {
+        // Solr emits the `null` bucket last and unconditionally — it is not
+        // subject to `facet.mincount` or `facet.limit`. Its count is the
+        // number of *hits* with no value in the field, read from the fast
+        // field column (`ExistsQuery`), never from stored values.
+        let has_value = ExistsQuery::new(field.column.clone(), false);
+        let absent = index.count(&narrowed(base, Occur::MustNot, Box::new(has_value)))?;
+        buckets.push((None, absent as u64));
+    }
+    Ok(render_buckets(&buckets, nl))
 }
 
 /// `facet.range` + `facet.range.start` / `.end` / `.gap`, repeatable per field.

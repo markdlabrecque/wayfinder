@@ -13,7 +13,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value, json};
 use tantivy::aggregation::agg_req::{Aggregation, AggregationVariants, Aggregations};
-use tantivy::aggregation::agg_result::{AggregationResult, BucketResult, MetricResult};
+use tantivy::aggregation::agg_result::{
+    AggregationResult, AggregationResults, BucketResult, MetricResult,
+};
 use tantivy::aggregation::bucket::TermsAggregation;
 use tantivy::aggregation::metric::{ExtendedStats, ExtendedStatsAggregation};
 use tantivy::aggregation::{
@@ -2171,17 +2173,45 @@ impl CoreIndex {
     ) -> Result<TopOutcome> {
         let searcher = self.reader.searcher();
         let collector = TopScoredHits::new(sort.to_vec(), limit);
-        if filter_queries.is_empty() {
-            return Ok(searcher.search(query, &collector)?);
+        match compose_filtered(query, filter_queries) {
+            None => Ok(searcher.search(query, &collector)?),
+            Some(composed) => Ok(searcher.search(&composed, &collector)?),
         }
-        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, query.box_clone())];
-        for fq in filter_queries {
-            clauses.push((
-                Occur::Must,
-                Box::new(ConstScoreQuery::new(fq.box_clone(), 0.0)),
-            ));
+    }
+
+    /// [`search_top`](Self::search_top) with a set of aggregations fused into
+    /// the *same* pass (issue #246): Tantivy's `Collector` impl for a 2-tuple
+    /// runs both collectors off one iteration of the matching set, so a
+    /// `facet.field` terms aggregation no longer costs a second full walk of
+    /// the same docs.
+    ///
+    /// Query composition is `search_top`'s own (`compose_filtered`), byte for
+    /// byte — the aggregation therefore sees exactly the doc set the hit list
+    /// does, `q` AND every `fq`, and the scoreless `ConstScoreQuery(0.0)`
+    /// wrapper leaves both halves' results identical to running them apart.
+    pub fn search_top_with_aggs(
+        &self,
+        query: &dyn Query,
+        filter_queries: &[Box<dyn Query>],
+        sort: &[SortClause],
+        limit: usize,
+        aggs: Aggregations,
+    ) -> Result<(TopOutcome, AggregationResults)> {
+        let searcher = self.reader.searcher();
+        let collectors = (
+            TopScoredHits::new(sort.to_vec(), limit),
+            AggregationCollector::from_aggs(
+                aggs,
+                AggContextParams::new(
+                    AggregationLimitsGuard::default(),
+                    self.index.tokenizers().clone(),
+                ),
+            ),
+        );
+        match compose_filtered(query, filter_queries) {
+            None => Ok(searcher.search(query, &collectors)?),
+            Some(composed) => Ok(searcher.search(&composed, &collectors)?),
         }
-        Ok(searcher.search(&BooleanQuery::new(clauses), &collector)?)
     }
 
     /// Renders the stored fields of `addr` as a Solr-shaped doc JSON object,
@@ -3107,28 +3137,7 @@ impl CoreIndex {
         const AGG_NAME: &str = "wf_terms";
 
         let mut aggs = Aggregations::default();
-        aggs.insert(
-            AGG_NAME.to_string(),
-            Aggregation {
-                agg: AggregationVariants::Terms(TermsAggregation {
-                    field: field_name.to_string(),
-                    // `size` trims the final bucket list and `segment_size`
-                    // caps the dictionary walk that fills in the zero-count
-                    // terms, so both have to be at least the dictionary size
-                    // for the enumeration to be complete.
-                    //
-                    // ponytail: a field with more distinct values than
-                    // `MAX_FACET_TERMS` truncates (and trips Tantivy's own
-                    // bucket limit). Solr has no such ceiling. Revisit with
-                    // streaming/`facet.prefix` paging if a real corpus needs it.
-                    size: Some(MAX_FACET_TERMS),
-                    segment_size: Some(MAX_FACET_TERMS),
-                    min_doc_count: Some(0),
-                    ..TermsAggregation::default()
-                }),
-                sub_aggregation: Aggregations::default(),
-            },
-        );
+        aggs.insert(AGG_NAME.to_string(), terms_aggregation(field_name));
 
         let collector = AggregationCollector::from_aggs(
             aggs,
@@ -3138,104 +3147,7 @@ impl CoreIndex {
             ),
         );
         let results = self.reader.searcher().search(query, &collector)?;
-
-        let Some(AggregationResult::BucketResult(BucketResult::Terms { buckets, .. })) =
-            results.0.get(AGG_NAME)
-        else {
-            return Err(anyhow!(
-                "could not facet on field `{field_name}`: unexpected aggregation result"
-            ));
-        };
-
-        Ok(buckets
-            .iter()
-            .map(|bucket| {
-                // The rendered term is exactly what shipped before: Tantivy's
-                // own `key_as_string` for a `Bool` column (the only variant
-                // `into_final_result` in tantivy 0.26.1's
-                // `intermediate_agg_result.rs:728-734` ever sets it for — not
-                // reachable today since `ValueKind` has no `Bool`, kept
-                // defensively rather than as a live path), otherwise the raw
-                // key. A **date** column's terms bucket is *not* `key_as_string`
-                // at all: `term_agg.rs:1054-1060` inserts
-                // `IntermediateKey::Str(format_date(val))` directly, so the key
-                // Tantivy hands back is already `Key::Str(rfc3339)` and falls
-                // into the plain `Key::Str` arm below.
-                // A `pdouble`/`pfloat` column renders Java `Double.toString`
-                // (finding 39): an integral double is `"5.0"`, never `"5"`.
-                // Tantivy's own aggregation *normalises* an exactly-integral
-                // double to a `U64`/`I64` key variant
-                // (`NumericalValue::normalize`, `term_agg.rs:1096-1109`), so
-                // this decision cannot be driven by the bucket key's variant
-                // or value — only the schema's own declared `ValueKind::F64`
-                // says "this column is a double/float", regardless of which
-                // key variant a particular bucket happened to normalise to.
-                // `views` (an `I64` column) must keep rendering `"5"` for the
-                // exact same underlying value, which is exactly why this is
-                // schema-driven and not variant- or value-sniffed.
-                let term = if kind == Some(ValueKind::F64) {
-                    let v = match &bucket.key {
-                        Key::F64(v) => *v,
-                        Key::I64(v) => *v as f64,
-                        Key::U64(v) => *v as f64,
-                        // Genuinely unreachable, not just quiet-fallback
-                        // unreachable: the terms aggregation's `Key` variant
-                        // is decided by the underlying Tantivy column's own
-                        // type (`term_agg.rs`'s numeric vs. `ColumnType::Str`
-                        // branches), and `kind == Some(ValueKind::F64)` here
-                        // means this field was declared (and therefore
-                        // added, via `add_f64_field`) as an `f64` column — a
-                        // `Str` key can only come from a string/text column.
-                        // Loud per the sibling guard in `facet.rs`'s
-                        // `echo_range_end`, rather than a silent `0.0`.
-                        Key::Str(_) => {
-                            unreachable!("an F64-kind field's aggregation key was Key::Str")
-                        }
-                    };
-                    render_double(v)
-                } else {
-                    match (&bucket.key_as_string, &bucket.key) {
-                        (Some(s), _) => s.clone(),
-                        (None, Key::Str(s)) => s.clone(),
-                        (None, Key::I64(v)) => v.to_string(),
-                        (None, Key::U64(v)) => v.to_string(),
-                        (None, Key::F64(v)) => v.to_string(),
-                    }
-                };
-                // The sort key is separate from the rendered term because the
-                // string is lossy: `"15"` sorts before `"5"` lexically but
-                // after it by value (issue #24). For a date field the term
-                // *is* the rendered RFC3339 string (see above), so ordering by
-                // it naively is ordering lexically, not chronologically —
-                // which happens to coincide with chronological order for
-                // fixed-width same-precision keys, but is still the wrong
-                // thing to order by in general (e.g. a fraction rendered with
-                // a different number of digits, or two precisions mixed).
-                // Parsing the term back into an exact instant and sorting by
-                // that removes the dependency on rendering shape entirely —
-                // it does not merely "remove the dependency on precision":
-                // this issue's own millisecond-precision fixtures resolve
-                // well inside the ~200ns an `f64`-seconds key (the previous
-                // carrier) can distinguish near a 2020s epoch, so the
-                // ms-ordering fixtures alone would not have caught a
-                // precision-loss regression there — nanoseconds-since-epoch
-                // in an `i128` carrier is exact instead of merely "precise
-                // enough for the corpus captured so far".
-                let order = if kind == Some(ValueKind::Date) {
-                    match OffsetDateTime::parse(&term, &Rfc3339) {
-                        Ok(dt) => FacetOrderKey::Nanos(dt.unix_timestamp_nanos()),
-                        // Should not happen — `term` came from Tantivy's own
-                        // `format_date`, which always emits RFC3339 — but fall
-                        // back to the (still correct for this corpus) lexical
-                        // order rather than panicking or dropping the bucket.
-                        Err(_) => FacetOrderKey::Str(term.clone()),
-                    }
-                } else {
-                    FacetOrderKey::from(&bucket.key)
-                };
-                (term, order, bucket.doc_count)
-            })
-            .collect())
+        render_term_facet_buckets(field_name, kind, &results, AGG_NAME)
     }
 
     /// Solr's `stats.field`: min/max/count/sum/sumOfSquares/mean/stddev over a
@@ -3285,6 +3197,163 @@ impl CoreIndex {
         };
         Ok((**stats).clone())
     }
+}
+
+/// Composes `query` with every `filter_queries` entry as a scoreless
+/// `ConstScoreQuery(0.0)` `Must` clause, or `None` when there is nothing to
+/// compose and `query` should be searched as-is. Shared by
+/// [`CoreIndex::search_top`] and [`CoreIndex::search_top_with_aggs`] so the
+/// fused pass cannot drift from the unfused one's doc set (issue #246).
+fn compose_filtered(query: &dyn Query, filter_queries: &[Box<dyn Query>]) -> Option<BooleanQuery> {
+    if filter_queries.is_empty() {
+        return None;
+    }
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, query.box_clone())];
+    for fq in filter_queries {
+        clauses.push((
+            Occur::Must,
+            Box::new(ConstScoreQuery::new(fq.box_clone(), 0.0)),
+        ));
+    }
+    Some(BooleanQuery::new(clauses))
+}
+
+/// The `TermsAggregation` request one `facet.field` needs, over the Tantivy
+/// column `field_name`. Shared by [`CoreIndex::term_facet`]'s own standalone
+/// pass and by `facet::plan_facet_fields`, which folds one of these per
+/// requested field into a single fused aggregation request (issue #246), so
+/// the two can never ask for different shapes.
+pub(crate) fn terms_aggregation(field_name: &str) -> Aggregation {
+    Aggregation {
+        agg: AggregationVariants::Terms(TermsAggregation {
+            field: field_name.to_string(),
+            // `size` trims the final bucket list and `segment_size`
+            // caps the dictionary walk that fills in the zero-count
+            // terms, so both have to be at least the dictionary size
+            // for the enumeration to be complete.
+            //
+            // ponytail: a field with more distinct values than
+            // `MAX_FACET_TERMS` truncates (and trips Tantivy's own
+            // bucket limit). Solr has no such ceiling. Revisit with
+            // streaming/`facet.prefix` paging if a real corpus needs it.
+            size: Some(MAX_FACET_TERMS),
+            segment_size: Some(MAX_FACET_TERMS),
+            min_doc_count: Some(0),
+            ..TermsAggregation::default()
+        }),
+        sub_aggregation: Aggregations::default(),
+    }
+}
+
+/// Turns one named terms-aggregation result into `term_facet`'s
+/// `(rendered term, sort key, count)` triples. Shared by
+/// [`CoreIndex::term_facet`]'s standalone pass and by `facet::render_facet_fields`,
+/// which reads the same buckets back out of the fused `/select` pass (issue
+/// #246) -- the rendering rules below are wire contract, so both paths have to
+/// go through the one copy of them.
+pub(crate) fn render_term_facet_buckets(
+    field_name: &str,
+    kind: Option<ValueKind>,
+    results: &AggregationResults,
+    agg_name: &str,
+) -> Result<Vec<(String, FacetOrderKey, u64)>> {
+    let Some(AggregationResult::BucketResult(BucketResult::Terms { buckets, .. })) =
+        results.0.get(agg_name)
+    else {
+        return Err(anyhow!(
+            "could not facet on field `{field_name}`: unexpected aggregation result"
+        ));
+    };
+
+    Ok(buckets
+        .iter()
+        .map(|bucket| {
+            // The rendered term is exactly what shipped before: Tantivy's
+            // own `key_as_string` for a `Bool` column (the only variant
+            // `into_final_result` in tantivy 0.26.1's
+            // `intermediate_agg_result.rs:728-734` ever sets it for — not
+            // reachable today since `ValueKind` has no `Bool`, kept
+            // defensively rather than as a live path), otherwise the raw
+            // key. A **date** column's terms bucket is *not* `key_as_string`
+            // at all: `term_agg.rs:1054-1060` inserts
+            // `IntermediateKey::Str(format_date(val))` directly, so the key
+            // Tantivy hands back is already `Key::Str(rfc3339)` and falls
+            // into the plain `Key::Str` arm below.
+            // A `pdouble`/`pfloat` column renders Java `Double.toString`
+            // (finding 39): an integral double is `"5.0"`, never `"5"`.
+            // Tantivy's own aggregation *normalises* an exactly-integral
+            // double to a `U64`/`I64` key variant
+            // (`NumericalValue::normalize`, `term_agg.rs:1096-1109`), so
+            // this decision cannot be driven by the bucket key's variant
+            // or value — only the schema's own declared `ValueKind::F64`
+            // says "this column is a double/float", regardless of which
+            // key variant a particular bucket happened to normalise to.
+            // `views` (an `I64` column) must keep rendering `"5"` for the
+            // exact same underlying value, which is exactly why this is
+            // schema-driven and not variant- or value-sniffed.
+            let term = if kind == Some(ValueKind::F64) {
+                let v = match &bucket.key {
+                    Key::F64(v) => *v,
+                    Key::I64(v) => *v as f64,
+                    Key::U64(v) => *v as f64,
+                    // Genuinely unreachable, not just quiet-fallback
+                    // unreachable: the terms aggregation's `Key` variant
+                    // is decided by the underlying Tantivy column's own
+                    // type (`term_agg.rs`'s numeric vs. `ColumnType::Str`
+                    // branches), and `kind == Some(ValueKind::F64)` here
+                    // means this field was declared (and therefore
+                    // added, via `add_f64_field`) as an `f64` column — a
+                    // `Str` key can only come from a string/text column.
+                    // Loud per the sibling guard in `facet.rs`'s
+                    // `echo_range_end`, rather than a silent `0.0`.
+                    Key::Str(_) => {
+                        unreachable!("an F64-kind field's aggregation key was Key::Str")
+                    }
+                };
+                render_double(v)
+            } else {
+                match (&bucket.key_as_string, &bucket.key) {
+                    (Some(s), _) => s.clone(),
+                    (None, Key::Str(s)) => s.clone(),
+                    (None, Key::I64(v)) => v.to_string(),
+                    (None, Key::U64(v)) => v.to_string(),
+                    (None, Key::F64(v)) => v.to_string(),
+                }
+            };
+            // The sort key is separate from the rendered term because the
+            // string is lossy: `"15"` sorts before `"5"` lexically but
+            // after it by value (issue #24). For a date field the term
+            // *is* the rendered RFC3339 string (see above), so ordering by
+            // it naively is ordering lexically, not chronologically —
+            // which happens to coincide with chronological order for
+            // fixed-width same-precision keys, but is still the wrong
+            // thing to order by in general (e.g. a fraction rendered with
+            // a different number of digits, or two precisions mixed).
+            // Parsing the term back into an exact instant and sorting by
+            // that removes the dependency on rendering shape entirely —
+            // it does not merely "remove the dependency on precision":
+            // this issue's own millisecond-precision fixtures resolve
+            // well inside the ~200ns an `f64`-seconds key (the previous
+            // carrier) can distinguish near a 2020s epoch, so the
+            // ms-ordering fixtures alone would not have caught a
+            // precision-loss regression there — nanoseconds-since-epoch
+            // in an `i128` carrier is exact instead of merely "precise
+            // enough for the corpus captured so far".
+            let order = if kind == Some(ValueKind::Date) {
+                match OffsetDateTime::parse(&term, &Rfc3339) {
+                    Ok(dt) => FacetOrderKey::Nanos(dt.unix_timestamp_nanos()),
+                    // Should not happen — `term` came from Tantivy's own
+                    // `format_date`, which always emits RFC3339 — but fall
+                    // back to the (still correct for this corpus) lexical
+                    // order rather than panicking or dropping the bucket.
+                    Err(_) => FacetOrderKey::Str(term.clone()),
+                }
+            } else {
+                FacetOrderKey::from(&bucket.key)
+            };
+            (term, order, bucket.doc_count)
+        })
+        .collect())
 }
 
 /// An order-preserving sort key for one facet-term bucket, carried alongside
