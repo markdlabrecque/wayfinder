@@ -123,7 +123,11 @@ const ACCEPTED_DIVERGENCES_MULTIPART: &[(&str, &str)] = &[
 const DIVERGENT_STATUS_MULTIPART: &[(&str, u16, &str)] = &[(
     "extract_corrupt_pdf",
     415,
-    "issue #258: Solr's Tika parses this malformed PDF and throws, which is a 500; Wayfinder has      no PDF extractor at all, so it never reaches a parse attempt and answers 415 unsupported      format. Retire this entry when the PDF extractor lands (PRD phase 2b) -- at that point      Wayfinder can fail *inside* a parser and the captured 500 becomes reachable",
+    "issue #258: Solr's Tika parses this malformed PDF and throws, which is a 500; \
+     Wayfinder has no PDF extractor at all, so it never reaches a parse attempt and \
+     answers 415 unsupported format. Retire this entry when the PDF extractor lands \
+     (PRD phase 2b) -- at that point Wayfinder can fail *inside* a parser and the \
+     captured 500 becomes reachable",
 )];
 
 fn divergent_status_multipart(name: &str) -> Option<(u16, &'static str)> {
@@ -2572,14 +2576,17 @@ async fn extract_multipart_manifest_matches_captured_fixtures() {
         if let Some((expected_status, reason)) = divergent_status_multipart(&entry.name) {
             if entry.status == expected_status {
                 failures.push(format!(
-                    "{}: DIVERGENT_STATUS_MULTIPART says Wayfinder answers {expected_status}                      where the capture is {}, but they now agree ({reason}) -- remove this entry",
+                    "{}: DIVERGENT_STATUS_MULTIPART says Wayfinder answers \
+                     {expected_status} where the capture is {}, but they now agree \
+                     ({reason}) -- remove this entry",
                     entry.name, entry.status
                 ));
                 continue;
             }
             if status.as_u16() != expected_status {
                 failures.push(format!(
-                    "{}: recorded status divergence expects {expected_status}, got {}, body:                      {actual}",
+                    "{}: recorded status divergence expects {expected_status}, got {}, \
+                     body: {actual}",
                     entry.name,
                     status.as_u16()
                 ));
@@ -2592,7 +2599,9 @@ async fn extract_multipart_manifest_matches_captured_fixtures() {
                 || header != Some(u64::from(expected_status))
             {
                 failures.push(format!(
-                    "{}: status-divergent row must still answer Wayfinder's normal error                      envelope, got error.code={code:?} responseHeader.status={header:?} in                      {actual}",
+                    "{}: status-divergent row must still answer Wayfinder's normal error \
+                     envelope, got error.code={code:?} responseHeader.status={header:?} \
+                     in {actual}",
                     entry.name
                 ));
                 continue;
@@ -2863,51 +2872,83 @@ fn diagnostic_constant_tables_have_no_double_spaces() {
     );
 }
 
+/// Lines exempt from Test B, keyed by a distinctive **substring of the line**
+/// rather than by line number: this file is a documented hot file that every
+/// branch appends to, and a line-number table silently slides onto unrelated
+/// lines the moment anything above it grows.
+///
+/// A line is exempt if it contains the key, which also (deliberately) exempts
+/// the entry below that spells the key out.
+const DOUBLE_SPACE_LINT_EXEMPT_CONTENT: &[(&str, &str)] = &[(
+    r#"{"id":"k1","views":5,  "tag":["zebra","apple"]},"#,
+    "keyorder_corpus's JSON fixture data lines up the shorter view-count \
+     rows with extra padding so the tag column stays aligned -- readability \
+     formatting for test data, not a diagnostic string",
+)];
+
+/// Returns the byte offset, within `line`, of the first run of two or more
+/// consecutive spaces that is *not* the leading indentation of an output
+/// line, or `None` if there is none.
+///
+/// `line` must already have its source indentation stripped. Inside a string
+/// literal, a run of spaces that begins immediately after the opening quote
+/// or immediately after a `\n` escape is that output line's own leading
+/// indentation -- structurally the same thing as source indentation, and the
+/// established idiom in this file for a sub-message printed under the
+/// preceding `eprintln!`. Everything else, including a run in the *middle* of
+/// a string literal, is reported.
+fn first_offending_double_space(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    let mut in_string = false;
+    // Byte offset at which an output line's leading indentation may begin.
+    let mut indent_starts_at: Option<usize> = None;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if in_string => {
+                if bytes.get(i + 1) == Some(&b'n') {
+                    indent_starts_at = Some(i + 2);
+                }
+                i += 2;
+            }
+            b'"' => {
+                in_string = !in_string;
+                indent_starts_at = if in_string { Some(i + 1) } else { None };
+                i += 1;
+            }
+            b' ' if bytes.get(i + 1) == Some(&b' ') => {
+                if indent_starts_at != Some(i) {
+                    return Some(i);
+                }
+                while bytes.get(i) == Some(&b' ') {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// Test B (narrow, source text): guards the three inline
 /// `failures.push(format!(...))` literals in the multipart status-divergence
 /// runner, which Test A cannot reach because they are never constructed by a
 /// hermetic pass (triggering them means making the differential runner
-/// actually fail). Lines are exempt from this check, by 1-based line number,
-/// for a legitimate reason named alongside each one below; every other
-/// non-comment line in this file must have single spaces after its own
-/// leading indentation.
+/// actually fail). Every non-comment line in this file must have single
+/// spaces after its own leading indentation and after the leading
+/// indentation of each output line inside a string literal.
 ///
-/// ponytail: this is a source-text lint scoped to this one file. It would
-/// not catch the same defect in a diagnostic literal built by concatenation
-/// (e.g. `format!("{a}{b}")` where `a` or `b` supplies the run) rather than
-/// typed out as contiguous source text.
-const DOUBLE_SPACE_LINT_EXEMPT_LINES: &[(usize, &str)] = &[
-    (
-        238,
-        "keyorder_corpus's JSON fixture data lines up the shorter view-count \
-         rows with extra padding so the tag column stays aligned -- readability \
-         formatting for test data, not a diagnostic string",
-    ),
-    (
-        1609,
-        "eprintln!'s indented \"(expected divergence: {reason})\" -- an established idiom in \
-         this file: a leading two-space run inside the string marks a sub-message printed under \
-         the preceding unindented eprintln line, not reflow debris",
-    ),
-    (1666, "same nested-eprintln-indent idiom as line 1609"),
-    (1696, "same nested-eprintln-indent idiom as line 1609"),
-    (1712, "same nested-eprintln-indent idiom as line 1609"),
-    (1729, "same nested-eprintln-indent idiom as line 1609"),
-    (1739, "same nested-eprintln-indent idiom as line 1609"),
-    (1752, "same nested-eprintln-indent idiom as line 1609"),
-    (1802, "same nested-eprintln-indent idiom as line 1609"),
-    (1987, "same nested-eprintln-indent idiom as line 1609"),
-    (2174, "same nested-eprintln-indent idiom as line 1609"),
-    (2184, "same nested-eprintln-indent idiom as line 1609"),
-];
-
+/// ponytail: this is a source-text lint scoped to this one file, and it reads
+/// the source with a one-line-at-a-time scanner rather than a Rust lexer. It
+/// would not catch the same defect in a diagnostic literal built by
+/// concatenation (e.g. `format!("{a}{b}")` where `a` or `b` supplies the
+/// run); it treats a run right after an opening quote or a `\n` escape as
+/// deliberate output indentation, so a genuine reflow artefact that lands in
+/// exactly that position is missed; and its quote tracking restarts on each
+/// line, so it can misjudge string state inside a multi-line raw string.
 #[test]
 fn source_text_has_no_double_spaces_outside_leading_indentation() {
     let source = include_str!("differential.rs");
-    let exempt: std::collections::HashSet<usize> = DOUBLE_SPACE_LINT_EXEMPT_LINES
-        .iter()
-        .map(|(line_no, _)| *line_no)
-        .collect();
 
     let mut failures = Vec::new();
     for (zero_based, line) in source.lines().enumerate() {
@@ -2922,10 +2963,13 @@ fn source_text_has_no_double_spaces_outside_leading_indentation() {
             // the same convention).
             continue;
         }
-        if exempt.contains(&line_no) {
+        if DOUBLE_SPACE_LINT_EXEMPT_CONTENT
+            .iter()
+            .any(|(key, _)| trimmed.contains(key))
+        {
             continue;
         }
-        if let Some(pos) = find_double_space(trimmed) {
+        if let Some(pos) = first_offending_double_space(trimmed) {
             failures.push(format!(
                 "line {line_no} has a run of 2+ consecutive spaces at column {pos} of its \
                  trimmed content (i.e. outside leading indentation): {trimmed:?}"
@@ -2938,7 +2982,7 @@ fn source_text_has_no_double_spaces_outside_leading_indentation() {
         "tests/differential.rs has lines with an embedded multi-space run outside their \
          leading indentation -- a wrapped format!/push string literal likely carries source \
          indentation mid-sentence (see issue #277); if a new occurrence is a legitimate \
-         construct, add a narrowly scoped, named entry to DOUBLE_SPACE_LINT_EXEMPT_LINES \
+         construct, add a narrowly scoped, named entry to DOUBLE_SPACE_LINT_EXEMPT_CONTENT \
          instead of widening this check:\n{}",
         failures.join("\n")
     );
