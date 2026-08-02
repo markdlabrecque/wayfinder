@@ -140,33 +140,26 @@ check_schema_add_field_response() { # status body -> non-zero + body on stderr u
 }
 
 query_result_cache_stat() { # base_url core stat_name -> the named CACHE.searcher.queryResultCache counter
+  # `base` here is the SERVER root (e.g. http://host:port/solr), not a core
+  # URL: admin/metrics is a server-level handler and reports every core as a
+  # `solr.core.<core>` registry, so the core is a parse-time selector rather
+  # than part of the path. The parse lives in bench/query_result_cache_stat.py
+  # (pinned by bench/tests/query_result_cache_metrics.rs against a real Solr 9
+  # capture) instead of an inline heredoc, so it is testable in isolation.
+  #
+  # The previous admin/mbeans path never worked against a real Solr 9 (issue
+  # #251): without `json.nl=map` the `solr-mbeans` body is a type signature,
+  # not JSON, and the stats key is `.searcher`-scoped. Do not go back to it.
+  #
+  # `indent=true` is load-bearing, not cosmetic. Verified live against solr:9:
+  # `admin/metrics?...&wt=json` with no response-writer param renders the same
+  # type-signature body the mbeans path did -- HTTP 200, unquoted keys, values
+  # literally `int`/`float`, no responseHeader, not parseable as JSON. Passing
+  # any recognized writer param (`indent=true`, `indent=false`, `json.nl=map`)
+  # switches it to real JSON; an unrecognized one (`x=1`) does not.
   local base=$1 core=$2 stat=$3
-  # shellcheck disable=SC2016  # the python program is deliberately unexpanded
-  curl -sSf "$base/$core/admin/mbeans?cat=CACHE&stats=true&wt=json" \
-    | python3 -c '
-import json, sys
-
-stat = sys.argv[1]
-doc = json.load(sys.stdin)
-beans = doc["solr-mbeans"]
-# `solr-mbeans` is a flat alternating [name, value, name, value, ...] array,
-# not an object, so zip the odd entries onto the even ones. Scoping the
-# lookup to the queryResultCache bean also keeps us off the bare "hits" key,
-# which several other caches expose too.
-sections = dict(zip(beans[0::2], beans[1::2]))
-for name, bean in sections.get("CACHE", {}).items():
-    if not name.endswith("queryResultCache"):
-        continue
-    stats = bean.get("stats", {})
-    qualified = "CACHE." + name + "." + stat
-    if qualified in stats:
-        print(int(stats[qualified]))
-        sys.exit(0)
-    if stat in stats:
-        print(int(stats[stat]))
-        sys.exit(0)
-sys.exit("query_result_cache_stat: no queryResultCache " + stat + " counter in the mbeans response")
-' "$stat"
+  curl -sSf "$base/admin/metrics?group=core&prefix=CACHE.searcher.queryResultCache&wt=json&indent=true" \
+    | python3 "$HERE/query_result_cache_stat.py" "$core" "$stat"
 }
 
 query_result_cache_hits() { # base_url core -> cumulative queryResultCache hit count
@@ -231,6 +224,14 @@ assert_cache_pass_behavior() { # kind hits lookups n_queries -- hits/lookups are
   local min_hits
   case "$kind" in
     cold)
+      # 0 lookups is not evidence of a cold cache -- it is evidence nothing
+      # was measured: no query reached Solr's searcher at all, and hits is
+      # then trivially 0. Accepting that as a clean cold pass would let a
+      # silently-empty run report itself as the headline p95 (issue #251).
+      if [ "$lookups" -eq 0 ]; then
+        echo "assert_cache_pass_behavior: cold pass took 0 queryResultCache lookups, so no query reached Solr's searcher -- these are not cold numbers, they are no numbers" >&2
+        return 1
+      fi
       if [ "$hits" -ne 0 ]; then
         echo "assert_cache_pass_behavior: cold pass took $hits cache hits over $lookups lookups, expected 0 -- the searcher was not actually flushed, or the term list repeated a query, so these are not cold numbers" >&2
         return 1
@@ -323,6 +324,17 @@ docker rm -f "$SOLR_CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$SOLR_CONTAINER" -p "$SOLR_HOST_PORT:8983" solr:9 solr-precreate "$SOLR_CORE" >/dev/null
 SOLR_COLD_MS=$(wait_for_ping "$SOLR_URL/$SOLR_CORE/admin/ping?wt=json")
 echo "solr cold start: ${SOLR_COLD_MS}ms"
+
+# Smoke-probe the cache counter read before anything expensive happens. The
+# first real read used to sit after the whole Wayfinder phase and Solr
+# indexing, so a broken read (which is exactly what shipped: see
+# query_result_cache_stat) aborted the run roughly an hour in. Fail here
+# instead, seconds after the core answers its first ping.
+if ! SOLR_CACHE_PROBE=$(query_result_cache_hits "$SOLR_URL" "$SOLR_CORE"); then
+  echo "queryResultCache counter smoke probe failed against $SOLR_URL (core $SOLR_CORE) -- aborting before the expensive phases rather than an hour in" >&2
+  exit 1
+fi
+echo "solr queryResultCache counter probe ok (hits=$SOLR_CACHE_PROBE)"
 
 SCHEMA_BODY_FILE="$WORK/schema_resp.json"
 SCHEMA_STATUS=$(curl -sS -o "$SCHEMA_BODY_FILE" -w '%{http_code}' \
