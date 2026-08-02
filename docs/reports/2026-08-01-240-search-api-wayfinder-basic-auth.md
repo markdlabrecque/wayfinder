@@ -16,7 +16,7 @@ complete pair, on shared request paths and `ping`; incomplete or absent pairs
 remain unauthenticated. The existing 401 JSON-envelope extraction continues to
 raise `SearchApiException('authentication required')`.
 
-## Exported-config tradeoff
+## Accepted exported-config tradeoff
 
 This deliberately follows `search_api_solr`'s `BasicAuthTrait`: credentials
 are ordinary exported backend plugin configuration. That keeps the connector
@@ -56,7 +56,16 @@ command after restoration passed, with `AUTH: PASS - public ping and exact
 unauthenticated select failure verified` and `ROUNDTRIP: PASS - real
 index+search round trip through WayfinderBackend::search() succeeded`.
 
-Full hermetic gate (with `PI_SUBAGENT_*` and `PI_WORKFLOW_*` unset only in
-that spawned process) passed: `cargo fmt --check`; `cargo clippy --all-targets
--- -D warnings`; `cargo test`; the matching three `bench` commands; and full
-PHPUnit (`134` tests, `215` assertions).
+## Review and verification
+
+Round 1 requested credential-forwarding mutation evidence, translated form
+errors, and stale-comment fixes; all were addressed. Round 2 found no
+implementation defect, but its gate process did not clear every workflow
+identity variable. The foreground resolved that procedural escalation by
+unsetting every `PI_SUBAGENT_*` and `PI_WORKFLOW_*` variable, verifying none
+remained, and running one full gate successfully: `cargo fmt --check`; `cargo
+clippy --all-targets -- -D warnings`; `cargo test`; the matching three `bench`
+commands; and full PHPUnit (`134` tests, `215` assertions).
+
+No implementation findings or follow-ups remain. The accepted exported-config
+credential tradeoff above is the only residual risk.
