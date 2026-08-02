@@ -9,6 +9,34 @@
 //! `bench/tests/run_sh_memory_phases.rs`'s established pattern -- these are
 //! source-order guards over `run.sh`'s text, not a live run.
 //!
+//! Round 2 (independent reviewer finding): the round-1 ordering guards
+//! matched ANY source line containing a function's name, which resolves to
+//! an error-message or comment line *inside that function's own body* just
+//! as readily as to a real call site -- so they were checking the order of
+//! function *definitions*, never of call sites. Proven by three mutations
+//! against a scratch copy of run.sh:
+//!   - moving the Solr cold-pass call to before the cache-flush call (the
+//!     exact regression these guards exist to catch) still PASSED;
+//!   - moving the `flush_solr_caches` definition above `warm_up_pass` (a
+//!     pure no-op refactor) FAILED;
+//!   - rewording `run_cold_query_pass`'s error string FAILED.
+//!
+//! Fixed by `support::strip_function_bodies`, which blanks every top-level
+//! function's body (definition line through matching close-brace) before
+//! any of the line-number scans below run, so a match can only ever be a
+//! real call site or a genuine standalone occurrence -- never text quoted
+//! inside a function's own definition. `call_lines` is applied to the
+//! stripped source everywhere ordering matters; `extract_bash_function`
+//! (which needs a function's real body) still reads the unstripped source.
+//!
+//! This also fixes a latent anchor bug: `flush_solr_caches`'s call to
+//! `admin/cores?action=RELOAD` is text *inside that function's own body*,
+//! so anchoring order checks on "the line containing `action=RELOAD`"
+//! anchors on the function's *definition* (near the top of the file, before
+//! any top-level flow), which is vacuously before everything regardless of
+//! how the top-level calls get reordered. The round-2 tests anchor on the
+//! call site of `flush_solr_caches` itself instead.
+//!
 //! Interface assumed (ambiguity flagged; the spec names *what* must happen,
 //! not function names -- if this contract doesn't fit, escalate rather than
 //! editing this file):
@@ -22,12 +50,14 @@
 //!     Same query shape as `run_query_load`, `q=<term>` varying.
 //!   - `query_result_cache_hits base_url core` / `query_result_cache_lookups
 //!     base_url core` -- each echoes the current
-//!     `CACHE.searcher.queryResultCache.{hits,lookups}` counter, parsed from
-//!     `admin/mbeans?cat=CACHE&stats=true&wt=json`.
+//!     `CACHE.searcher.queryResultCache.{hits,lookups}` counter.
 //!   - `assert_cache_pass_behavior kind hits lookups n_queries` -- `kind` is
 //!     `cold` or `warm`; fails loudly (non-zero exit, message on stderr)
 //!     when the pass didn't have the cache behavior it claims: cold pass
-//!     hits must be exactly 0; warm pass hits must be `>= n_queries - 2`.
+//!     hits must be exactly 0 AND lookups must be nonzero (round 2, item C
+//!     -- a pass where no query reached Solr at all must not be accepted as
+//!     a clean cold measurement just because it also reported 0 hits); warm
+//!     pass hits must be `>= n_queries - 2`.
 //!
 //! None of these exist in `run.sh` today, so every test below is red for a
 //! clear "missing behavior" reason (an `Option::expect` panic naming what's
@@ -36,8 +66,14 @@
 
 mod support;
 
-use support::{extract_bash_function, fresh_scratch_dir, run_bash, run_sh_source};
+use support::{
+    extract_bash_function, fresh_scratch_dir, run_bash, run_sh_source, strip_function_bodies,
+};
 
+/// Lines in `source` that mention `function` as other than its own
+/// definition line. Callers pass a body-stripped source (see
+/// `strip_function_bodies`) so a match can only be a real call site or a
+/// standalone occurrence, never text quoted inside `function`'s own body.
 fn call_lines<'a>(source: &'a str, function: &str) -> Vec<(usize, &'a str)> {
     source
         .lines()
@@ -58,7 +94,8 @@ fn call_lines<'a>(source: &'a str, function: &str) -> Vec<(usize, &'a str)> {
 #[test]
 fn per_engine_runs_a_discarded_warm_up_pass_over_every_term() {
     let source = run_sh_source();
-    let warm_ups = call_lines(&source, "warm_up_pass");
+    let stripped = strip_function_bodies(&source);
+    let warm_ups = call_lines(&stripped, "warm_up_pass");
     assert!(
         warm_ups.len() >= 2,
         "expected a warm_up_pass call for each engine (Wayfinder and Solr), issue #251; found \
@@ -76,14 +113,12 @@ fn per_engine_runs_a_discarded_warm_up_pass_over_every_term() {
 #[test]
 fn solr_flushes_caches_with_a_core_reload_and_pings_afterward_not_update_commit_true() {
     let source = run_sh_source();
+    let stripped = strip_function_bodies(&source);
 
-    let reloads: Vec<(usize, &str)> = source
-        .lines()
-        .enumerate()
-        .filter(|(_, l)| l.contains("action=RELOAD"))
-        .collect();
+    // Existence only (not order-dependent): Solr's caches must be flushed
+    // with a core RELOAD somewhere in run.sh.
     assert!(
-        !reloads.is_empty(),
+        source.contains("action=RELOAD"),
         "expected run.sh to flush Solr's caches with a core RELOAD \
          (admin/cores?action=RELOAD&core=$SOLR_CORE), issue #251; \
          `update?commit=true` does not work here (Solr skips the commit when nothing \
@@ -91,59 +126,79 @@ fn solr_flushes_caches_with_a_core_reload_and_pings_afterward_not_update_commit_
          in run.sh"
     );
 
-    let pings = call_lines(&source, "wait_for_ping");
-    let reload_line = reloads[0].0;
-    let ping_after_reload = pings.iter().find(|(line_no, _)| *line_no > reload_line);
+    // Order-dependent part anchors on the *call site* of flush_solr_caches,
+    // not on the line containing `action=RELOAD` text -- that text lives
+    // inside flush_solr_caches's own body, which (being a function
+    // definition) sits near the top of the file regardless of where the
+    // function gets *called*, and so is a vacuous anchor for ordering.
+    let flush_calls = call_lines(&stripped, "flush_solr_caches");
+    let flush = flush_calls.first().unwrap_or_else(|| {
+        panic!(
+            "expected a call to a `flush_solr_caches` function in run.sh's top-level flow \
+             (issue #251's Solr cache-flush step); none found"
+        )
+    });
+
+    let pings = call_lines(&stripped, "wait_for_ping");
+    let ping_after_flush = pings.iter().find(|(line_no, _)| *line_no > flush.0);
     assert!(
-        ping_after_reload.is_some(),
-        "expected a wait_for_ping call after the core RELOAD -- the core is briefly \
-         unavailable during a reload -- found RELOAD at line {reload_line} with no \
-         subsequent wait_for_ping call; pings at {pings:?}"
+        ping_after_flush.is_some(),
+        "expected a wait_for_ping call after the flush_solr_caches call at line {} -- the core \
+         is briefly unavailable during a reload -- found no subsequent wait_for_ping call; \
+         pings at {pings:?}",
+        flush.0
     );
 }
 
 #[test]
 fn commit_true_is_not_used_as_the_solr_cache_flush() {
     let source = run_sh_source();
+    let stripped = strip_function_bodies(&source);
 
     // The existing `index_corpus` helper already legitimately uses
     // `update?commit=true` to finalize indexing -- that's not the cache
     // flush and must stay untouched. The guard is scoped to the flush
-    // step: within a window around any `action=RELOAD` call, no sibling
+    // step: in the top-level window from the `flush_solr_caches` call site
+    // to the next `wait_for_ping` call site, no sibling
     // `update?commit=true` call should also appear pretending to be the
     // flush mechanism.
-    let lines: Vec<&str> = source.lines().collect();
-    let reload_idx = lines
-        .iter()
-        .position(|l| l.contains("action=RELOAD"))
-        .expect(
-            "expected a `action=RELOAD` call in run.sh (issue #251's cache flush); none found \
-             yet -- this guard becomes meaningful once the RELOAD call exists",
-        );
+    let flush_calls = call_lines(&stripped, "flush_solr_caches");
+    let flush_line = flush_calls
+        .first()
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a call to a `flush_solr_caches` function in run.sh's top-level flow \
+                 (issue #251's cache flush); none found yet -- this guard becomes meaningful \
+                 once the call exists"
+            )
+        })
+        .0;
 
-    // A generous window: from the RELOAD call to the next wait_for_ping
-    // call (the flush-then-ping step described in the spec).
-    let next_ping_idx = lines
+    let pings = call_lines(&stripped, "wait_for_ping");
+    let lines: Vec<&str> = source.lines().collect();
+    let next_ping_line = pings
         .iter()
-        .enumerate()
-        .find(|(i, l)| *i > reload_idx && l.contains("wait_for_ping"))
-        .map(|(i, _)| i)
-        .unwrap_or(lines.len());
-    let flush_window = lines[reload_idx..next_ping_idx].join("\n");
+        .find(|(line_no, _)| *line_no > flush_line)
+        .map(|(line_no, _)| *line_no)
+        .unwrap_or(lines.len().saturating_sub(1));
+
+    let flush_window =
+        lines[flush_line..=next_ping_line.min(lines.len().saturating_sub(1))].join("\n");
 
     assert!(
         !flush_window.contains("update?commit=true"),
-        "the cache-flush step (around the RELOAD call) must not also call \
-         `update?commit=true` -- that call does not flush Solr's caches (observed: Solr \
-         skips the commit when nothing changed, so no new searcher opens and the caches \
-         survive), got flush window:\n{flush_window}"
+        "the cache-flush step (the top-level window from the flush_solr_caches call to the \
+         next wait_for_ping call) must not also call `update?commit=true` -- that call does \
+         not flush Solr's caches (observed: Solr skips the commit when nothing changed, so no \
+         new searcher opens and the caches survive), got flush window:\n{flush_window}"
     );
 }
 
 #[test]
-fn cold_pass_reads_terms_txt_and_runs_after_the_warm_up_and_reload_ping_sequence() {
+fn cold_pass_reads_terms_txt_and_runs_after_the_solr_warm_up_and_cache_flush() {
     let source = run_sh_source();
-    let cold_calls = call_lines(&source, "run_cold_query_pass");
+    let stripped = strip_function_bodies(&source);
+    let cold_calls = call_lines(&stripped, "run_cold_query_pass");
     assert!(
         !cold_calls.is_empty(),
         "expected a `run_cold_query_pass`-style call in run.sh reading terms.txt exactly once \
@@ -157,36 +212,40 @@ fn cold_pass_reads_terms_txt_and_runs_after_the_warm_up_and_reload_ping_sequence
         );
     }
 
-    let warm_ups = call_lines(&source, "warm_up_pass");
-    let reloads: Vec<(usize, &str)> = source
-        .lines()
-        .enumerate()
-        .filter(|(_, l)| l.contains("action=RELOAD"))
-        .collect();
-    if let (Some(warm_up), Some(reload), Some(cold)) =
-        (warm_ups.first(), reloads.first(), cold_calls.first())
-    {
-        assert!(
-            warm_up.0 < reload.0,
-            "the warm-up pass must run before the cache flush, got warm_up at {}, RELOAD at \
-             {}",
-            warm_up.0,
-            reload.0
-        );
-        assert!(
-            reload.0 < cold.0,
-            "the cold pass must run after the cache flush, got RELOAD at {}, cold pass at {}",
-            reload.0,
-            cold.0
-        );
-    }
+    let warm_ups = call_lines(&stripped, "warm_up_pass");
+    let flush_calls = call_lines(&stripped, "flush_solr_caches");
+    let flush = flush_calls.first().unwrap_or_else(|| {
+        panic!(
+            "expected a call to a `flush_solr_caches` function in run.sh's top-level flow \
+             (issue #251's Solr cache-flush step); none found"
+        )
+    });
+
+    // Only Solr flushes (Wayfinder has no query result cache and runs its
+    // cold pass with nothing to flush), so these are existence checks
+    // relative to the flush's position, not checks on `.first()`/`.last()`
+    // of either list -- the earliest cold-pass call is Wayfinder's, which
+    // legitimately runs before Solr's flush ever happens.
+    assert!(
+        warm_ups.iter().any(|(line_no, _)| *line_no < flush.0),
+        "expected the Solr warm-up pass to run before the Solr cache flush, got warm_up_pass \
+         calls at {warm_ups:?}, flush_solr_caches call at {}",
+        flush.0
+    );
+    assert!(
+        cold_calls.iter().any(|(line_no, _)| *line_no > flush.0),
+        "expected the Solr cold pass (run_cold_query_pass) to run after the Solr cache flush \
+         at line {}, got cold pass calls at {cold_calls:?}",
+        flush.0
+    );
 }
 
 #[test]
 fn warm_pass_runs_after_the_cold_pass_and_keeps_the_existing_run_query_load_call() {
     let source = run_sh_source();
-    let cold_calls = call_lines(&source, "run_cold_query_pass");
-    let warm_calls = call_lines(&source, "run_query_load");
+    let stripped = strip_function_bodies(&source);
+    let cold_calls = call_lines(&stripped, "run_cold_query_pass");
+    let warm_calls = call_lines(&stripped, "run_query_load");
 
     assert!(
         warm_calls.len() >= 2,
@@ -211,7 +270,8 @@ fn warm_pass_runs_after_the_cold_pass_and_keeps_the_existing_run_query_load_call
 #[test]
 fn both_passes_are_bracketed_by_query_result_cache_counter_reads() {
     let source = run_sh_source();
-    let cache_reads: Vec<(usize, &str)> = source
+    let stripped = strip_function_bodies(&source);
+    let cache_reads: Vec<(usize, &str)> = stripped
         .lines()
         .enumerate()
         .filter(|(_, l)| {
@@ -226,9 +286,36 @@ fn both_passes_are_bracketed_by_query_result_cache_counter_reads() {
          than trusted blindly (issue #251); found {cache_reads:?}"
     );
 
-    let cold_calls = call_lines(&source, "run_cold_query_pass");
-    let warm_calls = call_lines(&source, "run_query_load");
-    if let (Some(cold), Some(warm)) = (cold_calls.first(), warm_calls.first()) {
+    // Anchored on the Solr-specific cold/warm calls (the ones after the
+    // cache flush), not `.first()` of either list -- Wayfinder's cold pass
+    // legitimately has no cache reads around it (it has no query result
+    // cache to flush or read), so anchoring on whichever cold/warm call
+    // comes first in the file picks up Wayfinder's and wrongly demands
+    // cache reads that were never going to exist there.
+    let flush_calls = call_lines(&stripped, "flush_solr_caches");
+    let cold_calls = call_lines(&stripped, "run_cold_query_pass");
+    let warm_calls = call_lines(&stripped, "run_query_load");
+    if let Some(flush) = flush_calls.first() {
+        let cold = cold_calls
+            .iter()
+            .find(|(n, _)| *n > flush.0)
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a run_cold_query_pass call after the flush_solr_caches call at \
+                     line {}, got cold pass calls at {cold_calls:?}",
+                    flush.0
+                )
+            });
+        let warm = warm_calls
+            .iter()
+            .find(|(n, _)| *n > cold.0)
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a run_query_load call after the Solr cold pass at line {}, got \
+                     warm pass calls at {warm_calls:?}",
+                    cold.0
+                )
+            });
         let reads_before_cold = cache_reads.iter().filter(|(n, _)| *n < cold.0).count();
         let reads_after_cold = cache_reads
             .iter()
@@ -289,7 +376,7 @@ fn cold_pass_assertion_fails_when_hits_are_not_zero() {
 }
 
 #[test]
-fn cold_pass_assertion_succeeds_when_hits_are_zero() {
+fn cold_pass_assertion_succeeds_when_hits_are_zero_and_lookups_are_nonzero() {
     let source = run_sh_source();
     let func = extract_bash_function(&source, "assert_cache_pass_behavior").expect(
         "run.sh should define an `assert_cache_pass_behavior(kind, hits, lookups, n_queries)` \
@@ -304,8 +391,45 @@ fn cold_pass_assertion_succeeds_when_hits_are_zero() {
 
     assert!(
         out.status.success(),
-        "a cold pass with 0 hits must pass; stderr: {}",
+        "a cold pass with 0 hits and nonzero lookups must pass; stderr: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn cold_pass_assertion_fails_when_lookups_are_zero_even_though_hits_are_also_zero() {
+    // Round 2, item C: the cold branch takes `lookups` and never read it,
+    // so a pass in which NO query reached Solr at all (every request
+    // errored out or was skipped before ever hitting the searcher) reports
+    // hits=0, lookups=0, and was accepted as a clean cold measurement.
+    // Zero lookups is not evidence of a cold cache -- it's evidence nothing
+    // was measured. Choosing `lookups == 0` (rather than "below the term
+    // count") as the assertion here: the value `assert_cache_pass_behavior`
+    // actually receives for its 4th argument on the cold call in run.sh is
+    // `N_QUERIES` (the *warm*-pass count, 200), not the term count (48/49)
+    // -- see run.sh's `assert_cache_pass_behavior cold ... "$N_QUERIES"`
+    // call -- so a "lookups >= term count" check has no term count
+    // available to check against without a signature change this issue
+    // doesn't ask for. `lookups == 0` needs no such extra information and
+    // still closes the exact hole the spec names: "a pass in which NO
+    // queries reached Solr reports 0 hits and is accepted as clean."
+    let source = run_sh_source();
+    let func = extract_bash_function(&source, "assert_cache_pass_behavior").expect(
+        "run.sh should define an `assert_cache_pass_behavior(kind, hits, lookups, n_queries)` \
+         function; it does not exist in run.sh yet",
+    );
+
+    let dir = fresh_scratch_dir("cache-assert-cold-no-lookups");
+    let script = format!("{func}\nassert_cache_pass_behavior cold 0 0 200\n");
+    let out = run_bash(&script, &dir, &[]);
+
+    assert!(
+        !out.status.success(),
+        "a cold pass reporting 0 lookups must fail loudly, not pass silently just because hits \
+         are also 0 -- 0 lookups means no query reached Solr at all, not that the cache was \
+         cleanly flushed; stdout: {:?} stderr: {:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
     );
 }
 
