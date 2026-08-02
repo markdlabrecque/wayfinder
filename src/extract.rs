@@ -462,11 +462,17 @@ impl Default for ExtractLimits {
 /// type instead of six bespoke ones. Each *use site* still gets its own
 /// default (from `ExtractLimits`) and its own error identity in the
 /// rendered message (`StructuralLimitKind`).
-/// Both fields are private and read-only from outside: a counter whose
-/// `count` or `limit` a caller can assign is not a guard, it is a
-/// suggestion, and the callers it constrains (future format extractors,
-/// which hold `&mut Budget`) are exactly the code that must not be able to
-/// reset it.
+/// Both fields are private and read-only from outside, which prevents
+/// *accidental* mutation — not a determined caller. Anything holding
+/// `&mut Budget` can still reassign a whole counter (`budget.xml_depth =
+/// BoundedCounter::new(usize::MAX)`) or the whole budget, so guard
+/// integrity here rests on review of in-tree extractors, not on the type
+/// system.
+// ponytail: unforgeable would mean delegating methods on `Budget`
+// (`enter_xml_element()`, `count_xml_event()`) and an `Extractor` signature
+// taking `&Budget` instead of `&mut Budget`. Deferred to the first extractor
+// that actually drives a structural counter (#171 OOXML), where the method
+// set can be designed against real call sites rather than guessed at.
 #[derive(Debug, Clone, Copy)]
 pub struct BoundedCounter {
     count: usize,
