@@ -1714,6 +1714,8 @@ fn detect_does_not_treat_a_non_html_doctype_as_html() {
         got,
         ContentType::Xml,
         "a doctype merely beginning with `h` must not be sniffed as Html -- the match is on the \
-         whole name `html`, got {got:?}"
+         full prefix `html`, not a first letter. (It is a prefix match, so a hypothetical \
+         `<!DOCTYPE htmlish>` would sniff as Html; no real doctype vocabulary does that.) \
+         got {got:?}"
     );
 }

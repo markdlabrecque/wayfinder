@@ -243,9 +243,11 @@ const MARKUP_SNIFF_WINDOW: usize = 1024;
 /// whitespace, and the asymmetry is intentional: an XML declaration is only
 /// well-formed at byte zero, so `"  <?xml ...?>"` is not an XML document and
 /// this function is right not to treat it as one. Leading whitespace before a
-/// root element, by contrast, is perfectly ordinary. Such an input falls
-/// through to the declared type, which is the correct answer for malformed
-/// markup.
+/// root element, by contrast, is perfectly ordinary, and the no-declaration
+/// branch trims for exactly that reason. The mixed case — whitespace and then
+/// an XML declaration — is malformed XML, and falls through to the declared
+/// type, which is the right answer for input that is not well-formed as
+/// either.
 fn sniff_markup(bytes: &[u8]) -> Option<ContentType> {
     let window = &bytes[..bytes.len().min(MARKUP_SNIFF_WINDOW)];
     if bytes.starts_with(b"<?xml") {
@@ -768,7 +770,9 @@ pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 ///
 /// `Budget` is `Send` but **not** `Sync`, because those counters are `Cell`s.
 /// It moves onto an extraction worker thread freely (which is how
-/// `ExtractionRuntime` uses it), but a `&Budget` cannot be held across an
+/// `ExtractionRuntime` is meant to be used — the runtime never builds a
+/// `Budget` itself; the caller's closure owns one), but a `&Budget` cannot be
+/// held across an
 /// `.await` inside a `Send` handler future — the route must own its budget on
 /// the blocking side of `spawn_extraction`, not borrow it from async code.
 /// That is deliberate: a budget shared between threads would need every
@@ -789,6 +793,15 @@ pub struct Budget {
     output: String,
     output_scalars: usize,
 }
+
+// The `## Threading` section above is a promise about auto traits, and a
+// future field (an `Rc`, a raw pointer) would falsify it silently. This makes
+// the compiler check it: `Budget` must stay `Send`, because `spawn_extraction`
+// requires the closure that owns it to be `Send`.
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<Budget>();
+};
 
 impl Budget {
     pub fn new(limits: ExtractLimits) -> Self {
