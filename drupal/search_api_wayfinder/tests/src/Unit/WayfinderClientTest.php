@@ -29,11 +29,29 @@ use PHPUnit\Framework\TestCase;
  */
 class WayfinderClientTest extends TestCase {
 
-  private function clientWithResponses(array $responses): WayfinderClient {
+  private function clientWithResponses(array $responses, string $username = '', string $password = ''): WayfinderClient {
     $mock = new MockHandler($responses);
     $handlerStack = HandlerStack::create($mock);
     $httpClient = new Client(['handler' => $handlerStack]);
-    return new WayfinderClient($httpClient, 'http://localhost:8983/solr/mycore');
+    return new WayfinderClient($httpClient, 'http://localhost:8983/solr/mycore', NULL, $username, $password);
+  }
+
+  /**
+   * Builds a client with request history so authentication headers can be
+   * asserted on the actual outgoing PSR-7 requests.
+   *
+   * @param array<int, array<string, mixed>> $history
+   */
+  private function clientWithHistory(array $responses, array &$history, ?string $username = NULL, ?string $password = NULL): WayfinderClient {
+    $history = [];
+    $mock = new MockHandler($responses);
+    $handlerStack = HandlerStack::create($mock);
+    $handlerStack->push(\GuzzleHttp\Middleware::history($history));
+    $httpClient = new Client(['handler' => $handlerStack]);
+
+    return $username === NULL && $password === NULL
+      ? new WayfinderClient($httpClient, 'http://localhost:8983/solr/mycore')
+      : new WayfinderClient($httpClient, 'http://localhost:8983/solr/mycore', NULL, $username ?? '', $password ?? '');
   }
 
   /**
@@ -92,6 +110,77 @@ class WayfinderClientTest extends TestCase {
   public function testPingReturnsTrueOn200(): void {
     $client = $this->clientWithResponses([new Response(200, [], '{"status":"OK"}')]);
     $this->assertTrue($client->ping());
+  }
+
+  /**
+   * Ping remains public, but the client sends configured credentials on both
+   * ping and protected select requests. The header value is asserted exactly
+   * so a future change cannot silently choose a different authentication scheme.
+   *
+   * @covers ::select
+   * @covers ::ping
+   */
+  public function testSelectAndPingSendBasicCredentialsWhenBothAreConfigured(): void {
+    $history = [];
+    $client = $this->clientWithHistory([
+      new Response(200, [], '{"response":{"numFound":0,"docs":[]}}'),
+      new Response(200, [], '{"status":"OK"}'),
+    ], $history, 'alice', 's3cr3t');
+
+    $client->select(['q' => '*:*']);
+    $this->assertTrue($client->ping());
+
+    $this->assertCount(2, $history);
+    $this->assertSame('Basic ' . base64_encode('alice:s3cr3t'), $history[0]['request']->getHeaderLine('Authorization'));
+    $this->assertSame('Basic ' . base64_encode('alice:s3cr3t'), $history[1]['request']->getHeaderLine('Authorization'));
+  }
+
+  /**
+   * @dataProvider incompleteCredentialsProvider
+   * @covers ::select
+   * @covers ::ping
+   */
+  public function testSelectAndPingOmitAuthorizationWithoutACompleteCredentialPair(?string $username, ?string $password): void {
+    $history = [];
+    $client = $this->clientWithHistory([
+      new Response(200, [], '{"response":{"numFound":0,"docs":[]}}'),
+      new Response(200, [], '{"status":"OK"}'),
+    ], $history, $username, $password);
+
+    $client->select(['q' => '*:*']);
+    $this->assertTrue($client->ping());
+
+    $this->assertCount(2, $history);
+    $this->assertFalse($history[0]['request']->hasHeader('Authorization'));
+    $this->assertFalse($history[1]['request']->hasHeader('Authorization'));
+  }
+
+  /**
+   * @return array<string, array{0: ?string, 1: ?string}>
+   */
+  public static function incompleteCredentialsProvider(): array {
+    return [
+      'absent' => [NULL, NULL],
+      'username only' => ['alice', ''],
+      'password only' => ['', 's3cr3t'],
+    ];
+  }
+
+  /**
+   * Wayfinder deliberately returns its normal Solr-compatible JSON error
+   * envelope for an authentication failure, rather than Solr's HTML body.
+   *
+   * @covers ::select
+   */
+  public function testSelectTurnsWayfinderAuthenticationEnvelopeIntoSearchApiException(): void {
+    $client = $this->clientWithResponses([
+      new Response(401, [], '{"responseHeader":{"status":401,"QTime":0},"error":{"metadata":["error-class","wayfinder::Error","root-error-class","wayfinder::AuthenticationError"],"msg":"authentication required","code":401}}'),
+    ]);
+
+    $this->expectException(SearchApiException::class);
+    $this->expectExceptionMessage('authentication required');
+
+    $client->select(['q' => '*:*']);
   }
 
   /**

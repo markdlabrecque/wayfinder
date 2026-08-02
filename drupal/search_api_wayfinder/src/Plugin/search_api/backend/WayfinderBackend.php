@@ -64,6 +64,12 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
       'core' => '',
       'timeout' => 5,
       'commitWithin' => 1000,
+      // Deliberately exported plugin config, mirroring search_api_solr's
+      // BasicAuthTrait. This keeps the backend dependency-free but means an
+      // exported config file contains the password; use Drupal config access
+      // controls appropriate to a secret. A Key integration is out of scope.
+      'username' => '',
+      'password' => '',
       // Server-side highlighting is opt-in per plan doc locked decision 6:
       // sites that prefer Search API's own algorithmic "highlight" processor
       // need nothing from the backend, and shouldn't pay for hl on every
@@ -112,6 +118,18 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
       '#title' => $this->t('Request timeout (seconds)'),
       '#default_value' => $config['timeout'],
     ];
+    $form['username'] = [
+      '#type' => 'textfield',
+      '#title' => $this->t('HTTP Basic authentication username'),
+      '#default_value' => $config['username'],
+    ];
+    $form['password'] = [
+      '#type' => 'password',
+      '#title' => $this->t('HTTP Basic authentication password'),
+    ];
+    // Keep the stored password out of rendered form values. If the password
+    // input is blank on submit, validation restores it only for this username.
+    $form_state->set('password', $config['password']);
     $form['highlight'] = [
       '#type' => 'checkbox',
       '#title' => $this->t('Retrieve result highlighting from the server'),
@@ -140,6 +158,29 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
     if ($port !== NULL && $port !== '' && ((int) $port < 1 || (int) $port > 65535)) {
       $form_state->setError($form['port'], $this->t('Port must be between 1 and 65535.'));
     }
+
+    $username = $form_state->getValue('username');
+    $password = $form_state->getValue('password');
+    if ($password === '' && $username === ($this->configuration['username'] ?? '')) {
+      $password = $form_state->get('password');
+      $form_state->setValue('password', $password);
+    }
+
+    if (!is_string($username) || !is_string($password)) {
+      return;
+    }
+    if (($username === '') !== ($password === '')) {
+      $form_state->setErrorByName('password', $this->t('HTTP Basic authentication requires both a username and a password.'));
+    }
+    if (str_contains($username, ':')) {
+      $form_state->setErrorByName('username', $this->t('HTTP Basic authentication usernames cannot contain a colon.'));
+    }
+    if (preg_match('/[\x00-\x1F\x7F]/', $username) === 1) {
+      $form_state->setErrorByName('username', $this->t('HTTP Basic authentication usernames cannot contain ASCII control characters.'));
+    }
+    if (preg_match('/[\x00-\x1F\x7F]/', $password) === 1) {
+      $form_state->setErrorByName('password', $this->t('HTTP Basic authentication passwords cannot contain ASCII control characters.'));
+    }
   }
 
   /**
@@ -147,7 +188,7 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
    */
   public function submitConfigurationForm(array &$form, FormStateInterface $form_state) {
     $values = $form_state->getValues();
-    foreach (['scheme', 'host', 'port', 'path', 'core', 'timeout', 'highlight'] as $key) {
+    foreach (['scheme', 'host', 'port', 'path', 'core', 'timeout', 'username', 'password', 'highlight'] as $key) {
       if (array_key_exists($key, $values)) {
         $this->configuration[$key] = $values[$key];
       }
@@ -312,7 +353,14 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
    */
   protected function getClient(): WayfinderClient {
     $timeout = (float) ($this->getConfiguration()['timeout'] ?? 5);
-    return new WayfinderClient($this->httpClient, $this->getCoreUrl(), $timeout);
+    $config = $this->getConfiguration();
+    return new WayfinderClient(
+      $this->httpClient,
+      $this->getCoreUrl(),
+      $timeout,
+      $config['username'] ?? '',
+      $config['password'] ?? '',
+    );
   }
 
 }

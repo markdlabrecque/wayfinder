@@ -16,7 +16,8 @@
 # per issue #80 it points at `presets/search-api.toml`, two directories above
 # `drupal/search_api_wayfinder`, four `../` up from here) instead of a
 # harness-local schema.toml -- the harness must prove the round trip against
-# the actual preset it's supposed to validate, not a hand-tuned copy of it.
+# the actual preset it's supposed to validate, not a hand-tuned copy of it. The
+# adjacent wayfinder.toml is a harness-only Basic-auth fixture for issue #240.
 services:
   wayfinder:
     build:
@@ -27,6 +28,9 @@ services:
       - "18990:8983"
     volumes:
       - ../../../../presets/search-api.toml:/schema.toml:ro
+      - ./wayfinder.toml:/wayfinder.toml:ro
+    environment:
+      WAYFINDER_CONFIG: /wayfinder.toml
     command: ["/schema.toml", "/data", "0.0.0.0:8983"]
 
   drupal:

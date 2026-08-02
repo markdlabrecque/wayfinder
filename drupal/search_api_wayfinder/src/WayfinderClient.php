@@ -23,6 +23,8 @@ class WayfinderClient {
     private readonly ClientInterface $httpClient,
     private readonly string $coreUrl,
     private readonly ?float $timeout = NULL,
+    private readonly string $username = '',
+    private readonly string $password = '',
   ) {}
 
   /**
@@ -103,9 +105,11 @@ class WayfinderClient {
    */
   public function ping(): bool {
     try {
-      $response = $this->httpClient->request('GET', $this->coreUrl . '/admin/ping', [
+      $options = [
         'query' => $this->encodeQuery(['wt' => 'json']),
-      ]);
+      ];
+      $options += $this->authenticationOptions();
+      $response = $this->httpClient->request('GET', $this->coreUrl . '/admin/ping', $options);
       return $response->getStatusCode() === 200;
     }
     catch (GuzzleException $e) {
@@ -138,6 +142,17 @@ class WayfinderClient {
   }
 
   /**
+   * Returns Guzzle's HTTP Basic option only for a complete credential pair.
+   *
+   * @return array<string, array{0: string, 1: string}>
+   */
+  private function authenticationOptions(): array {
+    return $this->username !== '' && $this->password !== ''
+      ? ['auth' => [$this->username, $this->password]]
+      : [];
+  }
+
+  /**
    * Performs a request against a core-relative endpoint and decodes the JSON
    * body, converting non-200 error envelopes into SearchApiException.
    */
@@ -145,6 +160,7 @@ class WayfinderClient {
     if ($this->timeout !== NULL) {
       $options += ['timeout' => $this->timeout, 'connect_timeout' => $this->timeout];
     }
+    $options += $this->authenticationOptions();
 
     try {
       $response = $this->httpClient->request($method, $this->coreUrl . '/' . $endpoint, $options);

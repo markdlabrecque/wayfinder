@@ -5,31 +5,13 @@
 // trip" acceptance item.
 //
 // Unlike the old worktree's run_queries.php
-// (/Users/mark/Projects/wayfinder-57-search-api-wayfinder/drupal/search_api_wayfinder/tests/integration/run_queries.php,
-// which ran a fulltext query AND a facet query through the search_api_solr
-// backend + wayfinder connector), this version only runs the plain fulltext
-// query: M1 (see WayfinderBackend::getSupportedFeatures(), currently `[]`)
-// has not implemented facets yet, so a facet query here would not be
-// exercising this ticket's scope -- it would just be asserting on a
-// not-yet-built feature. Facets get their own round trip in M3 (#57 plan
-// doc, "search_api_facets" contrib module) once QueryBuilder emits
-// `facet.field` and ResponseParser parses `facet_counts`.
+// (/Users/mark/Projects/wayfinder-57-search-api-wayfinder/drupal/search_api_wayfinder/tests/integration/run_queries.php),
+// which ran fulltext and facet queries through the search_api_solr backend
+// plus a Wayfinder connector, this standalone-backend harness exercises the
+// plain fulltext round trip required for this ticket.
 //
-// KNOWN BLOCKER (#84): this currently fails, but not because of anything in
-// search_api_wayfinder. Indexing succeeds; the search step 400s because
-// Wayfinder core's edismax `qf`/`pf` resolution (CoreIndex::
-// resolve_field_weights, src/core_index.rs) only resolves statically
-// declared fields, never a `[[dynamic_fields]]` pattern match like
-// `ts_title` -- unlike the `q` text path, which does rewrite dynamic names
-// via rewrite_dynamic_fields(). Since search_api_solr's field-naming
-// convention (and this repo's own presets/search-api.toml) is entirely
-// dynamic-field-based, `defType=edismax` against real Drupal `qf` values is
-// unusable until #84 lands. Re-run this harness once #84 closes; it should
-// go green with no changes needed here.
-//
-// This script is the harness's actual "red" assertion for issue #80: it
-// exits non-zero (and prints a ROUNDTRIP: FAIL line) unless the node
-// created by create_content.php comes back from a real Wayfinder core
+// This script exits non-zero (and prints a ROUNDTRIP: FAIL line) unless the
+// node created by create_content.php comes back from a real Wayfinder core
 // through WayfinderBackend::search(), so run.sh can fail loudly instead of
 // silently reporting "0 results" as if that were fine.
 
@@ -44,6 +26,30 @@ if (!$index) {
 $pmm = \Drupal::service('plugin.manager.search_api.parse_mode');
 
 $exit_code = 0;
+
+// Wayfinder keeps its configured-core ping public, but all query endpoints
+// require the backend's credentials. Prove both contracts before the normal
+// authenticated Search API round trip below.
+$unauthenticated = new \Drupal\search_api_wayfinder\WayfinderClient(
+  \Drupal::service('http_client'),
+  'http://wayfinder:8983/solr/content',
+);
+if (!$unauthenticated->ping()) {
+  echo "AUTH: FAIL - unauthenticated client could not ping the public endpoint\n";
+  exit(1);
+}
+try {
+  $unauthenticated->select(['q' => '*:*']);
+  echo "AUTH: FAIL - unauthenticated select unexpectedly succeeded\n";
+  exit(1);
+}
+catch (\Drupal\search_api\SearchApiException $e) {
+  if ($e->getMessage() !== 'authentication required') {
+    echo "AUTH: FAIL - unauthenticated select message was: " . $e->getMessage() . "\n";
+    exit(1);
+  }
+}
+echo "AUTH: PASS - public ping and exact unauthenticated select failure verified\n";
 
 try {
   $query = $index->query();
@@ -75,4 +81,6 @@ catch (\Throwable $e) {
   $exit_code = 1;
 }
 
-exit($exit_code);
+if ($exit_code !== 0) {
+  throw new \RuntimeException('Search API round trip failed.');
+}

@@ -12,7 +12,7 @@
 // M1 (#75) superseded that architecture with a standalone backend, so this
 // version configures the server directly with `backend: 'wayfinder'` and
 // WayfinderBackend's own configuration schema (scheme/host/port/path/core/
-// timeout/commitWithin -- see
+// timeout/commitWithin/username/password -- see
 // config/schema/search_api_wayfinder.schema.yml and
 // WayfinderBackend::defaultConfiguration()) -- no search_api_solr, no
 // Solarium, no connector plugin at all.
@@ -43,6 +43,8 @@ $server = Server::create([
     'core' => 'content',
     'timeout' => 5,
     'commitWithin' => 1000,
+    'username' => 'operator',
+    'password' => 'secret',
   ],
   'status' => TRUE,
 ]);
