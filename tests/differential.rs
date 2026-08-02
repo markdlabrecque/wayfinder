@@ -2742,3 +2742,204 @@ fn live_solr_matches_committed_manifest_multipart() {
         failures.join("\n")
     );
 }
+
+// --- diagnostic-string hygiene (issue #277) ---------------------------------
+//
+// A reflow that leaves source indentation *inside* a string literal turns a
+// wrapped multi-line diagnostic into one that renders with a run of several
+// consecutive spaces mid-sentence. Test A below checks every diagnostic
+// constant table at runtime (their reason strings are always constructed,
+// whether or not the divergence path is hit). Test B checks the three
+// `failures.push(format!(...))` literals in the multipart runner, which are
+// inline and only rendered when the differential runner actually fails --
+// not hermetically triggerable -- by scanning this file's own source text
+// instead.
+
+/// Returns the byte offset of the first run of two or more consecutive ASCII
+/// spaces in `s`, or `None` if there is none.
+fn find_double_space(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    (0..bytes.len().saturating_sub(1)).find(|&i| bytes[i] == b' ' && bytes[i + 1] == b' ')
+}
+
+fn char_boundary_floor(s: &str, mut idx: usize) -> usize {
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+fn char_boundary_ceil(s: &str, mut idx: usize) -> usize {
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx
+}
+
+/// Appends a failure to `failures` for every reason string in `entries`
+/// (already reduced to `(name, reason)` pairs) that contains a run of two or
+/// more consecutive spaces, naming the table, the entry, and a window around
+/// the offending substring.
+fn collect_double_space_reasons(
+    table_name: &str,
+    entries: &[(&str, &str)],
+    failures: &mut Vec<String>,
+) {
+    for (name, reason) in entries {
+        if let Some(pos) = find_double_space(reason) {
+            let start = char_boundary_floor(reason, pos.saturating_sub(24));
+            let end = char_boundary_ceil(reason, (pos + 24).min(reason.len()));
+            failures.push(format!(
+                "{table_name} entry `{name}` reason has a run of 2+ consecutive spaces at byte \
+                 {pos}: ...{}...",
+                &reason[start..end]
+            ));
+        }
+    }
+}
+
+/// Test A (broad, runtime): none of the six diagnostic constant tables'
+/// reason strings may contain a run of two or more consecutive spaces. A
+/// wrapped literal that left its own source indentation inside the string is
+/// exactly how this regresses -- see issue #277.
+#[test]
+fn diagnostic_constant_tables_have_no_double_spaces() {
+    let mut failures = Vec::new();
+
+    collect_double_space_reasons(
+        "ACCEPTED_DIVERGENCES_MULTIPART",
+        &ACCEPTED_DIVERGENCES_MULTIPART
+            .iter()
+            .map(|(n, r)| (*n, *r))
+            .collect::<Vec<_>>(),
+        &mut failures,
+    );
+    collect_double_space_reasons(
+        "DIVERGENT_STATUS_MULTIPART",
+        &DIVERGENT_STATUS_MULTIPART
+            .iter()
+            .map(|(n, _, r)| (*n, *r))
+            .collect::<Vec<_>>(),
+        &mut failures,
+    );
+    collect_double_space_reasons(
+        "ACCEPTED_DIVERGENCES",
+        &ACCEPTED_DIVERGENCES
+            .iter()
+            .map(|(n, r)| (*n, *r))
+            .collect::<Vec<_>>(),
+        &mut failures,
+    );
+    collect_double_space_reasons(
+        "RANKED_SCORE_VALUE_RATIFIED",
+        &RANKED_SCORE_VALUE_RATIFIED
+            .iter()
+            .map(|(n, r)| (*n, *r))
+            .collect::<Vec<_>>(),
+        &mut failures,
+    );
+    collect_double_space_reasons(
+        "EXPECTED_DIVERGENCES_MANIFEST_ERRORS",
+        &EXPECTED_DIVERGENCES_MANIFEST_ERRORS
+            .iter()
+            .map(|(n, r)| (*n, *r))
+            .collect::<Vec<_>>(),
+        &mut failures,
+    );
+    collect_double_space_reasons(
+        "EXPECTED_DIVERGENCES",
+        &EXPECTED_DIVERGENCES
+            .iter()
+            .map(|(n, r)| (*n, *r))
+            .collect::<Vec<_>>(),
+        &mut failures,
+    );
+
+    assert!(
+        failures.is_empty(),
+        "diagnostic constant table reason strings must be single-spaced (a reflow that left \
+         source indentation inside the literal renders as a multi-space mid-sentence run):\n{}",
+        failures.join("\n")
+    );
+}
+
+/// Test B (narrow, source text): guards the three inline
+/// `failures.push(format!(...))` literals in the multipart status-divergence
+/// runner, which Test A cannot reach because they are never constructed by a
+/// hermetic pass (triggering them means making the differential runner
+/// actually fail). Lines are exempt from this check, by 1-based line number,
+/// for a legitimate reason named alongside each one below; every other
+/// non-comment line in this file must have single spaces after its own
+/// leading indentation.
+///
+/// ponytail: this is a source-text lint scoped to this one file. It would
+/// not catch the same defect in a diagnostic literal built by concatenation
+/// (e.g. `format!("{a}{b}")` where `a` or `b` supplies the run) rather than
+/// typed out as contiguous source text.
+const DOUBLE_SPACE_LINT_EXEMPT_LINES: &[(usize, &str)] = &[
+    (
+        238,
+        "keyorder_corpus's JSON fixture data lines up the shorter view-count \
+         rows with extra padding so the tag column stays aligned -- readability \
+         formatting for test data, not a diagnostic string",
+    ),
+    (
+        1609,
+        "eprintln!'s indented \"(expected divergence: {reason})\" -- an established idiom in \
+         this file: a leading two-space run inside the string marks a sub-message printed under \
+         the preceding unindented eprintln line, not reflow debris",
+    ),
+    (1666, "same nested-eprintln-indent idiom as line 1609"),
+    (1696, "same nested-eprintln-indent idiom as line 1609"),
+    (1712, "same nested-eprintln-indent idiom as line 1609"),
+    (1729, "same nested-eprintln-indent idiom as line 1609"),
+    (1739, "same nested-eprintln-indent idiom as line 1609"),
+    (1752, "same nested-eprintln-indent idiom as line 1609"),
+    (1802, "same nested-eprintln-indent idiom as line 1609"),
+    (1987, "same nested-eprintln-indent idiom as line 1609"),
+    (2174, "same nested-eprintln-indent idiom as line 1609"),
+    (2184, "same nested-eprintln-indent idiom as line 1609"),
+];
+
+#[test]
+fn source_text_has_no_double_spaces_outside_leading_indentation() {
+    let source = include_str!("differential.rs");
+    let exempt: std::collections::HashSet<usize> = DOUBLE_SPACE_LINT_EXEMPT_LINES
+        .iter()
+        .map(|(line_no, _)| *line_no)
+        .collect();
+
+    let mut failures = Vec::new();
+    for (zero_based, line) in source.lines().enumerate() {
+        let line_no = zero_based + 1;
+        let trimmed = line.trim_start_matches(' ');
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            // Leading indentation is exempt by construction (trimmed already
+            // has it stripped); comment lines are exempt too, since this
+            // lint targets diagnostic strings that actually get printed, not
+            // comment formatting (including the module doc's markdown
+            // bullet continuations, which indent under the bullet text using
+            // the same convention).
+            continue;
+        }
+        if exempt.contains(&line_no) {
+            continue;
+        }
+        if let Some(pos) = find_double_space(trimmed) {
+            failures.push(format!(
+                "line {line_no} has a run of 2+ consecutive spaces at column {pos} of its \
+                 trimmed content (i.e. outside leading indentation): {trimmed:?}"
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "tests/differential.rs has lines with an embedded multi-space run outside their \
+         leading indentation -- a wrapped format!/push string literal likely carries source \
+         indentation mid-sentence (see issue #277); if a new occurrence is a legitimate \
+         construct, add a narrowly scoped, named entry to DOUBLE_SPACE_LINT_EXEMPT_LINES \
+         instead of widening this check:\n{}",
+        failures.join("\n")
+    );
+}
