@@ -97,12 +97,12 @@ fn main() {
         let rss_delta_note = if wayfinder_rss_delta_mb >= 0.0 {
             format!(
                 "RSS increased by {wayfinder_rss_delta_mb:.1} MB between that sample and the \
-                 {wayfinder_load_mb:.1} MB maximum sampled during query load"
+                 later maximum of {wayfinder_load_mb:.1} MB"
             )
         } else {
             format!(
                 "RSS decreased by {:.1} MB between that sample and the \
-                 {wayfinder_load_mb:.1} MB maximum sampled during query load",
+                 later maximum of {wayfinder_load_mb:.1} MB",
                 -wayfinder_rss_delta_mb
             )
         };
