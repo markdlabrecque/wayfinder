@@ -120,7 +120,7 @@ fn render_markdown_table_matches_the_expected_shape_for_a_2m_run() {
 | p95 query latency, warm cache (facet+filter+highlight, 2000000 docs) | baseline | <= baseline | 95.00 ms | 85.50 ms | {WARM_LATENCY_PATH} |
 | p95 query latency, cold cache (distinct queries, 2000000 docs) | baseline | <= baseline | 46.00 ms | 41.40 ms | {COLD_LATENCY_PATH} |
 | Container image size | ~500 MB | < 30 MB | 512.0 MB | 24.0 MB | Both: Docker image size (`docker inspect`), not a running-container measurement. |
-| Index size on disk | baseline | <= 1.2x baseline | 200.0 MB | 230.0 MB | Solr: size inside the Docker container's data volume (`docker exec du`). Wayfinder: size of the native process's data directory on the host (`du`). |"
+| Index size on disk | baseline | <= 1.2x baseline | 200.0 MB | 230.0 MB | Solr: Lucene `data/index` directory inside the Docker container (`docker exec du`); excludes tlog. Wayfinder: Tantivy/native data directory on the host (`du`), including tiny Wayfinder schema/analyzer metadata. |"
     );
 
     assert_eq!(table.trim_end(), expected);
@@ -299,7 +299,7 @@ fn render_markdown_table_has_exactly_the_header_plus_nine_metric_rows_for_a_sub_
 | p95 query latency, warm cache (facet+filter+highlight, 50000 docs) | baseline | <= baseline | 95.00 ms | 85.50 ms | {WARM_LATENCY_PATH} |
 | p95 query latency, cold cache (distinct queries, 50000 docs) | baseline | <= baseline | 46.00 ms | 41.40 ms | {COLD_LATENCY_PATH} |
 | Container image size | ~500 MB | < 30 MB | 512.0 MB | 24.0 MB | Both: Docker image size (`docker inspect`), not a running-container measurement. |
-| Index size on disk | baseline | <= 1.2x baseline | 200.0 MB | 230.0 MB | Solr: size inside the Docker container's data volume (`docker exec du`). Wayfinder: size of the native process's data directory on the host (`du`). |"
+| Index size on disk | baseline | <= 1.2x baseline | 200.0 MB | 230.0 MB | Solr: Lucene `data/index` directory inside the Docker container (`docker exec du`); excludes tlog. Wayfinder: Tantivy/native data directory on the host (`du`), including tiny Wayfinder schema/analyzer metadata. |"
     );
 
     assert_eq!(table.trim_end(), expected);
