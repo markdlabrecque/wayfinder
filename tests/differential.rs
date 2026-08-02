@@ -108,6 +108,31 @@ const ACCEPTED_DIVERGENCES_MULTIPART: &[(&str, &str)] = &[
     ),
 ];
 
+/// Rows where Wayfinder's HTTP *status* itself diverges from the captured
+/// one, keyed by fixture name to the status Wayfinder answers and why.
+///
+/// Separate from `ACCEPTED_DIVERGENCES_MULTIPART` because the two are
+/// different claims: that list waives body fields the normaliser then strips
+/// from an otherwise identical envelope, while a status divergence means the
+/// two responses are not the same kind of answer at all and no normaliser
+/// can or should reconcile them.
+///
+/// Self-expiring: the runner asserts the captured status still differs from
+/// the listed one, so an entry that stops diverging fails and names itself
+/// for deletion.
+const DIVERGENT_STATUS_MULTIPART: &[(&str, u16, &str)] = &[(
+    "extract_corrupt_pdf",
+    415,
+    "issue #258: Solr's Tika parses this malformed PDF and throws, which is a 500; Wayfinder has      no PDF extractor at all, so it never reaches a parse attempt and answers 415 unsupported      format. Retire this entry when the PDF extractor lands (PRD phase 2b) -- at that point      Wayfinder can fail *inside* a parser and the captured 500 becomes reachable",
+)];
+
+fn divergent_status_multipart(name: &str) -> Option<(u16, &'static str)> {
+    DIVERGENT_STATUS_MULTIPART
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, status, reason)| (*status, *reason))
+}
+
 fn accepted_divergence_multipart_reason(name: &str) -> Option<&'static str> {
     ACCEPTED_DIVERGENCES_MULTIPART
         .iter()
@@ -2537,6 +2562,44 @@ async fn extract_multipart_manifest_matches_captured_fixtures() {
             &bytes,
         )
         .await;
+
+        // A recorded status divergence replaces the captured status as this
+        // row's expectation, and is checked *as* a divergence: the captured
+        // status must still differ (or the entry is stale), Wayfinder's
+        // status must be exactly the recorded one (not merely "some other
+        // error"), and the body must still be a well-formed Wayfinder error
+        // envelope agreeing with it.
+        if let Some((expected_status, reason)) = divergent_status_multipart(&entry.name) {
+            if entry.status == expected_status {
+                failures.push(format!(
+                    "{}: DIVERGENT_STATUS_MULTIPART says Wayfinder answers {expected_status}                      where the capture is {}, but they now agree ({reason}) -- remove this entry",
+                    entry.name, entry.status
+                ));
+                continue;
+            }
+            if status.as_u16() != expected_status {
+                failures.push(format!(
+                    "{}: recorded status divergence expects {expected_status}, got {}, body:                      {actual}",
+                    entry.name,
+                    status.as_u16()
+                ));
+                continue;
+            }
+            let actual_n = normalize(actual.clone());
+            let code = actual_n.value["error"]["code"].as_u64();
+            let header = actual_n.value["responseHeader"]["status"].as_u64();
+            if code != Some(u64::from(expected_status))
+                || header != Some(u64::from(expected_status))
+            {
+                failures.push(format!(
+                    "{}: status-divergent row must still answer Wayfinder's normal error                      envelope, got error.code={code:?} responseHeader.status={header:?} in                      {actual}",
+                    entry.name
+                ));
+                continue;
+            }
+            ran += 1;
+            continue;
+        }
 
         if status.as_u16() != entry.status {
             failures.push(format!(

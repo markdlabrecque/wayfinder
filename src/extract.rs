@@ -604,7 +604,16 @@ pub fn resolve_charset(declared_type: Option<&str>, bytes: &[u8]) -> ResolvedCha
     // ASCII), but Tika reports `ISO-8859-1` for both of those captures. ASCII
     // is a subset of every Latin-1-family encoding, so nothing about the
     // decode changes; only the reported label does.
-    let ascii_only = window.is_ascii() && window.len() == bytes.len();
+    //
+    // The scan deliberately covers *all* the bytes, not just the detection
+    // window: a document whose first 64 KiB are ASCII and whose tail is UTF-8
+    // must keep the UTF-8 label, or the tail decodes as mojibake. Reading the
+    // window alone would have flipped the label at exactly 64 KiB with no
+    // change in content class. `is_ascii` is a vectorised scan over input that
+    // `max_body_bytes` already bounds, and `decode_text` walks the same bytes
+    // immediately afterwards, so this is a constant-factor cost, not a new
+    // order of work.
+    let ascii_only = bytes.is_ascii();
     let encoding = if ascii_only && encoding == UTF_8 {
         WINDOWS_1252
     } else {
@@ -867,7 +876,14 @@ impl Extractor for HtmlExtractor {
             let take = char_boundary_len(rest, DECODE_CHUNK_BYTES);
             let (chunk, tail) = rest.split_at(take);
             queue.push_back(StrTendril::from_slice(chunk));
-            if matches!(tokenizer.feed(&queue), TokenizerResult::Script(())) {
+            // `TokenSinkResult::Script` is the only abort channel html5ever
+            // offers, and it is only *reachable* from a tag token: a sink that
+            // runs out of budget mid-character-run cannot signal until the next
+            // tag arrives. Checking `error` directly bounds the overshoot to a
+            // single chunk instead of "however much text until the next tag".
+            if matches!(tokenizer.feed(&queue), TokenizerResult::Script(()))
+                || tokenizer.sink.state.borrow().error.is_some()
+            {
                 aborted = true;
                 break;
             }
@@ -1563,6 +1579,39 @@ impl Default for ExtractLimits {
             max_rtf_group_depth: 256,
             max_pdf_pages: 5000,
         }
+    }
+}
+
+/// Head-room the route-level transport ceiling allows above `max_body_bytes`
+/// for multipart framing: boundary delimiters, per-part headers, and any
+/// non-file form fields sent alongside the document.
+///
+/// 1 MiB is far above what a legitimate upload spends on framing (a handful
+/// of parts, a few hundred bytes each) and far below anything that matters as
+/// a resource. It exists so the *content* budget — the one whose overrun
+/// produces the captured 413 envelope — is what a realistic oversized upload
+/// hits first, rather than a transport cap firing early on framing bytes and
+/// answering with axum's bare `LengthLimitError` instead.
+const MULTIPART_FRAMING_SLACK: u64 = 1024 * 1024;
+
+impl ExtractLimits {
+    /// The transport-level ceiling for the whole `/update/extract` request
+    /// body, for a route-level `DefaultBodyLimit::max`.
+    ///
+    /// This is **not** a duplicate of `max_body_bytes`, and it is not the
+    /// limit that produces the 413 envelope. It is the backstop for the bytes
+    /// the handler's own counting cannot see: multipart *part headers* are
+    /// consumed by `multer` before a `Field` exists, so no handler-side
+    /// counter can charge for them. Without a finite transport ceiling, an
+    /// unauthenticated client can stream endless part headers (or an endless
+    /// chunked body) at this route and never reach a counted byte.
+    ///
+    /// Content bytes are charged against `max_body_bytes` by the handler, for
+    /// every part it consumes, file or not — so this ceiling is defence in
+    /// depth over that, not a substitute for it.
+    pub fn route_body_ceiling(&self) -> usize {
+        usize::try_from(self.max_body_bytes.saturating_add(MULTIPART_FRAMING_SLACK))
+            .unwrap_or(usize::MAX)
     }
 }
 
@@ -2280,6 +2329,56 @@ pub async fn stream_to_tempfile(
     dest: &mut NamedTempFile,
     max_bytes: u64,
 ) -> Result<u64, ExtractError> {
+    let mut consumed = 0u64;
+    stream_to_tempfile_counted(source, dest, max_bytes, &mut consumed).await
+}
+
+/// `stream_to_tempfile` against a **request-wide** running total.
+///
+/// A multipart request is more than its file part: the same body can carry
+/// any number of other fields, and every byte of all of them arrived over the
+/// same connection. Charging them all to one `consumed` total is what makes
+/// `max_bytes` a limit on the *request* rather than a limit on whichever part
+/// happens to be the document.
+///
+/// `consumed` is advanced as bytes are accepted, so a caller that runs
+/// several sources through this sees the limit shrink for each one. The
+/// returned count is what *this* source contributed.
+pub async fn stream_to_tempfile_counted(
+    source: &mut impl ChunkSource,
+    dest: &mut NamedTempFile,
+    max_bytes: u64,
+    consumed: &mut u64,
+) -> Result<u64, ExtractError> {
+    let written = copy_counted(source, Some(dest), max_bytes, consumed).await?;
+    dest.as_file_mut()
+        .flush()
+        .map_err(|e| ExtractError::Io(format!("flushing upload temp file: {e}")))?;
+    Ok(written)
+}
+
+/// Reads a source to exhaustion, discarding the bytes but **charging them**
+/// to the same request-wide total `stream_to_tempfile_counted` uses.
+///
+/// This is the non-file multipart field: its content is not wanted, but it
+/// still had to be received, and a handler that skips such a field without
+/// counting it accepts an unbounded stream of them. Fails with the same
+/// `BodyTooLarge` — and therefore the same captured 413 envelope — as an
+/// oversized document does.
+pub async fn drain_counted(
+    source: &mut impl ChunkSource,
+    max_bytes: u64,
+    consumed: &mut u64,
+) -> Result<u64, ExtractError> {
+    copy_counted(source, None, max_bytes, consumed).await
+}
+
+async fn copy_counted(
+    source: &mut impl ChunkSource,
+    mut dest: Option<&mut NamedTempFile>,
+    max_bytes: u64,
+    consumed: &mut u64,
+) -> Result<u64, ExtractError> {
     let mut written: u64 = 0;
     while let Some(chunk) = source.next_chunk().await {
         let chunk = chunk.map_err(|e| ExtractError::Io(format!("reading upload body: {e}")))?;
@@ -2287,17 +2386,17 @@ pub async fn stream_to_tempfile(
         // Checked *before* the write, and with a saturating add so a
         // pathological chunk length cannot wrap the running total back under
         // the limit.
-        if written.saturating_add(len) > max_bytes {
+        if consumed.saturating_add(len) > max_bytes {
             return Err(ExtractError::BodyTooLarge { limit: max_bytes });
         }
-        dest.as_file_mut()
-            .write_all(&chunk)
-            .map_err(|e| ExtractError::Io(format!("writing upload to temp file: {e}")))?;
+        if let Some(dest) = dest.as_deref_mut() {
+            dest.as_file_mut()
+                .write_all(&chunk)
+                .map_err(|e| ExtractError::Io(format!("writing upload to temp file: {e}")))?;
+        }
         written += len;
+        *consumed += len;
     }
-    dest.as_file_mut()
-        .flush()
-        .map_err(|e| ExtractError::Io(format!("flushing upload temp file: {e}")))?;
     Ok(written)
 }
 
@@ -2690,7 +2789,8 @@ impl std::error::Error for ExtractError {}
 /// self-expiring note for that — it fails the moment anyone captures an
 /// extraction fixture beyond the ten that exist today, which is exactly when
 /// these mappings must be re-checked against real Solr. It has fired once
-/// already, and moved `UnsupportedFormat` (see that test's recheck table).
+/// already, for #258's five new captures; that recheck moved nothing, and its
+/// findings are recorded in the test's own doc comment.
 impl From<ExtractError> for crate::error::WfError {
     fn from(err: ExtractError) -> Self {
         use axum::http::StatusCode;
@@ -2701,17 +2801,26 @@ impl From<ExtractError> for crate::error::WfError {
             ExtractError::Parse(_) => (StatusCode::INTERNAL_SERVER_ERROR, "extraction-failed"),
             // Server-side failure, not the document's fault.
             ExtractError::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "extraction-io"),
-            // **Captured, as of issue #258**: `extract_corrupt_pdf.json` is
-            // real Solr answering a document it could not extract, and it is
-            // an HTTP 500, not a 415. Wayfinder reaches that same fixture
-            // through `UnsupportedFormat` rather than `Parse` (there is no
-            // PDF parser here to fail *inside*), so the phase-0 415 — chosen
-            // with no evidence — was remapped to 500 when the trip-wire below
-            // fired. 415 is the better-argued status in the abstract; the
-            // captured wire says 500, and the compatibility contract makes
-            // the capture win.
+            // 415: the request names a media type this server will not
+            // process. The canonical meaning of the status, and it tells the
+            // client retrying is pointless.
+            //
+            // Still uncaptured, and #258's fixtures did **not** change that.
+            // `extract_corrupt_pdf.json` is Solr's Tika throwing *while
+            // parsing* a malformed PDF, which is the `Parse` arm above and is
+            // already a 500. It says nothing about a *well-formed* document
+            // in a format this server does not implement — a valid DOCX, RTF
+            // or JPEG — which is what `UnsupportedFormat` actually means here
+            // and which real Solr answers 200 with extracted content. That
+            // population is the one this status has to be right for, and
+            // 500ing it would contradict the client-caused/4xx rule stated
+            // above. Wayfinder happens to reach the corrupt-PDF *fixture*
+            // through this arm only because it has no PDF parser to fail
+            // inside; that is a status divergence on one row, recorded in
+            // `DIVERGENT_STATUS_MULTIPART` in `tests/differential.rs` and in
+            // the PRD, not evidence for this mapping.
             ExtractError::UnsupportedFormat { .. } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "extraction-unsupported-format",
             ),
             // 503: capacity, not content. Retry later may succeed, and 503
@@ -2770,17 +2879,24 @@ mod tests {
     /// | mapping | new evidence? | outcome |
     /// |---|---|---|
     /// | 500 `Parse` | `extract_corrupt_pdf` (unchanged) | still matched |
-    /// | 415 `UnsupportedFormat` | `extract_corrupt_pdf`, now *reachable* | **changed to 500** |
+    /// | 415 `UnsupportedFormat` | none | reasoned choice stands |
     /// | 413 `BodyTooLarge` | none | reasoned choice stands |
     /// | 503 `TooBusy` | none | reasoned choice stands |
     /// | 503 `DeadlineExceeded` | none | reasoned choice stands |
     /// | 400 `OutputTooLarge`/`ZipBudget`/`StructuralLimit` | none | reasoned choice stands |
     ///
-    /// The one that moved is `UnsupportedFormat`. In phase 0 nothing routed a
-    /// real document to it, so 415 was a free choice; with the route landed,
-    /// a corrupt PDF now *is* an `UnsupportedFormat` here, and
-    /// `extract_corrupt_pdf.json` shows Solr answering that exact upload with
-    /// a 500. See `impl From<ExtractError> for WfError`.
+    /// `UnsupportedFormat` is the one worth spelling out, because it looks
+    /// like it gained evidence and did not. Wayfinder answers
+    /// `extract_corrupt_pdf`'s upload through that arm, and the fixture is a
+    /// 500 — but the fixture is Solr's Tika failing *inside* a PDF parser,
+    /// which is the `Parse` arm, already 500. What `UnsupportedFormat`
+    /// actually covers is a well-formed document in an unimplemented format
+    /// (DOCX, RTF, JPEG), for which Solr returns 200 with content and no
+    /// capture exists. Remapping 415 to 500 on the strength of the corrupt
+    /// PDF would have set the status for that whole population from a fixture
+    /// that does not describe it. The corrupt-PDF row is instead a recorded
+    /// status divergence (`DIVERGENT_STATUS_MULTIPART` in
+    /// `tests/differential.rs`), which retires when a PDF extractor lands.
     const CAPTURED_EXTRACT_FIXTURES: [&str; 10] = [
         "extract_corrupt_pdf.json",
         "extract_declared_charset_text.json",
@@ -2797,7 +2913,7 @@ mod tests {
     /// Self-expiring note for the uncaptured budget-violation statuses in
     /// `impl From<ExtractError> for WfError`.
     ///
-    /// Those statuses (413/503/400) are Wayfinder's own reasoned choice,
+    /// Those statuses (413/503/415/400) are Wayfinder's own reasoned choice,
     /// because Solr was never provoked into a budget violation during the
     /// #171 capture. That is only acceptable for as long as there is no
     /// captured evidence to check them against — so this test asserts the
@@ -2820,7 +2936,7 @@ mod tests {
             found, CAPTURED_EXTRACT_FIXTURES,
             "the set of captured extraction fixtures changed. The budget-violation status \
              mapping in `impl From<ExtractError> for WfError` (413 BodyTooLarge, 503 TooBusy, \
-             503 DeadlineExceeded, 400 OutputTooLarge/ZipBudget/\
+             503 DeadlineExceeded, 415 UnsupportedFormat, 400 OutputTooLarge/ZipBudget/\
              StructuralLimit) was chosen with no captured Solr evidence. If the new fixture \
              covers any of those cases, verify the mapping against it and either fix the \
              mapping or record a deliberate divergence; then update \

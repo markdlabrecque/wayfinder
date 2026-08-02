@@ -183,11 +183,18 @@ async fn extract_declared_charset_text_matches_fixture() {
     .await;
 }
 
-/// The corrupt-PDF 500 envelope — no `normalize_extract` needed (no
-/// `file`/`file_metadata` fields on an error response), same treatment as
-/// every other error-envelope fixture.
+/// The corrupt-PDF row is a **recorded status divergence**, not a fixture
+/// match. `extract_corrupt_pdf.json` is Solr's Tika parsing a malformed PDF
+/// and throwing, which is a 500. Wayfinder has no PDF extractor at all, so it
+/// never reaches a parse attempt: the document is an unimplemented format and
+/// the answer is 415. Recorded in `DIVERGENT_STATUS_MULTIPART` in
+/// `tests/differential.rs` and as PRD ratified divergence 10; both retire when
+/// a PDF extractor lands.
+///
+/// The captured 500 is still loaded here, so this test fails if the fixture's
+/// status ever stops being the thing Wayfinder diverges from.
 #[tokio::test]
-async fn extract_corrupt_pdf_matches_fixture() {
+async fn extract_corrupt_pdf_is_a_recorded_status_divergence() {
     let (app, _dir) = default_app().await;
     let bytes = input_bytes("broken.pdf");
     let (status, actual) = request_multipart(
@@ -200,17 +207,33 @@ async fn extract_corrupt_pdf_matches_fixture() {
     )
     .await;
 
+    let captured = fixture("extract_corrupt_pdf");
+    assert_eq!(
+        captured["error"]["code"].as_i64(),
+        Some(500),
+        "the captured fixture must still be a 500, or this divergence entry is stale"
+    );
     assert_eq!(
         status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "corrupt PDF must surface the captured 500, got {status}: {actual}"
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "a PDF must come back 415 (no PDF extractor exists), got {status}: {actual}"
     );
-    let expected = fixture("extract_corrupt_pdf");
-    let report = diff(&normalize(expected).value, &normalize(actual).value);
+    assert_eq!(
+        actual["error"]["code"].as_i64(),
+        Some(415),
+        "body: {actual}"
+    );
+    assert_eq!(
+        actual["responseHeader"]["status"].as_i64(),
+        Some(415),
+        "the NoParams envelope still carries responseHeader, body: {actual}"
+    );
     assert!(
-        report.diffs.is_empty(),
-        "extract_corrupt_pdf: response must match the captured fixture, diffs: {:?}",
-        report.diffs
+        actual
+            .get("responseHeader")
+            .and_then(|h| h.get("params"))
+            .is_none(),
+        "an /update path never echoes params, got: {actual}"
     );
 }
 
@@ -483,6 +506,116 @@ async fn extract_body_over_configured_max_body_bytes_is_413() {
          BodyTooLarge envelope, got {status}: {body}"
     );
     assert_eq!(body["error"]["code"].as_i64(), Some(413));
+}
+
+/// Builds a multipart body from `(name, filename, content)` triples.
+/// `filename` empty means no `filename=` parameter, i.e. a non-file field.
+fn multipart_parts(parts: &[(&str, &str, Vec<u8>)]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (name, filename, content) in parts {
+        body.extend_from_slice(format!("--{}\r\n", common::MULTIPART_BOUNDARY).as_bytes());
+        let disposition = if filename.is_empty() {
+            format!("Content-Disposition: form-data; name=\"{name}\"\r\n")
+        } else {
+            format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n")
+        };
+        body.extend_from_slice(disposition.as_bytes());
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(content);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{}--\r\n", common::MULTIPART_BOUNDARY).as_bytes());
+    body
+}
+
+/// The hole the single-part 413 test walked straight past: parts the handler
+/// *skips* are still parts the handler *read*. `next_field()` drains a
+/// skipped field to completion, so a body made entirely of non-file fields
+/// used to be consumed in full — at any length — and then answered
+/// `400 MissingContentStream`. Their bytes must be charged to the same
+/// request-wide budget as the document's.
+#[tokio::test]
+async fn extract_non_file_parts_are_charged_against_max_body_bytes() {
+    let config_toml = "[extraction]\nmax_body_bytes = 40\n";
+    let (app, _dir) = build_app_with_config(Some(config_toml))
+        .expect("extraction.max_body_bytes must be a valid config knob");
+
+    // No file part anywhere: reaching the end of this body at all means it
+    // was read in full. 5 x 100 bytes of content is well over the 40-byte cap.
+    let parts: Vec<(&str, &str, Vec<u8>)> = (0..5)
+        .map(|_| ("literal", "", vec![b'x'; 100]))
+        .collect::<Vec<_>>();
+    let (status, body) = request_multipart_with_raw_body(
+        &app,
+        &format!("{CORE}/update/extract?extractOnly=true&wt=json"),
+        &multipart_parts(&parts),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "non-file parts over extraction.max_body_bytes must 413, not be drained and answered \
+         400 MissingContentStream, got {status}: {body}"
+    );
+    assert_eq!(body["error"]["code"].as_i64(), Some(413), "body: {body}");
+}
+
+/// The counter must not over-fire: a body of non-file fields that stays
+/// *inside* the budget still reaches the normal "no file part" 400. Without
+/// this, "413 everything" would pass the test above.
+#[tokio::test]
+async fn extract_small_non_file_parts_still_reach_missing_content_stream() {
+    let config_toml = "[extraction]\nmax_body_bytes = 40\n";
+    let (app, _dir) = build_app_with_config(Some(config_toml))
+        .expect("extraction.max_body_bytes must be a valid config knob");
+
+    let parts: Vec<(&str, &str, Vec<u8>)> = vec![
+        ("literal", "", b"short".to_vec()),
+        ("literal", "", b"also short".to_vec()),
+    ];
+    let (status, body) = request_multipart_with_raw_body(
+        &app,
+        &format!("{CORE}/update/extract?extractOnly=true&wt=json"),
+        &multipart_parts(&parts),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "15 bytes of non-file fields is inside a 40-byte budget and must still be a plain \
+         missing-file-part 400, got {status}: {body}"
+    );
+    assert_eq!(body["error"]["code"].as_i64(), Some(400), "body: {body}");
+}
+
+/// The part the handler-side counter structurally cannot reach: multipart
+/// part *headers* are consumed by the multipart reader before a field exists,
+/// so no byte of them is ever offered to the handler. The route-level
+/// `DefaultBodyLimit` (`ExtractLimits::route_body_ceiling`) is what bounds
+/// them. Here the whole body is one part header and no content at all.
+#[tokio::test]
+async fn extract_oversized_part_headers_are_bounded_by_the_route_body_limit() {
+    let config_toml = "[extraction]\nmax_body_bytes = 40\n";
+    let (app, _dir) = build_app_with_config(Some(config_toml))
+        .expect("extraction.max_body_bytes must be a valid config knob");
+
+    // 4 MiB of header, comfortably past the 1 MiB framing head-room the
+    // ceiling allows above max_body_bytes, and zero bytes of part content.
+    let huge_name = "n".repeat(4 * 1024 * 1024);
+    let parts: Vec<(&str, &str, Vec<u8>)> = vec![(huge_name.as_str(), "big.txt", Vec::new())];
+    let (status, body) = request_multipart_with_raw_body(
+        &app,
+        &format!("{CORE}/update/extract?extractOnly=true&wt=json"),
+        &multipart_parts(&parts),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "an unbounded run of part-header bytes must be stopped by the route body limit, \
+         got {status}: {body}"
+    );
+    assert_eq!(body["error"]["code"].as_i64(), Some(413), "body: {body}");
 }
 
 #[tokio::test]

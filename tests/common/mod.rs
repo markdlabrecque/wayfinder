@@ -251,7 +251,12 @@ pub async fn request_full(
 /// ever builds a single-file body), so no request needs a distinct boundary
 /// to disambiguate parts from each other; a constant keeps every caller's
 /// request byte-for-byte reproducible.
-const MULTIPART_BOUNDARY: &str = "WayfinderTestBoundary7f3a9c2e";
+///
+/// Public because `request_multipart_with_raw_body` lets a caller hand-build
+/// a body (several parts, oversized headers) that the single-part builder
+/// cannot express, and that body has to use the boundary the request header
+/// declares.
+pub const MULTIPART_BOUNDARY: &str = "WayfinderTestBoundary7f3a9c2e";
 
 /// Issues a single-file `multipart/form-data` POST against
 /// `/solr/<path_and_query>` (core-relative, like `request_full`'s counterpart

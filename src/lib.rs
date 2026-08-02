@@ -46,6 +46,7 @@ pub use coverage::report as coverage_report;
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use axum::Router;
@@ -337,29 +338,38 @@ fn update_method(method: &str) -> bool {
 ///
 /// `inherit_body_limit` is the normal case: the route says nothing, so the
 /// global `DefaultBodyLimit::max(resources.max_body_size)` layer applies.
-/// `no_body_limit` disables that layer for one route, which only
-/// `/update/extract` wants — its ceiling is `extraction.max_body_bytes`,
-/// counted byte by byte while streaming to a temp file (`stream_to_tempfile`),
-/// so it can answer the captured 413 envelope instead of axum's bare
-/// `LengthLimitError`. A route-level `DefaultBodyLimit::max(...)` would *not*
-/// do: it is applied inside the global one and would simply overwrite it, so
-/// there is no way to spell "some other finite limit" here without also
-/// re-deciding the global policy per route.
+///
+/// `extraction_body_limit` overrides that layer for one route.
+/// `/update/extract` needs a *different* finite ceiling, not no ceiling: its
+/// content budget is `extraction.max_body_bytes`, counted byte by byte by the
+/// handler for every part it consumes, so an oversized upload gets the
+/// captured 413 envelope rather than axum's bare `LengthLimitError`. But the
+/// handler cannot count what it never sees — `multer` consumes multipart part
+/// *headers* before a `Field` exists — so the route still needs a transport
+/// backstop. `ExtractLimits::route_body_ceiling` is that backstop:
+/// `max_body_bytes` plus framing head-room, so the counted content limit is
+/// what a realistic oversized upload hits first, and the transport cap only
+/// catches bodies that are pathological in a way counting cannot reach.
+///
+/// A route-level `DefaultBodyLimit::max(...)` layer is applied *inside* the
+/// global one and replaces it for that route, which is exactly the intent
+/// here.
 type RouteMethods = axum::routing::MethodRouter<Arc<AppState>>;
 
-fn inherit_body_limit(route: RouteMethods) -> RouteMethods {
+fn inherit_body_limit(route: RouteMethods, _extract_ceiling: usize) -> RouteMethods {
     route
 }
 
-fn no_body_limit(route: RouteMethods) -> RouteMethods {
-    route.layer(DefaultBodyLimit::disable())
+fn extraction_body_limit(route: RouteMethods, extract_ceiling: usize) -> RouteMethods {
+    route.layer(DefaultBodyLimit::max(extract_ceiling))
 }
 
 macro_rules! search_api_routes {
-    ($apply:ident) => {
+    ($apply:ident $(, $extra:expr)?) => {
         $apply! {
+            $([$extra])?
             ("/solr/{core}/update", update, update_method, inherit_body_limit),
-            ("/solr/{core}/update/extract", update_extract, update_method, no_body_limit),
+            ("/solr/{core}/update/extract", update_extract, update_method, extraction_body_limit),
             ("/solr/{core}/select", select, any_method, inherit_body_limit),
             ("/solr/{core}/mlt", mlt, any_method, inherit_body_limit),
             ("/solr/{core}/terms", terms, any_method, inherit_body_limit),
@@ -380,8 +390,8 @@ macro_rules! route_specs {
 }
 
 macro_rules! wire_routes {
-    ($(($path:literal, $handler:ident, $accepts_method:ident, $body_limit:ident)),+ $(,)?) => {
-        Router::new()$(.route($path, $body_limit(any($handler))))+
+    ([$ceiling:expr] $(($path:literal, $handler:ident, $accepts_method:ident, $body_limit:ident)),+ $(,)?) => {
+        Router::new()$(.route($path, $body_limit(any($handler), $ceiling)))+
     };
 }
 
@@ -481,6 +491,7 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
         core_name: core_name.clone(),
     };
     let extract_limits = config.extraction.limits();
+    let extract_body_ceiling = extract_limits.route_body_ceiling();
     let extraction = extract::ExtractionRuntime::new(&extract_limits);
     let state = Arc::new(AppState {
         core_name,
@@ -496,7 +507,7 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
     // so a 405 from the router would be a divergence. `/update` does reject
     // some methods (`err_update_put.json`), which it does itself, with Solr's
     // envelope for it.
-    let router = search_api_routes!(wire_routes)
+    let router = search_api_routes!(wire_routes, extract_body_ceiling)
         // Admin UI (issue #94, PRD §5 v2.5). Outside `/solr/*` on purpose:
         // this is Wayfinder's own surface, not part of the Solr wire API, so
         // it can never shadow a path a Solr client expects — deliberately
@@ -2138,14 +2149,36 @@ async fn update(
 /// is counted and spilled to a temp file by the same `stream_to_tempfile`
 /// the phase-0 budget tests exercise — rather than a second byte-counting
 /// loop written here, which is exactly how the two would drift apart.
-struct FieldChunks<'a>(axum::extract::multipart::Field<'a>);
+struct FieldChunks<'a> {
+    field: axum::extract::multipart::Field<'a>,
+    /// Set when the underlying multipart error is the route's
+    /// `DefaultBodyLimit` firing. `ChunkSource` yields `io::Error`, which
+    /// would otherwise flatten a transport-level 413 into a 500 by the time
+    /// `ExtractError::Io` has stringified it — this flag carries the one bit
+    /// of that error that changes the response.
+    body_limit_hit: Arc<AtomicBool>,
+}
+
+impl<'a> FieldChunks<'a> {
+    fn new(field: axum::extract::multipart::Field<'a>, body_limit_hit: Arc<AtomicBool>) -> Self {
+        FieldChunks {
+            field,
+            body_limit_hit,
+        }
+    }
+}
 
 impl extract::ChunkSource for FieldChunks<'_> {
     async fn next_chunk(&mut self) -> Option<std::io::Result<axum::body::Bytes>> {
-        match self.0.chunk().await {
+        match self.field.chunk().await {
             Ok(Some(chunk)) => Some(Ok(chunk)),
             Ok(None) => None,
-            Err(e) => Some(Err(std::io::Error::other(e))),
+            Err(e) => {
+                if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                    self.body_limit_hit.store(true, Ordering::Relaxed);
+                }
+                Some(Err(std::io::Error::other(e)))
+            }
         }
     }
 }
@@ -2240,9 +2273,40 @@ async fn update_extract(
         .envelope(Envelope::NoParams)
     })?;
 
+    // Every byte the handler consumes is charged against one request-wide
+    // total, file part or not. Skipping a non-file field without counting it
+    // is what made this route unbounded: `next_field()` drains the skipped
+    // field to completion, so an arbitrarily long (or endless chunked) stream
+    // of non-file parts was read in full and then answered
+    // `MissingContentStream`. The route-level `DefaultBodyLimit`
+    // (`route_body_ceiling`) is the backstop for the part *headers* this
+    // counter cannot see; this counter is what produces the captured 413.
+    let max_body_bytes = state.extract_limits.max_body_bytes;
+    let body_ceiling = state.extract_limits.route_body_ceiling() as u64;
+    let body_limit_hit = Arc::new(AtomicBool::new(false));
+    let mut consumed: u64 = 0;
+    // A transport-cap 413 outranks whatever `ChunkSource` managed to report:
+    // see `FieldChunks::body_limit_hit`.
+    let body_error = |e: extract::ExtractError| {
+        let e = if body_limit_hit.load(Ordering::Relaxed) {
+            extract::ExtractError::BodyTooLarge {
+                limit: body_ceiling,
+            }
+        } else {
+            e
+        };
+        WfError::from(e).with_params(&params)
+    };
+
     let mut found: Option<(String, String, String, u64)> = None;
     loop {
         let field = multipart.next_field().await.map_err(|e| {
+            if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                return WfError::from(extract::ExtractError::BodyTooLarge {
+                    limit: body_ceiling,
+                })
+                .with_params(&params);
+            }
             extract_err(
                 "wayfinder::BadContentStream",
                 format!("malformed multipart body: {e}"),
@@ -2254,6 +2318,10 @@ async fn update_extract(
         // rather than as a document named "".
         let file_name = field.file_name().unwrap_or_default().to_string();
         if file_name.is_empty() {
+            let mut chunks = FieldChunks::new(field, Arc::clone(&body_limit_hit));
+            extract::drain_counted(&mut chunks, max_body_bytes, &mut consumed)
+                .await
+                .map_err(body_error)?;
             continue;
         }
         let part_name = field.name().unwrap_or_default().to_string();
@@ -2268,14 +2336,15 @@ async fn update_extract(
             .and_then(|value| value.to_str().ok())
             .map(str::to_string)
             .unwrap_or_else(|| OCTET_STREAM.to_string());
-        let mut chunks = FieldChunks(field);
-        let written = extract::stream_to_tempfile(
+        let mut chunks = FieldChunks::new(field, Arc::clone(&body_limit_hit));
+        let written = extract::stream_to_tempfile_counted(
             &mut chunks,
             &mut temp,
-            state.extract_limits.max_body_bytes,
+            max_body_bytes,
+            &mut consumed,
         )
         .await
-        .map_err(|e| WfError::from(e).with_params(&params))?;
+        .map_err(body_error)?;
         found = Some((part_name, file_name, declared_type, written));
         break;
     }
@@ -2299,10 +2368,18 @@ async fn update_extract(
     // `extraction.max_body_bytes` (32 MiB by default), so it is a real
     // ceiling rather than an unbounded one — but it is still a full copy in
     // RAM, and the temp file is currently only buying the streaming *count*.
+    // The ceiling is per request, not per server: nothing bounds how many
+    // requests are in this read at once, so resident bytes here are
+    // `max_body_bytes` x (HTTP concurrency), not `max_body_bytes` x
+    // `max_concurrency` — the extraction permit is acquired *after* this
+    // point, deliberately (see `ExtractLimits::max_body_bytes`), so it does
+    // not cap this. At the defaults that is 32 MiB per concurrent upload.
     // Trigger: the first extractor that can work incrementally (the phase-2a
     // ZIP walker, per `ZipBudget`'s documented call sequence) wants a reader,
     // at which point `ExtractInput` grows a stream variant and this read
-    // goes away.
+    // goes away — *or* sooner, if in-flight-upload bytes are ever bounded
+    // globally (item 1 of the route-side design on `max_body_bytes`), which
+    // is the same knob.
     let bytes = std::fs::read(temp.path()).map_err(|e| {
         WfError::internal(
             "wayfinder::ExtractionIo",
