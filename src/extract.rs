@@ -52,7 +52,7 @@
 //! extraction into a separate OS process that can actually be killed.
 //! Revisit at that issue, not before.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::future::Future;
 use std::io::Write;
@@ -65,6 +65,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
+use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE, WINDOWS_1252};
+use html5ever::TokenizerResult;
+use html5ever::buffer_queue::BufferQueue;
+use html5ever::tendril::StrTendril;
+use html5ever::tokenizer::states::RawKind;
+use html5ever::tokenizer::{
+    Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
+};
 use tempfile::NamedTempFile;
 
 // ---------------------------------------------------------------------
@@ -154,6 +162,18 @@ pub struct ExtractMetadata {
 pub struct Extracted {
     pub text: String,
     pub metadata: ExtractMetadata,
+    /// The document body rendered as the XHTML fragment Solr's `extractOnly`
+    /// response puts between `<body>` and `</body>` — issue #258 spec item 6.
+    ///
+    /// Kept beside `text` rather than derived from it because the two are not
+    /// interconvertible: the XHTML keeps element structure and (a narrow
+    /// allowlist of) attributes, and the text form keeps only the block
+    /// boundaries as newlines. An extractor is the only place that still has
+    /// both.
+    pub body_xhtml: String,
+    /// The same body rendered as `extractFormat=text` serializes it: text
+    /// runs verbatim, one `\n` after every block-level element.
+    pub body_text: String,
 }
 
 /// Object-safe extraction trait. `dispatch()` hands back `&'static dyn
@@ -305,8 +325,12 @@ fn is_html_root_at_start(bytes: &[u8]) -> bool {
 /// yields its literal text rather than an error — and the anchored
 /// alternative (parse past the declaration, doctype, comments and PIs to find
 /// the real first element) is a small XML scanner this phase has no parser to
-/// borrow. Trigger: the HTML or XML extractor landing, where a real parser
-/// exists and misrouting an XSLT stylesheet starts to have a visible cost.
+/// borrow. Re-checked when the HTML extractor landed (issue #258): the cost
+/// is still only "a stylesheet's literal text comes back instead of an
+/// error", because the HTML extractor is a tokenizer with no tree builder, so
+/// there is still no XML scanner here to borrow. Trigger: the XML extractor
+/// landing, at which point the two paths genuinely diverge and misrouting
+/// costs a wrong answer rather than a degraded one.
 fn window_contains_html_root(window: &[u8]) -> bool {
     window
         .iter()
@@ -362,19 +386,20 @@ fn detect_by_extension(resource_name: &str) -> Option<ContentType> {
 }
 
 static PLAIN_TEXT_EXTRACTOR: PlainTextExtractor = PlainTextExtractor;
+static HTML_EXTRACTOR: HtmlExtractor = HtmlExtractor;
 
-/// Looks up the extractor for a content type. Phase 0 only implements
-/// `PlainText`; every other content type (including `LegacyOle`) has no
+/// Looks up the extractor for a content type. Phase 1 implements `PlainText`
+/// and `Html`; every other content type (including `LegacyOle`) has no
 /// extractor, and the caller must turn that into a typed
 /// `UnsupportedFormat` rather than silently routing to some other parser.
 pub fn dispatch(content_type: ContentType) -> Option<&'static dyn Extractor> {
     match content_type {
         ContentType::PlainText => Some(&PLAIN_TEXT_EXTRACTOR),
-        // Exhaustive on purpose rather than a `_ => None` arm: when phase 1
-        // adds the HTML extractor, this match is the place the compiler
-        // points at.
-        ContentType::Html
-        | ContentType::Xml
+        ContentType::Html => Some(&HTML_EXTRACTOR),
+        // Exhaustive on purpose rather than a `_ => None` arm: when a later
+        // phase adds the XML/ZIP/RTF/PDF extractors, this match is the place
+        // the compiler points at.
+        ContentType::Xml
         | ContentType::Zip
         | ContentType::Rtf
         | ContentType::Pdf
@@ -399,11 +424,22 @@ const DECODE_CHUNK_BYTES: usize = 8 * 1024;
 /// mojibake tail still yields the text before it, which matches what Tika
 /// does through Solr's extract handler.
 ///
-/// ponytail: charset *detection* (`chardetng`/`encoding_rs`) is phase 1; this
-/// extractor assumes UTF-8 (or ASCII, a UTF-8 subset), never sniffs a BOM or
-/// a declared charset, and so will mangle a Latin-1 or Shift-JIS upload into
-/// replacement characters. Phase 1 prefers a declared/BOM charset, then
-/// detection, and decodes through `encoding_rs`.
+/// Charset resolution is *not* this extractor's job and deliberately sits one
+/// layer up, in `extract_document`: `resolve_charset` + `decode_text` turn the
+/// uploaded bytes into UTF-8 once, above `dispatch`, and every extractor is
+/// handed the decoded bytes. The question "what encoding is this stream in?"
+/// is about the byte stream, not the document format, so answering it per
+/// format would duplicate it per format. That also keeps this trait's
+/// UTF-8-in contract — and the lossy-replacement behaviour described above —
+/// exactly as phase 0 defined it.
+///
+/// ponytail: HTML's own in-band charset declaration (`<meta charset=...>` /
+/// `<meta http-equiv="content-type">`) is *not* consulted, so an HTML upload
+/// that declares Shift-JIS in its own head but nothing on the wire is decoded
+/// by `chardetng`'s guess instead. html5ever surfaces exactly this as
+/// `TokenSinkResult::EncodingIndicator`; honouring it means re-decoding the
+/// prefix and restarting the tokenizer, which needs a fixture to build
+/// against. Trigger: the first captured non-ASCII HTML extract.
 pub struct PlainTextExtractor;
 
 impl Extractor for PlainTextExtractor {
@@ -451,6 +487,15 @@ impl Extractor for PlainTextExtractor {
                 title: None,
                 author: None,
             },
+            // Tika wraps a whole plain-text stream in a single `<p>` and puts
+            // one newline after the block, which is what
+            // `extract_plain_text_xml.json`'s
+            // `<body><p>...\n</p>\n</body></html>` shows.
+            body_xhtml: format!(
+                "<p>{}</p>\n",
+                escape_xml_text(&budget.output_text()[start..])
+            ),
+            body_text: format!("{}\n", &budget.output_text()[start..]),
         })
     }
 }
@@ -483,6 +528,918 @@ pub fn extract(input: &ExtractInput<'_>, budget: &mut Budget) -> Result<Extracte
     let extractor =
         dispatch(content_type).ok_or(ExtractError::UnsupportedFormat { content_type })?;
     extractor.extract(input, budget)
+}
+
+// ---------------------------------------------------------------------
+// Issue #258 — charset resolution
+// ---------------------------------------------------------------------
+
+/// Which piece of evidence decided the charset. Only `Declared` is
+/// wire-visible: Tika records `Content-Encoding` twice when the container
+/// declared the charset and once when it did not
+/// (`extract_declared_charset_text.json` vs every other extract capture), so
+/// the response renderer needs to know which happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CharsetSource {
+    Bom,
+    Declared,
+    Detected,
+}
+
+/// The resolved charset of an uploaded byte stream.
+#[derive(Debug, Clone)]
+pub struct ResolvedCharset {
+    /// The `encoding_rs` decoder to run.
+    pub encoding: &'static Encoding,
+    /// The label the wire reports (`Content-Encoding`, the `charset=` of the
+    /// second `Content-Type` metadata value, and the XHTML head's
+    /// `Content-Type` meta). Not always `encoding.name()` — see
+    /// `normalized_charset_label`.
+    pub label: String,
+    pub source: CharsetSource,
+    /// Bytes of BOM at the front of the stream, already accounted for and to
+    /// be skipped before decoding. Zero unless `source == Bom`.
+    pub bom_len: usize,
+}
+
+/// How many leading bytes `chardetng` is fed. Detection quality plateaus long
+/// before this, and bounding it keeps the cost of the guess independent of
+/// upload size.
+const CHARSET_DETECT_WINDOW: usize = 64 * 1024;
+
+/// BOM > declared `charset=` > `chardetng` detection.
+///
+/// **BOM beats the declared charset, and that ordering is an uncaptured,
+/// reasoned choice** — no fixture pins the conflict (the captures either have
+/// a BOM or a declaration, never both). A BOM is a property the *producer* of
+/// the bytes wrote into them; a `charset=` parameter is a header some client
+/// typed, and in practice is the thing that is stale or copy-pasted. Where
+/// they disagree, the bytes are the better evidence.
+pub fn resolve_charset(declared_type: Option<&str>, bytes: &[u8]) -> ResolvedCharset {
+    if let Some((encoding, bom_len)) = sniff_bom(bytes) {
+        return ResolvedCharset {
+            encoding,
+            label: normalized_charset_label(encoding),
+            source: CharsetSource::Bom,
+            bom_len,
+        };
+    }
+    if let Some(encoding) = declared_type
+        .and_then(declared_charset_label)
+        .and_then(|label| Encoding::for_label(label.as_bytes()))
+    {
+        return ResolvedCharset {
+            encoding,
+            label: normalized_charset_label(encoding),
+            source: CharsetSource::Declared,
+            bom_len: 0,
+        };
+    }
+    let window = &bytes[..bytes.len().min(CHARSET_DETECT_WINDOW)];
+    let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
+    detector.feed(window, window.len() == bytes.len());
+    let encoding = detector.guess(None, chardetng::Utf8Detection::Allow);
+    // `chardetng` answers `UTF-8` for ASCII-only input (verified against
+    // `solr-ref/extract-inputs/sample.txt` and `sample.html`, both pure
+    // ASCII), but Tika reports `ISO-8859-1` for both of those captures. ASCII
+    // is a subset of every Latin-1-family encoding, so nothing about the
+    // decode changes; only the reported label does.
+    //
+    // The scan deliberately covers *all* the bytes, not just the detection
+    // window: a document whose first 64 KiB are ASCII and whose tail is UTF-8
+    // must keep the UTF-8 label, or the tail decodes as mojibake. Reading the
+    // window alone would have flipped the label at exactly 64 KiB with no
+    // change in content class. `is_ascii` is a vectorised scan over input that
+    // `max_body_bytes` already bounds, and `decode_text` walks the same bytes
+    // immediately afterwards, so this is a constant-factor cost, not a new
+    // order of work.
+    let ascii_only = bytes.is_ascii();
+    let encoding = if ascii_only && encoding == UTF_8 {
+        WINDOWS_1252
+    } else {
+        encoding
+    };
+    ResolvedCharset {
+        encoding,
+        label: normalized_charset_label(encoding),
+        source: CharsetSource::Detected,
+        bom_len: 0,
+    }
+}
+
+/// The `charset=` parameter of a `Content-Type`, lowercased and unquoted.
+fn declared_charset_label(declared_type: &str) -> Option<String> {
+    declared_type.split(';').skip(1).find_map(|param| {
+        let (name, value) = param.split_once('=')?;
+        if !name.trim().eq_ignore_ascii_case("charset") {
+            return None;
+        }
+        let value = value.trim().trim_matches('"');
+        (!value.is_empty()).then(|| value.to_ascii_lowercase())
+    })
+}
+
+/// The three BOMs worth honouring, and how many bytes each occupies.
+///
+/// UTF-16LE is checked before UTF-16BE deliberately: `FF FE` is the LE BOM
+/// and `FE FF` the BE one, so the order is unambiguous, but a UTF-32LE BOM
+/// (`FF FE 00 00`) also *starts* with the UTF-16LE BOM. UTF-32 is not a
+/// charset `encoding_rs` supports at all, so it could not be honoured even if
+/// it were detected — reading it as UTF-16LE is the same answer any
+/// WHATWG-conformant decoder gives.
+fn sniff_bom(bytes: &[u8]) -> Option<(&'static Encoding, usize)> {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return Some((UTF_8, 3));
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        return Some((UTF_16LE, 2));
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        return Some((UTF_16BE, 2));
+    }
+    None
+}
+
+/// Maps an `encoding_rs` encoding onto the label the extract response
+/// reports.
+///
+/// The one rewrite is the Latin-1 family: `encoding_rs` (following WHATWG)
+/// folds `ISO-8859-1` into `windows-1252`, so `Encoding::for_label(b"ISO-8859-1")`
+/// *is* `WINDOWS_1252` and `.name()` gives back `"windows-1252"`. Tika reports
+/// `ISO-8859-1` for exactly these bytes (`extract_latin1_text.json`,
+/// `extract_declared_charset_text.json`, and the two ASCII captures), so the
+/// label is normalised back. Nothing about the decode changes: the two labels
+/// name the same decoder here.
+fn normalized_charset_label(encoding: &'static Encoding) -> String {
+    if encoding == WINDOWS_1252 {
+        return "ISO-8859-1".to_string();
+    }
+    encoding.name().to_string()
+}
+
+/// Cooperatively chunked decode of `bytes` through `encoding`, checking the
+/// deadline between chunks exactly as `PlainTextExtractor` does — never one
+/// `Encoding::decode(whole_buffer)` call.
+///
+/// The accumulated string is bounded by `budget.limits().max_output_bytes`
+/// while it grows, so a decode that would blow the output budget fails during
+/// the decode rather than after materialising the whole thing. It is checked
+/// here as well as in `Budget::push_str` because this buffer is *not* the
+/// budget's own output buffer: it is the intermediate the extractor is then
+/// handed, and it would otherwise be unbounded.
+pub fn decode_text(
+    bytes: &[u8],
+    encoding: &'static Encoding,
+    budget: &Budget,
+) -> Result<String, ExtractError> {
+    let max_bytes = budget.limits().max_output_bytes;
+    let mut decoder = encoding.new_decoder_without_bom_handling();
+    let mut out = String::new();
+    let mut rest = bytes;
+    // Checked before the first chunk as well as between chunks, for the same
+    // reason `PlainTextExtractor` does: an extraction admitted with an
+    // already-spent budget must not get one free chunk of work.
+    budget.check_deadline()?;
+    loop {
+        let take = rest.len().min(DECODE_CHUNK_BYTES);
+        let (chunk, tail) = rest.split_at(take);
+        let last = tail.is_empty();
+        // `max_utf8_buffer_length` is the decoder's own worst-case answer for
+        // this chunk, so the push below never reallocates mid-decode.
+        let needed = decoder
+            .max_utf8_buffer_length(chunk.len())
+            .ok_or_else(|| ExtractError::Parse("decoded text length overflowed".to_string()))?;
+        if out.len().saturating_add(needed) > max_bytes {
+            // Reserving beyond the ceiling is itself the violation: the
+            // worst case for this chunk cannot fit, so the decode stops here
+            // rather than after the fact.
+            return Err(ExtractError::OutputTooLarge(OutputLimitKind::Bytes));
+        }
+        out.reserve(needed);
+        let (result, _read, _had_errors) = decoder.decode_to_string(chunk, &mut out, last);
+        match result {
+            encoding_rs::CoderResult::InputEmpty => {}
+            // Unreachable given the reservation above, but a silent truncation
+            // is the wrong failure mode to risk if it ever is reached.
+            encoding_rs::CoderResult::OutputFull => {
+                return Err(ExtractError::OutputTooLarge(OutputLimitKind::Bytes));
+            }
+        }
+        if out.len() > max_bytes {
+            return Err(ExtractError::OutputTooLarge(OutputLimitKind::Bytes));
+        }
+        if last {
+            break;
+        }
+        rest = tail;
+        budget.check_deadline()?;
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------
+// Issue #258 — the HTML extractor: html5ever's incremental tokenizer with a
+// budgeted sink, and no DOM anywhere
+// ---------------------------------------------------------------------
+
+/// Elements whose *content* is discarded entirely.
+const SKIPPED_ELEMENTS: &[&str] = &["script", "style", "template"];
+
+/// Elements that are not themselves serialized but whose children are — the
+/// document scaffolding.
+const TRANSPARENT_ELEMENTS: &[&str] = &["html", "head", "body"];
+
+/// Elements handled by the metadata pass instead of the body pass: their
+/// content never reaches the body, and `title`/`meta` feed
+/// `ExtractMetadata`.
+const HEAD_ELEMENTS: &[&str] = &["title", "meta", "link", "base"];
+
+/// Elements after which the serializers emit a newline.
+///
+/// ponytail: a hand-maintained list rather than a real CSS display model.
+/// It covers the block elements ordinary prose documents are made of, which
+/// is what the captured fixture and every realistic Search API attachment
+/// contain; an exotic element (`<details>`, a custom element, anything with
+/// `display:block` from a stylesheet) falls through as inline. Trigger: a
+/// captured extract whose newline placement this list gets wrong.
+const BLOCK_ELEMENTS: &[&str] = &[
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "br",
+    "caption",
+    "dd",
+    "div",
+    "dl",
+    "dt",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "tr",
+    "ul",
+];
+
+/// HTML void elements: no end tag, so they never push a nesting level.
+const VOID_ELEMENTS: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
+
+/// Attributes carried through into the XHTML body.
+///
+/// ponytail: deliberately tiny. Tika's own XHTML output keeps a wider set
+/// (and adds `shape="rect"` to every `<a>`, which is one of this issue's two
+/// ratified divergences); the only attribute any captured extract fixture
+/// contains is `href`, and inventing the rest with no ground truth to check
+/// them against is how a normaliser ends up widened later. `src`/`alt` are
+/// included because an `<img>` with neither is not worth serializing at all.
+/// Trigger: a captured extract whose body carries an attribute not in here.
+const KEPT_ATTRIBUTES: &[&str] = &["href", "src", "alt"];
+
+/// How many tokens pass between wall-clock deadline checks. The per-token
+/// work is tiny, so checking every token would make the clock read the
+/// dominant cost; 256 keeps the worst-case overshoot far below the
+/// `SPAWN_TIMEOUT_GRACE` the caller-side timeout allows for.
+const HTML_DEADLINE_CHECK_INTERVAL: u64 = 256;
+
+/// The HTML extractor: `html5ever`'s tokenizer driven incrementally, with a
+/// `TokenSink` that accumulates straight into the two output strings.
+///
+/// **There is no DOM, and that is the point** (PRD:741, and issue #258's spec
+/// item 5). `scraper`/`html2text` would parse the whole document into a tree
+/// before any budget could look at it, which is precisely the unbounded step
+/// the phase-0 contract exists to remove. Here the input is fed to the
+/// tokenizer in `DECODE_CHUNK_BYTES` slices, the sink charges every token
+/// against the `Budget`, and a budget violation stops the tokenizer at the
+/// next tag — so an oversized or malicious document is abandoned part-way
+/// through with nothing but the bounded output strings resident.
+pub struct HtmlExtractor;
+
+impl Extractor for HtmlExtractor {
+    fn extract(
+        &self,
+        input: &ExtractInput<'_>,
+        budget: &mut Budget,
+    ) -> Result<Extracted, ExtractError> {
+        let start = budget.output_text().len();
+        // The bytes reaching an extractor are already UTF-8 (see
+        // `PlainTextExtractor`'s doc comment on where decoding happens); the
+        // lossy call is the same belt-and-braces the plain-text path uses.
+        let text = String::from_utf8_lossy(input.bytes).into_owned();
+
+        let sink = HtmlSink {
+            state: RefCell::new(SinkState {
+                budget,
+                xhtml: String::new(),
+                text: String::new(),
+                title: None,
+                author: None,
+                in_title: false,
+                in_head: false,
+                document_closed: false,
+                skip_depth: 0usize,
+                open: Vec::new(),
+                tokens: 0,
+                error: None,
+            }),
+        };
+        let tokenizer = Tokenizer::new(sink, TokenizerOpts::default());
+        let queue = BufferQueue::default();
+
+        let mut rest = text.as_str();
+        let mut aborted = false;
+        while !rest.is_empty() {
+            let take = char_boundary_len(rest, DECODE_CHUNK_BYTES);
+            let (chunk, tail) = rest.split_at(take);
+            queue.push_back(StrTendril::from_slice(chunk));
+            // `TokenSinkResult::Script` is the only abort channel html5ever
+            // offers, and it is only *reachable* from a tag token: a sink that
+            // runs out of budget mid-character-run cannot signal until the next
+            // tag arrives. Checking `error` directly bounds the overshoot to a
+            // single chunk instead of "however much text until the next tag".
+            if matches!(tokenizer.feed(&queue), TokenizerResult::Script(()))
+                || tokenizer.sink.state.borrow().error.is_some()
+            {
+                aborted = true;
+                break;
+            }
+            rest = tail;
+        }
+        // `Tokenizer::end()` asserts internally that the run completes, which
+        // an aborted run by construction does not — so an abandoned parse
+        // simply never finishes, which is the whole intent.
+        if !aborted {
+            tokenizer.end();
+        }
+
+        let SinkState {
+            xhtml,
+            text: body_text,
+            title,
+            author,
+            error,
+            ..
+        } = tokenizer.sink.state.into_inner();
+        if let Some(err) = error {
+            return Err(err);
+        }
+
+        Ok(Extracted {
+            text: budget.output_text()[start..].to_string(),
+            metadata: ExtractMetadata {
+                resource_name: input.resource_name.to_string(),
+                content_type: ContentType::Html,
+                title,
+                author,
+            },
+            body_xhtml: xhtml,
+            body_text,
+        })
+    }
+}
+
+/// The largest prefix of `s` no longer than `max` bytes that ends on a `char`
+/// boundary. Feeding the tokenizer a `StrTendril` requires `&str`, so a chunk
+/// split cannot land mid-scalar.
+fn char_boundary_len(s: &str, max: usize) -> usize {
+    if s.len() <= max {
+        return s.len();
+    }
+    let mut take = max;
+    while take > 0 && !s.is_char_boundary(take) {
+        take -= 1;
+    }
+    // A single scalar longer than `max` cannot happen (UTF-8 tops out at 4
+    // bytes and `max` is kilobytes), but backing off to zero would spin.
+    if take == 0 { s.len().min(4) } else { take }
+}
+
+struct SinkState<'a> {
+    budget: &'a mut Budget,
+    xhtml: String,
+    text: String,
+    title: Option<String>,
+    author: Option<String>,
+    in_title: bool,
+    /// Inside `<head>`: character tokens there are metadata, not body text.
+    /// Tika emits none of them (`extract_html_only_xml.json`'s body starts at
+    /// the first body element), and a document that pretty-prints its head
+    /// would otherwise leak that whitespace into the extracted text.
+    in_head: bool,
+    /// Set when `</body>` or `</html>` closes. Anything after it is trailing
+    /// file noise — `sample.html`'s final newline is the everyday case — and
+    /// Tika drops it, so the body's trailing edge stays the last block's own
+    /// newline rather than the file's.
+    document_closed: bool,
+    skip_depth: usize,
+    open: Vec<String>,
+    tokens: u64,
+    error: Option<ExtractError>,
+}
+
+/// `TokenSink::process_token` takes `&self` (html5ever 0.39), so the sink's
+/// mutable state lives behind a `RefCell`. Single-threaded by construction:
+/// the whole tokenizer run happens inside one `spawn_extraction` closure on
+/// one pool thread, which is also why the `&mut Budget` can be borrowed in
+/// here at all.
+struct HtmlSink<'a> {
+    state: RefCell<SinkState<'a>>,
+}
+
+impl SinkState<'_> {
+    /// Charges one token against the structural budget and, every so often,
+    /// the wall clock.
+    fn charge_token(&mut self) -> Result<(), ExtractError> {
+        self.budget.count_xml_event()?;
+        self.tokens += 1;
+        if self.tokens.is_multiple_of(HTML_DEADLINE_CHECK_INTERVAL) {
+            self.budget.check_deadline()?;
+        }
+        Ok(())
+    }
+
+    fn push_text(&mut self, s: &str) -> Result<(), ExtractError> {
+        self.budget.push_str(s)?;
+        self.text.push_str(s);
+        self.push_xhtml(&escape_xml_text(s))
+    }
+
+    /// The XHTML rendering is a second buffer beside the budget's own output,
+    /// so it gets the same ceiling explicitly rather than growing unbounded
+    /// behind a budget that only sees the text.
+    fn push_xhtml(&mut self, s: &str) -> Result<(), ExtractError> {
+        if self.xhtml.len().saturating_add(s.len()) > self.budget.limits().max_output_bytes {
+            return Err(ExtractError::OutputTooLarge(OutputLimitKind::Bytes));
+        }
+        self.xhtml.push_str(s);
+        Ok(())
+    }
+
+    fn start_tag(&mut self, tag: &Tag) -> Result<(), ExtractError> {
+        let name = tag.name.as_ref().to_ascii_lowercase();
+        let void = tag.self_closing || VOID_ELEMENTS.contains(&name.as_str());
+
+        if self.skip_depth > 0 {
+            if !void {
+                self.enter(name)?;
+            }
+            return Ok(());
+        }
+        if SKIPPED_ELEMENTS.contains(&name.as_str()) {
+            self.skip_depth = 1;
+            if !void {
+                self.enter(name)?;
+            }
+            return Ok(());
+        }
+        if name == "meta" {
+            if let Some(kind) = attribute(tag, "name")
+                && kind.eq_ignore_ascii_case("author")
+                && self.author.is_none()
+                && let Some(content) = attribute(tag, "content")
+            {
+                self.author = Some(content);
+            }
+            return Ok(());
+        }
+        if name == "title" {
+            self.in_title = true;
+            if !void {
+                self.enter(name)?;
+            }
+            return Ok(());
+        }
+        if name == "head" {
+            self.in_head = true;
+        }
+        if HEAD_ELEMENTS.contains(&name.as_str()) || TRANSPARENT_ELEMENTS.contains(&name.as_str()) {
+            if !void {
+                self.enter(name)?;
+            }
+            return Ok(());
+        }
+
+        let mut rendered = format!("<{name}");
+        for attr in &tag.attrs {
+            let attr_name = attr.name.local.as_ref().to_ascii_lowercase();
+            if KEPT_ATTRIBUTES.contains(&attr_name.as_str()) {
+                rendered.push_str(&format!(
+                    " {attr_name}=\"{}\"",
+                    escape_xml_attribute(&attr.value)
+                ));
+            }
+        }
+        rendered.push('>');
+        self.push_xhtml(&rendered)?;
+        if void {
+            // A void element has no end tag to close, so its block newline is
+            // emitted here or never.
+            self.close_block(&name)?;
+        } else {
+            self.enter(name)?;
+        }
+        Ok(())
+    }
+
+    fn end_tag(&mut self, tag: &Tag) -> Result<(), ExtractError> {
+        let name = tag.name.as_ref().to_ascii_lowercase();
+        if VOID_ELEMENTS.contains(&name.as_str()) {
+            // `</br>` and friends: nothing was opened, so nothing closes.
+            return Ok(());
+        }
+        // Stray end tags with no matching start are ignored rather than
+        // unwinding the stack: malformed input is the normal case here, and
+        // popping on a name that was never pushed would close somebody else's
+        // element.
+        if !self.open.contains(&name) {
+            return Ok(());
+        }
+        while let Some(open) = self.open.pop() {
+            self.budget.leave_xml_element();
+            if open == "head" {
+                self.in_head = false;
+            } else if open == "body" || open == "html" {
+                self.document_closed = true;
+            }
+            let skipping = self.skip_depth > 0;
+            if skipping && SKIPPED_ELEMENTS.contains(&open.as_str()) {
+                self.skip_depth = 0;
+            } else if !skipping {
+                if open == "title" {
+                    self.in_title = false;
+                } else if !HEAD_ELEMENTS.contains(&open.as_str())
+                    && !TRANSPARENT_ELEMENTS.contains(&open.as_str())
+                {
+                    self.push_xhtml(&format!("</{open}>"))?;
+                    self.close_block(&open)?;
+                }
+            }
+            if open == name {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Emits the newline a block-level element ends with, in both
+    /// serializations.
+    fn close_block(&mut self, name: &str) -> Result<(), ExtractError> {
+        if !BLOCK_ELEMENTS.contains(&name) {
+            return Ok(());
+        }
+        self.text.push('\n');
+        self.push_xhtml("\n")
+    }
+
+    fn enter(&mut self, name: String) -> Result<(), ExtractError> {
+        self.budget.enter_xml_element()?;
+        self.open.push(name);
+        Ok(())
+    }
+}
+
+fn attribute(tag: &Tag, name: &str) -> Option<String> {
+    tag.attrs
+        .iter()
+        .find(|attr| attr.name.local.as_ref().eq_ignore_ascii_case(name))
+        .map(|attr| attr.value.to_string())
+}
+
+impl TokenSink for HtmlSink<'_> {
+    type Handle = ();
+
+    fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
+        let mut state = self.state.borrow_mut();
+        // Once a budget has been blown the remaining tokens are dropped on
+        // the floor; the abort itself can only be signalled from a *tag*
+        // token, because html5ever asserts `Continue` for every other kind
+        // (`Tokenizer::process_token_and_continue`).
+        if state.error.is_some() {
+            return match token {
+                Token::TagToken(_) => TokenSinkResult::Script(()),
+                _ => TokenSinkResult::Continue,
+            };
+        }
+        if let Err(e) = state.charge_token() {
+            state.error = Some(e);
+            return match token {
+                Token::TagToken(_) => TokenSinkResult::Script(()),
+                _ => TokenSinkResult::Continue,
+            };
+        }
+
+        let outcome = match token {
+            Token::CharacterTokens(ref chars) => {
+                if state.skip_depth > 0 || state.document_closed {
+                    Ok(())
+                } else if state.in_title {
+                    state.title.get_or_insert_with(String::new).push_str(chars);
+                    Ok(())
+                } else if state.in_head {
+                    Ok(())
+                } else {
+                    state.push_text(chars)
+                }
+            }
+            Token::TagToken(ref tag) => match tag.kind {
+                TagKind::StartTag => {
+                    let raw = raw_kind_for(tag.name.as_ref());
+                    match state.start_tag(tag) {
+                        Ok(()) => {
+                            if let Some(kind) = raw {
+                                return TokenSinkResult::RawData(kind);
+                            }
+                            Ok(())
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                TagKind::EndTag => state.end_tag(tag),
+            },
+            // Comments, doctypes, parse errors, NULs and EOF carry no
+            // extractable text.
+            _ => Ok(()),
+        };
+
+        match outcome {
+            Ok(()) => TokenSinkResult::Continue,
+            Err(e) => {
+                state.error = Some(e);
+                match token {
+                    Token::TagToken(_) => TokenSinkResult::Script(()),
+                    _ => TokenSinkResult::Continue,
+                }
+            }
+        }
+    }
+}
+
+/// Which raw-text tokenizer state an element switches into.
+///
+/// Without this the tokenizer would keep treating `<script>if (a<b) {}` as
+/// ordinary markup: switching to the raw state is the tree builder's job in
+/// html5ever, and this sink is standing in for one. `title` needs RCDATA so
+/// its text is not re-tokenized as tags either.
+fn raw_kind_for(name: &str) -> Option<RawKind> {
+    match name.to_ascii_lowercase().as_str() {
+        "script" => Some(RawKind::ScriptData),
+        "style" | "template" | "noscript" | "iframe" | "noembed" | "noframes" => {
+            Some(RawKind::Rawtext)
+        }
+        "title" | "textarea" => Some(RawKind::Rcdata),
+        _ => None,
+    }
+}
+
+fn escape_xml_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn escape_xml_attribute(s: &str) -> String {
+    escape_xml_text(s).replace('"', "&quot;")
+}
+
+// ---------------------------------------------------------------------
+// Issue #258 — one extraction, and the two `extractFormat` renderings of it
+// ---------------------------------------------------------------------
+
+/// Everything the `/update/extract` response renderer needs from one
+/// extraction. Produced by `extract_document`, consumed by `ExtractRender`.
+#[derive(Debug, Clone)]
+pub struct ExtractedDocument {
+    pub content_type: ContentType,
+    pub charset_label: String,
+    pub charset_source: CharsetSource,
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub body_xhtml: String,
+    pub body_text: String,
+}
+
+/// `detect` -> `resolve_charset` -> `decode_text` -> `dispatch` -> extract.
+///
+/// Detection runs on the **raw** bytes (signatures are byte patterns, and a
+/// BOM-prefixed or Latin-1 document must still be recognised as a PDF or an
+/// XHTML file), and only then is the stream decoded once, above `dispatch`.
+pub fn extract_document(
+    declared_type: Option<&str>,
+    resource_name: &str,
+    bytes: &[u8],
+    budget: &mut Budget,
+) -> Result<ExtractedDocument, ExtractError> {
+    let content_type = detect(declared_type, resource_name, bytes);
+    let extractor =
+        dispatch(content_type).ok_or(ExtractError::UnsupportedFormat { content_type })?;
+    let charset = resolve_charset(declared_type, bytes);
+    let decoded = decode_text(&bytes[charset.bom_len..], charset.encoding, budget)?;
+    let input = ExtractInput {
+        declared_type,
+        resource_name,
+        bytes: decoded.as_bytes(),
+    };
+    let extracted = extractor.extract(&input, budget)?;
+    Ok(ExtractedDocument {
+        content_type,
+        charset_label: charset.label,
+        charset_source: charset.source,
+        title: extracted.metadata.title,
+        author: extracted.metadata.author,
+        body_xhtml: extracted.body_xhtml,
+        body_text: extracted.body_text,
+    })
+}
+
+/// Everything outside the document itself that the response echoes back:
+/// the multipart part's name and filename, its declared type, and how many
+/// bytes were actually streamed.
+pub struct ExtractRender<'a> {
+    /// The multipart part's field name. This — not `resource.name` — is the
+    /// content key of the response (finding 120).
+    pub part_name: &'a str,
+    /// `resource.name` when the client sent it, else the part's filename.
+    pub resource_name: &'a str,
+    /// The part's filename, verbatim.
+    pub stream_source_info: &'a str,
+    /// The part's declared `Content-Type`, or `application/octet-stream` when
+    /// it declared none.
+    pub declared_type: &'a str,
+    /// Bytes actually streamed to the temp file — never a `Content-Length`.
+    pub stream_size: u64,
+    pub doc: &'a ExtractedDocument,
+}
+
+/// Exactly 13 newlines open every `extractFormat=text` value.
+///
+/// Finding 121: verified constant across two document formats and three
+/// charsets with differing head-element counts, so it is emitted literally
+/// rather than derived from the metadata this response happens to carry.
+/// Deriving it would also be wrong here specifically, because Wayfinder omits
+/// the two `X-Parsed-By` metas Tika emits — a derived count would come out
+/// two short.
+const EXTRACT_TEXT_LEADING_NEWLINES: usize = 13;
+
+impl ExtractRender<'_> {
+    /// The MIME essence the response reports for the *detected* type, as the
+    /// second `Content-Type` metadata value and the XHTML head's
+    /// `Content-Type` meta.
+    fn detected_essence(&self) -> &'static str {
+        match self.doc.content_type {
+            ContentType::Html => "text/html",
+            ContentType::Xml => "application/xml",
+            ContentType::Pdf => "application/pdf",
+            ContentType::Rtf => "application/rtf",
+            ContentType::Zip => "application/zip",
+            ContentType::LegacyOle => "application/x-tika-msoffice",
+            ContentType::PlainText | ContentType::Unknown => "text/plain",
+        }
+    }
+
+    fn resolved_content_type(&self) -> String {
+        format!(
+            "{}; charset={}",
+            self.detected_essence(),
+            self.doc.charset_label
+        )
+    }
+
+    /// The `file_metadata` alternating array: `[key, [values], ...]`, keys in
+    /// the captured order, values always arrays.
+    ///
+    /// Every ordering and cardinality rule below is read off the five
+    /// `extractOnly` captures, not invented:
+    ///
+    /// - The first six keys are in the same order in all five.
+    /// - `dc:title`/`author` appear only for HTML, between
+    ///   `stream_content_type` and `Content-Encoding`; `title` trails
+    ///   `Content-Encoding`.
+    /// - `Content-Encoding` carries the label **twice** when the part
+    ///   declared a charset (`extract_declared_charset_text.json`) and once
+    ///   otherwise. Tika records it from the container *and* from the parser;
+    ///   with nothing declared, only the parser speaks.
+    /// - `X-Parsed-By` is absent: it names Java class names, and is one of the
+    ///   two ratified divergences (PRD, findings 120-123).
+    pub fn file_metadata(&self) -> Vec<(String, Vec<String>)> {
+        let mut entries: Vec<(String, Vec<String>)> = Vec::new();
+        let twice = |v: &str| vec![v.to_string(), v.to_string()];
+
+        entries.push(("resourceName".to_string(), twice(self.resource_name)));
+        entries.push((
+            "Content-Type".to_string(),
+            vec![self.declared_type.to_string(), self.resolved_content_type()],
+        ));
+        entries.push(("stream_name".to_string(), twice(self.part_name)));
+        entries.push((
+            "stream_source_info".to_string(),
+            twice(self.stream_source_info),
+        ));
+        entries.push((
+            "stream_size".to_string(),
+            twice(&self.stream_size.to_string()),
+        ));
+        entries.push(("stream_content_type".to_string(), twice(self.declared_type)));
+        if let Some(title) = self.doc.title.as_deref() {
+            entries.push(("dc:title".to_string(), vec![title.to_string()]));
+        }
+        if let Some(author) = self.doc.author.as_deref() {
+            entries.push(("author".to_string(), vec![author.to_string()]));
+        }
+        let encoding = if self.doc.charset_source == CharsetSource::Declared {
+            twice(&self.doc.charset_label)
+        } else {
+            vec![self.doc.charset_label.clone()]
+        };
+        entries.push(("Content-Encoding".to_string(), encoding));
+        if let Some(title) = self.doc.title.as_deref() {
+            entries.push(("title".to_string(), vec![title.to_string()]));
+        }
+        entries
+    }
+
+    /// The default `extractFormat` rendering: Tika's XHTML envelope.
+    ///
+    /// The head's `meta` order is its own (it is *not* `file_metadata`'s
+    /// order) and is taken verbatim from `extract_plain_text_xml.json` /
+    /// `extract_html_only_xml.json`: one `meta` per key even where
+    /// `file_metadata` repeats the value, `X-Parsed-By` omitted.
+    pub fn xhtml(&self) -> String {
+        let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        out.push_str("<html xmlns=\"http://www.w3.org/1999/xhtml\">\n<head>\n");
+        let mut meta = |name: &str, content: &str| {
+            out.push_str(&format!(
+                "<meta name=\"{}\" content=\"{}\" />\n",
+                escape_xml_attribute(name),
+                escape_xml_attribute(content)
+            ));
+        };
+        meta("stream_size", &self.stream_size.to_string());
+        meta("stream_content_type", self.declared_type);
+        meta("stream_name", self.part_name);
+        meta("stream_source_info", self.stream_source_info);
+        if let Some(title) = self.doc.title.as_deref() {
+            meta("dc:title", title);
+        }
+        if let Some(author) = self.doc.author.as_deref() {
+            meta("author", author);
+        }
+        meta("Content-Encoding", &self.doc.charset_label);
+        meta("resourceName", self.resource_name);
+        meta("Content-Type", &self.resolved_content_type());
+        out.push_str(&format!(
+            "<title>{}</title>\n</head>\n<body>",
+            escape_xml_text(self.doc.title.as_deref().unwrap_or(""))
+        ));
+        out.push_str(&self.doc.body_xhtml);
+        out.push_str("</body></html>");
+        out
+    }
+
+    /// The `extractFormat=text` rendering.
+    ///
+    /// Leading and trailing newlines are part of the value and are never
+    /// trimmed (finding 121): the leading run is the 13-newline constant, and
+    /// the trailing edge is simply whatever the body ended with.
+    pub fn text(&self) -> String {
+        let mut out = "\n".repeat(EXTRACT_TEXT_LEADING_NEWLINES);
+        if let Some(title) = self.doc.title.as_deref().filter(|t| !t.is_empty()) {
+            out.push_str(title);
+            out.push_str("\n\n");
+        }
+        out.push_str(&self.doc.body_text);
+        out
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -622,6 +1579,39 @@ impl Default for ExtractLimits {
             max_rtf_group_depth: 256,
             max_pdf_pages: 5000,
         }
+    }
+}
+
+/// Head-room the route-level transport ceiling allows above `max_body_bytes`
+/// for multipart framing: boundary delimiters, per-part headers, and any
+/// non-file form fields sent alongside the document.
+///
+/// 1 MiB is far above what a legitimate upload spends on framing (a handful
+/// of parts, a few hundred bytes each) and far below anything that matters as
+/// a resource. It exists so the *content* budget — the one whose overrun
+/// produces the captured 413 envelope — is what a realistic oversized upload
+/// hits first, rather than a transport cap firing early on framing bytes and
+/// answering with axum's bare `LengthLimitError` instead.
+const MULTIPART_FRAMING_SLACK: u64 = 1024 * 1024;
+
+impl ExtractLimits {
+    /// The transport-level ceiling for the whole `/update/extract` request
+    /// body, for a route-level `DefaultBodyLimit::max`.
+    ///
+    /// This is **not** a duplicate of `max_body_bytes`, and it is not the
+    /// limit that produces the 413 envelope. It is the backstop for the bytes
+    /// the handler's own counting cannot see: multipart *part headers* are
+    /// consumed by `multer` before a `Field` exists, so no handler-side
+    /// counter can charge for them. Without a finite transport ceiling, an
+    /// unauthenticated client can stream endless part headers (or an endless
+    /// chunked body) at this route and never reach a counted byte.
+    ///
+    /// Content bytes are charged against `max_body_bytes` by the handler, for
+    /// every part it consumes, file or not — so this ceiling is defence in
+    /// depth over that, not a substitute for it.
+    pub fn route_body_ceiling(&self) -> usize {
+        usize::try_from(self.max_body_bytes.saturating_add(MULTIPART_FRAMING_SLACK))
+            .unwrap_or(usize::MAX)
     }
 }
 
@@ -962,31 +1952,18 @@ impl Budget {
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
-/// An in-flight extraction slot. Releasing is `Drop`, so every early return
-/// and every panicking parser gives its slot back.
-struct Permit(Arc<AtomicUsize>);
+/// An in-flight extraction slot, reserved out of an
+/// [`ExtractionRuntime`]'s `max_concurrency` budget.
+///
+/// Releasing is `Drop`, so every early return and every panicking parser
+/// gives its slot back. Holding one reduces the slots available to
+/// [`ExtractionRuntime::spawn_extraction`] by one for as long as it lives;
+/// dropping it returns the slot immediately.
+pub struct ExtractionPermit(Arc<AtomicUsize>);
 
-impl Drop for Permit {
+impl Drop for ExtractionPermit {
     fn drop(&mut self) {
         self.0.fetch_add(1, Ordering::AcqRel);
-    }
-}
-
-fn try_acquire(available: &Arc<AtomicUsize>) -> Option<Permit> {
-    let mut current = available.load(Ordering::Acquire);
-    loop {
-        if current == 0 {
-            return None;
-        }
-        match available.compare_exchange_weak(
-            current,
-            current - 1,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => return Some(Permit(Arc::clone(available))),
-            Err(actual) => current = actual,
-        }
     }
 }
 
@@ -1085,10 +2062,49 @@ impl ExtractionRuntime {
         }
     }
 
+    /// Reserves one extraction slot if the pool is not already at
+    /// `max_concurrency`, returning `None` rather than waiting when it is.
+    ///
+    /// This is the single admission path: [`Self::spawn_extraction`] calls
+    /// it too, so a permit held here is a slot `spawn_extraction` cannot
+    /// hand out. Holding every slot makes the runtime saturated as a fact
+    /// rather than as a race, which is what lets callers (an admission
+    /// gate ahead of the pool, a test pinning the `TooBusy` envelope)
+    /// reserve capacity deterministically. Dropping the returned
+    /// [`ExtractionPermit`] returns the slot.
+    pub fn try_acquire_permit(&self) -> Option<ExtractionPermit> {
+        let available = &self.available;
+        let mut current = available.load(Ordering::Acquire);
+        loop {
+            if current == 0 {
+                return None;
+            }
+            match available.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(ExtractionPermit(Arc::clone(available))),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
     /// Runs `f` on the dedicated blocking pool if a concurrency slot is
-    /// free; otherwise `Err(ExtractError::TooBusy)` immediately. The slot is
-    /// held for the whole duration of `f` and released on the worker thread,
-    /// so it reflects real in-flight work rather than pending futures.
+    /// free; otherwise `Err(ExtractError::TooBusy)` immediately.
+    ///
+    /// The slot is held for the whole duration of `f` **and until the
+    /// awaiting caller has taken the result back**: the [`ExtractionPermit`] travels
+    /// through the oneshot alongside the outcome and is dropped here, not on
+    /// the worker thread. Releasing it on the worker instead would leave a
+    /// window in which the extraction is, from the request's point of view,
+    /// still in flight while the slot already reads as free — so `N`
+    /// concurrent requests could be admitted against `max_concurrency = N-1`
+    /// purely on scheduling luck. That window is also what makes a
+    /// concurrency test racy rather than deterministic. The burnt-slot
+    /// invariant below is unaffected, and is in fact strengthened: a job that
+    /// never returns never sends, so its permit stays owned by the closure.
     ///
     /// #257 follow-up item C: `deadline` is the baked-in timeout — the caller
     /// cannot forget it, unlike a `tokio::time::timeout` applied at the call
@@ -1105,9 +2121,11 @@ impl ExtractionRuntime {
     /// the job's own `DeadlineExceeded` and the slot comes back.
     ///
     /// On expiry this resolves with `DeadlineExceeded` **without freeing the
-    /// pool slot**. That is not an oversight: the permit is released by the
-    /// worker thread when the job returns, so a job that never returns leaves
-    /// the slot burnt. Burnt slots are the documented residual risk (see the
+    /// pool slot**. That is not an oversight: the permit is released when the
+    /// job's result is delivered, so a job that never returns leaves the slot
+    /// burnt. A job that returns *after* the caller gave up still releases —
+    /// its send drops the permit into shared oneshot state that nobody reads,
+    /// and dropping that state drops the permit. Burnt slots are the documented residual risk (see the
     /// module docs) — a hung *request* is not.
     ///
     /// Requires a tokio runtime with the **time driver** enabled, since the
@@ -1122,19 +2140,20 @@ impl ExtractionRuntime {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        let permit = match try_acquire(&self.available) {
+        let permit = match self.try_acquire_permit() {
             Some(permit) => permit,
             None => return Err(ExtractError::TooBusy),
         };
-        let (tx, rx) = oneshot::<Result<T, ExtractError>>();
+        let (tx, rx) = oneshot::<(Result<T, ExtractError>, ExtractionPermit)>();
         let job: Job = Box::new(move || {
             // A panicking third-party parser must not take a pool worker
             // with it: catching here keeps the pool at full strength and
             // turns the panic into an ordinary 500.
             let outcome = std::panic::catch_unwind(AssertUnwindSafe(f))
                 .map_err(|_| ExtractError::Parse("extraction panicked".to_string()));
-            drop(permit);
-            tx.send(outcome);
+            // The permit rides back with the result rather than being
+            // dropped here — see the doc comment on slot lifetime.
+            tx.send((outcome, permit));
         });
         {
             let guard = match self.jobs.lock() {
@@ -1153,7 +2172,13 @@ impl ExtractionRuntime {
         // keeps that state alive, so the worker cannot fault on a send into a
         // gone receiver.
         match tokio::time::timeout(deadline.saturating_add(SPAWN_TIMEOUT_GRACE), rx).await {
-            Ok(Some(outcome)) => outcome,
+            // Dropping the permit here, after the awaiting caller has been
+            // handed the result, is what makes the slot's lifetime cover the
+            // whole *request*'s use of it rather than only the worker's.
+            Ok(Some((outcome, permit))) => {
+                drop(permit);
+                outcome
+            }
             Ok(None) => Err(ExtractError::Io(
                 "extraction worker exited without a result".to_string(),
             )),
@@ -1320,6 +2345,56 @@ pub async fn stream_to_tempfile(
     dest: &mut NamedTempFile,
     max_bytes: u64,
 ) -> Result<u64, ExtractError> {
+    let mut consumed = 0u64;
+    stream_to_tempfile_counted(source, dest, max_bytes, &mut consumed).await
+}
+
+/// `stream_to_tempfile` against a **request-wide** running total.
+///
+/// A multipart request is more than its file part: the same body can carry
+/// any number of other fields, and every byte of all of them arrived over the
+/// same connection. Charging them all to one `consumed` total is what makes
+/// `max_bytes` a limit on the *request* rather than a limit on whichever part
+/// happens to be the document.
+///
+/// `consumed` is advanced as bytes are accepted, so a caller that runs
+/// several sources through this sees the limit shrink for each one. The
+/// returned count is what *this* source contributed.
+pub async fn stream_to_tempfile_counted(
+    source: &mut impl ChunkSource,
+    dest: &mut NamedTempFile,
+    max_bytes: u64,
+    consumed: &mut u64,
+) -> Result<u64, ExtractError> {
+    let written = copy_counted(source, Some(dest), max_bytes, consumed).await?;
+    dest.as_file_mut()
+        .flush()
+        .map_err(|e| ExtractError::Io(format!("flushing upload temp file: {e}")))?;
+    Ok(written)
+}
+
+/// Reads a source to exhaustion, discarding the bytes but **charging them**
+/// to the same request-wide total `stream_to_tempfile_counted` uses.
+///
+/// This is the non-file multipart field: its content is not wanted, but it
+/// still had to be received, and a handler that skips such a field without
+/// counting it accepts an unbounded stream of them. Fails with the same
+/// `BodyTooLarge` — and therefore the same captured 413 envelope — as an
+/// oversized document does.
+pub async fn drain_counted(
+    source: &mut impl ChunkSource,
+    max_bytes: u64,
+    consumed: &mut u64,
+) -> Result<u64, ExtractError> {
+    copy_counted(source, None, max_bytes, consumed).await
+}
+
+async fn copy_counted(
+    source: &mut impl ChunkSource,
+    mut dest: Option<&mut NamedTempFile>,
+    max_bytes: u64,
+    consumed: &mut u64,
+) -> Result<u64, ExtractError> {
     let mut written: u64 = 0;
     while let Some(chunk) = source.next_chunk().await {
         let chunk = chunk.map_err(|e| ExtractError::Io(format!("reading upload body: {e}")))?;
@@ -1327,17 +2402,17 @@ pub async fn stream_to_tempfile(
         // Checked *before* the write, and with a saturating add so a
         // pathological chunk length cannot wrap the running total back under
         // the limit.
-        if written.saturating_add(len) > max_bytes {
+        if consumed.saturating_add(len) > max_bytes {
             return Err(ExtractError::BodyTooLarge { limit: max_bytes });
         }
-        dest.as_file_mut()
-            .write_all(&chunk)
-            .map_err(|e| ExtractError::Io(format!("writing upload to temp file: {e}")))?;
+        if let Some(dest) = dest.as_deref_mut() {
+            dest.as_file_mut()
+                .write_all(&chunk)
+                .map_err(|e| ExtractError::Io(format!("writing upload to temp file: {e}")))?;
+        }
         written += len;
+        *consumed += len;
     }
-    dest.as_file_mut()
-        .flush()
-        .map_err(|e| ExtractError::Io(format!("flushing upload temp file: {e}")))?;
     Ok(written)
 }
 
@@ -1719,16 +2794,19 @@ impl std::error::Error for ExtractError {}
 /// error and root-error classes. `msg` text and Java stack content are not
 /// contractual (findings 10/59); the code and the envelope shape are.
 ///
-/// **Every other arm has no captured fixture.** Solr's extract handler was
-/// never provoked into a budget violation during the #171 capture, so the
-/// statuses below are Wayfinder's own defensible choice, not a matched
-/// contract. The rule applied: a violation the *client* caused by sending
-/// this particular document is a 4xx (it will fail identically on retry); a
-/// violation caused by *server* capacity is a 5xx (retry may succeed).
-/// This module's `budget_violation_statuses_have_no_captured_fixture_yet`
-/// test is the self-expiring note for that — it fails the moment anyone
-/// captures an extraction fixture beyond the five that exist today, which is
-/// exactly when these mappings must be re-checked against real Solr.
+/// **Every budget arm still has no captured fixture.** Solr's extract handler
+/// was never provoked into a budget violation during the #171 capture, nor by
+/// #258's, so the statuses below are Wayfinder's own defensible choice, not a
+/// matched contract. The rule applied: a violation the *client* caused by
+/// sending this particular document is a 4xx (it will fail identically on
+/// retry); a violation caused by *server* capacity is a 5xx (retry may
+/// succeed). This module's
+/// `budget_violation_statuses_have_no_captured_fixture_yet` test is the
+/// self-expiring note for that — it fails the moment anyone captures an
+/// extraction fixture beyond the ten that exist today, which is exactly when
+/// these mappings must be re-checked against real Solr. It has fired once
+/// already, for #258's five new captures; that recheck moved nothing, and its
+/// findings are recorded in the test's own doc comment.
 impl From<ExtractError> for crate::error::WfError {
     fn from(err: ExtractError) -> Self {
         use axum::http::StatusCode;
@@ -1742,6 +2820,21 @@ impl From<ExtractError> for crate::error::WfError {
             // 415: the request names a media type this server will not
             // process. The canonical meaning of the status, and it tells the
             // client retrying is pointless.
+            //
+            // Still uncaptured, and #258's fixtures did **not** change that.
+            // `extract_corrupt_pdf.json` is Solr's Tika throwing *while
+            // parsing* a malformed PDF, which is the `Parse` arm above and is
+            // already a 500. It says nothing about a *well-formed* document
+            // in a format this server does not implement — a valid DOCX, RTF
+            // or JPEG — which is what `UnsupportedFormat` actually means here
+            // and which real Solr answers 200 with extracted content. That
+            // population is the one this status has to be right for, and
+            // 500ing it would contradict the client-caused/4xx rule stated
+            // above. Wayfinder happens to reach the corrupt-PDF *fixture*
+            // through this arm only because it has no PDF parser to fail
+            // inside; that is a status divergence on one row, recorded in
+            // `DIVERGENT_STATUS_MULTIPART` in `tests/differential.rs` and in
+            // the PRD, not evidence for this mapping.
             ExtractError::UnsupportedFormat { .. } => (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "extraction-unsupported-format",
@@ -1792,14 +2885,45 @@ pub fn extract_error_response(err: ExtractError) -> axum::response::Response {
 mod tests {
     use super::*;
 
-    /// The five extraction fixtures captured by the #171 exploration. All
-    /// five are success/parser-failure cases; none is a budget violation.
-    const CAPTURED_EXTRACT_FIXTURES: [&str; 5] = [
+    /// Every captured extraction fixture: the five from the #171 exploration
+    /// plus the five issue #258 captured. All ten are success or
+    /// parser-failure cases; **none is a budget violation**, which is the
+    /// property the trip-wire below actually depends on.
+    ///
+    /// Recheck performed when #258's captures landed (its spec item 8):
+    ///
+    /// | mapping | new evidence? | outcome |
+    /// |---|---|---|
+    /// | 500 `Parse` | `extract_corrupt_pdf` (unchanged) | still matched |
+    /// | 415 `UnsupportedFormat` | none | reasoned choice stands |
+    /// | 413 `BodyTooLarge` | none | reasoned choice stands |
+    /// | 503 `TooBusy` | none | reasoned choice stands |
+    /// | 503 `DeadlineExceeded` | none | reasoned choice stands |
+    /// | 400 `OutputTooLarge`/`ZipBudget`/`StructuralLimit` | none | reasoned choice stands |
+    ///
+    /// `UnsupportedFormat` is the one worth spelling out, because it looks
+    /// like it gained evidence and did not. Wayfinder answers
+    /// `extract_corrupt_pdf`'s upload through that arm, and the fixture is a
+    /// 500 — but the fixture is Solr's Tika failing *inside* a PDF parser,
+    /// which is the `Parse` arm, already 500. What `UnsupportedFormat`
+    /// actually covers is a well-formed document in an unimplemented format
+    /// (DOCX, RTF, JPEG), for which Solr returns 200 with content and no
+    /// capture exists. Remapping 415 to 500 on the strength of the corrupt
+    /// PDF would have set the status for that whole population from a fixture
+    /// that does not describe it. The corrupt-PDF row is instead a recorded
+    /// status divergence (`DIVERGENT_STATUS_MULTIPART` in
+    /// `tests/differential.rs`), which retires when a PDF extractor lands.
+    const CAPTURED_EXTRACT_FIXTURES: [&str; 10] = [
         "extract_corrupt_pdf.json",
+        "extract_declared_charset_text.json",
         "extract_html_index.json",
+        "extract_html_only_text.json",
+        "extract_html_only_xml.json",
         "extract_html_select.json",
+        "extract_latin1_text.json",
         "extract_plain_text_text.json",
         "extract_plain_text_xml.json",
+        "extract_utf8_bom_text.json",
     ];
 
     /// Self-expiring note for the uncaptured budget-violation statuses in

@@ -270,10 +270,47 @@ chosen. Nothing may be added here without the same two things.
    surface is JSON-only and its clients parse JSON, so reproducing a servlet-container fallback
    would add a second error format solely for authentication failures. (issue #229; finding 118)
 
+10. **`/update/extract` omits `X-Parsed-By`, omits Tika's injected `shape="rect"`, requires
+    `extractOnly=true`, and answers 415 where Solr's Tika answers 500 on a corrupt PDF.** Four
+    separate divergences on the one endpoint, all from the issue #258 captures (findings 120-123):
+
+    - **`X-Parsed-By` is absent** from both `file_metadata` and the XHTML `<head>`. Its captured
+      values are Java class names —
+      `org.apache.tika.parser.DefaultParser`, `...csv.TextAndCSVParser`, `...html.HtmlParser` —
+      naming the Tika classes that did the work. Wayfinder has no Tika and no honest equivalent;
+      emitting a Java class name it never ran would be a lie a client could reasonably act on
+      (Tika's own tooling keys parser-specific behaviour off it). Emitting Wayfinder-specific
+      values instead would be a *different* divergence with no fixture behind it, and would still
+      break any client matching on the captured strings.
+    - **`shape="rect"` is not injected** onto `<a>` elements. `extract_html_only_xml.json` shows
+      Tika adding it to a link whose source (`solr-ref/extract-inputs/sample.html`) has no such
+      attribute. It is an artefact of Tika's HTML parser, not content, and reproducing it would
+      mean fabricating markup that was never in the document.
+    - **`extractOnly=true` is required; without it the request is a 400**, where Solr answers 200
+      and indexes the extracted document. Server-side indexing of extracted content is out of v1
+      scope. The alternative — 200 with nothing indexed — is strictly worse: the client's next
+      query comes back empty with no error anywhere to explain it.
+    - **A corrupt PDF is a 415, not the captured 500.** `extract_corrupt_pdf.json` is Tika
+      *parsing* a malformed PDF and throwing, which Solr reports as a 500. Wayfinder ships no PDF
+      extractor in v1, so the request never reaches a parse attempt: PDF is an unimplemented
+      format and the honest answer is 415 unsupported media type. This is narrowly about that one
+      row — a well-formed file in an unsupported format is 415 in both readings, and every format
+      Wayfinder *does* parse reports parse failure as Solr does. **The PDF extractor (phase 2b)
+      retires this entry**: once Wayfinder can fail inside a PDF parser the captured 500 becomes
+      reachable and the divergence must be deleted, not re-justified.
+
+    The first two are normalised away in the differential harness by `normalize_extract`, with each
+    affected row listed in `ACCEPTED_DIVERGENCES_MULTIPART` in `tests/differential.rs`; that runner
+    asserts the raw envelopes really do still differ before normalisation, so the normaliser cannot
+    quietly start hiding something else. The fourth is a *status* divergence, which no normaliser
+    may hide: it is listed row-by-row in `DIVERGENT_STATUS_MULTIPART`, which pins the exact status
+    Wayfinder must return and fails if the capture ever starts agreeing.
+    (issue #258; findings 120-123)
+
 Note that divergence 3 is a difference from the *configset* the reference fixtures were captured
 against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, 4, 6, 7,
-and 8 are differences from Solr proper. Divergence 5 is a deliberate config choice plus inherent
-host non-reproducibility, not a Solr-behaviour disagreement. Divergence 9 is a
+8, and 10 are differences from Solr proper. Divergence 5 is a deliberate config choice plus
+inherent host non-reproducibility, not a Solr-behaviour disagreement. Divergence 9 is a
 difference from Solr's auth-filter/container error body, while retaining its 401 and Basic
 challenge realm.
 

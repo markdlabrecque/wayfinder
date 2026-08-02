@@ -1,0 +1,8 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":4
+  },
+  "file":"\n\n\n\n\n\n\n\n\n\n\n\n\nCaptured title\n\nIgnored wrapper Linked words\nMain paragraph.\n",
+  "file_metadata":["resourceName",["sample.html","sample.html"],"Content-Type",["text/html","text/html; charset=ISO-8859-1"],"stream_name",["file","file"],"stream_source_info",["sample.html","sample.html"],"stream_size",["226","226"],"stream_content_type",["text/html","text/html"],"X-Parsed-By",["org.apache.tika.parser.DefaultParser","org.apache.tika.parser.html.HtmlParser"],"dc:title",["Captured title"],"author",["Ada Example"],"Content-Encoding",["ISO-8859-1"],"title",["Captured title"]]
+}

@@ -246,6 +246,154 @@ pub async fn request_full(
     (status, body)
 }
 
+/// Fixed boundary for every hand-built multipart body this suite sends.
+/// There is exactly one part per request today (`request_multipart` only
+/// ever builds a single-file body), so no request needs a distinct boundary
+/// to disambiguate parts from each other; a constant keeps every caller's
+/// request byte-for-byte reproducible.
+///
+/// Public because `request_multipart_with_raw_body` lets a caller hand-build
+/// a body (several parts, oversized headers) that the single-part builder
+/// cannot express, and that body has to use the boundary the request header
+/// declares.
+pub const MULTIPART_BOUNDARY: &str = "WayfinderTestBoundary7f3a9c2e";
+
+/// Issues a single-file `multipart/form-data` POST against
+/// `/solr/<path_and_query>` (core-relative, like `request_full`'s counterpart
+/// is core-qualified) and returns the HTTP status plus parsed JSON body.
+///
+/// Builds the multipart body by hand (RFC 2046) rather than depending on
+/// axum's `multipart` extractor feature or a client-side multipart-builder
+/// crate — this is the *client* side of the request, which the wire format
+/// does not require any particular library for, and the route this exercises
+/// (`/update/extract`, issue #258) does not exist on `app` yet, so `app`
+/// itself has nothing to do with how this function builds bytes.
+///
+/// `part_name` becomes the form-data field name (`file` for every capture in
+/// `solr-ref/capture.sh`'s #171/#258 blocks); `filename` is the part's
+/// declared filename; `mime` is its declared `Content-Type`, and may be
+/// empty to omit the header entirely (mirrors a client that sends no
+/// `Content-Type` on the part).
+pub async fn request_multipart(
+    app: &Router,
+    path_and_query: &str,
+    part_name: &str,
+    filename: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> (StatusCode, Value) {
+    let (status, raw) =
+        request_multipart_raw(app, path_and_query, part_name, filename, mime, bytes).await;
+    let body: Value = if raw.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&raw).unwrap_or_else(|e| {
+            panic!(
+                "response body must be valid JSON: {e} (raw: {:?})",
+                String::from_utf8_lossy(&raw)
+            )
+        })
+    };
+    (status, body)
+}
+
+/// Byte-returning counterpart of `request_multipart`, for callers (a
+/// non-multipart-body error test, a malformed-envelope test) that need the
+/// raw response bytes rather than a JSON parse that would panic on a
+/// deliberately non-JSON or empty error body.
+pub async fn request_multipart_raw(
+    app: &Router,
+    path_and_query: &str,
+    part_name: &str,
+    filename: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> (StatusCode, Vec<u8>) {
+    let body = build_multipart_body(part_name, filename, mime, bytes);
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/solr/{path_and_query}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={MULTIPART_BOUNDARY}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(req)
+        .await
+        .expect("multipart request must not fail at the transport level");
+    let status = resp.status();
+    let raw = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("response body must be readable")
+        .to_bytes()
+        .to_vec();
+    (status, raw)
+}
+
+/// Builds one single-file `multipart/form-data` body (RFC 2046) with
+/// `MULTIPART_BOUNDARY`. `mime` empty means "no `Content-Type` header on the
+/// part" rather than an empty header value.
+fn build_multipart_body(part_name: &str, filename: &str, mime: &str, bytes: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{MULTIPART_BOUNDARY}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"{part_name}\"; filename=\"{filename}\"\r\n"
+        )
+        .as_bytes(),
+    );
+    if !mime.is_empty() {
+        body.extend_from_slice(format!("Content-Type: {mime}\r\n").as_bytes());
+    }
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{MULTIPART_BOUNDARY}--\r\n").as_bytes());
+    body
+}
+
+/// A non-multipart body sent with a `multipart/form-data` content-type
+/// header — for the "malformed multipart envelope" 400 case the spec names
+/// (`src/extract.rs`'s multipart intake section).
+pub async fn request_multipart_with_raw_body(
+    app: &Router,
+    path_and_query: &str,
+    raw_body: &[u8],
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/solr/{path_and_query}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={MULTIPART_BOUNDARY}"),
+        )
+        .body(Body::from(raw_body.to_vec()))
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(req)
+        .await
+        .expect("request must not fail at the transport level");
+    let status = resp.status();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("response body must be readable")
+        .to_bytes();
+    let body: Value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("response body must be valid JSON")
+    };
+    (status, body)
+}
+
 /// Thin core-relative wrapper over `request_full`, for callers (like
 /// `tests/error_shapes.rs`) that only ever address `CORE`. Mirrors `get()`'s
 /// relationship to a full-path request, but for arbitrary methods/bodies.

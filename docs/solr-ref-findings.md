@@ -2143,3 +2143,52 @@ contains `quack`/`garden`. The self-contained setup is appended to `solr-ref/cap
 
      Both halves of this cost a full bad measurement round: a benchmark harness built to the
      unparameterised URL and the unscoped key aborted an hour into a 2M-document run.
+
+## Findings from issue #258 (`/update/extract` extractOnly tracer)
+
+Captured 2026-08-02 against `solr:9.10.1` (container `wayfinder-solr-258`, port 9020, core
+`extract258`, removed after capture) with the `extraction` module and the same
+Search-API-shaped `ExtractingRequestHandler` as the #171 block. Fixtures:
+`extract_html_only_xml.json`, `extract_html_only_text.json`, `extract_latin1_text.json`,
+`extract_utf8_bom_text.json`, `extract_declared_charset_text.json`. Inputs:
+`extract-inputs/sample.html`, `sample-latin1.txt` (raw ISO-8859-1 bytes),
+`sample-utf8-bom.txt` (UTF-8 with a BOM).
+
+120. **`extractFormat=text` always opens with exactly thirteen newlines, independent of the
+     document, its format, and how many metadata keys the head carries.** #171's plain-text
+     fixture (nine `meta` elements plus `title`) and this issue's HTML fixture (eleven `meta`
+     elements plus `title`) both return `"\n" * 13` before the first character of content. The
+     count is therefore a fixed artifact of Tika's XHTML-to-text serialization, not one newline
+     per head child as the differing meta counts would otherwise suggest. It is reproducible as
+     a constant. The trailing edge is *not* padded: the value simply ends with whatever the
+     content ended with (`...Second line.\n\n` for the plain-text file whose last byte is a
+     newline, `...Main paragraph.\n` for the HTML file whose last block is a `<p>`).
+
+121. **HTML `extractOnly` returns the same `{responseHeader, file, file_metadata}` envelope as
+     plain text, with `title` and `author` promoted into metadata.** `file_metadata` carries
+     both `dc:title` and a bare `title` for the same value, plus `author` from
+     `<meta name="author">`. The XHTML `file` value keeps `<div>` and `<p>` structure and
+     rewrites the anchor with `captureAttr`'s `shape="rect"` attribute first; `extractFormat=text`
+     flattens the same document to `Captured title\n\nIgnored wrapper Linked words\nMain
+     paragraph.\n` after the thirteen leading newlines — the title text is part of the text
+     output, and inline elements do not introduce breaks while block elements do. #171 had no
+     ground truth for this path: its HTML captures were the *indexing* path, which answers with
+     a bare `responseHeader`.
+
+122. **A declared charset beats detection, a BOM beats detection, and the resolved charset is
+     echoed in three places.** Posting the ISO-8859-1 bytes with no declared charset detects
+     `ISO-8859-1`; posting the same bytes as `text/plain; charset=ISO-8859-1` also resolves
+     `ISO-8859-1` but additionally propagates the declared value into `stream_content_type`
+     (`application/octet-stream` in the undeclared case). The UTF-8-with-BOM file resolves
+     `UTF-8` and the BOM is consumed, not emitted as U+FEFF in the value. In every case the
+     resolved charset appears as the `Content-Encoding` metadata key, as the `charset=` of the
+     second `Content-Type` metadata value, and inside the XHTML head's `Content-Type` meta.
+
+123. **`X-Parsed-By` is the only part of the extractOnly envelope Wayfinder cannot honestly
+     reproduce.** Every other metadata key (`resourceName`, `Content-Type`, `stream_name`,
+     `stream_source_info`, `stream_size`, `stream_content_type`, `Content-Encoding`, and HTML's
+     `dc:title`/`title`/`author`) is a property of the request and the document. `X-Parsed-By`
+     names Java classes (`org.apache.tika.parser.DefaultParser`,
+     `.csv.TextAndCSVParser`, `.html.HtmlParser`) that do not exist in a Rust server, and the
+     XHTML `file` value embeds them as `meta` elements. This is a ratified divergence, not a
+     to-do: see the PRD's ratified-divergence list.

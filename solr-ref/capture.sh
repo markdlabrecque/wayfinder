@@ -2463,3 +2463,77 @@ capspell spellcheck_unicode_offsets \
 
 echo "captured issue #223 spellcheck fixtures from '$SPELL_CONTAINER' (port $SPELL_PORT)"
 docker rm -f "$SPELL_CONTAINER" >/dev/null
+
+# --- /update/extract extractOnly: HTML + charset ground truth (issue #258) ---
+# Captured 2026-08-02 against solr:9.10.1 with the `extraction` module and the
+# same Search-API-shaped ExtractingRequestHandler as the #171 block above.
+# Separate container/core/port for the same reason #171 used one: the stock
+# tracer-bullet core has no ExtractingRequestHandler.
+#
+# #171 captured extractOnly only for plain text; the HTML captures it took were
+# the *indexing* path, which returns a bare responseHeader. Issue #258
+# implements the extractOnly route for plain text AND HTML, so the HTML
+# extractOnly envelope needed ground truth of its own rather than being
+# inferred from the indexing path. The three charset rows pin the declared-vs-
+# detected precedence the issue's charset handling depends on.
+#
+# Like #171's block these are multipart POSTs; they live in
+# `solr-ref/manifest-multipart.tsv`, which the differential harness runs with a
+# multipart-aware runner (`manifest-errors.tsv` models JSON bodies only).
+EXTRACT258_CONTAINER=wayfinder-solr-258
+EXTRACT258_SOLR=http://localhost:9020/solr
+EXTRACT258_CORE=extract258
+docker rm -f "$EXTRACT258_CONTAINER" >/dev/null 2>&1 || true
+docker run -d --name "$EXTRACT258_CONTAINER" -p 9020:8983 \
+  -e SOLR_MODULES=extraction solr:9.10.1 solr-precreate "$EXTRACT258_CORE" >/dev/null
+extract258_ready=false
+for _ in $(seq 90); do
+  if curl -sf "$EXTRACT258_SOLR/$EXTRACT258_CORE/admin/ping?wt=json" >/dev/null 2>&1; then
+    extract258_ready=true
+    break
+  fi
+  sleep 1
+done
+if [ "$extract258_ready" != true ]; then
+  echo "extract258 Solr did not become ready" >&2
+  exit 1
+fi
+curl -sSf "$EXTRACT258_SOLR/$EXTRACT258_CORE/config" -H 'Content-Type: application/json' -d '{
+  "add-requesthandler": {
+    "name":"/update/extract",
+    "class":"solr.extraction.ExtractingRequestHandler",
+    "startup":"lazy",
+    "defaults": {
+      "lowernames":"true", "uprefix":"ignored_", "captureAttr":"true",
+      "fmap.a":"links", "fmap.div":"ignored_"
+    }
+  }
+}' >/dev/null
+
+cap_extract258() { # cap_extract258 <name> <expected-status> <query> <input> [mime]
+  local name=$1 expected=$2 query=$3 input=$4 mime=${5:-application/octet-stream} actual
+  actual=$(curl -sS -X POST "$EXTRACT258_SOLR/$EXTRACT258_CORE/update/extract?$query" \
+    -F "file=@$HERE/extract-inputs/$input;type=$mime;filename=$input" \
+    -o "$OUT/$name.json" -w '%{http_code}')
+  if [ "$actual" != "$expected" ]; then
+    echo "$name: expected HTTP $expected, got $actual" >&2
+    exit 1
+  fi
+}
+
+cap_extract258 extract_html_only_xml 200 \
+  'extractOnly=true&resource.name=sample.html&wt=json' sample.html text/html
+cap_extract258 extract_html_only_text 200 \
+  'extractOnly=true&extractFormat=text&resource.name=sample.html&wt=json' sample.html text/html
+cap_extract258 extract_latin1_text 200 \
+  'extractOnly=true&extractFormat=text&resource.name=sample-latin1.txt&wt=json' \
+  sample-latin1.txt
+cap_extract258 extract_utf8_bom_text 200 \
+  'extractOnly=true&extractFormat=text&resource.name=sample-utf8-bom.txt&wt=json' \
+  sample-utf8-bom.txt
+cap_extract258 extract_declared_charset_text 200 \
+  'extractOnly=true&extractFormat=text&resource.name=sample-latin1.txt&wt=json' \
+  sample-latin1.txt 'text/plain; charset=ISO-8859-1'
+
+echo "captured issue #258 extractOnly fixtures from '$EXTRACT258_CONTAINER' (port 9020)"
+docker rm -f "$EXTRACT258_CONTAINER" >/dev/null
