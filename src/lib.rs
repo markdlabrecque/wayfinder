@@ -2376,7 +2376,7 @@ async fn select(
     // `PreQueryFacetError` treatment and whether the envelope carries a
     // `response` block all stay bit-identical. Double validation costs nothing
     // on a request that is already failing.
-    let facet_field_plan = if facet_requested {
+    let mut facet_field_plan = if facet_requested {
         facet::plan_facet_fields(&state.index, &params)
             .ok()
             .filter(|plan| !plan.fields.is_empty())
@@ -2386,44 +2386,62 @@ async fn select(
 
     // Bounded search (issue #242): only the first `start + rows` hits are
     // materialised; `num_found` and `max_score` still cover every match.
-    let (outcome, facet_field_aggs) = match (&parsed, &facet_field_plan) {
-        (None, _) => (
-            crate::collector::TopOutcome {
-                num_found: 0,
-                max_score: None,
-                top: Vec::new(),
-            },
-            None,
-        ),
-        (Some((query, filter_queries)), Some(plan)) => {
-            let (outcome, aggs) = state
-                .index
-                .search_top_with_aggs(
+    let mut facet_field_aggs = None;
+    let outcome = match &parsed {
+        None => crate::collector::TopOutcome {
+            num_found: 0,
+            max_score: None,
+            top: Vec::new(),
+        },
+        Some((query, filter_queries)) => {
+            let unfused = || {
+                state
+                    .index
+                    .search_top(
+                        query.as_ref(),
+                        filter_queries,
+                        &sort,
+                        start.saturating_add(rows),
+                    )
+                    .map_err(|e| {
+                        WfError::internal("wayfinder::SearchError", e.to_string())
+                            .with_params(&params)
+                    })
+            };
+            // Attempted, not borrowed-through, so the plan can be dropped
+            // below without fighting the borrow checker.
+            let attempt = facet_field_plan.as_ref().map(|plan| {
+                state.index.search_top_with_aggs(
                     query.as_ref(),
                     filter_queries,
                     &sort,
                     start.saturating_add(rows),
                     plan.aggregations.clone(),
                 )
-                .map_err(|e| {
-                    WfError::internal("wayfinder::SearchError", e.to_string()).with_params(&params)
-                })?;
-            (outcome, Some(aggs))
+            });
+            match attempt {
+                Some(Ok((outcome, aggs))) => {
+                    facet_field_aggs = Some(aggs);
+                    outcome
+                }
+                // An aggregation-class refusal (bucket limit, memory limit,
+                // a malformed aggregation) is exactly the error the unfused
+                // path raises out of `facet_counts` as a 400
+                // `wayfinder::FacetError` with the `response` block attached
+                // -- not the 500 `wayfinder::SearchError` it would become
+                // here. Un-fuse and let that path answer it, so the wire
+                // output stays bit-identical whichever way the request went.
+                Some(Err(e)) if crate::core_index::is_aggregation_error(&e) => {
+                    facet_field_plan = None;
+                    unfused()?
+                }
+                Some(Err(e)) => {
+                    return Err(WfError::internal("wayfinder::SearchError", e.to_string())
+                        .with_params(&params));
+                }
+                None => unfused()?,
+            }
         }
-        (Some((query, filter_queries)), None) => (
-            state
-                .index
-                .search_top(
-                    query.as_ref(),
-                    filter_queries,
-                    &sort,
-                    start.saturating_add(rows),
-                )
-                .map_err(|e| {
-                    WfError::internal("wayfinder::SearchError", e.to_string()).with_params(&params)
-                })?,
-            None,
-        ),
     };
 
     let num_found = outcome.num_found;

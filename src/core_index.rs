@@ -2189,6 +2189,10 @@ impl CoreIndex {
     /// byte — the aggregation therefore sees exactly the doc set the hit list
     /// does, `q` AND every `fq`, and the scoreless `ConstScoreQuery(0.0)`
     /// wrapper leaves both halves' results identical to running them apart.
+    ///
+    /// The bucket limit is sized to the whole fused request
+    /// (`fused_bucket_limit`), because Tantivy's is a *per-request* budget
+    /// summed across every top-level aggregation, not a per-aggregation one.
     pub fn search_top_with_aggs(
         &self,
         query: &dyn Query,
@@ -2198,14 +2202,20 @@ impl CoreIndex {
         aggs: Aggregations,
     ) -> Result<(TopOutcome, AggregationResults)> {
         let searcher = self.reader.searcher();
+        // The memory budget is deliberately *not* scaled the same way. It
+        // guards peak process memory, and the unfused path's per-pass budgets
+        // were sequential: one 500MB ceiling at a time, exactly what one
+        // shared 500MB ceiling over a single fused pass still enforces.
+        // Multiplying it by the field count would turn a fixed server
+        // ceiling into an unbounded, request-controlled one. A fused request
+        // that does trip it falls back to the unfused path in `select`, which
+        // reproduces the old per-pass behaviour and envelope exactly.
+        let limits = AggregationLimitsGuard::new(None, Some(fused_bucket_limit(aggs.len())));
         let collectors = (
             TopScoredHits::new(sort.to_vec(), limit),
             AggregationCollector::from_aggs(
                 aggs,
-                AggContextParams::new(
-                    AggregationLimitsGuard::default(),
-                    self.index.tokenizers().clone(),
-                ),
+                AggContextParams::new(limits, self.index.tokenizers().clone()),
             ),
         );
         match compose_filtered(query, filter_queries) {
@@ -3216,6 +3226,49 @@ fn compose_filtered(query: &dyn Query, filter_queries: &[Box<dyn Query>]) -> Opt
         ));
     }
     Some(BooleanQuery::new(clauses))
+}
+
+/// The bucket budget one fused aggregation request gets, as a function of how
+/// many aggregations share it (issue #246).
+///
+/// Tantivy's bucket limit is a **per-request** ceiling, not a per-aggregation
+/// one: `IntermediateAggregationResults::into_final_result`
+/// (`intermediate_agg_result.rs:158-167`) compares it against
+/// `AggregationResults::get_bucket_count`, which sums over *every* top-level
+/// aggregation (`agg_result.rs:24-30`). Each `facet.field` is already capped
+/// at `MAX_FACET_TERMS` buckets by its own `size`, so on the unfused path
+/// (one `AggregationCollector`, hence one fresh guard, per field) a field
+/// could never trip the default `DEFAULT_BUCKET_LIMIT == MAX_FACET_TERMS`.
+/// Leaving the default in place for the fused request would have made any two
+/// facet fields whose dictionaries sum past it fail where they previously
+/// passed — `facet.field=id&facet.field=category` on a corpus over ~65k docs,
+/// since `min_doc_count: 0` makes the count the field's whole cardinality.
+/// Scaling by the number of aggregations restores the old per-field headroom
+/// exactly.
+///
+/// An empty request keeps one field's worth of budget rather than zero: no
+/// buckets can be produced anyway, and a zero ceiling is a trap for a future
+/// caller.
+fn fused_bucket_limit(agg_count: usize) -> u32 {
+    let count = u32::try_from(agg_count).unwrap_or(u32::MAX).max(1);
+    MAX_FACET_TERMS.saturating_mul(count)
+}
+
+/// Whether `error` is Tantivy's own aggregation error class (a bucket-limit
+/// or memory-limit refusal, or a malformed aggregation request).
+///
+/// `select` uses this to fall back from the fused pass to the unfused one
+/// (issue #246): on the unfused path the identical Tantivy error surfaces out
+/// of `term_facet` -> `facet_fields` -> `facet_counts` and is rendered as a
+/// 400 `wayfinder::FacetError` carrying the `response` block, whereas out of
+/// the fused search it would become a 500 `wayfinder::SearchError`. Re-running
+/// the search unfused costs a wasted pass on a request that is already
+/// failing, and keeps status, error code, message and envelope bit-identical.
+pub(crate) fn is_aggregation_error(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<tantivy::TantivyError>(),
+        Some(tantivy::TantivyError::AggregationError(_))
+    )
 }
 
 /// The `TermsAggregation` request one `facet.field` needs, over the Tantivy
@@ -4678,5 +4731,76 @@ fast = true
             expected_views,
             "the `views` aggregation must be unaffected by sharing the request with `category`"
         );
+    }
+
+    /// Review round 1 (issue #246): Tantivy's bucket limit is a *per-request*
+    /// budget compared against the sum of every top-level aggregation's
+    /// buckets (`intermediate_agg_result.rs:158-167` +
+    /// `agg_result.rs:24-30`), not a per-aggregation one. The unfused path
+    /// gave each `facet.field` its own `AggregationCollector` and therefore
+    /// its own fresh guard, so a field capped at `MAX_FACET_TERMS` buckets by
+    /// its own `size` could never trip the equal default limit. Fusing N
+    /// fields into one request under the *default* guard would have failed
+    /// any two fields whose dictionaries sum past it -- e.g.
+    /// `facet.field=id&facet.field=category` over ~65k docs, since
+    /// `min_doc_count: 0` makes each field's bucket count its whole
+    /// cardinality.
+    ///
+    /// Asserted as a function of the aggregation count rather than by
+    /// building 65001 real buckets, which would not stay hermetic or fast.
+    /// That leaves one gap -- this cannot see whether `search_top_with_aggs`
+    /// still *calls* it, since Tantivy's `get_bucket_limit` is crate-private
+    /// to Tantivy. The tripwire for that is `-D warnings`: `fused_bucket_limit`
+    /// has exactly one production caller, so reverting that call site to
+    /// `AggregationLimitsGuard::default()` fails CI's own clippy line with
+    /// `function `fused_bucket_limit` is never used` (verified by doing it).
+    #[test]
+    fn the_fused_bucket_limit_scales_with_the_number_of_aggregations() {
+        assert_eq!(
+            fused_bucket_limit(1),
+            MAX_FACET_TERMS,
+            "one aggregation must get exactly the headroom a standalone term_facet pass had"
+        );
+        for count in 2..=8usize {
+            assert_eq!(
+                fused_bucket_limit(count),
+                MAX_FACET_TERMS * count as u32,
+                "{count} fused aggregations must each keep a standalone pass's own headroom, \
+                 because Tantivy sums their bucket counts against this one limit"
+            );
+        }
+        assert_eq!(
+            fused_bucket_limit(0),
+            MAX_FACET_TERMS,
+            "an empty request keeps one field's budget rather than a zero-bucket trap"
+        );
+        assert_eq!(
+            fused_bucket_limit(usize::MAX),
+            u32::MAX,
+            "the scaling must saturate rather than wrap into a tiny limit"
+        );
+    }
+
+    /// The other half of the same round-1 must-fix: an aggregation-class
+    /// Tantivy error has to be recognisable, because `select` answers it by
+    /// falling back to the unfused path (which renders it as the 400
+    /// `wayfinder::FacetError` it has always been) instead of letting it
+    /// escape the fused search as a 500. A non-aggregation error must not be
+    /// caught by that net.
+    #[test]
+    fn aggregation_errors_are_distinguishable_from_other_search_errors() {
+        let bucket_limit = anyhow::Error::from(tantivy::TantivyError::AggregationError(
+            tantivy::aggregation::AggregationError::BucketLimitExceeded {
+                limit: MAX_FACET_TERMS,
+                current: MAX_FACET_TERMS + 1,
+            },
+        ));
+        assert!(is_aggregation_error(&bucket_limit));
+
+        let other = anyhow::Error::from(tantivy::TantivyError::InvalidArgument("nope".to_string()));
+        assert!(!is_aggregation_error(&other));
+        assert!(!is_aggregation_error(&anyhow!(
+            "not a tantivy error at all"
+        )));
     }
 }
