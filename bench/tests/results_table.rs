@@ -9,8 +9,27 @@
 //! latency as `{:.2} ms`. PRD target/baseline text is reproduced ASCII-only
 //! (`2-4 GB`, `10-30 s`) rather than with the PRD's en-dashes, per this repo's
 //! ASCII-only convention for committed text.
+//!
+//! Issue #251: the single p95 row splits into two -- a warm-cache row (the
+//! existing 100-sample series, same query repeated `N_QUERIES` times) and a
+//! cold-cache row (one sample per distinct query term; 48 samples here,
+//! matching the corpus's true count of distinct query terms after
+//! excluding the 8 that parse to the same empty query -- see
+//! `bench/tests/query_terms.rs`). `EngineMeasurements::query_latencies_ms`
+//! is renamed to `query_latencies_warm_ms` and gains a sibling
+//! `query_latencies_cold_ms`; this is a naming decision made at stage 1 (see
+//! the test-writer handoff), not implied verbatim by the spec, so it is a
+//! **compile-time** red until the implementor adds both fields under these
+//! exact names.
 
 use wayfinder_bench::results::{BenchmarkResults, EngineMeasurements, p95, render_markdown_table};
+
+/// Measurement-path text for the two latency rows. Duplicated here (not
+/// imported) because these are private formatting choices inside
+/// `render_markdown_table`, pinned by string equality like every other cell
+/// in this file.
+const WARM_LATENCY_PATH: &str = "Solr: HTTP to the Docker container's published port, served from Solr's queryResultCache. Wayfinder: HTTP to the native process's bound port; Wayfinder has no query result cache.";
+const COLD_LATENCY_PATH: &str = "Solr: HTTP to the Docker container's published port, after a core RELOAD flushed Solr's caches. Wayfinder: HTTP to the native process's bound port. Every query in this pass is distinct.";
 
 fn sample_results(corpus_size: u64) -> BenchmarkResults {
     BenchmarkResults {
@@ -19,7 +38,8 @@ fn sample_results(corpus_size: u64) -> BenchmarkResults {
             resident_mem_post_index_mb: 2400.0,
             resident_mem_load_mb: 3200.0,
             cold_start_ms: 18_000.0,
-            query_latencies_ms: (1..=100).map(|v| v as f64).collect(),
+            query_latencies_warm_ms: (1..=100).map(|v| v as f64).collect(),
+            query_latencies_cold_ms: (1..=48).map(|v| v as f64).collect(),
             image_size_mb: 512.0,
             index_size_mb: 200.0,
         },
@@ -28,7 +48,8 @@ fn sample_results(corpus_size: u64) -> BenchmarkResults {
             resident_mem_post_index_mb: 215.0,
             resident_mem_load_mb: 410.0,
             cold_start_ms: 350.0,
-            query_latencies_ms: (1..=100).map(|v| (v as f64) * 0.9).collect(),
+            query_latencies_warm_ms: (1..=100).map(|v| (v as f64) * 0.9).collect(),
+            query_latencies_cold_ms: (1..=48).map(|v| (v as f64) * 0.9).collect(),
             image_size_mb: 24.0,
             index_size_mb: 230.0,
         },
@@ -60,6 +81,19 @@ fn p95_of_a_single_sample_is_that_sample() {
     assert_eq!(p95(&[7.5]), 7.5);
 }
 
+// Premise 3 (issue #251 spec): the cold pass's sample size is one per
+// distinct query term (48 here per `query_terms.rs`'s confirmed true
+// distinct-query count, after excluding the 8 terms that collide on
+// Solr's parsed-empty-query cache key), much smaller than the warm pass's
+// 100-200. Confirm the existing nearest-rank `p95` has no divide-by-zero /
+// empty-slice surprise at that size, and produces the expected rank.
+#[test]
+fn p95_over_a_cold_pass_sized_sample_is_still_meaningful() {
+    let samples: Vec<f64> = (1..=48).map(|v| v as f64).collect();
+    // ceil(0.95 * 48) = 46 -> 46th smallest value, 1-indexed.
+    assert_eq!(p95(&samples), 46.0);
+}
+
 // --- render_markdown_table ----------------------------------------------
 
 // Round-2 review (issue #13) found the "2M docs under query load" row always
@@ -75,16 +109,19 @@ fn render_markdown_table_matches_the_expected_shape_for_a_2m_run() {
     // Issue #63: the p95 row's corpus-size label must reflect the actual
     // `corpus_size` measured, not a hardcoded "50k docs" -- a 2M-doc run's
     // label must say "2000000 docs".
-    let expected = "\
+    let expected = format!(
+        "\
 | Metric | Solr baseline | Wayfinder target | Solr measured | Wayfinder measured | Measurement path |
 |---|---|---|---|---|---|
 | Resident memory, startup idle | ~1 GB | < 50 MB | 987.0 MB | 42.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). RSS includes allocator-resident memory plus mmap-backed index pages. |
 | Resident memory, post-index before query load (2000000 docs) | No PRD baseline | No PRD target | 2400.0 MB | 215.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). RSS includes allocator-resident memory plus mmap-backed index pages. |
 | Resident memory, 2M docs under query load | 2-4 GB | < 500 MB | 3200.0 MB | 410.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). RSS includes allocator-resident memory plus mmap-backed index pages. |
 | Cold start to first query served | 10-30 s | < 1 s | 18.00 s | 0.35 s | Solr: Docker container (`docker run` to first successful ping). Wayfinder: native process (binary launch to first successful ping). |
-| p95 query latency (facet+filter+highlight, 2000000 docs) | baseline | <= baseline | 95.00 ms | 85.50 ms | Solr: HTTP to the Docker container's published port. Wayfinder: HTTP to the native process's bound port. |
+| p95 query latency, warm cache (facet+filter+highlight, 2000000 docs) | baseline | <= baseline | 95.00 ms | 85.50 ms | {WARM_LATENCY_PATH} |
+| p95 query latency, cold cache (distinct queries, 2000000 docs) | baseline | <= baseline | 46.00 ms | 41.40 ms | {COLD_LATENCY_PATH} |
 | Container image size | ~500 MB | < 30 MB | 512.0 MB | 24.0 MB | Both: Docker image size (`docker inspect`), not a running-container measurement. |
-| Index size on disk | baseline | <= 1.2x baseline | 200.0 MB | 230.0 MB | Solr: size inside the Docker container's data volume (`docker exec du`). Wayfinder: size of the native process's data directory on the host (`du`). |";
+| Index size on disk | baseline | <= 1.2x baseline | 200.0 MB | 230.0 MB | Solr: size inside the Docker container's data volume (`docker exec du`). Wayfinder: size of the native process's data directory on the host (`du`). |"
+    );
 
     assert_eq!(table.trim_end(), expected);
 }
@@ -129,8 +166,12 @@ fn p95_label_reflects_the_actual_corpus_size_for_a_sub_2m_run() {
     let table = render_markdown_table(&sample_results(50_000));
 
     assert!(
-        table.contains("p95 query latency (facet+filter+highlight, 50000 docs)"),
-        "expected the p95 label to interpolate the run's actual corpus_size (50000), got:\n{table}"
+        table.contains("p95 query latency, warm cache (facet+filter+highlight, 50000 docs)"),
+        "expected the warm p95 label to interpolate the run's actual corpus_size (50000), got:\n{table}"
+    );
+    assert!(
+        table.contains("p95 query latency, cold cache (distinct queries, 50000 docs)"),
+        "expected the cold p95 label to interpolate the run's actual corpus_size (50000), got:\n{table}"
     );
     assert!(
         !table.contains("50k docs"),
@@ -143,8 +184,12 @@ fn p95_label_reflects_the_actual_corpus_size_for_an_arbitrary_run() {
     let table = render_markdown_table(&sample_results(500_000));
 
     assert!(
-        table.contains("p95 query latency (facet+filter+highlight, 500000 docs)"),
-        "expected the p95 label to say '500000 docs' for a 500k run, got:\n{table}"
+        table.contains("p95 query latency, warm cache (facet+filter+highlight, 500000 docs)"),
+        "expected the warm p95 label to say '500000 docs' for a 500k run, got:\n{table}"
+    );
+    assert!(
+        table.contains("p95 query latency, cold cache (distinct queries, 500000 docs)"),
+        "expected the cold p95 label to say '500000 docs' for a 500k run, got:\n{table}"
     );
 }
 
@@ -205,14 +250,17 @@ fn a_run_larger_than_2m_gets_the_honest_row_not_the_fixed_2m_label() {
     );
 }
 
+// Issue #251: the single p95 row split into two (warm cache, cold cache),
+// so a literal 2M run now has 8 metric rows, not 7.
 #[test]
-fn render_markdown_table_has_exactly_the_header_plus_seven_metric_rows_for_a_literal_2m_run() {
+fn render_markdown_table_has_exactly_the_header_plus_eight_metric_rows_for_a_literal_2m_run() {
     let table = render_markdown_table(&sample_results(2_000_000));
     let lines: Vec<&str> = table.lines().collect();
     assert_eq!(
         lines.len(),
-        9,
-        "expected 1 header + 1 separator + 7 metric rows, got {} lines:\n{}",
+        10,
+        "expected 1 header + 1 separator + 8 metric rows (the p95 row split into warm-cache \
+         and cold-cache rows, issue #251), got {} lines:\n{}",
         lines.len(),
         table
     );
@@ -223,20 +271,24 @@ fn render_markdown_table_has_exactly_the_header_plus_seven_metric_rows_for_a_lit
 // run has eight metric rows (startup, post-index, fixed-2M not-measured,
 // and actual memory-under-load plus the four non-memory metrics), so the
 // table is 1 header + 1 separator + 8 metric rows = 10 lines.
+// Issue #251: the single p95 row split into two (warm cache, cold cache),
+// so a sub-2M run now has 9 metric rows, not 8.
 #[test]
-fn render_markdown_table_has_exactly_the_header_plus_eight_metric_rows_for_a_sub_2m_run() {
+fn render_markdown_table_has_exactly_the_header_plus_nine_metric_rows_for_a_sub_2m_run() {
     let table = render_markdown_table(&sample_results(50_000));
     let lines: Vec<&str> = table.lines().collect();
     assert_eq!(
         lines.len(),
-        10,
-        "expected 1 header + 1 separator + 8 metric rows (startup, post-index, fixed-2M \
-         not-measured, and actual under-load memory plus four non-memory rows), got {} lines:\n{}",
+        11,
+        "expected 1 header + 1 separator + 9 metric rows (startup, post-index, fixed-2M \
+         not-measured, actual under-load memory, cold start, warm p95, cold p95, image, index), \
+         got {} lines:\n{}",
         lines.len(),
         table
     );
 
-    let expected = "\
+    let expected = format!(
+        "\
 | Metric | Solr baseline | Wayfinder target | Solr measured | Wayfinder measured | Measurement path |
 |---|---|---|---|---|---|
 | Resident memory, startup idle | ~1 GB | < 50 MB | 987.0 MB | 42.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). RSS includes allocator-resident memory plus mmap-backed index pages. |
@@ -244,9 +296,11 @@ fn render_markdown_table_has_exactly_the_header_plus_eight_metric_rows_for_a_sub
 | Resident memory, 2M docs under query load | 2-4 GB | < 500 MB | not measured | not measured | Not measured: this run indexed 50000 docs, not 2M. |
 | Resident memory, 50000 docs under query load | 2-4 GB | < 500 MB | 3200.0 MB | 410.0 MB | Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). RSS includes allocator-resident memory plus mmap-backed index pages. |
 | Cold start to first query served | 10-30 s | < 1 s | 18.00 s | 0.35 s | Solr: Docker container (`docker run` to first successful ping). Wayfinder: native process (binary launch to first successful ping). |
-| p95 query latency (facet+filter+highlight, 50000 docs) | baseline | <= baseline | 95.00 ms | 85.50 ms | Solr: HTTP to the Docker container's published port. Wayfinder: HTTP to the native process's bound port. |
+| p95 query latency, warm cache (facet+filter+highlight, 50000 docs) | baseline | <= baseline | 95.00 ms | 85.50 ms | {WARM_LATENCY_PATH} |
+| p95 query latency, cold cache (distinct queries, 50000 docs) | baseline | <= baseline | 46.00 ms | 41.40 ms | {COLD_LATENCY_PATH} |
 | Container image size | ~500 MB | < 30 MB | 512.0 MB | 24.0 MB | Both: Docker image size (`docker inspect`), not a running-container measurement. |
-| Index size on disk | baseline | <= 1.2x baseline | 200.0 MB | 230.0 MB | Solr: size inside the Docker container's data volume (`docker exec du`). Wayfinder: size of the native process's data directory on the host (`du`). |";
+| Index size on disk | baseline | <= 1.2x baseline | 200.0 MB | 230.0 MB | Solr: size inside the Docker container's data volume (`docker exec du`). Wayfinder: size of the native process's data directory on the host (`du`). |"
+    );
 
     assert_eq!(table.trim_end(), expected);
 }

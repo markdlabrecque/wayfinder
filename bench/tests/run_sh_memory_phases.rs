@@ -81,11 +81,21 @@ fn each_engine_samples_startup_memory_after_ping_before_indexing_and_keeps_post_
     );
 }
 
+// Issue #251 (corrected at review, live-verified): `render_report` grows
+// two cold-latency-file arguments (18 args total, up from 16). Each
+// engine's cold-latency file sits immediately after that engine's existing
+// (now warm) latencies file, so the two engines stay symmetrical and each
+// engine's own arguments remain contiguous:
+//   solr: ... <solr_index_mb> <solr_latencies_warm> <solr_latencies_cold>
+//   wf:   ... <wf_index_mb>   <wf_latencies_warm>   <wf_latencies_cold>
+//   then <corpus_size> <out_markdown_path>
+// This was flagged rather than guessed at stage 1 and corrected by the
+// orchestrator against a live Solr 9 run before this update.
 #[test]
 fn render_report_receives_each_engine_memory_phases_in_order_then_corpus_and_output() {
     const CONTRACT: &str = r#""$BENCH_BIN/render_report" \
-  "$SOLR_STARTUP_IDLE_MB" "$SOLR_POST_INDEX_MB" "$SOLR_LOAD_MB" "$SOLR_COLD_MS" "$SOLR_IMAGE_MB" "$SOLR_INDEX_MB" "$SOLR_LATENCIES" \
-  "$WF_STARTUP_IDLE_MB" "$WF_POST_INDEX_MB" "$WF_LOAD_MB" "$WF_COLD_MS" "$WF_IMAGE_MB" "$WF_INDEX_MB" "$WF_LATENCIES" \
+  "$SOLR_STARTUP_IDLE_MB" "$SOLR_POST_INDEX_MB" "$SOLR_LOAD_MB" "$SOLR_COLD_MS" "$SOLR_IMAGE_MB" "$SOLR_INDEX_MB" "$SOLR_LATENCIES_WARM" "$SOLR_LATENCIES_COLD" \
+  "$WF_STARTUP_IDLE_MB" "$WF_POST_INDEX_MB" "$WF_LOAD_MB" "$WF_COLD_MS" "$WF_IMAGE_MB" "$WF_INDEX_MB" "$WF_LATENCIES_WARM" "$WF_LATENCIES_COLD" \
   "$SIZE" \
   "$ROOT/docs/benchmarks.md""#;
 
@@ -97,6 +107,8 @@ fn render_report_receives_each_engine_memory_phases_in_order_then_corpus_and_out
     );
     assert!(
         source.contains(CONTRACT),
-        "render_report must receive Solr startup/post-index/load, then Wayfinder startup/post-index/load, then corpus size and output path in its fixed positional contract"
+        "render_report must receive Solr startup/post-index/load/cold/image/index/warm-\
+         latencies/cold-latencies, then the same for Wayfinder, then corpus size and output \
+         path, in its fixed 18-argument positional contract (issue #251)"
     );
 }
