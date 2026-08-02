@@ -132,21 +132,38 @@ fn solr_flushes_caches_with_a_core_reload_and_pings_afterward_not_update_commit_
     // definition) sits near the top of the file regardless of where the
     // function gets *called*, and so is a vacuous anchor for ordering.
     let flush_calls = call_lines(&stripped, "flush_solr_caches");
-    let flush = flush_calls.first().unwrap_or_else(|| {
-        panic!(
-            "expected a call to a `flush_solr_caches` function in run.sh's top-level flow \
-             (issue #251's Solr cache-flush step); none found"
-        )
-    });
-
-    let pings = call_lines(&stripped, "wait_for_ping");
-    let ping_after_flush = pings.iter().find(|(line_no, _)| *line_no > flush.0);
     assert!(
-        ping_after_flush.is_some(),
-        "expected a wait_for_ping call after the flush_solr_caches call at line {} -- the core \
-         is briefly unavailable during a reload -- found no subsequent wait_for_ping call; \
-         pings at {pings:?}",
-        flush.0
+        !flush_calls.is_empty(),
+        "expected a call to a `flush_solr_caches` function in run.sh's top-level flow \
+         (issue #251's Solr cache-flush step); none found"
+    );
+
+    // The ping belongs inside the flush helper, immediately after its RELOAD:
+    // otherwise a caller can use `flush_solr_caches` and begin a cold pass
+    // before the new searcher serves requests. Keeping the readiness wait with
+    // the state transition also means the top-level flow need not retain a
+    // duplicate, separately ordered ping.
+    let flush_function = extract_bash_function(&source, "flush_solr_caches").expect(
+        "expected run.sh to define flush_solr_caches; its RELOAD and readiness wait must be \n         one atomic cache-flush operation",
+    );
+    let reload_line = flush_function
+        .lines()
+        .position(|line| !line.trim_start().starts_with('#') && line.contains("action=RELOAD"))
+        .expect("flush_solr_caches must issue admin/cores?action=RELOAD");
+    let ping_line = flush_function
+        .lines()
+        .position(|line| {
+            !line.trim_start().starts_with('#')
+                && line.contains("wait_for_ping")
+                && !line.trim_start().starts_with("wait_for_ping()")
+        })
+        .expect(
+            "flush_solr_caches must wait_for_ping after RELOAD before returning; a separate \n             top-level ping does not make the flush helper safe for every caller"
+        );
+    assert!(
+        reload_line < ping_line,
+        "flush_solr_caches must call wait_for_ping only after its RELOAD, got function body:\n\
+         {flush_function}"
     );
 }
 

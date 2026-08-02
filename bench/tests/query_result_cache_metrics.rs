@@ -170,6 +170,51 @@ fn fails_loudly_not_silently_zero_when_the_core_registry_is_missing() {
     );
 }
 
+fn assert_clean_parse_failure(out: std::process::Output, case: &str) {
+    assert!(
+        !out.status.success(),
+        "{case} must fail nonzero; stdout: {:?}, stderr: {:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with("query_result_cache_stat:"),
+        "{case} must report a clean query_result_cache_stat-prefixed error, not an interpreter \
+         exception; stderr: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("Traceback"),
+        "{case} must not leak a Python traceback; stderr: {stderr:?}"
+    );
+}
+
+#[test]
+fn malformed_registry_as_a_list_fails_with_a_clean_error() {
+    let out = run_stat("content", "hits", r#"{"metrics":{"solr.core.content":[]}}"#);
+    assert_clean_parse_failure(out, "a registry represented as a list");
+}
+
+#[test]
+fn non_numeric_stat_fails_with_a_clean_error() {
+    let out = run_stat(
+        "content",
+        "hits",
+        r#"{"metrics":{"solr.core.content":{"CACHE.searcher.queryResultCache":{"hits":"nope"}}}}"#,
+    );
+    assert_clean_parse_failure(out, "a non-numeric cache stat");
+}
+
+#[test]
+fn null_stat_fails_with_a_clean_error() {
+    let out = run_stat(
+        "content",
+        "hits",
+        r#"{"metrics":{"solr.core.content":{"CACHE.searcher.queryResultCache":{"hits":null}}}}"#,
+    );
+    assert_clean_parse_failure(out, "a null cache stat");
+}
+
 #[test]
 fn fails_loudly_not_silently_zero_when_the_stat_key_is_missing() {
     let out = run_stat("content", "not_a_real_stat", &fixture_json());

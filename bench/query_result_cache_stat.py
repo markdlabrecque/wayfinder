@@ -52,7 +52,14 @@ def main(argv):
             f"(registries present: {sorted(metrics)})"
         )
 
-    bean = metrics[registry].get(BEAN)
+    registry_metrics = metrics[registry]
+    if not isinstance(registry_metrics, dict):
+        sys.exit(
+            f"query_result_cache_stat: `{registry}` registry must be an object in the "
+            "admin/metrics response"
+        )
+
+    bean = registry_metrics.get(BEAN)
     if not isinstance(bean, dict):
         sys.exit(
             f"query_result_cache_stat: no `{BEAN}` bean under `{registry}` in the admin/metrics "
@@ -65,7 +72,14 @@ def main(argv):
             f"(counters present: {sorted(bean)})"
         )
 
-    print(int(bean[stat]))
+    value = bean[stat]
+    if isinstance(value, bool) or not isinstance(value, int):
+        sys.exit(
+            f"query_result_cache_stat: `{stat}` counter in `{registry}`'s `{BEAN}` bean "
+            f"must be an integer, got {value!r}"
+        )
+
+    print(value)
     return 0
 
 

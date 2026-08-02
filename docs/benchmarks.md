@@ -17,7 +17,7 @@ Measured against PRD §8 targets, on a corpus of 2000000 docs generated determin
 
 - This is a long manual local run outside CI; indexing is expected to dominate wall time.
 - Wayfinder met the PRD's <50 MB startup-idle resident-memory target at 9.2 MB.
-- Wayfinder missed the PRD's <500 MB query-load resident-memory target: 2149.3 MB was resident at the post-index sample, and RSS increased by 60.3 MB between that sample and the 2209.6 MB maximum sampled during query load.
+- Wayfinder missed the PRD's <500 MB query-load resident-memory target: 2149.3 MB was resident at the post-index sample, and RSS increased by 60.3 MB between that sample and the later maximum of 2209.6 MB.
 - The harness does not distinguish allocator-resident memory from mmap-backed index pages.
 - The two latency rows measure different cache conditions, and the PRD does not say which of the two p95 rows its `<= baseline` target refers to: the warm row compares a cached Solr against an uncached Wayfinder (Solr serves it from its queryResultCache; Wayfinder has no query result cache), while the cold row runs distinct queries against caches flushed by a core RELOAD. Neither row is reported here as meeting or missing a target, because which comparison the target means is an open product decision -- #251 tracks settling it.
 - Measured on a local Docker Desktop/OrbStack host, not dedicated hardware; absolute numbers (especially Solr cold start, which benefits from a warm image cache and may not reflect a cold pull) will vary by machine. Reproduce locally with `bench/run.sh` for numbers specific to your environment.

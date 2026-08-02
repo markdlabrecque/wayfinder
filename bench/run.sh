@@ -188,14 +188,20 @@ warm_up_pass() { # base_url core terms_file -> GETs every term once, results dis
   done < "$terms_file"
 }
 
-flush_solr_caches() { # -> reopens the searcher, zeroing the query caches
-  # A core RELOAD is the flush. `update?commit=true` does NOT work here:
-  # Solr skips the commit when nothing has changed, so no new searcher opens
-  # and the caches survive. That cost a full round of bad measurements
-  # (issue #251); bench/tests/run_sh_cold_warm.rs guards against it coming
-  # back. The caller pings afterwards -- the core is briefly unavailable
-  # while it reloads.
-  curl -sSf "$SOLR_URL/admin/cores?action=RELOAD&core=$SOLR_CORE&wt=json" >/dev/null
+assert_cold_latency_sample_count() { # terms_file latency_file -> requires the complete distinct-term cold sample
+  local terms_file=$1 latency_file=$2 terms_count distinct_terms_count latency_count
+  terms_count=$(awk 'NF { count++ } END { print count + 0 }' "$terms_file")
+  distinct_terms_count=$(awk 'NF && !seen[$0]++ { count++ } END { print count + 0 }' "$terms_file")
+  latency_count=$(awk 'NF { count++ } END { print count + 0 }' "$latency_file")
+
+  if [ "$terms_count" -ne 48 ] || [ "$distinct_terms_count" -ne 48 ]; then
+    echo "assert_cold_latency_sample_count: expected 48 distinct terms, got $distinct_terms_count distinct entries across $terms_count terms" >&2
+    return 1
+  fi
+  if [ "$latency_count" -ne "$terms_count" ]; then
+    echo "assert_cold_latency_sample_count: terms file has $terms_count entries but latency file has $latency_count samples" >&2
+    return 1
+  fi
 }
 
 run_cold_query_pass() { # base_url core terms_file out_latency_file -> one query per term, latencies to the file
@@ -295,6 +301,7 @@ warm_up_pass "http://$WF_BIND/solr" "$SOLR_CORE" "$TERMS_FILE"
 WF_LATENCIES_COLD="$WORK/wf_latencies_cold.txt"
 echo "== wayfinder cold pass (one query per distinct term) =="
 run_cold_query_pass "http://$WF_BIND/solr" "$SOLR_CORE" "$TERMS_FILE" "$WF_LATENCIES_COLD"
+assert_cold_latency_sample_count "$TERMS_FILE" "$WF_LATENCIES_COLD"
 
 WF_LATENCIES_WARM="$WORK/wf_latencies_warm.txt"
 run_query_load "http://$WF_BIND/solr" "$SOLR_CORE" "$WF_LATENCIES_WARM" &
@@ -316,6 +323,17 @@ kill "$WF_PID" 2>/dev/null || true
 wait "$WF_PID" 2>/dev/null || true
 
 # --- Solr ----------------------------------------------------------------
+flush_solr_caches() { # -> reopens the searcher, zeroing the query caches
+  # A core RELOAD is the flush. `update?commit=true` does NOT work here:
+  # Solr skips the commit when nothing has changed, so no new searcher opens
+  # and the caches survive. That cost a full round of bad measurements
+  # (issue #251); bench/tests/run_sh_cold_warm.rs guards against it coming
+  # back. Wait here, rather than at a particular call site, so every caller
+  # gets a flushed core that is ready to serve queries.
+  curl -sSf "$SOLR_URL/admin/cores?action=RELOAD&core=$SOLR_CORE&wt=json" >/dev/null
+  wait_for_ping "$SOLR_URL/$SOLR_CORE/admin/ping?wt=json" >/dev/null
+}
+
 echo "== starting solr =="
 docker rm -f "$SOLR_CONTAINER" >/dev/null 2>&1 || true
 # NOTE: SOLR_COLD_MS (via wait_for_ping below) starts timing only after this
@@ -366,14 +384,13 @@ warm_up_pass "$SOLR_URL" "$SOLR_CORE" "$TERMS_FILE"
 
 echo "== flushing solr caches (core RELOAD) =="
 flush_solr_caches
-# The core is briefly unavailable while it reloads; wait for it to serve again.
-wait_for_ping "$SOLR_URL/$SOLR_CORE/admin/ping?wt=json" >/dev/null
 
 SOLR_LATENCIES_COLD="$WORK/solr_latencies_cold.txt"
 SOLR_COLD_HITS_BEFORE=$(query_result_cache_hits "$SOLR_URL" "$SOLR_CORE")
 SOLR_COLD_LOOKUPS_BEFORE=$(query_result_cache_lookups "$SOLR_URL" "$SOLR_CORE")
 echo "== solr cold pass (one query per distinct term) =="
 run_cold_query_pass "$SOLR_URL" "$SOLR_CORE" "$TERMS_FILE" "$SOLR_LATENCIES_COLD"
+assert_cold_latency_sample_count "$TERMS_FILE" "$SOLR_LATENCIES_COLD"
 SOLR_COLD_HITS_AFTER=$(query_result_cache_hits "$SOLR_URL" "$SOLR_CORE")
 SOLR_COLD_LOOKUPS_AFTER=$(query_result_cache_lookups "$SOLR_URL" "$SOLR_CORE")
 assert_cache_pass_behavior cold \

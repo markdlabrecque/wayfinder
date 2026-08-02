@@ -9,7 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const STALE_2M_NOTE: &str = "**\"Resident memory, 2M docs under query load\" is only ever populated by a run with a 2M-doc corpus**";
-const PHASE_DELTA_NOTE: &str = "RSS increased by 100.0 MB between that sample and the 700.0 MB maximum sampled during query load";
+const PHASE_DELTA_NOTE: &str =
+    "RSS increased by 100.0 MB between that sample and the later maximum of 700.0 MB";
 const RSS_ATTRIBUTION_CAVEAT: &str =
     "The harness does not distinguish allocator-resident memory from mmap-backed index pages.";
 const STARTUP_TARGET_OUTCOME: &str =
@@ -141,7 +142,13 @@ fn literal_2m_render_omits_the_not_measured_note_but_50k_retains_it() {
     );
     assert!(
         two_m_notes.contains(PHASE_DELTA_NOTE),
-        "the 2M note must describe a measured phase-to-phase RSS increase without attributing it causally to queries, got:\n{two_m_notes}"
+        "the 2M note must retain the measured post-index-to-later-maximum RSS delta without \
+         attributing it to query load, got:\n{two_m_notes}"
+    );
+    assert!(
+        !two_m_notes.contains("maximum sampled during query load"),
+        "the 2M note must not claim the later RSS maximum was sampled during query load; the \
+         harness only records it as a later sample, got:\n{two_m_notes}"
     );
     assert!(
         two_m_notes.contains(RSS_ATTRIBUTION_CAVEAT),
