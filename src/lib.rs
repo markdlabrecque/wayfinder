@@ -31,6 +31,7 @@ mod core_index;
 mod coverage;
 pub mod edismax;
 mod error;
+pub mod extract;
 mod facet;
 mod highlight;
 mod local_params;
