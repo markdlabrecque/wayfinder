@@ -25,7 +25,13 @@ pub struct EngineMeasurements {
     /// Maximum RSS sampled while query load runs.
     pub resident_mem_load_mb: f64,
     pub cold_start_ms: f64,
-    pub query_latencies_ms: Vec<f64>,
+    /// Latencies from the warm pass: the same query repeated `N_QUERIES`
+    /// times, which Solr serves from its `queryResultCache` after the first
+    /// request (issue #251).
+    pub query_latencies_warm_ms: Vec<f64>,
+    /// Latencies from the cold pass: one request per distinct corpus term,
+    /// against caches freshly flushed by a Solr core RELOAD (issue #251).
+    pub query_latencies_cold_ms: Vec<f64>,
     pub image_size_mb: f64,
     pub index_size_mb: f64,
 }
@@ -58,12 +64,15 @@ pub fn render_markdown_table(results: &BenchmarkResults) -> String {
     let solr = &results.solr;
     let wf = &results.wayfinder;
 
-    let solr_p95 = p95(&solr.query_latencies_ms);
-    let wf_p95 = p95(&wf.query_latencies_ms);
+    let solr_p95_warm = p95(&solr.query_latencies_warm_ms);
+    let wf_p95_warm = p95(&wf.query_latencies_warm_ms);
+    let solr_p95_cold = p95(&solr.query_latencies_cold_ms);
+    let wf_p95_cold = p95(&wf.query_latencies_cold_ms);
 
     const MEM_PATH: &str = "Solr: Docker container (`docker stats`). Wayfinder: native process (`ps -o rss=`). RSS includes allocator-resident memory plus mmap-backed index pages.";
     const COLD_START_PATH: &str = "Solr: Docker container (`docker run` to first successful ping). Wayfinder: native process (binary launch to first successful ping).";
-    const LATENCY_PATH: &str = "Solr: HTTP to the Docker container's published port. Wayfinder: HTTP to the native process's bound port.";
+    const WARM_LATENCY_PATH: &str = "Solr: HTTP to the Docker container's published port, served from Solr's queryResultCache. Wayfinder: HTTP to the native process's bound port; Wayfinder has no query result cache.";
+    const COLD_LATENCY_PATH: &str = "Solr: HTTP to the Docker container's published port, after a core RELOAD flushed Solr's caches. Wayfinder: HTTP to the native process's bound port. Every query in this pass is distinct.";
     const IMAGE_PATH: &str =
         "Both: Docker image size (`docker inspect`), not a running-container measurement.";
     const INDEX_PATH: &str = "Solr: size inside the Docker container's data volume (`docker exec du`). Wayfinder: size of the native process's data directory on the host (`du`).";
@@ -102,7 +111,11 @@ pub fn render_markdown_table(results: &BenchmarkResults) -> String {
         wf.cold_start_ms / 1000.0
     ));
     out.push_str(&format!(
-        "| p95 query latency (facet+filter+highlight, {} docs) | baseline | <= baseline | {solr_p95:.2} ms | {wf_p95:.2} ms | {LATENCY_PATH} |\n",
+        "| p95 query latency, warm cache (facet+filter+highlight, {} docs) | baseline | <= baseline | {solr_p95_warm:.2} ms | {wf_p95_warm:.2} ms | {WARM_LATENCY_PATH} |\n",
+        results.corpus_size
+    ));
+    out.push_str(&format!(
+        "| p95 query latency, cold cache (distinct queries, {} docs) | baseline | <= baseline | {solr_p95_cold:.2} ms | {wf_p95_cold:.2} ms | {COLD_LATENCY_PATH} |\n",
         results.corpus_size
     ));
     out.push_str(&format!(

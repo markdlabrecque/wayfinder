@@ -64,6 +64,79 @@ pub fn extract_bash_function(source: &str, name: &str) -> Option<String> {
     Some(lines[start_idx..=end_idx].join("\n"))
 }
 
+/// Returns `true` and the function name if `line` (verbatim, no
+/// leading-whitespace stripping applied by the caller -- top-level
+/// functions in `run.sh` are unindented) is a top-level `name() {`
+/// definition line, optionally followed by a trailing `# comment`.
+fn top_level_function_name(line: &str) -> Option<&str> {
+    if line != line.trim_start() {
+        return None;
+    }
+    let idx = line.find("()")?;
+    let name = &line[..idx];
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    let after = line[idx + 2..].trim_start();
+    if after.starts_with('{') {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// Returns `source` with every top-level `name() { ... }` function body
+/// (definition line through its matching closing brace, inclusive) blanked
+/// out to empty lines, line numbers preserved.
+///
+/// Issue #251 round 2 (reviewer finding): a source-order guard that scans
+/// for "any line containing the function name" cannot tell a real call
+/// site from a mention of the name inside that function's OWN body (an
+/// error message naming itself, a comment referencing a sibling function).
+/// Stripping bodies first means every remaining match is a genuine call
+/// site or a genuine standalone occurrence (like a literal URL fragment),
+/// never text quoted inside the function's own definition.
+pub fn strip_function_bodies(source: &str) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+    let mut i = 0;
+    while i < lines.len() {
+        if let Some(_name) = top_level_function_name(lines[i]) {
+            let mut depth = 0i32;
+            for ch in lines[i].chars() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            let mut end = i;
+            let mut j = i + 1;
+            while depth != 0 && j < lines.len() {
+                for ch in lines[j].chars() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                end = j;
+                if depth == 0 {
+                    break;
+                }
+                j += 1;
+            }
+            for line in out.iter_mut().take(end + 1).skip(i) {
+                line.clear();
+            }
+            i = end + 1;
+            continue;
+        }
+        i += 1;
+    }
+    out.join("\n")
+}
+
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A fresh scratch directory under the OS temp dir, unique per call.

@@ -5,10 +5,15 @@
 //!
 //! Usage:
 //!   render_report <solr_startup_idle_mb> <solr_post_index_mb> <solr_load_mb> \
-//!                 <solr_cold_ms> <solr_image_mb> <solr_index_mb> <solr_latencies_file> \
+//!                 <solr_cold_ms> <solr_image_mb> <solr_index_mb> \
+//!                 <solr_latencies_warm_file> <solr_latencies_cold_file> \
 //!                 <wf_startup_idle_mb> <wf_post_index_mb> <wf_load_mb> \
-//!                 <wf_cold_ms> <wf_image_mb> <wf_index_mb> <wf_latencies_file> \
+//!                 <wf_cold_ms> <wf_image_mb> <wf_index_mb> \
+//!                 <wf_latencies_warm_file> <wf_latencies_cold_file> \
 //!                 <corpus_size> <out_markdown_path>
+//!
+//! Each engine's cold-latency file sits immediately after that engine's warm
+//! one, so each engine's arguments stay contiguous (issue #251).
 
 use wayfinder_bench::results::{BenchmarkResults, EngineMeasurements, render_markdown_table};
 
@@ -27,12 +32,14 @@ fn read_latencies(path: &str) -> Vec<f64> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() != 16 {
+    if args.len() != 18 {
         eprintln!(
             "usage: render_report <solr_startup_idle_mb> <solr_post_index_mb> <solr_load_mb> \
-             <solr_cold_ms> <solr_image_mb> <solr_index_mb> <solr_latencies_file> \
+             <solr_cold_ms> <solr_image_mb> <solr_index_mb> <solr_latencies_warm_file> \
+             <solr_latencies_cold_file> \
              <wf_startup_idle_mb> <wf_post_index_mb> <wf_load_mb> <wf_cold_ms> \
-             <wf_image_mb> <wf_index_mb> <wf_latencies_file> <corpus_size> <out_markdown_path>"
+             <wf_image_mb> <wf_index_mb> <wf_latencies_warm_file> <wf_latencies_cold_file> \
+             <corpus_size> <out_markdown_path>"
         );
         std::process::exit(2);
     }
@@ -51,20 +58,22 @@ fn main() {
             cold_start_ms: f(3),
             image_size_mb: f(4),
             index_size_mb: f(5),
-            query_latencies_ms: read_latencies(&args[6]),
+            query_latencies_warm_ms: read_latencies(&args[6]),
+            query_latencies_cold_ms: read_latencies(&args[7]),
         },
         wayfinder: EngineMeasurements {
-            resident_mem_startup_idle_mb: f(7),
-            resident_mem_post_index_mb: f(8),
-            resident_mem_load_mb: f(9),
-            cold_start_ms: f(10),
-            image_size_mb: f(11),
-            index_size_mb: f(12),
-            query_latencies_ms: read_latencies(&args[13]),
+            resident_mem_startup_idle_mb: f(8),
+            resident_mem_post_index_mb: f(9),
+            resident_mem_load_mb: f(10),
+            cold_start_ms: f(11),
+            image_size_mb: f(12),
+            index_size_mb: f(13),
+            query_latencies_warm_ms: read_latencies(&args[14]),
+            query_latencies_cold_ms: read_latencies(&args[15]),
         },
-        corpus_size: args[14]
+        corpus_size: args[16]
             .parse::<u64>()
-            .unwrap_or_else(|e| panic!("bad corpus_size {}: {e}", args[14])),
+            .unwrap_or_else(|e| panic!("bad corpus_size {}: {e}", args[16])),
     };
 
     let table = render_markdown_table(&results);
@@ -136,6 +145,13 @@ fn main() {
          {table}\n\n\
          ## Notes\n\n\
          {corpus_note}\
+         - The two latency rows measure different cache conditions, and the PRD does not say \
+         which of the two p95 rows its `<= baseline` target refers to: the warm row compares a \
+         cached Solr against an uncached Wayfinder (Solr serves it from its queryResultCache; \
+         Wayfinder has no query result cache), while the cold row runs distinct queries against \
+         caches flushed by a core RELOAD. Neither row is reported here as meeting or missing a \
+         target, because which comparison the target means is an open product decision -- \
+         #251 tracks settling it.\n\
          - Measured on a local Docker Desktop/OrbStack host, not dedicated hardware; absolute \
          numbers (especially Solr cold start, which benefits from a warm image cache and \
          may not reflect a cold pull) will vary by machine. Reproduce locally with \
@@ -146,6 +162,6 @@ fn main() {
          image-size row, which measures the built image, not a running process), so the two \
          engines' numbers are not directly comparable on overhead alone.\n"
     );
-    std::fs::write(&args[15], doc).expect("write benchmarks.md");
-    println!("wrote {}", args[15]);
+    std::fs::write(&args[17], doc).expect("write benchmarks.md");
+    println!("wrote {}", args[17]);
 }

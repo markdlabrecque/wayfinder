@@ -1,0 +1,26 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1
+  },
+  "metrics":{
+    "solr.core.content":{
+      "CACHE.searcher.queryResultCache":{
+        "lookups":3,
+        "hits":1,
+        "hitratio":0.3333333333333333,
+        "inserts":2,
+        "evictions":0,
+        "size":2,
+        "warmupTime":0,
+        "ramBytesUsed":3064,
+        "maxRamMB":-1,
+        "cumulative_lookups":3,
+        "cumulative_hits":1,
+        "cumulative_hitratio":0.3333333333333333,
+        "cumulative_inserts":2,
+        "cumulative_evictions":0
+      }
+    }
+  }
+}

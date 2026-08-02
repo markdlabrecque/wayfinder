@@ -2110,3 +2110,36 @@ contains `quack`/`garden`. The self-contained setup is appended to `solr-ref/cap
      that ratified divergence is PRD §2, divergence 9. It follows the same JSON-only client
      response-surface decision as divergences 1 and 8 rather than adding Jetty HTML solely for
      authentication failures.
+
+## Finding from issue #251 (benchmark cold/warm split)
+
+119. **`wt=json` alone is not enough on the admin endpoints: Solr renders a type signature,
+     not data.** Observed 2026-08-01 against a live `solr:9` container with a 2M-doc core.
+     `GET /solr/<core>/admin/mbeans?cat=CACHE&stats=true&wt=json` and
+     `GET /solr/admin/metrics?group=core&prefix=CACHE.searcher.queryResultCache&wt=json` both
+     return HTTP 200 with a body whose keys are unquoted and whose values are the literal type
+     names, e.g.
+
+         { responseHeader: { QTime: int, status: int } solr-mbeans: [string] (2) }
+
+     That is not valid JSON and carries no statistics at all. Adding any recognised
+     response-writer parameter restores real output: `indent=true`, `indent=false`, and
+     `json.nl=map` each work; an unrecognised parameter (`x=1`) and `omitHeader=true` do not.
+     `/select?wt=json` is unaffected and returns real JSON without any extra parameter.
+
+     Consequences for anything reading these endpoints: the URL must carry a writer parameter,
+     and `admin/metrics` is the better target than `admin/mbeans` because its body is plain
+     nested JSON. `admin/mbeans`'s `solr-mbeans` is a flat alternating
+     `[name, value, name, value, ...]` array by default and a map only under `json.nl=map`, so a
+     parser must pick one and cannot straddle both. Note also that `admin/metrics` is
+     server-level, not core-relative: the core appears as a registry key `solr.core.<core>`
+     inside `metrics`. Mind the shape difference between the two endpoints. Under
+     `admin/metrics` the counters are a **nested bean**: `metrics` -> `solr.core.<core>` ->
+     `CACHE.searcher.queryResultCache` -> `{lookups, hits, inserts, hitratio, size, ...}`.
+     Under `admin/mbeans` the same counters appear as **flat, fully-qualified string keys**
+     inside a bean's `stats` map, e.g. `CACHE.searcher.queryResultCache.hits`. Either way the
+     `.searcher` scope is part of the path -- an unscoped `CACHE.queryResultCache` matches
+     nothing.
+
+     Both halves of this cost a full bad measurement round: a benchmark harness built to the
+     unparameterised URL and the unscoped key aborted an hour into a 2M-document run.
