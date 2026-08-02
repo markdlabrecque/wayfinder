@@ -4258,4 +4258,356 @@ fast = true
         assert_eq!(outcome.num_found, expected.len());
         assert_eq!(outcome.top, expected[..5.min(expected.len())]);
     }
+
+    // -----------------------------------------------------------------
+    // Issue #246: fuse the facet.field terms aggregation into the main
+    // /select pass via a new `search_top_with_aggs` entry point.
+    //
+    // These tests pin the premises the task spec asks to verify before
+    // building anything (premise 1 was verified separately by a throwaway
+    // scratch probe -- tantivy 0.26.1's tuple `impl Collector for (Left,
+    // Right)` compiles and runs fine over `(TopScoredHits,
+    // AggregationCollector)`, so no `MultiCollector` fallback is needed):
+    // premise 2 (fused terms-agg buckets over the composed query, `fq`
+    // included, are identical to today's separate `term_facet` pass over
+    // `BaseClauses`) and premise 3 (multiple terms aggregations folded into
+    // one `Aggregations` map do not interfere with each other's counts).
+    //
+    // `search_top_with_aggs` does not exist yet -- this whole block is a
+    // compile-error red until issue #246 adds it.
+    // -----------------------------------------------------------------
+
+    const FACET_FUSION_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "category"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "views"
+type = "int"
+stored = true
+fast = true
+"#;
+
+    /// Two commits (two segments), a string fast field (`category`) and a
+    /// numeric fast field (`views`), and every fourth doc missing both --
+    /// enough shape for the fused terms aggregation to have to merge across
+    /// segment boundaries and to have real zero/missing buckets to get
+    /// wrong.
+    fn open_facet_fusion_corpus() -> (TempDir, CoreIndex) {
+        let dir = TempDir::new().expect("create temp dir");
+        let schema_path = dir.path().join("schema.toml");
+        std::fs::write(&schema_path, FACET_FUSION_SCHEMA_TOML).expect("write schema.toml");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let index = CoreIndex::open(&schema_path, &data_dir, &ServerConfig::default())
+            .expect("open test index");
+
+        for (batch, ids) in [(0, 0..15), (1, 15..30)] {
+            let docs: Vec<Value> = ids
+                .map(|i: i32| {
+                    let body = if i % 4 == 0 {
+                        "quick brown fox".to_string()
+                    } else {
+                        "quick fox jumps".to_string()
+                    };
+                    let mut doc = json!({"id": format!("doc{i:02}"), "body": body});
+                    if i % 4 != 0 {
+                        doc["category"] = json!(["animals", "birds", "fish"][(i % 3) as usize]);
+                        doc["views"] = json!((i % 5) as i64 * 10);
+                    }
+                    doc
+                })
+                .collect();
+            index.add_documents(&docs, true).expect("add_documents");
+            index.commit().expect("commit");
+            let _ = batch;
+        }
+        (dir, index)
+    }
+
+    /// The exact `TermsAggregation` shape `CoreIndex::term_facet` builds
+    /// today (`size`/`segment_size` = `MAX_FACET_TERMS`, `min_doc_count:
+    /// 0`), so a raw-bucket comparison against the fused path is comparing
+    /// like with like rather than two different aggregation requests.
+    fn single_terms_aggregations(agg_name: &str, field: &str) -> Aggregations {
+        let mut aggs = Aggregations::default();
+        aggs.insert(
+            agg_name.to_string(),
+            Aggregation {
+                agg: AggregationVariants::Terms(TermsAggregation {
+                    field: field.to_string(),
+                    size: Some(MAX_FACET_TERMS),
+                    segment_size: Some(MAX_FACET_TERMS),
+                    min_doc_count: Some(0),
+                    ..TermsAggregation::default()
+                }),
+                sub_aggregation: Aggregations::default(),
+            },
+        );
+        aggs
+    }
+
+    /// Projects one named terms-bucket result down to `(rendered key,
+    /// doc_count)` pairs, sorted by key so segment-merge order (which is not
+    /// part of what premise 2 claims) cannot cause a spurious mismatch.
+    fn terms_buckets(
+        results: &tantivy::aggregation::agg_result::AggregationResults,
+        agg_name: &str,
+    ) -> Vec<(String, u64)> {
+        let Some(AggregationResult::BucketResult(BucketResult::Terms { buckets, .. })) =
+            results.0.get(agg_name)
+        else {
+            panic!("expected a terms bucket result for `{agg_name}`");
+        };
+        let mut out: Vec<(String, u64)> = buckets
+            .iter()
+            .map(|bucket| {
+                let key = match (&bucket.key_as_string, &bucket.key) {
+                    (Some(s), _) => s.clone(),
+                    (None, Key::Str(s)) => s.clone(),
+                    (None, Key::I64(v)) => v.to_string(),
+                    (None, Key::U64(v)) => v.to_string(),
+                    (None, Key::F64(v)) => v.to_string(),
+                };
+                (key, bucket.doc_count)
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Premise 1 + the additive-API shape: `search_top_with_aggs`'s
+    /// `TopOutcome` half must be byte-identical to plain `search_top` over
+    /// the exact same query/filter_queries/sort/limit -- fusing the
+    /// aggregation in must not change the hit list at all.
+    #[test]
+    fn search_top_with_aggs_top_half_matches_plain_search_top() {
+        let (_dir, index) = open_facet_fusion_corpus();
+        let query = index.parse_query("quick", "body").expect("parse_query");
+        let fq = index
+            .parse_query("category:animals", "body")
+            .expect("parse fq");
+
+        let plain = index
+            .search_top(query.as_ref(), &[fq.box_clone()], &[], 5)
+            .expect("search_top");
+
+        let aggs = single_terms_aggregations("wf_category", "category");
+        let (fused_top, _agg_results) = index
+            .search_top_with_aggs(query.as_ref(), &[fq], &[], 5, aggs)
+            .expect("search_top_with_aggs");
+
+        assert_eq!(
+            fused_top, plain,
+            "fusing the terms aggregation in must not change search_top's own TopOutcome"
+        );
+    }
+
+    /// Premise 2, string field, no `fq`: the fused pass's terms-agg buckets
+    /// must be identical to `term_facet`'s own pass over the same base
+    /// query.
+    #[test]
+    fn search_top_with_aggs_buckets_match_term_facet_for_a_string_field_without_fq() {
+        use tantivy::aggregation::agg_result::AggregationResults;
+
+        let (_dir, index) = open_facet_fusion_corpus();
+        let query = index.parse_query("quick", "body").expect("parse_query");
+
+        let expected = index
+            .term_facet("category", Some(ValueKind::Text), query.as_ref())
+            .expect("term_facet");
+        let mut expected: Vec<(String, u64)> =
+            expected.into_iter().map(|(term, _, n)| (term, n)).collect();
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let aggs = single_terms_aggregations("wf_category", "category");
+        let (_top, agg_results): (TopOutcome, AggregationResults) = index
+            .search_top_with_aggs(query.as_ref(), &[], &[], 5, aggs)
+            .expect("search_top_with_aggs");
+        let fused = terms_buckets(&agg_results, "wf_category");
+
+        assert_eq!(
+            fused, expected,
+            "fused terms buckets over `q` alone must match term_facet's own pass exactly"
+        );
+    }
+
+    /// Premise 2, string field, *with* `fq`: `search_top`'s query
+    /// composition wraps each `fq` as a scoreless `ConstScoreQuery(0.0)`
+    /// `Must` clause, while `term_facet`'s caller (`facet::facet_fields`)
+    /// composes `fq` as a plain `Must` clause with no `ConstScoreQuery` --
+    /// two different `BooleanQuery` trees over the same doc set. The whole
+    /// point of premise 2 is that the *aggregation* does not care about that
+    /// difference, so this must still match term-for-term, count-for-count.
+    /// A fused implementation that silently dropped or mis-scoped the `fq`
+    /// (e.g. aggregated only over `q`) would fail this test, not just return
+    /// something plausible.
+    #[test]
+    fn search_top_with_aggs_buckets_match_term_facet_for_a_string_field_with_fq() {
+        use tantivy::aggregation::agg_result::AggregationResults;
+
+        let (_dir, index) = open_facet_fusion_corpus();
+        let query = index.parse_query("quick", "body").expect("parse_query");
+        let fq_for_base = index
+            .parse_query("category:animals", "body")
+            .expect("parse fq");
+        let fq_for_fused = index
+            .parse_query("category:animals", "body")
+            .expect("parse fq");
+
+        // The exact base-query shape `facet::facet_fields` builds today:
+        // `q` and every `fq` as plain `Must` clauses (see `narrowed`/`base`
+        // in `src/facet.rs` and `src/lib.rs`'s `select`).
+        let base_query = BooleanQuery::from(vec![
+            (Occur::Must, query.box_clone()),
+            (Occur::Must, fq_for_base),
+        ]);
+        let expected = index
+            .term_facet("category", Some(ValueKind::Text), &base_query)
+            .expect("term_facet");
+        let mut expected: Vec<(String, u64)> =
+            expected.into_iter().map(|(term, _, n)| (term, n)).collect();
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+        assert!(
+            expected.iter().any(|(_, n)| *n > 0),
+            "precondition: the fq must actually match something, or this test is vacuous"
+        );
+
+        let aggs = single_terms_aggregations("wf_category", "category");
+        let (_top, agg_results): (TopOutcome, AggregationResults) = index
+            .search_top_with_aggs(query.as_ref(), &[fq_for_fused], &[], 5, aggs)
+            .expect("search_top_with_aggs");
+        let fused = terms_buckets(&agg_results, "wf_category");
+
+        assert_eq!(
+            fused, expected,
+            "fused terms buckets over `q` AND `fq` must match term_facet's own pass exactly, \
+             despite the two code paths composing the fq into the query differently"
+        );
+    }
+
+    /// Premise 2, numeric field: the same equivalence, but on a Points-based
+    /// column, where `term_facet` only ever sees the buckets the hit set
+    /// produced (no zero-count dictionary walk) -- a different enough branch
+    /// internally that it needs its own coverage rather than assuming the
+    /// string-field test proves it.
+    #[test]
+    fn search_top_with_aggs_buckets_match_term_facet_for_a_numeric_field_with_fq() {
+        use tantivy::aggregation::agg_result::AggregationResults;
+
+        let (_dir, index) = open_facet_fusion_corpus();
+        let query = index.parse_query("quick", "body").expect("parse_query");
+        let fq_for_base = index
+            .parse_query("category:animals", "body")
+            .expect("parse fq");
+        let fq_for_fused = index
+            .parse_query("category:animals", "body")
+            .expect("parse fq");
+
+        let base_query = BooleanQuery::from(vec![
+            (Occur::Must, query.box_clone()),
+            (Occur::Must, fq_for_base),
+        ]);
+        let expected = index
+            .term_facet("views", Some(ValueKind::I64), &base_query)
+            .expect("term_facet");
+        let mut expected: Vec<(String, u64)> =
+            expected.into_iter().map(|(term, _, n)| (term, n)).collect();
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let aggs = single_terms_aggregations("wf_views", "views");
+        let (_top, agg_results): (TopOutcome, AggregationResults) = index
+            .search_top_with_aggs(query.as_ref(), &[fq_for_fused], &[], 5, aggs)
+            .expect("search_top_with_aggs");
+        let fused = terms_buckets(&agg_results, "wf_views");
+
+        assert_eq!(
+            fused, expected,
+            "fused terms buckets on a numeric column must match term_facet's own pass exactly"
+        );
+    }
+
+    /// Premise 3: multiple `facet.field` values folding into one
+    /// `Aggregations` map (one entry per field) must not let one field's
+    /// terms leak into or otherwise disturb the other's counts -- each
+    /// field's fused buckets must independently match its own `term_facet`
+    /// pass, in the same single search.
+    #[test]
+    fn search_top_with_aggs_multiple_fields_do_not_interfere() {
+        use tantivy::aggregation::agg_result::AggregationResults;
+
+        let (_dir, index) = open_facet_fusion_corpus();
+        let query = index.parse_query("quick", "body").expect("parse_query");
+        let fq_for_category_expected = index
+            .parse_query("category:animals", "body")
+            .expect("parse fq");
+        let fq_for_views_expected = index
+            .parse_query("category:animals", "body")
+            .expect("parse fq");
+        let fq_for_fused = index
+            .parse_query("category:animals", "body")
+            .expect("parse fq");
+
+        let base_query_for_category = BooleanQuery::from(vec![
+            (Occur::Must, query.box_clone()),
+            (Occur::Must, fq_for_category_expected),
+        ]);
+        let base_query_for_views = BooleanQuery::from(vec![
+            (Occur::Must, query.box_clone()),
+            (Occur::Must, fq_for_views_expected),
+        ]);
+        let mut expected_category: Vec<(String, u64)> = index
+            .term_facet("category", Some(ValueKind::Text), &base_query_for_category)
+            .expect("term_facet category")
+            .into_iter()
+            .map(|(term, _, n)| (term, n))
+            .collect();
+        expected_category.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut expected_views: Vec<(String, u64)> = index
+            .term_facet("views", Some(ValueKind::I64), &base_query_for_views)
+            .expect("term_facet views")
+            .into_iter()
+            .map(|(term, _, n)| (term, n))
+            .collect();
+        expected_views.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut aggs = single_terms_aggregations("wf_category", "category");
+        aggs.extend(single_terms_aggregations("wf_views", "views"));
+        assert_eq!(aggs.len(), 2, "both fields must share one Aggregations map");
+
+        let (_top, agg_results): (TopOutcome, AggregationResults) = index
+            .search_top_with_aggs(query.as_ref(), &[fq_for_fused], &[], 5, aggs)
+            .expect("search_top_with_aggs");
+
+        assert_eq!(
+            terms_buckets(&agg_results, "wf_category"),
+            expected_category,
+            "the `category` aggregation must be unaffected by sharing the request with `views`"
+        );
+        assert_eq!(
+            terms_buckets(&agg_results, "wf_views"),
+            expected_views,
+            "the `views` aggregation must be unaffected by sharing the request with `category`"
+        );
+    }
 }

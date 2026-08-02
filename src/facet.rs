@@ -775,7 +775,299 @@ fn check_facetable(schema: &WayfinderSchema, field_name: &str, allow_dynamic: bo
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
+
+    // -----------------------------------------------------------------
+    // Issue #246: split `facet_fields` into a pure plan/validate phase
+    // (`plan_facet_fields`) and a render phase (`render_facet_fields`) that
+    // takes aggregation buckets back. Neither exists yet -- every test below
+    // is a compile-error red until issue #246 adds them.
+    //
+    // Contract these tests pin (additive, chosen by stage 1 since the task
+    // spec describes the shape but not the exact signature):
+    //
+    //   pub struct FacetFieldPlan {
+    //       pub label: String,
+    //       pub field_name: String,
+    //       pub column: String,       // `resolved_fast_column`'s output
+    //       pub kind: Option<ValueKind>,
+    //       pub agg_name: String,     // key inside `aggregations`
+    //       pub missing: bool,
+    //   }
+    //   pub struct FacetFieldsPlan {
+    //       pub fields: Vec<FacetFieldPlan>,
+    //       pub aggregations: tantivy::aggregation::agg_req::Aggregations,
+    //       pub warnings: Vec<String>,
+    //   }
+    //   pub fn plan_facet_fields(index: &CoreIndex, params: &Params) -> Result<FacetFieldsPlan>;
+    //   pub fn render_facet_fields(
+    //       index: &CoreIndex,
+    //       config: &ServerConfig,
+    //       params: &Params,
+    //       base: &BaseClauses,
+    //       plan: &FacetFieldsPlan,
+    //       agg_results: &tantivy::aggregation::agg_result::AggregationResults,
+    //   ) -> Result<(Value, Vec<String>)>;
+    // -----------------------------------------------------------------
+
+    const PLAN_RENDER_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "category"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "views"
+type = "int"
+stored = true
+fast = true
+"#;
+
+    fn open_plan_render_index() -> (TempDir, CoreIndex) {
+        let dir = TempDir::new().expect("create temp dir");
+        let schema_path = dir.path().join("schema.toml");
+        std::fs::write(&schema_path, PLAN_RENDER_SCHEMA_TOML).expect("write schema.toml");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let index = CoreIndex::open(&schema_path, &data_dir, &ServerConfig::default())
+            .expect("open test index");
+        (dir, index)
+    }
+
+    /// Two commits (two segments) so the fused/unfused equivalence test below
+    /// has real segment-merge behaviour to get wrong, a string field
+    /// (`category`) and a numeric field (`views`), and enough docs missing
+    /// each that `facet.missing` and `facet.mincount` both have real material.
+    fn open_plan_render_corpus() -> (TempDir, CoreIndex) {
+        let (dir, index) = open_plan_render_index();
+        for (batch, ids) in [(0, 0..15), (1, 15..30)] {
+            let docs: Vec<Value> = ids
+                .map(|i: i32| {
+                    let body = if i % 4 == 0 {
+                        "quick brown fox".to_string()
+                    } else {
+                        "quick fox jumps".to_string()
+                    };
+                    let mut doc = json!({"id": format!("doc{i:02}"), "body": body});
+                    if i % 4 != 0 {
+                        doc["category"] = json!(["animals", "birds", "fish"][(i % 3) as usize]);
+                        doc["views"] = json!((i % 5) as i64 * 10);
+                    }
+                    doc
+                })
+                .collect();
+            index.add_documents(&docs, true).expect("add_documents");
+            index.commit().expect("commit");
+            let _ = batch;
+        }
+        (dir, index)
+    }
+
+    /// The plan phase resolves label/field/column/kind purely from `params` +
+    /// schema, with no search executed at all -- proven here by succeeding
+    /// against an index with zero committed segments, which a query-executing
+    /// implementation would have no principled reason to special-case.
+    #[test]
+    fn plan_facet_fields_does_not_require_any_committed_data() {
+        let (_dir, index) = open_plan_render_index();
+        let params = Params::parse("facet.field=category");
+
+        let plan = plan_facet_fields(&index, &params)
+            .expect("the plan phase must succeed with zero committed segments");
+        assert_eq!(plan.fields.len(), 1);
+        assert_eq!(plan.fields[0].label, "category");
+        assert_eq!(plan.fields[0].field_name, "category");
+    }
+
+    /// The `TermsAggregation` the plan phase builds must be the exact shape
+    /// `CoreIndex::term_facet` builds today: full-dictionary `size`/
+    /// `segment_size` and `min_doc_count: 0`. A plan that requested a smaller
+    /// size, or a nonzero `min_doc_count`, would silently truncate or drop
+    /// zero-count buckets the unfused path never drops.
+    #[test]
+    fn plan_facet_fields_terms_aggregation_matches_term_facets_shape() {
+        use tantivy::aggregation::DEFAULT_BUCKET_LIMIT;
+        use tantivy::aggregation::agg_req::AggregationVariants;
+
+        let (_dir, index) = open_plan_render_corpus();
+        let params = Params::parse("facet.field=category");
+
+        let plan = plan_facet_fields(&index, &params).expect("plan_facet_fields");
+        assert_eq!(plan.fields.len(), 1);
+        let agg = plan
+            .aggregations
+            .get(&plan.fields[0].agg_name)
+            .expect("the plan's Aggregations map must carry an entry for its own field");
+        let AggregationVariants::Terms(terms) = &agg.agg else {
+            panic!("expected a Terms aggregation, got {:?}", agg.agg);
+        };
+        assert_eq!(terms.field, "category");
+        assert_eq!(terms.size, Some(DEFAULT_BUCKET_LIMIT));
+        assert_eq!(terms.segment_size, Some(DEFAULT_BUCKET_LIMIT));
+        assert_eq!(terms.min_doc_count, Some(0));
+    }
+
+    /// Issue #24's Points-based mincount warning is a plan-time fact (it
+    /// depends only on the field's declared kind and the requested
+    /// `facet.mincount`, never on the hit set), so the plan phase must
+    /// surface it exactly as `facet_fields` does today, verbatim wording
+    /// included.
+    #[test]
+    fn plan_facet_fields_warns_on_points_based_field_at_mincount_zero() {
+        let (_dir, index) = open_plan_render_corpus();
+        let params = Params::parse("facet.field=views");
+
+        let plan = plan_facet_fields(&index, &params).expect("plan_facet_fields");
+        assert_eq!(
+            plan.warnings,
+            vec![
+                "Raising facet.mincount from 0 to 1, because field views is Points-based."
+                    .to_string()
+            ]
+        );
+
+        let params_string_field = Params::parse("facet.field=category");
+        let plan_string =
+            plan_facet_fields(&index, &params_string_field).expect("plan_facet_fields");
+        assert!(
+            plan_string.warnings.is_empty(),
+            "a string field must never earn the Points-based warning"
+        );
+    }
+
+    /// Error wording is part of the wire contract (it lands verbatim in the
+    /// JSON `error` block), so the plan phase's errors must match
+    /// `facet_fields`'s own errors byte-for-byte, not just "also fail".
+    #[test]
+    fn plan_facet_fields_errors_match_facet_fields_errors() {
+        let (_dir, index) = open_plan_render_corpus();
+        let config = ServerConfig::default();
+        let query = index.parse_query("quick", "body").expect("parse_query");
+        let base: BaseClauses = vec![(Occur::Must, query.box_clone())];
+
+        for query_string in [
+            "facet.field=nosuchfield",
+            "facet.field=category&facet.field={!key=category}views",
+            "facet.field=body",
+        ] {
+            let params = Params::parse(query_string);
+            let nl = JsonNl::from_params(&params);
+
+            let plan_err = plan_facet_fields(&index, &params)
+                .expect_err(&format!("`{query_string}` must be a plan-time error"))
+                .to_string();
+            let facet_fields_err = facet_fields(&index, &config, &params, &base, nl)
+                .expect_err(&format!(
+                    "`{query_string}` must still error out of facet_fields"
+                ))
+                .to_string();
+
+            assert_eq!(
+                plan_err, facet_fields_err,
+                "plan_facet_fields and facet_fields must disagree on nothing for `{query_string}`"
+            );
+        }
+    }
+
+    /// The whole point of the split: plan then fuse then render must produce
+    /// byte-identical `facet_fields` output (and the same warnings) to
+    /// today's single-pass `facet_fields`, across mincount/limit/sort/missing
+    /// combinations, single and multiple `facet.field`, and with and without
+    /// `fq` -- proving the render phase's key-rendering rules (F64
+    /// `Double.toString`, date keys, `key_as_string`) moved rather than
+    /// changed, and that the fused aggregation ran over the right doc set
+    /// (identical counts, not just identical shape).
+    #[test]
+    fn plan_then_render_matches_facet_fields_across_param_combinations() {
+        use tantivy::aggregation::agg_result::AggregationResults;
+
+        let (_dir, index) = open_plan_render_corpus();
+        let config = ServerConfig::default();
+        let query = index.parse_query("quick", "body").expect("parse_query");
+
+        for query_string in [
+            "facet.field=category",
+            "facet.field=views",
+            "facet.field=category&facet.field=views",
+            "facet.field=category&facet.mincount=2",
+            "facet.field=category&facet.limit=1",
+            "facet.field=category&facet.sort=index",
+            "facet.field=category&facet.missing=true",
+            "facet.field=views&facet.missing=true&facet.limit=-1",
+            "facet.field={!key=mylabel}category",
+        ] {
+            for with_fq in [false, true] {
+                let qs = if with_fq {
+                    format!("{query_string}&fq=category:animals")
+                } else {
+                    query_string.to_string()
+                };
+                let params = Params::parse(&qs);
+
+                let filter_queries: Vec<Box<dyn Query>> = params
+                    .get_all("fq")
+                    .into_iter()
+                    .map(|fq| index.parse_query(fq, "body").expect("parse fq"))
+                    .collect();
+                let base: BaseClauses = std::iter::once((Occur::Must, query.box_clone()))
+                    .chain(
+                        filter_queries
+                            .iter()
+                            .map(|fq| (Occur::Must, fq.box_clone())),
+                    )
+                    .collect();
+                let nl = JsonNl::from_params(&params);
+
+                let (expected_fields, expected_warnings) =
+                    facet_fields(&index, &config, &params, &base, nl)
+                        .unwrap_or_else(|e| panic!("facet_fields for `{qs}`: {e}"));
+
+                let plan = plan_facet_fields(&index, &params)
+                    .unwrap_or_else(|e| panic!("plan_facet_fields for `{qs}`: {e}"));
+                let (_top, agg_results): (crate::collector::TopOutcome, AggregationResults) = index
+                    .search_top_with_aggs(
+                        query.as_ref(),
+                        &filter_queries,
+                        &[],
+                        5,
+                        plan.aggregations.clone(),
+                    )
+                    .unwrap_or_else(|e| panic!("search_top_with_aggs for `{qs}`: {e}"));
+                let (fused_fields, fused_warnings) =
+                    render_facet_fields(&index, &config, &params, &base, &plan, &agg_results)
+                        .unwrap_or_else(|e| panic!("render_facet_fields for `{qs}`: {e}"));
+
+                assert_eq!(
+                    fused_fields, expected_fields,
+                    "facet_fields JSON diverged between the fused and unfused paths for `{qs}`"
+                );
+                assert_eq!(
+                    fused_warnings, expected_warnings,
+                    "facet warnings diverged between the fused and unfused paths for `{qs}`"
+                );
+            }
+        }
+    }
 
     /// Mutation-test gap closed here (issue #138): replacing `parse_block` with
     /// a `split('}')`-style prefix strip passes every request-level test in
