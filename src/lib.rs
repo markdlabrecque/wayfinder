@@ -37,6 +37,7 @@ mod local_params;
 mod params;
 mod query;
 pub mod schema;
+pub mod snapshot;
 mod stats;
 
 pub use config::ServerConfig;

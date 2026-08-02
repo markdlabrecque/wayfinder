@@ -1757,6 +1757,7 @@ dependencies = [
  "base64",
  "http",
  "http-body-util",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
