@@ -2811,6 +2811,9 @@ fn collect_double_space_reasons(
 /// reason strings may contain a run of two or more consecutive spaces. A
 /// wrapped literal that left its own source indentation inside the string is
 /// exactly how this regresses -- see issue #277.
+///
+/// ponytail: the six tables are enumerated by name, so a seventh added later
+/// is silently uncovered. Add new diagnostic tables here when you add them.
 #[test]
 fn diagnostic_constant_tables_have_no_double_spaces() {
     let mut failures = Vec::new();
@@ -2917,12 +2920,19 @@ fn first_offending_double_space(line: &str) -> Option<usize> {
                 i += 1;
             }
             b' ' if bytes.get(i + 1) == Some(&b' ') => {
-                if indent_starts_at != Some(i) {
+                let mut end = i;
+                while bytes.get(end) == Some(&b' ') {
+                    end += 1;
+                }
+                // The skip is bounded to a run of *exactly two* spaces: that
+                // is the sub-message idiom, and every one of this file's
+                // legitimate in-string indents is two spaces. A longer run in
+                // the same position is reflow debris wearing indentation's
+                // clothes, and is reported.
+                if indent_starts_at != Some(i) || end - i != 2 {
                     return Some(i);
                 }
-                while bytes.get(i) == Some(&b' ') {
-                    i += 1;
-                }
+                i = end;
             }
             _ => i += 1,
         }
@@ -2942,10 +2952,18 @@ fn first_offending_double_space(line: &str) -> Option<usize> {
 /// the source with a one-line-at-a-time scanner rather than a Rust lexer. It
 /// would not catch the same defect in a diagnostic literal built by
 /// concatenation (e.g. `format!("{a}{b}")` where `a` or `b` supplies the
-/// run); it treats a run right after an opening quote or a `\n` escape as
-/// deliberate output indentation, so a genuine reflow artefact that lands in
-/// exactly that position is missed; and its quote tracking restarts on each
-/// line, so it can misjudge string state inside a multi-line raw string.
+/// run); it treats a two-space run right after an opening quote or a `\n`
+/// escape as deliberate output indentation, so a genuine reflow artefact that
+/// lands in exactly that position *and* is exactly two spaces wide is missed;
+/// and its quote tracking restarts on each line, so it can misjudge string
+/// state inside a multi-line raw string.
+///
+/// Two further blind spots, both covered for the constant tables by Test A but
+/// not for the three inline `format!` literals: a literal wrapped *without* a
+/// `\` continuation (a real multi-line string) has its continuation-line
+/// indentation stripped here as if it were source indentation, even though
+/// those spaces are inside the rendered string; and a run immediately after an
+/// escaped quote at the start of a continuation line is not seen either.
 #[test]
 fn source_text_has_no_double_spaces_outside_leading_indentation() {
     let source = include_str!("differential.rs");
