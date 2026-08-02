@@ -113,9 +113,9 @@ class WayfinderClientTest extends TestCase {
   }
 
   /**
-   * Both select and ping are protected routes when Wayfinder HTTP Basic
-   * authentication is configured. The header value is asserted exactly so a
-   * future change cannot silently choose a different authentication scheme.
+   * Ping remains public, but the client sends configured credentials on both
+   * ping and protected select requests. The header value is asserted exactly
+   * so a future change cannot silently choose a different authentication scheme.
    *
    * @covers ::select
    * @covers ::ping

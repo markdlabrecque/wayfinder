@@ -152,7 +152,7 @@ class WayfinderBackendTest extends TestCase {
    * @covers ::validateConfigurationForm
    */
   public function testCredentialValidationRejectsUnsafeOrIncompletePairs(string $username, string $password, bool $valid): void {
-    $backend = new WayfinderBackend([], 'wayfinder', []);
+    $backend = $this->createBackend(new Response(200, []));
     $formState = (new FormState())->setValues([
       'username' => $username,
       'password' => $password,

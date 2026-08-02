@@ -35,12 +35,28 @@ isolated to this harness and uses no production credential.
 
 ## Tests
 
-The supplied red unit tests were preserved. Focused red evidence was 44 tests
-with 9 failures before implementation; focused verification passed all 44
-assertions after the implementation. The Docker integration harness passed,
-including `AUTH: PASS` and `ROUNDTRIP: PASS`.
+The focused PHP suite has 44 tests. Its assertions were preserved; the exact
+401 Wayfinder authentication-envelope fixture was corrected. Focused
+verification passed all 44 tests (82 assertions). The Docker integration
+harness passed, including `AUTH: PASS` and `ROUNDTRIP: PASS`.
+
+### Credential-forwarding mutation evidence
+
+For a mutation check, a trap-backed temporary copy of
+`WayfinderBackend.php` was made and `WayfinderBackend::getClient()` was
+mutated to omit its final `$config['username'] ?? ''` and
+`$config['password'] ?? ''` arguments to `new WayfinderClient(...)`.
+`WAYFINDER_INTEGRATION=1 bash drupal/search_api_wayfinder/tests/integration/run.sh`
+then exited `1` as expected during indexing with
+`Drupal\search_api\SearchApiException ... authentication required`; the
+harness consequently reported `FAIL: expected indexed documents for
+index_id=wf80_index, found 0`. The EXIT trap restored the original file
+exactly and removed its temporary backup. Re-running the same integration
+command after restoration passed, with `AUTH: PASS - public ping and exact
+unauthenticated select failure verified` and `ROUNDTRIP: PASS - real
+index+search round trip through WayfinderBackend::search() succeeded`.
 
 Full hermetic gate (with `PI_SUBAGENT_*` and `PI_WORKFLOW_*` unset only in
 that spawned process) passed: `cargo fmt --check`; `cargo clippy --all-targets
 -- -D warnings`; `cargo test`; the matching three `bench` commands; and full
-PHPUnit (`134` tests, `215` assertions). No supplied test was changed.
+PHPUnit (`134` tests, `215` assertions).

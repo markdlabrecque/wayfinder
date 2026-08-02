@@ -170,16 +170,16 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
       return;
     }
     if (($username === '') !== ($password === '')) {
-      $form_state->setErrorByName('password', 'HTTP Basic authentication requires both a username and a password.');
+      $form_state->setErrorByName('password', $this->t('HTTP Basic authentication requires both a username and a password.'));
     }
     if (str_contains($username, ':')) {
-      $form_state->setErrorByName('username', 'HTTP Basic authentication usernames cannot contain a colon.');
+      $form_state->setErrorByName('username', $this->t('HTTP Basic authentication usernames cannot contain a colon.'));
     }
     if (preg_match('/[\x00-\x1F\x7F]/', $username) === 1) {
-      $form_state->setErrorByName('username', 'HTTP Basic authentication usernames cannot contain ASCII control characters.');
+      $form_state->setErrorByName('username', $this->t('HTTP Basic authentication usernames cannot contain ASCII control characters.'));
     }
     if (preg_match('/[\x00-\x1F\x7F]/', $password) === 1) {
-      $form_state->setErrorByName('password', 'HTTP Basic authentication passwords cannot contain ASCII control characters.');
+      $form_state->setErrorByName('password', $this->t('HTTP Basic authentication passwords cannot contain ASCII control characters.'));
     }
   }
 
