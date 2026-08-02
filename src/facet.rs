@@ -302,16 +302,6 @@ pub struct FacetFieldPlan {
     /// The key this facet's buckets appear under in `facet_fields`, i.e. the
     /// `{!key=...}` label if there is one, otherwise the field name.
     pub label: String,
-    /// The field as written in the request, minus any local-params prefix —
-    /// what validation, the `f.<field>.facet.*` overrides and every error
-    /// message name. Carried on the plan (rather than dropped once `column`
-    /// is resolved) because it, not `column`, is the request-visible
-    /// identity of this facet: `column` may be a dynamic field's shared
-    /// catch-all path. Nothing in the render phase needs it yet — the
-    /// rendering rules are all column- and kind-driven — so it is currently
-    /// read only by `plan_facet_fields`' own tests.
-    #[allow(dead_code)]
-    pub field_name: String,
     /// The Tantivy column actually aggregated over: `field_name` itself, or a
     /// dynamic field's catch-all JSON path (issue #66).
     pub column: String,
@@ -438,7 +428,6 @@ pub fn plan_facet_fields(index: &CoreIndex, params: &Params) -> Result<FacetFiel
 
         fields.push(FacetFieldPlan {
             label,
-            field_name: field_name.to_string(),
             column,
             kind,
             agg_name,
@@ -1110,7 +1099,6 @@ fast = true
             .expect("the plan phase must succeed with zero committed segments");
         assert_eq!(plan.fields.len(), 1);
         assert_eq!(plan.fields[0].label, "category");
-        assert_eq!(plan.fields[0].field_name, "category");
     }
 
     /// The `TermsAggregation` the plan phase builds must be the exact shape
