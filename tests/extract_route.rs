@@ -22,12 +22,15 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
+use wayfinder::extract::ExtractionRuntime;
 
 use common::diff::{diff, normalize, normalize_extract};
 use common::{fixture, request_multipart, request_multipart_with_raw_body};
@@ -59,6 +62,27 @@ fn build_app_with_config(config: Option<&str>) -> anyhow::Result<(Router, TempDi
         None => wayfinder::app(&schema_path, &data_dir)?,
     };
     Ok((app, dir))
+}
+
+/// As [`build_app_with_config`], but keeps the `AppServer` long enough to
+/// hand back the extraction pool the router actually admits against.
+///
+/// A sibling rather than a change to `build_app_with_config`'s signature:
+/// every other test in this file uses that one and does not need the handle.
+fn build_app_with_extraction(
+    config: &str,
+) -> anyhow::Result<(Router, Arc<ExtractionRuntime>, TempDir)> {
+    let dir = TempDir::new().expect("create temp dir");
+    let schema_path = dir.path().join("schema.toml");
+    std::fs::write(&schema_path, common::SCHEMA_TOML).expect("write schema.toml");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    let config_path = dir.path().join("wayfinder.toml");
+    std::fs::write(&config_path, config).expect("write wayfinder.toml");
+
+    let server = wayfinder::app_server_with_config(&schema_path, &data_dir, &config_path)?;
+    let extraction = server.extraction();
+    Ok((server.into_router(), extraction, dir))
 }
 
 async fn default_app() -> (Router, TempDir) {
@@ -618,58 +642,49 @@ async fn extract_oversized_part_headers_are_bounded_by_the_route_body_limit() {
     assert_eq!(body["error"]["code"].as_i64(), Some(413), "body: {body}");
 }
 
+/// An extraction admitted while the pool is at `max_concurrency` is rejected
+/// (`TooBusy`), not queued — and the slot comes back afterwards.
+///
+/// Saturation here is deterministic, not a race: with
+/// `max_concurrency = 1` the test holds the pool's only permit itself, via
+/// `ExtractionRuntime::try_acquire_permit` on the very runtime the route
+/// admits against, so zero slots remain while the request runs. No second
+/// in-flight request, no sleeps, no timing tolerance.
+///
+/// The second half — drop the permit, repeat the request, expect `200` — is
+/// what stops this passing trivially: without it a route that never extracts
+/// anything would satisfy the `503` assertion just as well.
 #[tokio::test]
 async fn extract_concurrency_over_configured_max_concurrency_is_503() {
-    // max_concurrency = 1: a second concurrent extraction request while the
-    // first is in flight must be rejected (TooBusy), not queued. This test
-    // does not attempt real inter-request synchronization (the harness has
-    // no hook to pause an in-flight extraction); it pins the *shape* of the
-    // 503 envelope by asserting the config is honoured for a single request
-    // once the runtime is saturated by a fixed small value — the implementor
-    // is expected to either satisfy this via a synchronization hook added to
-    // the extraction runtime, or the reviewer/implementor may need to redesign
-    // this specific test once ExtractionRuntime's concurrency-control surface
-    // is wired to the route (flagged in the handoff: this is the one budget
-    // test whose harness-level mechanism is not fully specified yet).
     let config_toml = "[extraction]\nmax_concurrency = 1\n";
-    let (app, _dir) = build_app_with_config(Some(config_toml))
+    let (app, extraction, _dir) = build_app_with_extraction(config_toml)
         .expect("extraction.max_concurrency must be a valid config knob");
 
-    let bytes = input_bytes("sample.txt");
-    let app2 = app.clone();
-    let bytes2 = bytes.clone();
-    let req1 = tokio::spawn(async move {
-        request_multipart(
-            &app,
-            &format!("{CORE}/update/extract?extractOnly=true&wt=json"),
-            "file",
-            "sample.txt",
-            "",
-            &bytes,
-        )
-        .await
-    });
-    let req2 = tokio::spawn(async move {
-        request_multipart(
-            &app2,
-            &format!("{CORE}/update/extract?extractOnly=true&wt=json"),
-            "file",
-            "sample.txt",
-            "",
-            &bytes2,
-        )
-        .await
-    });
-
-    let (r1, r2) = tokio::join!(req1, req2);
-    let (status1, body1) = r1.expect("task must not panic");
-    let (status2, body2) = r2.expect("task must not panic");
-
-    let statuses = [status1, status2];
+    let permit = extraction.try_acquire_permit();
     assert!(
-        statuses.contains(&StatusCode::SERVICE_UNAVAILABLE),
-        "with extraction.max_concurrency=1, at least one of two concurrent extractions must \
-         503 (TooBusy), got {status1} ({body1}) and {status2} ({body2})"
+        permit.is_some(),
+        "the single configured extraction slot must be free before the test holds it"
+    );
+
+    let bytes = input_bytes("sample.txt");
+    let url = format!("{CORE}/update/extract?extractOnly=true&wt=json");
+    let (status, body) = request_multipart(&app, &url, "file", "sample.txt", "", &bytes).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "with extraction.max_concurrency=1 and its only slot held, an extraction must \
+         503 (TooBusy), got {status}: {body}"
+    );
+    assert_eq!(body["error"]["code"].as_i64(), Some(503), "body: {body}");
+
+    drop(permit);
+
+    let (status, body) = request_multipart(&app, &url, "file", "sample.txt", "", &bytes).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "dropping the held permit must return the slot, so the same request now \
+         succeeds, got {status}: {body}"
     );
 }
 

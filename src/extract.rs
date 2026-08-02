@@ -1952,31 +1952,18 @@ impl Budget {
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
-/// An in-flight extraction slot. Releasing is `Drop`, so every early return
-/// and every panicking parser gives its slot back.
-struct Permit(Arc<AtomicUsize>);
+/// An in-flight extraction slot, reserved out of an
+/// [`ExtractionRuntime`]'s `max_concurrency` budget.
+///
+/// Releasing is `Drop`, so every early return and every panicking parser
+/// gives its slot back. Holding one reduces the slots available to
+/// [`ExtractionRuntime::spawn_extraction`] by one for as long as it lives;
+/// dropping it returns the slot immediately.
+pub struct ExtractionPermit(Arc<AtomicUsize>);
 
-impl Drop for Permit {
+impl Drop for ExtractionPermit {
     fn drop(&mut self) {
         self.0.fetch_add(1, Ordering::AcqRel);
-    }
-}
-
-fn try_acquire(available: &Arc<AtomicUsize>) -> Option<Permit> {
-    let mut current = available.load(Ordering::Acquire);
-    loop {
-        if current == 0 {
-            return None;
-        }
-        match available.compare_exchange_weak(
-            current,
-            current - 1,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => return Some(Permit(Arc::clone(available))),
-            Err(actual) => current = actual,
-        }
     }
 }
 
@@ -2075,11 +2062,40 @@ impl ExtractionRuntime {
         }
     }
 
+    /// Reserves one extraction slot if the pool is not already at
+    /// `max_concurrency`, returning `None` rather than waiting when it is.
+    ///
+    /// This is the single admission path: [`Self::spawn_extraction`] calls
+    /// it too, so a permit held here is a slot `spawn_extraction` cannot
+    /// hand out. Holding every slot makes the runtime saturated as a fact
+    /// rather than as a race, which is what lets callers (an admission
+    /// gate ahead of the pool, a test pinning the `TooBusy` envelope)
+    /// reserve capacity deterministically. Dropping the returned
+    /// [`ExtractionPermit`] returns the slot.
+    pub fn try_acquire_permit(&self) -> Option<ExtractionPermit> {
+        let available = &self.available;
+        let mut current = available.load(Ordering::Acquire);
+        loop {
+            if current == 0 {
+                return None;
+            }
+            match available.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(ExtractionPermit(Arc::clone(available))),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
     /// Runs `f` on the dedicated blocking pool if a concurrency slot is
     /// free; otherwise `Err(ExtractError::TooBusy)` immediately.
     ///
     /// The slot is held for the whole duration of `f` **and until the
-    /// awaiting caller has taken the result back**: the `Permit` travels
+    /// awaiting caller has taken the result back**: the [`ExtractionPermit`] travels
     /// through the oneshot alongside the outcome and is dropped here, not on
     /// the worker thread. Releasing it on the worker instead would leave a
     /// window in which the extraction is, from the request's point of view,
@@ -2124,11 +2140,11 @@ impl ExtractionRuntime {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        let permit = match try_acquire(&self.available) {
+        let permit = match self.try_acquire_permit() {
             Some(permit) => permit,
             None => return Err(ExtractError::TooBusy),
         };
-        let (tx, rx) = oneshot::<(Result<T, ExtractError>, Permit)>();
+        let (tx, rx) = oneshot::<(Result<T, ExtractError>, ExtractionPermit)>();
         let job: Job = Box::new(move || {
             // A panicking third-party parser must not take a pool worker
             // with it: catching here keeps the pool at full strength and

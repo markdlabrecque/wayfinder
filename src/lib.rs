@@ -87,7 +87,12 @@ struct AppState {
     /// request: its whole purpose is a *bounded, shared* pool, and a
     /// per-request one would give every concurrent request its own
     /// `max_concurrency` slots.
-    extraction: extract::ExtractionRuntime,
+    /// `Arc` rather than owned by value so the pool can be handed out
+    /// through [`AppServer::extraction`] without a second construction path:
+    /// the handle a caller reserves a slot on must be the *same* runtime the
+    /// route admits requests against, or the concurrency budget is two
+    /// budgets.
+    extraction: Arc<extract::ExtractionRuntime>,
 }
 
 /// Opaque handle to the state shared by an [`AppServer`]'s router.
@@ -122,6 +127,17 @@ impl AppServer {
     /// has stopped accepting and drained requests.
     pub fn shutdown_handle(&self) -> ShutdownHandle {
         self.shutdown.clone()
+    }
+
+    /// Returns the extraction thread pool this router's `/update/extract`
+    /// route admits against.
+    ///
+    /// Additive: it hands back the *same* `ExtractionRuntime` the route
+    /// uses, so a slot reserved through
+    /// [`extract::ExtractionRuntime::try_acquire_permit`] on it is a slot
+    /// the route can no longer hand out.
+    pub fn extraction(&self) -> Arc<extract::ExtractionRuntime> {
+        Arc::clone(&self.shutdown.0.extraction)
     }
 
     /// Consumes this construction result into the HTTP router.
@@ -492,7 +508,7 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
     };
     let extract_limits = config.extraction.limits();
     let extract_body_ceiling = extract_limits.route_body_ceiling();
-    let extraction = extract::ExtractionRuntime::new(&extract_limits);
+    let extraction = Arc::new(extract::ExtractionRuntime::new(&extract_limits));
     let state = Arc::new(AppState {
         core_name,
         index,
