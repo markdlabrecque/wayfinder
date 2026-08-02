@@ -226,10 +226,31 @@ fn cold_pass_reads_terms_txt_and_runs_after_the_solr_warm_up_and_cache_flush() {
     // relative to the flush's position, not checks on `.first()`/`.last()`
     // of either list -- the earliest cold-pass call is Wayfinder's, which
     // legitimately runs before Solr's flush ever happens.
+    //
+    // Round 3 (reviewer finding, item 2): `warm_ups.iter().any(|n| n <
+    // flush.0)` is satisfied by *Wayfinder's* warm-up call, which is nowhere
+    // near the Solr flush -- so the previous assertion didn't check what its
+    // own message claimed ("the Solr warm-up pass runs before the Solr cache
+    // flush"). Anchor on the `# --- Solr ---` section marker so the warm-up
+    // call being checked is provably the Solr one, not Wayfinder's earlier
+    // call that happens to also be numerically before `flush.0`.
+    let solr_section_line = stripped
+        .lines()
+        .position(|l| l.contains("--- Solr ---"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a `# --- Solr ---` section marker in run.sh separating the Wayfinder \
+                 and Solr phases; found none -- this guard needs it to tell the Solr warm-up \
+                 call apart from Wayfinder's earlier one"
+            )
+        });
     assert!(
-        warm_ups.iter().any(|(line_no, _)| *line_no < flush.0),
-        "expected the Solr warm-up pass to run before the Solr cache flush, got warm_up_pass \
-         calls at {warm_ups:?}, flush_solr_caches call at {}",
+        warm_ups
+            .iter()
+            .any(|(line_no, _)| *line_no > solr_section_line && *line_no < flush.0),
+        "expected the Solr warm-up pass (a warm_up_pass call between the `# --- Solr ---` \
+         section marker at line {solr_section_line} and the flush_solr_caches call at line {}) \
+         to run before the Solr cache flush; got warm_up_pass calls at {warm_ups:?}",
         flush.0
     );
     assert!(
@@ -502,5 +523,148 @@ fn warm_pass_assertion_accepts_the_live_verified_end_state_of_200_hits_not_exact
         "hits=200 (not 199) for a 200-request warm pass must pass, not be rejected for not \
          being exactly N_QUERIES - 1; stderr: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// --- round 3 (independent reviewer findings) -----------------------------
+
+#[test]
+fn assert_cache_pass_behavior_is_actually_called_after_both_the_solr_cold_and_warm_passes() {
+    // Round 3, item 1 (the reviewer called this the highest-value finding):
+    // every test above pins `assert_cache_pass_behavior`'s *behaviour* and
+    // its *definition*, but nothing pins that run.sh actually *calls* it.
+    // Deleting both call sites from run.sh (while leaving the function
+    // defined) left all other tests in this file green -- the self-checking
+    // property that is the entire point of issue #251 could be silently
+    // removed. This guard pins the call sites themselves, anchored on the
+    // Solr cold/warm passes so it can't be satisfied by, say, a call left
+    // over in a comment or a stray call somewhere unrelated.
+    let source = run_sh_source();
+    let stripped = strip_function_bodies(&source);
+
+    let asserts = call_lines(&stripped, "assert_cache_pass_behavior");
+    assert!(
+        asserts.len() >= 2,
+        "expected at least 2 calls to assert_cache_pass_behavior in run.sh's top-level flow \
+         (one after the Solr cold pass, one after the Solr warm pass) -- found {} at {asserts:?}; \
+         without these calls the cold/warm split's self-check (issue #251's whole point) can be \
+         deleted without any test noticing",
+        asserts.len()
+    );
+
+    let flush_calls = call_lines(&stripped, "flush_solr_caches");
+    let flush = flush_calls.first().unwrap_or_else(|| {
+        panic!(
+            "expected a call to a `flush_solr_caches` function in run.sh's top-level flow \
+             (issue #251's Solr cache-flush step); none found"
+        )
+    });
+    let cold_calls = call_lines(&stripped, "run_cold_query_pass");
+    let cold = cold_calls
+        .iter()
+        .find(|(n, _)| *n > flush.0)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a run_cold_query_pass call after the flush_solr_caches call at line \
+                 {}, got cold pass calls at {cold_calls:?}",
+                flush.0
+            )
+        });
+    let warm_calls = call_lines(&stripped, "run_query_load");
+    let warm = warm_calls
+        .iter()
+        .find(|(n, _)| *n > cold.0)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a run_query_load call after the Solr cold pass at line {}, got warm \
+                 pass calls at {warm_calls:?}",
+                cold.0
+            )
+        });
+
+    let assert_after_cold = asserts.iter().any(|(n, _)| *n > cold.0 && *n < warm.0);
+    assert!(
+        assert_after_cold,
+        "expected an assert_cache_pass_behavior call between the Solr cold pass (line {}) and \
+         the Solr warm pass (line {}) checking the cold pass's cache counters; got calls at \
+         {asserts:?}",
+        cold.0, warm.0
+    );
+
+    let assert_after_warm = asserts.iter().any(|(n, _)| *n > warm.0);
+    assert!(
+        assert_after_warm,
+        "expected an assert_cache_pass_behavior call after the Solr warm pass (line {}) \
+         checking the warm pass's cache counters; got calls at {asserts:?}",
+        warm.0
+    );
+}
+
+#[test]
+fn metrics_url_carries_a_recognized_response_writer_param() {
+    // Round 3, item 3: `wt=json` alone on `admin/metrics` is documented
+    // (docs/solr-ref-findings.md, finding 119, live-verified against a real
+    // solr:9 container) to return HTTP 200 with a type-signature body --
+    // unquoted keys, values literally `int` -- which is not valid JSON and
+    // carries no statistics. Any recognised response-writer param fixes it
+    // (`indent=true`, `indent=false`, `json.nl=map`); an unrecognised one
+    // (or none) does not. This does not pin the URL as a literal string --
+    // that would only freeze whichever URL happens to be typed today, which
+    // is the standing objection to the round-1 guards -- it pins that the
+    // URL query_result_cache_stat builds carries *one of* the recognised
+    // params.
+    let source = run_sh_source();
+    let func = extract_bash_function(&source, "query_result_cache_stat").expect(
+        "run.sh should define a `query_result_cache_stat` function that GETs admin/metrics; \
+         none found in run.sh",
+    );
+    let metrics_line = func
+        .lines()
+        .find(|l| l.contains("admin/metrics") && !l.trim_start().starts_with('#'))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected query_result_cache_stat to GET .../admin/metrics; found no such \
+                 (non-comment) line in its body:\n{func}"
+            )
+        });
+
+    let recognized = ["indent=true", "indent=false", "json.nl=map"];
+    assert!(
+        recognized.iter().any(|p| metrics_line.contains(p)),
+        "docs/solr-ref-findings.md finding 119: Solr's admin/metrics endpoint with `wt=json` \
+         alone returns HTTP 200 but a type-signature body (unquoted keys, values literally \
+         `int`/`float`) -- not valid JSON, no statistics -- so a recognised response-writer \
+         param (`indent=true`, `indent=false`, or `json.nl=map`) must be present on the URL; \
+         got metrics URL line: {metrics_line}"
+    );
+}
+
+#[test]
+fn strip_function_bodies_blanks_only_the_named_functions_body_preserving_line_count() {
+    // Direct unit coverage of the helper the ordering guards above all lean
+    // on: it must blank a top-level function's body (and only that body),
+    // and it must not change the line count (every ordering guard above
+    // uses `.enumerate()` line numbers against the stripped source and
+    // expects them to still line up with the original file).
+    let source = "before\nfoo() {\n  echo foo\n  bar\n}\nafter\n";
+    let stripped = strip_function_bodies(source);
+
+    assert_eq!(
+        stripped.lines().count(),
+        source.lines().count(),
+        "stripping a function's body must preserve line count so line numbers still match the \
+         original source; got:\n{stripped}"
+    );
+    assert!(
+        stripped.contains("before"),
+        "text before the function must survive stripping"
+    );
+    assert!(
+        stripped.contains("after"),
+        "text after the function must survive stripping"
+    );
+    assert!(
+        !stripped.contains("echo foo") && !stripped.contains("bar"),
+        "the function's own body must be blanked, not just its definition line; got:\n{stripped}"
     );
 }
