@@ -7,6 +7,7 @@ mod unix {
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::path::Path;
     use std::process::{Child, Command, Stdio};
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -249,6 +250,8 @@ stored = true
         );
         assert_eq!(status, 200, "seed commit must succeed: {response}");
 
+        let (first_wave_tx, first_wave_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
         let updater = thread::spawn(move || {
             for batch in 0..30 {
                 let body = "x".repeat(4096);
@@ -268,13 +271,20 @@ stored = true
                     &request,
                 );
                 assert_eq!(status, 200, "batch {batch} commit must succeed: {response}");
+                if batch == 9 {
+                    first_wave_tx.send(()).expect("announce first commit wave");
+                    resume_rx.recv().expect("resume remaining commits");
+                }
                 thread::sleep(Duration::from_millis(2));
             }
         });
 
         let final_count = 1 + 30 * 80;
         let mut observed_counts = Vec::new();
-        for attempt in 0..20 {
+        let mut attempt = 0;
+        let mut first_wave_committed = false;
+        let merge_deadline = Instant::now() + Duration::from_secs(15);
+        loop {
             let destination = temp.path().join(format!("snapshot-{attempt}"));
             let snapshot = Command::new(env!("CARGO_BIN_EXE_wayfinder"))
                 .arg("snapshot")
@@ -293,6 +303,45 @@ stored = true
                 "snapshot {attempt} must contain the seed plus whole 80-document commits, got {count} docs"
             );
             observed_counts.push((count, segment_count));
+            attempt += 1;
+
+            first_wave_committed |= first_wave_rx.try_recv().is_ok();
+            let committed_batches = (count - 1) / 80;
+            if first_wave_committed
+                && committed_batches >= 8
+                && segment_count < committed_batches + 1
+            {
+                break;
+            }
+            if Instant::now() >= merge_deadline {
+                let _ = resume_tx.send(());
+                panic!(
+                    "a snapshot did not observe Tantivy's first-wave merge before the deadline: {observed_counts:?}"
+                );
+            }
+        }
+
+        resume_tx.send(()).expect("resume remaining commits");
+        for _ in 0..20 {
+            let destination = temp.path().join(format!("snapshot-{attempt}"));
+            let snapshot = Command::new(env!("CARGO_BIN_EXE_wayfinder"))
+                .arg("snapshot")
+                .arg(&live_data_dir)
+                .arg(&destination)
+                .output()
+                .expect("run snapshot CLI under indexing load");
+            assert!(
+                snapshot.status.success(),
+                "snapshot {attempt} must survive concurrent commit/merge/GC; stderr:\n{}",
+                String::from_utf8_lossy(&snapshot.stderr)
+            );
+            let (count, segment_count) = snapshot_stats(&destination);
+            assert!(
+                (1..=final_count).contains(&count) && (count - 1) % 80 == 0,
+                "snapshot {attempt} must contain the seed plus whole 80-document commits, got {count} docs"
+            );
+            observed_counts.push((count, segment_count));
+            attempt += 1;
         }
         updater.join().expect("continuous updater must finish");
 
@@ -301,13 +350,6 @@ stored = true
                 .iter()
                 .any(|&(count, _)| count < final_count),
             "at least one snapshot must overlap indexing rather than all running afterward: {observed_counts:?}"
-        );
-        assert!(
-            observed_counts.iter().any(|&(count, segments)| {
-                let committed_batches = (count - 1) / 80;
-                committed_batches >= 8 && segments < committed_batches + 1
-            }),
-            "at least one concurrent snapshot must observe that Tantivy completed a merge of committed segments: {observed_counts:?}"
         );
         assert_eq!(
             snapshot_doc_count(&live_data_dir),

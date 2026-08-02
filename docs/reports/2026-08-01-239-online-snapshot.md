@@ -14,10 +14,11 @@
 ## Evidence
 
 - Initial red: `cargo test --test online_snapshot -- --nocapture` — failed for the expected reason: `snapshot` was parsed as a schema path.
-- Final targeted: `cargo test --test online_snapshot -- --nocapture` — 2 passed, about 5.28s.
-- `cargo clippy --all-targets -- -D warnings` — green.
+- Final targeted: `cargo test --test online_snapshot -- --nocapture` — 2 passed in three consecutive runs, about 6.8–7.1s each.
+- `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` — green.
 - `git diff --check` — green.
 - Final `cargo test` after the durability and merge-evidence fixes — green. Earlier full gates were also green after initial implementation, in reviewer round 1, after the first review bounce, and in the round-2 replacement.
+- The first PR CI run exposed a timing-sensitive merge assertion: on the slower runner, all 20 snapshots completed before the updater reached Tantivy's merge threshold. The test now coordinates a ten-commit first wave, snapshots until its background merge is observable, then resumes the remaining commits; three targeted runs and the full local gate are green.
 
 ## Review and deviations
 
