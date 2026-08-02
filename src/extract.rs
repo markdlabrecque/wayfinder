@@ -178,6 +178,13 @@ fn detect_by_signature(bytes: &[u8]) -> Option<ContentType> {
     if bytes.starts_with(b"{\\rtf") {
         return Some(ContentType::Rtf);
     }
+    // ponytail: this outranks the declared MIME type, so an XHTML document
+    // served as `text/html` and opening with an XML declaration detects as
+    // `Xml`, not `Html` — phase 1's HTML extractor would silently never see
+    // it. Correct fix when that extractor lands: look past the declaration
+    // for a `<html` root element (or an XHTML doctype/namespace) and prefer
+    // `Html` for those, keeping `Xml` for everything else. Harmless today
+    // because neither `Xml` nor `Html` has an extractor.
     if bytes.starts_with(b"<?xml") {
         return Some(ContentType::Xml);
     }
@@ -455,15 +462,30 @@ impl Default for ExtractLimits {
 /// type instead of six bespoke ones. Each *use site* still gets its own
 /// default (from `ExtractLimits`) and its own error identity in the
 /// rendered message (`StructuralLimitKind`).
+/// Both fields are private and read-only from outside: a counter whose
+/// `count` or `limit` a caller can assign is not a guard, it is a
+/// suggestion, and the callers it constrains (future format extractors,
+/// which hold `&mut Budget`) are exactly the code that must not be able to
+/// reset it.
 #[derive(Debug, Clone, Copy)]
 pub struct BoundedCounter {
-    pub count: usize,
-    pub limit: usize,
+    count: usize,
+    limit: usize,
 }
 
 impl BoundedCounter {
     pub fn new(limit: usize) -> Self {
         BoundedCounter { count: 0, limit }
+    }
+
+    /// How many increments have been accepted so far.
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    /// The ceiling this counter was constructed with.
+    pub fn limit(&self) -> usize {
+        self.limit
     }
 
     /// Increments by one, failing with a `StructuralLimit` error naming
@@ -481,15 +503,39 @@ impl BoundedCounter {
     /// The mirror of `increment` for depth-shaped counters, which go back
     /// down when an element closes. Saturating: an unbalanced document
     /// cannot drive this below zero.
+    ///
+    /// **Only the three depth-shaped counters may be decremented:**
+    /// `Budget::xml_depth`, `Budget::rtf_group_depth`, and any future
+    /// nesting counter. The three cumulative counters — `xml_events`,
+    /// `cells`, `pdf_pages` — bound *total work* and must never be
+    /// decremented: doing so would let a document alternate
+    /// increment/decrement forever and defeat the bound entirely. The type
+    /// system does not yet enforce this split.
+    ///
+    /// ponytail: the enforcing version is a separate `DepthCounter` type
+    /// with no `increment`-only sibling sharing its API, so a cumulative
+    /// counter simply has no `decrement` to call. Deferred to the phase that
+    /// first drives XML nesting for real (#171 follow-up, OOXML), because
+    /// splitting the type now would churn the six call sites before any of
+    /// them exists.
     pub fn decrement(&mut self) {
         self.count = self.count.saturating_sub(1);
     }
 }
 
+/// Where `Budget` reads "now" from when checking its deadline.
+/// `Budget::new` uses the system clock; `Budget::with_clock` takes one
+/// explicitly.
+pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
 /// The live per-extraction state threaded to extractors: deadline, output
 /// counters, structural counters.
+///
+/// `limits` is deliberately not a public field. Extractors receive
+/// `&mut Budget` — they must be able to push output and advance counters,
+/// and must *not* be able to raise the ceilings they are being held to.
 pub struct Budget {
-    pub limits: ExtractLimits,
+    limits: ExtractLimits,
     pub xml_depth: BoundedCounter,
     pub xml_events: BoundedCounter,
     pub sheets: BoundedCounter,
@@ -499,14 +545,28 @@ pub struct Budget {
     /// The wall-clock instant past which `check_deadline` fails. Stored as
     /// an absolute instant computed once, so repeated checks cannot drift.
     deadline_at: Instant,
+    clock: Clock,
     output: String,
     output_scalars: usize,
 }
 
 impl Budget {
     pub fn new(limits: ExtractLimits) -> Self {
+        Budget::with_clock(limits, Arc::new(Instant::now))
+    }
+
+    /// `Budget::new` with an explicit source of "now".
+    ///
+    /// This is the seam that makes cooperative cancellation *testable*
+    /// rather than merely asserted. The interesting property is not "an
+    /// already-expired deadline fails immediately" — it is "a deadline that
+    /// expires part-way through a decode stops the decode part-way", and
+    /// with the system clock that can only be probed by racing a sleep
+    /// against a chunk loop. A supplied clock makes it deterministic.
+    pub fn with_clock(limits: ExtractLimits, clock: Clock) -> Self {
         Budget {
-            deadline_at: Instant::now() + limits.deadline,
+            deadline_at: clock() + limits.deadline,
+            clock,
             output: String::new(),
             output_scalars: 0,
             xml_depth: BoundedCounter::new(limits.max_xml_depth),
@@ -519,11 +579,17 @@ impl Budget {
         }
     }
 
+    /// The limits this budget enforces. Read-only on purpose — see the type
+    /// docs.
+    pub fn limits(&self) -> &ExtractLimits {
+        &self.limits
+    }
+
     /// `Err(DeadlineExceeded)` once the wall-clock deadline has passed. This
     /// is the *only* cancellation signal a phase-0 extractor gets; see the
     /// module docs.
     pub fn check_deadline(&self) -> Result<(), ExtractError> {
-        if Instant::now() >= self.deadline_at {
+        if (self.clock)() >= self.deadline_at {
             return Err(ExtractError::DeadlineExceeded);
         }
         Ok(())
@@ -531,7 +597,7 @@ impl Budget {
 
     /// Time left before the deadline; zero once it has passed.
     pub fn remaining(&self) -> Duration {
-        self.deadline_at.saturating_duration_since(Instant::now())
+        self.deadline_at.saturating_duration_since((self.clock)())
     }
 
     /// Appends `s` to the accumulated output, checked incrementally against
@@ -628,6 +694,16 @@ pub struct ExtractionRuntime {
 }
 
 impl ExtractionRuntime {
+    /// Builds the pool, one worker thread per `max_concurrency` slot.
+    ///
+    /// `max_concurrency = 0` is **not** "extraction disabled" — it is
+    /// clamped to one worker. Zero would advertise no permits at all, so
+    /// every request would return `TooBusy` forever, which reads as an
+    /// outage rather than as configuration. Disabling extraction is the
+    /// route's job (don't mount it), not this pool's; there is no route
+    /// yet, so there is nothing to disable. If a later issue wants a real
+    /// "off" switch, it belongs in the `[extraction]` config section as an
+    /// explicit `enabled` flag, not as a magic zero here.
     pub fn new(limits: &ExtractLimits) -> Self {
         let workers = limits.max_concurrency.max(1);
         let (tx, rx) = mpsc::channel::<Job>();
@@ -660,11 +736,20 @@ impl ExtractionRuntime {
                 });
             // A thread that cannot be spawned simply lowers the effective
             // pool size; the permit count is what actually bounds admission,
-            // and it is set from the threads that did start.
+            // and it is set from the threads that did start — exactly `i` of
+            // them, never rounded up. Advertising one permit more than there
+            // are workers would admit an extraction that then blocks in the
+            // channel forever (or, if the sender is gone, fails as `Io`),
+            // when the honest answer is `TooBusy`.
             if spawned.is_err() {
+                // `i == 0` (the very first spawn failed) is the degenerate
+                // case: no workers, so no permits, so every admission is
+                // rejected with `TooBusy` and the job channel is dropped
+                // rather than left dangling with nothing to drain it.
+                let jobs = if i == 0 { None } else { Some(tx) };
                 return ExtractionRuntime {
-                    available: Arc::new(AtomicUsize::new(i.max(1))),
-                    jobs: Mutex::new(Some(tx)),
+                    available: Arc::new(AtomicUsize::new(i)),
+                    jobs: Mutex::new(jobs),
                 };
             }
         }
@@ -827,6 +912,21 @@ pub trait ChunkSource: Send {
 /// would take the running total over the limit is not written, so the temp
 /// file never exceeds `max_bytes` — well inside the "limit plus one chunk"
 /// ceiling the contract promises.
+///
+/// The `write_all` below is a *synchronous* write inside an `async fn`, and
+/// that is deliberate rather than an oversight. It is bounded work: at most
+/// `max_bytes` (32 MiB by default) of buffered writes to a local temp file,
+/// spread across chunk-sized calls that each yield to the executor at the
+/// next `await`. Neither alternative pays for itself here — `tokio::fs`
+/// dispatches every call to the *shared* blocking pool this module exists to
+/// stay off, and `spawn_blocking` per chunk would do the same. The write
+/// that actually deserves isolation is the parse, which already gets it via
+/// `ExtractionRuntime`.
+///
+/// ponytail: if the route ever accepts bodies large enough that 32 MiB of
+/// inline writes measurably stalls a runtime worker, move the whole
+/// receive-to-temp-file step onto `ExtractionRuntime` too (its own pool,
+/// still not tokio's), rather than reaching for `tokio::fs`.
 pub async fn stream_to_tempfile(
     source: &mut impl ChunkSource,
     dest: &mut NamedTempFile,
@@ -869,10 +969,16 @@ pub struct ZipEntryMeta<'a> {
 /// archive already declares, which is why phase 0 can define and test it
 /// with no zip reader at all: phase 2a's `zip` crate feeds it
 /// `ZipEntryMeta` and honours the answer.
+///
+/// All three fields are private with read-only accessors, for the same
+/// reason `Budget`'s are: the caller this guards against is the archive
+/// walker itself, and a walker that could assign `cumulative_uncompressed
+/// = 0` between entries would defeat the only check that actually bounds a
+/// zip bomb.
 pub struct ZipBudget {
-    pub limits: ExtractLimits,
-    pub entries_seen: usize,
-    pub cumulative_uncompressed: u64,
+    limits: ExtractLimits,
+    entries_seen: usize,
+    cumulative_uncompressed: u64,
 }
 
 impl ZipBudget {
@@ -882,6 +988,23 @@ impl ZipBudget {
             entries_seen: 0,
             cumulative_uncompressed: 0,
         }
+    }
+
+    /// The limits this budget enforces.
+    pub fn limits(&self) -> &ExtractLimits {
+        &self.limits
+    }
+
+    /// How many entries have been admitted so far. Rejected entries do not
+    /// count.
+    pub fn entries_seen(&self) -> usize {
+        self.entries_seen
+    }
+
+    /// Total declared uncompressed bytes across admitted entries. Rejected
+    /// entries contribute nothing.
+    pub fn cumulative_uncompressed(&self) -> u64 {
+        self.cumulative_uncompressed
     }
 
     /// Admits one entry's metadata, or rejects it. Checks run cheapest-and-
@@ -1280,10 +1403,10 @@ mod tests {
     fn bounded_counter_decrement_is_saturating() {
         let mut counter = BoundedCounter::new(4);
         counter.decrement();
-        assert_eq!(counter.count, 0);
+        assert_eq!(counter.count(), 0);
         counter.increment(StructuralLimitKind::XmlDepth).unwrap();
         counter.decrement();
-        assert_eq!(counter.count, 0);
+        assert_eq!(counter.count(), 0);
     }
 
     #[test]
@@ -1313,8 +1436,8 @@ mod tests {
             uncompressed_size: 500,
         };
         assert!(zip.admit(&rejected).is_err());
-        assert_eq!(zip.cumulative_uncompressed, 0);
-        assert_eq!(zip.entries_seen, 0);
+        assert_eq!(zip.cumulative_uncompressed(), 0);
+        assert_eq!(zip.entries_seen(), 0);
     }
 
     #[test]

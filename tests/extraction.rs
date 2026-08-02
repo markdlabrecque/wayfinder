@@ -56,7 +56,11 @@ use common::fixture;
 fn permissive_limits() -> ExtractLimits {
     ExtractLimits {
         max_body_bytes: 1_000_000_000,
-        max_concurrency: 1000,
+        // Not "generous" like the rest: this one costs an OS thread per
+        // slot, since `ExtractionRuntime::new` spawns a dedicated worker per
+        // unit of concurrency. Kept small deliberately; the concurrency
+        // tests override it with the exact value they need anyway.
+        max_concurrency: 4,
         max_output_scalars: 1_000_000,
         max_output_bytes: 1_000_000,
         deadline: Duration::from_secs(60),
@@ -230,6 +234,97 @@ async fn extraction_runtime_rejects_the_n_plus_first_concurrent_extraction() {
     );
 }
 
+/// Review round 1, item 2. The `TooBusy` test above proves a slot is *taken*
+/// but not that it is ever *given back*: a `Permit` whose `Drop` never
+/// incremented the counter would produce identical results there, and the
+/// pool would then wedge permanently after the first `max_concurrency`
+/// extractions. This binds the release path on the success path.
+#[tokio::test]
+async fn extraction_runtime_returns_every_slot_once_the_extractions_complete() {
+    let mut limits = permissive_limits();
+    limits.max_concurrency = 2;
+    let runtime = std::sync::Arc::new(wayfinder::extract::ExtractionRuntime::new(&limits));
+
+    // Fill the pool, then drain it.
+    let first = runtime.spawn_extraction(|| "a").await;
+    let second = runtime.spawn_extraction(|| "b").await;
+    assert_eq!(first.ok(), Some("a"));
+    assert_eq!(second.ok(), Some("b"));
+
+    // Every slot must be free again: `max_concurrency` fresh extractions in
+    // a row, each of which would be `TooBusy` if a permit had leaked.
+    for round in 0..limits.max_concurrency {
+        let again = runtime.spawn_extraction(|| "c").await;
+        assert_eq!(
+            again.as_ref().ok(),
+            Some(&"c"),
+            "round {round}: a completed extraction must return its concurrency slot, so the pool \
+             admits max_concurrency fresh extractions again; got {again:?}"
+        );
+    }
+}
+
+/// Review round 1, item 3. Panic containment is what keeps the pool at full
+/// strength: an uncaught panic would unwind the worker thread out of its
+/// receive loop, permanently shrinking the pool by one and (with the permit
+/// never released) leaking a slot as well.
+#[tokio::test]
+async fn extraction_runtime_contains_a_panicking_parser_and_keeps_the_pool_at_full_strength() {
+    let mut limits = permissive_limits();
+    limits.max_concurrency = 2;
+    let runtime = std::sync::Arc::new(wayfinder::extract::ExtractionRuntime::new(&limits));
+
+    let panicked = runtime
+        .spawn_extraction(|| panic!("parser exploded"))
+        .await
+        .map(|(): ()| ());
+    assert!(
+        matches!(panicked, Err(ExtractError::Parse(_))),
+        "a panicking parser must surface as ExtractError::Parse, not unwind the worker or hang \
+         the caller; got {panicked:?}"
+    );
+
+    for round in 0..limits.max_concurrency {
+        let after = runtime.spawn_extraction(|| "ok").await;
+        assert_eq!(
+            after.as_ref().ok(),
+            Some(&"ok"),
+            "round {round}: after a panicking extraction the pool must still admit and run \
+             max_concurrency extractions — the worker survived and the slot came back; \
+             got {after:?}"
+        );
+    }
+}
+
+/// Review round 1, item 11. The isolation claim in the module docs is that
+/// extraction runs on *its own* threads, not tokio's shared blocking pool.
+/// Nothing else in this suite would notice if `spawn_extraction` were
+/// quietly reimplemented on `tokio::task::spawn_blocking`; the thread name
+/// is the observable that distinguishes them.
+#[tokio::test]
+async fn extraction_runs_on_a_dedicated_named_thread_not_the_shared_tokio_blocking_pool() {
+    let mut limits = permissive_limits();
+    limits.max_concurrency = 1;
+    let runtime = wayfinder::extract::ExtractionRuntime::new(&limits);
+
+    let name = runtime
+        .spawn_extraction(|| {
+            std::thread::current()
+                .name()
+                .map(str::to_string)
+                .unwrap_or_default()
+        })
+        .await
+        .expect("extraction must run");
+
+    assert!(
+        name.starts_with("wayfinder-extract-"),
+        "extraction must run on a thread from Wayfinder's own extraction pool (a wedged parser \
+         must not be able to consume tokio's shared blocking pool), but it ran on a thread named \
+         {name:?}"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Budget 3 — max extracted output: Unicode scalar count
 // ---------------------------------------------------------------------
@@ -307,6 +402,73 @@ async fn budget_check_deadline_reports_exceeded_after_the_configured_wall_clock(
         matches!(result, Err(ExtractError::DeadlineExceeded)),
         "check_deadline must report DeadlineExceeded once the configured wall clock has passed, \
          got {result:?}"
+    );
+}
+
+/// Review round 1, item 1. The test above only proves an *already expired*
+/// deadline is reported — an extractor that checked its deadline exactly
+/// once, before doing any work, would pass it. The claim the module actually
+/// makes is cooperative cancellation: a deadline that expires *part-way
+/// through* a decode stops that decode part-way.
+///
+/// Made deterministic with an injected clock rather than raced against a
+/// sleep: the clock reports the start instant for the construction call, the
+/// pre-loop check, and the first in-loop check, then jumps an hour. So the
+/// decode is guaranteed to complete exactly one chunk and then be cancelled
+/// by the *between-chunks* check.
+#[tokio::test]
+async fn plain_text_extractor_stops_mid_decode_when_the_deadline_expires_between_chunks() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let limits = permissive_limits(); // deadline: 60s, so only the clock decides
+    let start = std::time::Instant::now();
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let clock: wayfinder::extract::Clock = {
+        let ticks = Arc::clone(&ticks);
+        Arc::new(move || {
+            // 0: construction. 1: the pre-loop check. 2: the first in-loop
+            // check. 3+: expired.
+            if ticks.fetch_add(1, Ordering::SeqCst) < 3 {
+                start
+            } else {
+                start + Duration::from_secs(3600)
+            }
+        })
+    };
+    let mut budget = Budget::with_clock(limits, clock);
+
+    // Many decode chunks' worth of input, so "stopped part-way" is
+    // unambiguous.
+    let text = "a".repeat(400_000);
+    let input = ExtractInput {
+        declared_type: Some("text/plain"),
+        resource_name: "long.txt",
+        bytes: text.as_bytes(),
+    };
+
+    let result = PlainTextExtractor.extract(&input, &mut budget);
+
+    assert!(
+        matches!(result, Err(ExtractError::DeadlineExceeded)),
+        "a deadline expiring during the decode must cancel it with DeadlineExceeded, \
+         got {result:?}"
+    );
+    let decoded = budget.output_text().len();
+    assert!(
+        decoded > 0,
+        "the decode must have made progress before the deadline expired (otherwise this test \
+         is only re-proving the pre-loop check), but nothing was decoded"
+    );
+    assert!(
+        decoded < text.len() / 2,
+        "the decode must stop far short of the input once the deadline passes, but {decoded} of \
+         {} bytes were decoded — the between-chunks deadline check is not being consulted",
+        text.len()
+    );
+    assert!(
+        ticks.load(Ordering::SeqCst) >= 4,
+        "the extractor must consult the clock repeatedly during the decode, not once up front"
     );
 }
 
