@@ -1,0 +1,8 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":328
+  },
+  "file":"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\">\n<head>\n<meta name=\"stream_size\" content=\"226\" />\n<meta name=\"X-Parsed-By\" content=\"org.apache.tika.parser.DefaultParser\" />\n<meta name=\"X-Parsed-By\" content=\"org.apache.tika.parser.html.HtmlParser\" />\n<meta name=\"stream_content_type\" content=\"text/html\" />\n<meta name=\"stream_name\" content=\"file\" />\n<meta name=\"stream_source_info\" content=\"sample.html\" />\n<meta name=\"dc:title\" content=\"Captured title\" />\n<meta name=\"author\" content=\"Ada Example\" />\n<meta name=\"Content-Encoding\" content=\"ISO-8859-1\" />\n<meta name=\"resourceName\" content=\"sample.html\" />\n<meta name=\"Content-Type\" content=\"text/html; charset=ISO-8859-1\" />\n<title>Captured title</title>\n</head>\n<body><div>Ignored wrapper <a shape=\"rect\" href=\"https://example.test/doc\">Linked words</a></div>\n<p>Main paragraph.</p>\n</body></html>",
+  "file_metadata":["resourceName",["sample.html","sample.html"],"Content-Type",["text/html","text/html; charset=ISO-8859-1"],"stream_name",["file","file"],"stream_source_info",["sample.html","sample.html"],"stream_size",["226","226"],"stream_content_type",["text/html","text/html"],"X-Parsed-By",["org.apache.tika.parser.DefaultParser","org.apache.tika.parser.html.HtmlParser"],"dc:title",["Captured title"],"author",["Ada Example"],"Content-Encoding",["ISO-8859-1"],"title",["Captured title"]]
+}

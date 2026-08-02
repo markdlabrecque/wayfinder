@@ -1,0 +1,8 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":4
+  },
+  "file":"\n\n\n\n\n\n\n\n\n\n\n\n\nCafé naïve.\nSecond line.\n\n",
+  "file_metadata":["resourceName",["sample-latin1.txt","sample-latin1.txt"],"Content-Type",["text/plain; charset=ISO-8859-1","text/plain; charset=ISO-8859-1"],"stream_name",["file","file"],"stream_source_info",["sample-latin1.txt","sample-latin1.txt"],"stream_size",["25","25"],"stream_content_type",["text/plain; charset=ISO-8859-1","text/plain; charset=ISO-8859-1"],"Content-Encoding",["ISO-8859-1","ISO-8859-1"],"X-Parsed-By",["org.apache.tika.parser.DefaultParser","org.apache.tika.parser.csv.TextAndCSVParser"]]
+}
