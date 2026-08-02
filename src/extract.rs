@@ -237,6 +237,15 @@ const MARKUP_SNIFF_WINDOW: usize = 1024;
 ///   `<!DOCTYPE html` counts. An unanchored search there would let any plain
 ///   text file that merely mentions `<html` in its first kilobyte be sniffed
 ///   as HTML, overriding a declared `text/plain`.
+///
+/// The `<?xml` test runs on the untrimmed bytes (only the BOM is stripped,
+/// by the caller) while the no-declaration branch trims leading ASCII
+/// whitespace, and the asymmetry is intentional: an XML declaration is only
+/// well-formed at byte zero, so `"  <?xml ...?>"` is not an XML document and
+/// this function is right not to treat it as one. Leading whitespace before a
+/// root element, by contrast, is perfectly ordinary. Such an input falls
+/// through to the declared type, which is the correct answer for malformed
+/// markup.
 fn sniff_markup(bytes: &[u8]) -> Option<ContentType> {
     let window = &bytes[..bytes.len().min(MARKUP_SNIFF_WINDOW)];
     if bytes.starts_with(b"<?xml") {
@@ -284,6 +293,18 @@ fn is_html_root_at_start(bytes: &[u8]) -> bool {
 
 /// True when an `<html` root or an `html` doctype appears anywhere in the
 /// already-known-to-be-XML leading window.
+///
+/// ponytail: "anywhere in the window" is unanchored, so an XML document that
+/// merely *contains* `<html ` in its first kilobyte detects as `Html`. The
+/// known false positive is **XSLT with a literal result element** (`<xsl:template
+/// match="/"><html>...`), which is genuinely a stylesheet, not a page; an
+/// `<html>` inside a leading comment or CDATA section does it too. The
+/// consequence is bounded — a stylesheet routed to the HTML extractor
+/// yields its literal text rather than an error — and the anchored
+/// alternative (parse past the declaration, doctype, comments and PIs to find
+/// the real first element) is a small XML scanner this phase has no parser to
+/// borrow. Trigger: the HTML or XML extractor landing, where a real parser
+/// exists and misrouting an XSLT stylesheet starts to have a visible cost.
 fn window_contains_html_root(window: &[u8]) -> bool {
     window
         .iter()
@@ -719,20 +740,40 @@ pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 /// as "guard integrity no longer rests on review of in-tree extractors" — it
 /// rests on it for exactly one, much more conspicuous, wholesale move.
 ///
-/// The trait was left on `&mut Budget` on purpose rather than by omission.
-/// The one real call site — `PlainTextExtractor` reading
-/// `output_text()[start..]` back after pushing to it — would, under `&Budget`,
-/// force the output `String` into a `RefCell` and either a `Ref` dance across
-/// the decode loop or an extra copy of the whole output, on the hot path, to
-/// close a hole that requires a deliberate wholesale reassignment to exploit.
+/// The trait was left on `&mut Budget` on purpose rather than by omission,
+/// and the reason is API shape, not cost. Moving the output `String` behind a
+/// `RefCell` — which `&Budget` requires, since `push_str` mutates it — means
+/// `output_text()` can no longer return `&str`. It would have to hand back a
+/// `Ref<'_, String>` (or a closure-taking `with_output_text`, or a copy), and
+/// that signature is part of the extractor contract every phase-1+ format
+/// will be written against. Designing it now would mean guessing at how
+/// extractors want to read accumulated output, with exactly one in-tree
+/// extractor to guess from.
+///
+/// It is worth being precise about what this does *not* cost, because an
+/// earlier draft of this comment got it wrong: nothing about the decode hot
+/// path gets slower. `PlainTextExtractor` already copies its slice out once
+/// via `output_text()[start..].to_string()`, and that copy happens either way
+/// — under a `RefCell` it simply happens inside one borrow, once, at the end.
+/// The hot path is `push_str`, one `borrow_mut` per 8 KiB chunk.
 ///
 /// ponytail: the upgrade is `Extractor::extract(&self, input, budget:
-/// &Budget)` with the output buffer behind interior mutability too (a `Cell`
-/// swap, or a `RefCell` borrowed only inside `push_str`), which makes
-/// reassignment impossible because the extractor never holds a `&mut`.
+/// &Budget)` with the output buffer behind interior mutability too, which
+/// makes reassignment impossible because the extractor never holds a `&mut`.
 /// Trigger: the first extractor that does not need to read its own output
-/// back — at that point the `RefCell`/copy cost disappears and there is
-/// nothing left to trade off.
+/// back. At that point the read-back accessor's shape can be designed against
+/// two real call sites with different needs instead of one.
+///
+/// ## Threading
+///
+/// `Budget` is `Send` but **not** `Sync`, because those counters are `Cell`s.
+/// It moves onto an extraction worker thread freely (which is how
+/// `ExtractionRuntime` uses it), but a `&Budget` cannot be held across an
+/// `.await` inside a `Send` handler future — the route must own its budget on
+/// the blocking side of `spawn_extraction`, not borrow it from async code.
+/// That is deliberate: a budget shared between threads would need every
+/// counter to be atomic, for a type that is by construction used by exactly
+/// one worker at a time.
 pub struct Budget {
     limits: ExtractLimits,
     xml_depth: Cell<BoundedCounter>,
@@ -1055,6 +1096,14 @@ impl ExtractionRuntime {
     /// worker thread when the job returns, so a job that never returns leaves
     /// the slot burnt. Burnt slots are the documented residual risk (see the
     /// module docs) — a hung *request* is not.
+    ///
+    /// Requires a tokio runtime with the **time driver** enabled, since the
+    /// timeout is a `tokio::time::timeout`. Every runtime in this crate is
+    /// built by `#[tokio::main]` or `#[tokio::test]`, both of which
+    /// `enable_all()`, so this is satisfied everywhere today — but a
+    /// hand-built `Builder::new_current_thread()` without `enable_time()`
+    /// would panic on the first extraction rather than merely losing the
+    /// timeout.
     pub async fn spawn_extraction<F, T>(&self, deadline: Duration, f: F) -> Result<T, ExtractError>
     where
         F: FnOnce() -> T + Send + 'static,

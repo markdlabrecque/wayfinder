@@ -1172,6 +1172,67 @@ fn zip_budget_accumulates_actual_bytes_across_the_chunks_of_a_single_entry() {
     );
 }
 
+/// Review round 1, item 2. `charge_actual` documents that "nothing is charged
+/// when a check fails", but only the cumulative half of that was bound:
+/// committing the per-entry total *above* the cumulative check survived the
+/// whole suite. It is fail-safe in direction (the entry is over-charged, never
+/// under-charged), and it is still wrong — it silently shrinks the per-entry
+/// allowance of an entry that has not consumed it.
+///
+/// Observed without an `entry_actual()` getter, through which limit trips
+/// next: after a charge rejected on the *cumulative* limit, a charge that
+/// still fits the entry's own allowance must succeed. Under the leak it fails
+/// as `EntryTooLarge` instead.
+#[test]
+fn zip_budget_does_not_charge_the_per_entry_total_when_the_cumulative_check_rejects() {
+    let mut limits = permissive_limits();
+    limits.zip_max_entry_bytes = 1000;
+    limits.zip_max_cumulative_bytes = 1500;
+    let mut zip = ZipBudget::new(limits);
+
+    let first = ZipEntryMeta {
+        name: "a.bin",
+        compressed_size: 0,
+        uncompressed_size: 0,
+    };
+    zip.admit(&first).expect("0/0 entry passes the pre-filter");
+    zip.charge_actual(800)
+        .expect("800 actual bytes fit both limits");
+
+    let second = ZipEntryMeta {
+        name: "b.bin",
+        compressed_size: 0,
+        uncompressed_size: 0,
+    };
+    zip.admit(&second).expect("0/0 entry passes the pre-filter");
+    // Fits this entry's own 1000-byte allowance, but takes the cumulative
+    // total to 1600 over a limit of 1500.
+    let rejected = zip.charge_actual(800);
+    assert!(
+        matches!(
+            rejected,
+            Err(ExtractError::ZipBudget(ZipViolation::CumulativeTooLarge))
+        ),
+        "the charge must be rejected on the cumulative limit, got {rejected:?}"
+    );
+    assert_eq!(
+        zip.cumulative_actual(),
+        800,
+        "a rejected charge must not advance the cumulative total"
+    );
+
+    // The entry itself has still consumed nothing, so 700 bytes fit its
+    // 1000-byte allowance and bring the cumulative total to exactly 1500.
+    let after = zip.charge_actual(700);
+    assert!(
+        after.is_ok(),
+        "a charge rejected on the cumulative limit must not have consumed the entry's own \
+         per-entry allowance -- 700 bytes must still fit an untouched 1000-byte entry, \
+         got {after:?}"
+    );
+    assert_eq!(zip.cumulative_actual(), 1500);
+}
+
 // ---------------------------------------------------------------------
 // Item B — ZIP entry count vs a skip-and-continue walker
 // ---------------------------------------------------------------------
@@ -1272,6 +1333,57 @@ async fn spawn_extraction_times_out_a_job_that_never_returns_while_the_slot_stay
         matches!(second, Err(ExtractError::TooBusy)),
         "the pool slot occupied by the wedged job must remain unavailable after the caller's \
          timeout fired -- only the future timed out, not the worker thread -- got {second:?}"
+    );
+}
+
+/// Review round 1, item 3. The wedge test above only proves the outer
+/// timeout *fires*; it would pass just as well with no grace margin at all,
+/// leaving `SPAWN_TIMEOUT_GRACE`'s entire stated purpose untested. The margin
+/// exists so the outer timeout is a backstop for jobs that ignore their
+/// budget, never a race against jobs that honour it: a cooperative parser
+/// that notices its own deadline and returns must win, so the caller sees the
+/// parser's own error (which names what was being parsed) rather than a bare
+/// timeout, and the slot comes back with it.
+#[tokio::test]
+async fn spawn_extraction_lets_a_job_that_honours_its_own_deadline_return_its_own_error() {
+    let mut limits = permissive_limits();
+    limits.max_concurrency = 1;
+    limits.deadline = Duration::from_millis(50);
+    let runtime = wayfinder::extract::ExtractionRuntime::new(&limits);
+
+    // A cooperative parser: it polls its own budget and stops itself. It
+    // necessarily finishes slightly *after* the deadline it is watching, which
+    // is exactly the window the grace margin covers.
+    let result = runtime
+        .spawn_extraction(limits.deadline, move || {
+            let budget = Budget::new(limits);
+            loop {
+                if budget.check_deadline().is_err() {
+                    return "stopped by its own budget";
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+        .await;
+
+    assert_eq!(
+        result.as_ref().ok(),
+        Some(&"stopped by its own budget"),
+        "a job that honours its budget deadline finishes just after that deadline; the grace \
+         margin on the outer timeout must let its own result through instead of racing it to a \
+         bare DeadlineExceeded, got {result:?}"
+    );
+
+    // The other half: because the job really returned, its worker released
+    // the permit — unlike the wedged case above, this slot is reusable.
+    let second = runtime
+        .spawn_extraction(Duration::from_secs(5), || "ok")
+        .await;
+    assert_eq!(
+        second.as_ref().ok(),
+        Some(&"ok"),
+        "a job that returned must have released its pool slot, so the next extraction runs \
+         instead of being shed as TooBusy; got {second:?}"
     );
 }
 
@@ -1557,5 +1669,51 @@ fn detect_does_not_sniff_html_from_a_mention_of_html_inside_plain_text() {
         "a plain-text file that merely mentions `<html>` must stay PlainText: with no XML \
          declaration, only a document that *opens* with an html root may be sniffed as Html, \
          got {got:?}"
+    );
+}
+
+/// Review round 1, item 4. Nothing in the suite exercised a *non-HTML*
+/// doctype, so both ways of loosening the doctype match survived: accepting
+/// any doctype at all, and matching only its first letter. Either one hands
+/// SVG (and any other custom vocabulary declared by name) to an HTML parser.
+/// Both spellings are asserted here, bare and behind an XML declaration,
+/// because only the declaration-less form reaches the anchored branch.
+#[test]
+fn detect_does_not_treat_a_non_html_doctype_as_html() {
+    // Bare, no XML declaration: the doctype is the first thing in the file,
+    // which is precisely where the anchored html-root check looks.
+    let svg = b"<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \
+                \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n\
+                <svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>";
+    let got = detect(Some("application/xml"), "drawing", svg);
+    assert_eq!(
+        got,
+        ContentType::Xml,
+        "a bare `<!DOCTYPE svg ...>` must not be sniffed as Html -- the doctype's root name has \
+         to actually be `html`, got {got:?}"
+    );
+
+    // The same document behind an XML declaration, which takes the unanchored
+    // window-search branch instead.
+    let declared_svg = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                         <!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \
+                         \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n\
+                         <svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>";
+    let got = detect(None, "drawing.xml", declared_svg);
+    assert_eq!(
+        got,
+        ContentType::Xml,
+        "an XML-declared document with a `<!DOCTYPE svg ...>` must still detect as Xml, \
+         got {got:?}"
+    );
+
+    // A doctype that shares only HTML's first letter: `h` is not `html`.
+    let hoard = b"<!DOCTYPE hoard SYSTEM \"hoard.dtd\">\n<hoard><item/></hoard>";
+    let got = detect(Some("text/xml"), "stash", hoard);
+    assert_eq!(
+        got,
+        ContentType::Xml,
+        "a doctype merely beginning with `h` must not be sniffed as Html -- the match is on the \
+         whole name `html`, got {got:?}"
     );
 }
