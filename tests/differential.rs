@@ -24,9 +24,10 @@ use std::time::{Duration, Instant};
 use axum::Router;
 use axum::http::StatusCode;
 use common::diff::{
-    Diff, ManifestEntry, ManifestErrorEntry, RankedDoc, diff, diff_ranked_ids, fetch_live_full,
-    fetch_live_status, live_reachable, load_manifest, load_manifest_errors, normalize, ranked_docs,
-    score_tolerance,
+    Diff, ManifestEntry, ManifestErrorEntry, ManifestMultipartEntry, RankedDoc, diff,
+    diff_ranked_ids, fetch_live_full, fetch_live_multipart, fetch_live_status, live_reachable,
+    load_manifest, load_manifest_errors, load_manifest_multipart, normalize, normalize_extract,
+    ranked_docs, score_tolerance,
 };
 use common::key_order::fixture_text;
 use common::{fixture, get, indexed_app, post_docs, request_full};
@@ -39,6 +40,79 @@ fn manifest_path() -> PathBuf {
 
 fn manifest_errors_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("solr-ref/manifest-errors.tsv")
+}
+
+fn manifest_multipart_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("solr-ref/manifest-multipart.tsv")
+}
+
+fn extract_inputs_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("solr-ref/extract-inputs")
+}
+
+/// `/update/extract` (issue #258) needs no particular field schema — it
+/// never indexes anything under `extractOnly=true` — so this reuses
+/// `common::SCHEMA_TOML` directly rather than defining a bespoke one like
+/// `facets_app`/`keyorder_app` do for their own manifest rows.
+async fn extract_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), common::SCHEMA_TOML).expect("app must build");
+    (app, dir)
+}
+
+/// Permanent, ratified `/update/extract` divergences (issue #258 spec) — the
+/// `manifest-multipart.tsv` counterpart of `ACCEPTED_DIVERGENCES` above.
+/// Named distinctly (rather than folded into `ACCEPTED_DIVERGENCES`) because
+/// that list's own lookup is checked against `manifest-errors.tsv` row names
+/// elsewhere in this file; reusing it verbatim for multipart rows would
+/// conflict with that scoping.
+///
+/// Every success row gets an `X-Parsed-By` entry (`file_metadata`, every
+/// capture); `extract_html_only_xml` additionally gets `shape="rect"` and an
+/// `X-Parsed-By` `<meta>` element inside its XHTML `file` string, and
+/// `extract_plain_text_xml` gets the `<meta>` element too (both wrap their
+/// text in Tika's XHTML envelope). The plain-text `extractFormat=text` rows
+/// have no `<meta>` markup in `file` at all — a plain-text body, not XHTML —
+/// so they only need the `file_metadata` entry.
+const ACCEPTED_DIVERGENCES_MULTIPART: &[(&str, &str)] = &[
+    (
+        "extract_plain_text_xml",
+        "issue #258: X-Parsed-By names Java Tika/parser class names Wayfinder has no honest \
+         equivalent for, in both the XHTML file's meta element and file_metadata",
+    ),
+    (
+        "extract_plain_text_text",
+        "issue #258: X-Parsed-By in file_metadata only (extractFormat=text has no XHTML meta \
+         markup in file to strip)",
+    ),
+    (
+        "extract_html_only_xml",
+        "issue #258: X-Parsed-By in both the XHTML file's meta element and file_metadata, plus \
+         shape=\"rect\" that Tika's own HTML parser injects onto every <a> element",
+    ),
+    (
+        "extract_html_only_text",
+        "issue #258: X-Parsed-By in file_metadata only",
+    ),
+    (
+        "extract_latin1_text",
+        "issue #258: X-Parsed-By in file_metadata only",
+    ),
+    (
+        "extract_utf8_bom_text",
+        "issue #258: X-Parsed-By in file_metadata only",
+    ),
+    (
+        "extract_declared_charset_text",
+        "issue #258: X-Parsed-By in file_metadata only",
+    ),
+];
+
+fn accepted_divergence_multipart_reason(name: &str) -> Option<&'static str> {
+    ACCEPTED_DIVERGENCES_MULTIPART
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, reason)| *reason)
 }
 
 // --- duplicated schema/corpus for manifest-errors.tsv's `facets`/`keyorder`
@@ -2268,6 +2342,340 @@ fn live_solr_matches_committed_manifest_errors() {
     assert!(
         failures.is_empty(),
         "live Solr manifest-errors differential failures:\n{}",
+        failures.join("\n")
+    );
+}
+
+// --- manifest-multipart.tsv wired into the harness (issue #258) -----------
+//
+// A third hermetic runner, alongside the plain-GET `manifest.tsv` run above
+// and the JSON-body `manifest-errors.tsv` run just above this comment: every
+// row is a multipart/form-data POST to `/update/extract`, built by
+// `common::request_multipart` from a file under `solr-ref/extract-inputs/`,
+// diffed against the committed `solr-ref/responses/<name>.json` fixture
+// through the same `normalize()` plus a second, extraction-specific
+// `normalize_extract()` pass (declared and tested for real, not vacuously,
+// in the `normalize_extract_*` tests below).
+
+#[test]
+fn load_manifest_multipart_parses_every_line_of_the_real_manifest_multipart() {
+    let path = manifest_multipart_path();
+    let raw = std::fs::read_to_string(&path).expect("read solr-ref/manifest-multipart.tsv");
+    let expected_count = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .count();
+
+    let entries = load_manifest_multipart(&path);
+
+    assert_eq!(
+        entries.len(),
+        expected_count,
+        "loader must parse every non-blank, non-comment line of manifest-multipart.tsv"
+    );
+    assert!(
+        entries.contains(&ManifestMultipartEntry {
+            name: "extract_plain_text_xml".to_string(),
+            status: 200,
+            url: "content/update/extract?extractOnly=true&resource.name=sample.txt&wt=json"
+                .to_string(),
+            part_name: "file".to_string(),
+            input_file: "sample.txt".to_string(),
+            mime: String::new(),
+        }),
+        "loader must parse extract_plain_text_xml with no mime column, got {:?}",
+        entries
+    );
+    assert!(
+        entries.contains(&ManifestMultipartEntry {
+            name: "extract_declared_charset_text".to_string(),
+            status: 200,
+            url: "content/update/extract?extractOnly=true&extractFormat=text&resource.name=sample-latin1.txt&wt=json"
+                .to_string(),
+            part_name: "file".to_string(),
+            input_file: "sample-latin1.txt".to_string(),
+            mime: "text/plain; charset=ISO-8859-1".to_string(),
+        }),
+        "loader must parse extract_declared_charset_text's mime column, got {:?}",
+        entries
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.name == "extract_corrupt_pdf" && e.status == 500),
+        "loader must parse the corrupt-pdf 500 row, got {:?}",
+        entries
+    );
+}
+
+/// Proves `normalize_extract` strips exactly the two ratified markers named
+/// in `ACCEPTED_DIVERGENCES_MULTIPART` above (`X-Parsed-By` and
+/// `shape="rect"`) and nothing else. Written against hand-built `Value`s
+/// (not the real fixtures) so it pins the normaliser's own behaviour in
+/// isolation from any particular capture.
+#[test]
+fn normalize_extract_strips_x_parsed_by_and_shape_rect_and_records_what_it_touched() {
+    let v = json!({
+        "responseHeader": {"status": 0, "QTime": 4},
+        "file": "\n<html>\n<meta name=\"X-Parsed-By\" content=\"org.apache.tika.parser.DefaultParser\" />\n<a href=\"x\" shape=\"rect\">x</a>\n</html>\n",
+        "file_metadata": ["resourceName", ["a.txt", "a.txt"], "X-Parsed-By", ["org.apache.tika.parser.DefaultParser", "org.apache.tika.parser.csv.TextAndCSVParser"]]
+    });
+
+    let n = normalize_extract(v);
+
+    let file = n.value["file"].as_str().expect("file must stay a string");
+    assert!(
+        !file.contains("X-Parsed-By"),
+        "X-Parsed-By meta element must be stripped from file, got {file:?}"
+    );
+    assert!(
+        !file.contains("shape=\"rect\""),
+        "shape=\"rect\" must be stripped from file, got {file:?}"
+    );
+    assert!(
+        file.contains("<a href=\"x\">x</a>"),
+        "the rest of the <a> element must survive untouched, got {file:?}"
+    );
+
+    let metadata = n.value["file_metadata"]
+        .as_array()
+        .expect("file_metadata must stay an array");
+    assert!(
+        !metadata.iter().any(|v| v.as_str() == Some("X-Parsed-By")),
+        "X-Parsed-By key must be removed from file_metadata, got {metadata:?}"
+    );
+    assert!(
+        metadata.iter().any(|v| v.as_str() == Some("resourceName")),
+        "unrelated file_metadata keys must survive, got {metadata:?}"
+    );
+
+    assert!(
+        n.touched.iter().any(|t| t.contains("X-Parsed-By meta")),
+        "touched must record the file meta-element strip, got {:?}",
+        n.touched
+    );
+    assert!(
+        n.touched.iter().any(|t| t.contains("shape=\"rect\"")),
+        "touched must record the shape=\"rect\" strip, got {:?}",
+        n.touched
+    );
+    assert!(
+        n.touched
+            .iter()
+            .any(|t| t.contains("file_metadata") && t.contains("X-Parsed-By")),
+        "touched must record the file_metadata strip, got {:?}",
+        n.touched
+    );
+}
+
+/// The over-normalisation guard the spec explicitly asks for: a real
+/// difference in `file` (not one of the two ratified markers) must still be
+/// visible to `diff()` after `normalize_extract`, proving the normaliser does
+/// not swallow anything beyond what it declares.
+#[test]
+fn normalize_extract_does_not_hide_a_real_difference_in_file() {
+    let expected = json!({"file": "hello world", "file_metadata": []});
+    let actual = json!({"file": "goodbye world", "file_metadata": []});
+
+    let expected_n = normalize_extract(expected);
+    let actual_n = normalize_extract(actual);
+
+    let report = diff(&expected_n.value, &actual_n.value);
+    assert!(
+        !report.diffs.is_empty(),
+        "a real content difference in file must still be reported after normalize_extract, \
+         not silently normalised away"
+    );
+}
+
+/// A fixture with neither `X-Parsed-By` nor `shape=\"rect\"` anywhere must
+/// come back with an empty `touched` list — the normaliser must not fire
+/// unconditionally.
+#[test]
+fn normalize_extract_touches_nothing_when_no_ratified_marker_is_present() {
+    let v = json!({"file": "plain content, nothing special", "file_metadata": ["a", ["1", "1"]]});
+    let n = normalize_extract(v);
+    assert!(
+        n.touched.is_empty(),
+        "normalize_extract must not touch anything when no ratified marker is present, got {:?}",
+        n.touched
+    );
+}
+
+/// The hermetic runner: every `manifest-multipart.tsv` row, POSTed through
+/// the real `/solr/{core}/update/extract` route (issue #258) against an
+/// in-process Wayfinder, diffed against its committed fixture.
+///
+/// Expected to fail today for a structural reason, not a normalisation
+/// reason: the route does not exist yet, so every row currently gets a 404
+/// (or whatever axum's router produces for an unmatched path) instead of its
+/// fixture's captured status.
+#[tokio::test]
+async fn extract_multipart_manifest_matches_captured_fixtures() {
+    let entries = load_manifest_multipart(&manifest_multipart_path());
+    assert!(
+        !entries.is_empty(),
+        "manifest-multipart.tsv must not be empty, or this test is vacuous"
+    );
+
+    let (app, _dir) = extract_app().await;
+    let mut failures = Vec::new();
+    let mut ran = 0usize;
+
+    for entry in &entries {
+        let input_path = extract_inputs_dir().join(&entry.input_file);
+        let bytes = std::fs::read(&input_path)
+            .unwrap_or_else(|e| panic!("read extract input {}: {e}", input_path.display()));
+
+        let (status, actual) = common::request_multipart(
+            &app,
+            &entry.url,
+            &entry.part_name,
+            &entry.input_file,
+            &entry.mime,
+            &bytes,
+        )
+        .await;
+
+        if status.as_u16() != entry.status {
+            failures.push(format!(
+                "{}: HTTP status {} vs expected {}, body: {actual}",
+                entry.name,
+                status.as_u16(),
+                entry.status
+            ));
+            continue;
+        }
+        ran += 1;
+
+        let expected = fixture(&entry.name);
+        let expected_n = normalize(expected);
+        let actual_n = normalize(actual);
+
+        let divergence_reason = accepted_divergence_multipart_reason(&entry.name);
+        if entry.status == 200 {
+            // Prove the raw (pre-normalize_extract) envelopes really do
+            // differ for every accepted-divergence row, so this is not a
+            // vacuous waiver: the divergence must still genuinely exist.
+            let raw_report = diff(&expected_n.value, &actual_n.value);
+            if let Some(reason) = divergence_reason
+                && raw_report.diffs.is_empty()
+            {
+                failures.push(format!(
+                    "{}: ACCEPTED_DIVERGENCES_MULTIPART says this should still diverge \
+                     before normalize_extract ({reason}), but the raw envelopes already \
+                     match — remove this entry",
+                    entry.name
+                ));
+            }
+
+            let expected_n2 = normalize_extract(expected_n.value.clone());
+            let actual_n2 = normalize_extract(actual_n.value.clone());
+            let report = diff(&expected_n2.value, &actual_n2.value);
+            eprintln!(
+                "{}: {} diffs after normalize_extract, touched {:?}",
+                entry.name,
+                report.diffs.len(),
+                actual_n2.touched
+            );
+            if !report.diffs.is_empty() {
+                failures.push(format!(
+                    "{}: diffs remain after normalize_extract: {:?}",
+                    entry.name, report.diffs
+                ));
+            }
+        } else {
+            // The corrupt-pdf 500 envelope has no file/file_metadata fields
+            // to normalize_extract; normalize() alone is the same treatment
+            // every other error-envelope fixture gets.
+            let report = diff(&expected_n.value, &actual_n.value);
+            if !report.diffs.is_empty() {
+                failures.push(format!("{}: {:?}", entry.name, report.diffs));
+            }
+        }
+    }
+
+    assert_eq!(
+        ran,
+        entries.len(),
+        "every manifest-multipart row must reach its expected status to be diffed at all \
+         (a status mismatch above short-circuits the diff for that row)"
+    );
+
+    assert!(
+        failures.is_empty(),
+        "hermetic multipart differential failures against solr-ref fixtures:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// Live counterpart, gated by `WAYFINDER_DIFF_SOLR=1` exactly like
+/// `live_solr_matches_committed_query_set` above. Requires
+/// `solr-ref/capture.sh`'s #258 block to have been run first (the
+/// `extract258` core / port-9020 container).
+#[test]
+fn live_solr_matches_committed_manifest_multipart() {
+    if std::env::var("WAYFINDER_DIFF_SOLR").ok().as_deref() != Some("1") {
+        eprintln!(
+            "skipping live Solr multipart differential: run solr-ref/capture.sh, then set \
+             WAYFINDER_DIFF_SOLR=1 to enable"
+        );
+        return;
+    }
+
+    let base_url = std::env::var("WAYFINDER_DIFF_SOLR_EXTRACT_URL")
+        .unwrap_or_else(|_| "http://localhost:9020/solr".to_string());
+
+    if !live_reachable(&base_url) {
+        eprintln!(
+            "skipping live Solr multipart differential: {base_url} is not reachable (run \
+             solr-ref/capture.sh's #258 block first)"
+        );
+        return;
+    }
+
+    let entries = load_manifest_multipart(&manifest_multipart_path());
+    let mut failures = Vec::new();
+
+    for entry in &entries {
+        let input_path = extract_inputs_dir().join(&entry.input_file);
+        let (status, actual) = fetch_live_multipart(
+            &base_url,
+            &entry.url,
+            &entry.part_name,
+            &input_path,
+            &entry.input_file,
+            &entry.mime,
+        );
+
+        if status != entry.status {
+            failures.push(format!(
+                "{}: HTTP status {status} vs expected {}",
+                entry.name, entry.status
+            ));
+            continue;
+        }
+
+        let expected = fixture(&entry.name);
+        let expected_n = normalize(expected);
+        let actual_n = normalize(actual);
+        let report = diff(&expected_n.value, &actual_n.value);
+        if !report.diffs.is_empty() {
+            eprintln!(
+                "{}: (comparing live Solr against its own capture) {:?}",
+                entry.name, report.diffs
+            );
+            failures.push(format!(
+                "{}: differs from live Solr: {:?}",
+                entry.name, report.diffs
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "live Solr multipart differential failures:\n{}",
         failures.join("\n")
     );
 }

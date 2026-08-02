@@ -558,3 +558,247 @@ pub fn live_reachable(base_url: &str) -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
+
+// ---------------------------------------------------------------------
+// `/update/extract` extractOnly differential support (issue #258)
+// ---------------------------------------------------------------------
+
+/// One line of `solr-ref/manifest-multipart.tsv`:
+/// `name<TAB>status<TAB>url<TAB>part-name<TAB>input-file<TAB>mime`. `url` is
+/// core-relative (like `ManifestErrorEntry::url`), never a bare GET path
+/// (`manifest.tsv` is core-relative GETs only) and never carries a JSON body
+/// (`manifest-errors.tsv`'s runner models JSON bodies, not multipart).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestMultipartEntry {
+    pub name: String,
+    pub status: u16,
+    pub url: String,
+    pub part_name: String,
+    pub input_file: String,
+    /// The declared `Content-Type` of the multipart file part. Empty when the
+    /// column is absent, meaning "send no `Content-Type` on the part" — the
+    /// same convention `capture.sh`'s `cap_extract`/`cap_extract258` use
+    /// (`type=application/octet-stream` unless the row overrides it).
+    pub mime: String,
+}
+
+/// Loads `solr-ref/manifest-multipart.tsv`, skipping blank lines and
+/// `#`-comment lines exactly like `load_manifest`/`load_manifest_errors`.
+pub fn load_manifest_multipart(path: &Path) -> Vec<ManifestMultipartEntry> {
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("read manifest-multipart {}: {e}", path.display()));
+    raw.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let mut cols = line.split('\t');
+            let name = cols
+                .next()
+                .unwrap_or_else(|| panic!("manifest-multipart line missing name column: {line:?}"))
+                .to_string();
+            let status: u16 = cols
+                .next()
+                .unwrap_or_else(|| {
+                    panic!("manifest-multipart line missing status column: {line:?}")
+                })
+                .parse()
+                .unwrap_or_else(|e| panic!("manifest-multipart status column must be a u16: {e}"));
+            let url = cols
+                .next()
+                .unwrap_or_else(|| panic!("manifest-multipart line missing url column: {line:?}"))
+                .to_string();
+            let part_name = cols
+                .next()
+                .unwrap_or_else(|| {
+                    panic!("manifest-multipart line missing part-name column: {line:?}")
+                })
+                .to_string();
+            let input_file = cols
+                .next()
+                .unwrap_or_else(|| {
+                    panic!("manifest-multipart line missing input-file column: {line:?}")
+                })
+                .to_string();
+            let mime = cols.next().unwrap_or("").to_string();
+            ManifestMultipartEntry {
+                name,
+                status,
+                url,
+                part_name,
+                input_file,
+                mime,
+            }
+        })
+        .collect()
+}
+
+/// Live counterpart, mirroring `capture.sh`'s `cap_extract`/`cap_extract258`:
+/// `curl -F "<part-name>=@<input-path>;type=<mime>;filename=<input-file>"`
+/// against `<base_url>/<path-and-query>`. Only ever called under
+/// `WAYFINDER_DIFF_SOLR=1`.
+pub fn fetch_live_multipart(
+    base_url: &str,
+    path_and_query: &str,
+    part_name: &str,
+    input_path: &Path,
+    input_file: &str,
+    mime: &str,
+) -> (u16, Value) {
+    let url = format!("{base_url}/{path_and_query}");
+    let mime = if mime.is_empty() {
+        "application/octet-stream"
+    } else {
+        mime
+    };
+    let form_field = format!(
+        "{part_name}=@{};type={mime};filename={input_file}",
+        input_path.display()
+    );
+    let output = std::process::Command::new("curl")
+        .args([
+            "-sS",
+            "-X",
+            "POST",
+            &url,
+            "-F",
+            &form_field,
+            "-w",
+            "\n%{http_code}",
+        ])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run curl against {url}: {e}"));
+    assert!(
+        output.status.success(),
+        "curl exited non-zero fetching {url}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    let (body, status) = text
+        .rsplit_once('\n')
+        .unwrap_or_else(|| panic!("curl output for {url} missing trailing status line: {text:?}"));
+    let status: u16 = status
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("curl status code for {url} must be numeric: {e}"));
+    let value: Value = serde_json::from_str(body.trim()).unwrap_or_else(|e| {
+        panic!("response body from {url} must be valid JSON: {e} (body: {body:?})")
+    });
+    (status, value)
+}
+
+/// Strips every `<meta name="X-Parsed-By" content="..." />` element (plus a
+/// following newline) from an XHTML `file` value, reporting whether anything
+/// was removed. A free function (not inlined into `normalize_extract`) so it
+/// can be unit-tested against strings that do and do not contain the marker
+/// without going through a whole envelope `Value`.
+fn strip_x_parsed_by_meta(file: &str) -> (String, bool) {
+    const MARKER: &str = "<meta name=\"X-Parsed-By\"";
+    let mut result = String::new();
+    let mut touched = false;
+    let mut rest = file;
+    loop {
+        match rest.find(MARKER) {
+            None => {
+                result.push_str(rest);
+                break;
+            }
+            Some(idx) => {
+                result.push_str(&rest[..idx]);
+                touched = true;
+                let after_marker = &rest[idx..];
+                let mut consumed = after_marker
+                    .find("/>")
+                    .map(|i| i + 2)
+                    .unwrap_or(after_marker.len());
+                // Also eat one trailing newline, so removing an element does
+                // not leave a blank line behind it — every captured `file`
+                // value puts exactly one `\n` after each `<meta .../>`.
+                if after_marker[consumed..].starts_with('\n') {
+                    consumed += 1;
+                }
+                rest = &after_marker[consumed..];
+            }
+        }
+    }
+    (result, touched)
+}
+
+/// Strips every ` shape="rect"` attribute (Tika's own addition to every
+/// HTML-parsed `<a>` element) from a `file` value, reporting whether
+/// anything was removed.
+fn strip_shape_rect(file: &str) -> (String, bool) {
+    const MARKER: &str = " shape=\"rect\"";
+    if file.contains(MARKER) {
+        (file.replace(MARKER, ""), true)
+    } else {
+        (file.to_string(), false)
+    }
+}
+
+/// Removes the `X-Parsed-By` key (and its value array) from a `file_metadata`
+/// alternating-array, reporting whether it was present.
+fn strip_x_parsed_by_metadata_key(arr: &[Value]) -> (Vec<Value>, bool) {
+    let mut out = Vec::with_capacity(arr.len());
+    let mut removed = false;
+    let mut i = 0;
+    while i + 1 < arr.len() {
+        let key = arr[i].as_str().unwrap_or_default();
+        if key == "X-Parsed-By" {
+            removed = true;
+        } else {
+            out.push(arr[i].clone());
+            out.push(arr[i + 1].clone());
+        }
+        i += 2;
+    }
+    // An odd trailing element (malformed input) is preserved rather than
+    // silently dropped, so a bug elsewhere producing a lopsided array is
+    // still visible in the diff instead of being swallowed here.
+    if i < arr.len() {
+        out.push(arr[i].clone());
+    }
+    (out, removed)
+}
+
+/// The two permanent, ratified `/update/extract` divergences named in the
+/// issue #258 spec — see the PRD's ratified-divergence entry and
+/// `docs/solr-ref-findings.md` findings 120-123:
+///
+/// - `X-Parsed-By` names Java Tika/PDFBox/etc. class names that Wayfinder has
+///   no honest equivalent for, in both the XHTML `file` value's `<meta>`
+///   elements and the `file_metadata` array.
+/// - `shape="rect"` is an attribute Tika's own HTML parser injects onto every
+///   `<a>` element; Wayfinder's HTML extractor has no reason to add it.
+///
+/// Nothing else in the extract envelope is touched: per CLAUDE.md's
+/// compatibility contract, a third real difference must still be reported by
+/// `diff()`, and `normalize_extract` deliberately does not widen to hide one
+/// (see the `normalize_extract_*` tests in `tests/differential.rs`, which
+/// prove exactly that).
+pub fn normalize_extract(mut value: Value) -> Normalized {
+    let mut touched = Vec::new();
+
+    if let Some(file) = value.get("file").and_then(|f| f.as_str()) {
+        let (stripped, meta_touched) = strip_x_parsed_by_meta(file);
+        let (stripped, shape_touched) = strip_shape_rect(&stripped);
+        if meta_touched {
+            touched.push("file (X-Parsed-By meta elements)".to_string());
+        }
+        if shape_touched {
+            touched.push("file (shape=\"rect\" attributes)".to_string());
+        }
+        if meta_touched || shape_touched {
+            value["file"] = Value::String(stripped);
+        }
+    }
+
+    if let Some(arr) = value.get("file_metadata").and_then(|m| m.as_array()) {
+        let (stripped, removed) = strip_x_parsed_by_metadata_key(arr);
+        if removed {
+            touched.push("file_metadata (X-Parsed-By)".to_string());
+            value["file_metadata"] = Value::Array(stripped);
+        }
+    }
+
+    Normalized { value, touched }
+}
