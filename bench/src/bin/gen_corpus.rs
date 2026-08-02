@@ -16,7 +16,7 @@
 //! Hand-rolled JSON/TOML string emission rather than a `serde_json`/`toml`
 //! dependency, per this crate's no-dependency constraint (`Cargo.toml`).
 
-use wayfinder_bench::corpus::{Doc, generate};
+use wayfinder_bench::corpus::{Doc, generate, query_terms};
 
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -116,8 +116,18 @@ multi_valued = true
 "#;
     std::fs::write(&schema_path, schema).expect("write schema TOML");
 
+    // The cold pass in `bench/run.sh` needs query terms that provably exist
+    // in this corpus (issue #251). Emit them here, from `query_terms()`,
+    // rather than hardcoding a second copy of the word list in shell.
+    let terms_path = format!("{out_dir}/terms.txt");
+    let mut terms = query_terms().join("\n");
+    terms.push('\n');
+    std::fs::write(&terms_path, terms).expect("write query terms");
+
     eprintln!(
-        "wrote {} docs across {batch_count} batch file(s) to {out_dir}, schema to {schema_path}",
-        docs.len()
+        "wrote {} docs across {batch_count} batch file(s) to {out_dir}, schema to {schema_path}, \
+         {} query terms to {terms_path}",
+        docs.len(),
+        query_terms().len()
     );
 }

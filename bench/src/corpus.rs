@@ -109,6 +109,42 @@ const BODY_WORDS: &[&str] = &[
     "tomorrow",
 ];
 
+/// Corpus words that must never be used as cold-pass query terms (issue
+/// #251). Solr's `queryResultCache` keys on the *parsed* query, not the `q`
+/// string, and these are all `text_en` stopwords: under
+/// `defType=edismax&qf=title body` every one of them analyses to the
+/// identical empty query `+()` (verified live against Solr 9 with
+/// `debugQuery=true`, `numFound` 0). They therefore share a single cache
+/// key, so the second and subsequent ones in a "cold" pass would be cache
+/// hits and would silently corrupt the measurement -- and they match nothing,
+/// so they are useless as benchmark queries regardless.
+///
+/// ponytail: this is an empirically derived property of Solr's `text_en`
+/// analyser, which this crate cannot introspect from Rust. If that stopword
+/// set ever changes, or either word list gains a new stopword, this list
+/// drifts from reality; the cold pass's `hits == 0` assertion in
+/// `bench/run.sh` is the runtime guard that catches the drift.
+const STOPWORD_TERMS: &[&str] = &["the", "a", "in", "and", "on", "to", "of", "for"];
+
+/// The corpus's query vocabulary, for the benchmark's cold pass: every word
+/// that provably appears in a generated corpus and parses to a distinct Solr
+/// query. `TITLE_WORDS` then `BODY_WORDS`, order-stable, deduplicated, with
+/// `STOPWORD_TERMS` excluded.
+///
+/// `bench/run.sh` queries these one apiece against a freshly flushed cache,
+/// so a repeat -- or a term that collides with another on Solr's parsed-query
+/// cache key -- would turn a cold-pass request into a cache hit.
+pub fn query_terms() -> Vec<&'static str> {
+    let mut seen = std::collections::HashSet::new();
+    TITLE_WORDS
+        .iter()
+        .chain(BODY_WORDS.iter())
+        .copied()
+        .filter(|word| !STOPWORD_TERMS.contains(word))
+        .filter(|word| seen.insert(*word))
+        .collect()
+}
+
 const CATEGORIES: &[&str] = &[
     "animals", "classic", "garden", "misc", "science", "history", "sports", "music",
 ];
