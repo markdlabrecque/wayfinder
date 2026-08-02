@@ -2364,25 +2364,84 @@ async fn select(
         .unwrap_or(10)
         .min(state.config.query.rows_limit);
 
+    // Fused faceting (issue #246): the `facet.field` terms aggregation runs
+    // over exactly the doc set the hit list iterates (`q` AND every `fq`), so
+    // planning it here lets the main search compute both in one pass instead
+    // of walking the same postings twice — ~5 ms of the 6.6 ms faceting cost
+    // at 2M docs was that second walk.
+    //
+    // A planning error is *discarded*, not reported: the request then takes
+    // today's unfused path, which re-derives the identical error at its
+    // original point in the request lifecycle, so its message, its
+    // `PreQueryFacetError` treatment and whether the envelope carries a
+    // `response` block all stay bit-identical. Double validation costs nothing
+    // on a request that is already failing.
+    let mut facet_field_plan = if facet_requested {
+        facet::plan_facet_fields(&state.index, &params)
+            .ok()
+            .filter(|plan| !plan.fields.is_empty())
+    } else {
+        None
+    };
+
     // Bounded search (issue #242): only the first `start + rows` hits are
     // materialised; `num_found` and `max_score` still cover every match.
+    let mut facet_field_aggs = None;
     let outcome = match &parsed {
         None => crate::collector::TopOutcome {
             num_found: 0,
             max_score: None,
             top: Vec::new(),
         },
-        Some((query, filter_queries)) => state
-            .index
-            .search_top(
-                query.as_ref(),
-                filter_queries,
-                &sort,
-                start.saturating_add(rows),
-            )
-            .map_err(|e| {
-                WfError::internal("wayfinder::SearchError", e.to_string()).with_params(&params)
-            })?,
+        Some((query, filter_queries)) => {
+            let unfused = || {
+                state
+                    .index
+                    .search_top(
+                        query.as_ref(),
+                        filter_queries,
+                        &sort,
+                        start.saturating_add(rows),
+                    )
+                    .map_err(|e| {
+                        WfError::internal("wayfinder::SearchError", e.to_string())
+                            .with_params(&params)
+                    })
+            };
+            // Attempted, not borrowed-through, so the plan can be dropped
+            // below without fighting the borrow checker.
+            let attempt = facet_field_plan.as_ref().map(|plan| {
+                state.index.search_top_with_aggs(
+                    query.as_ref(),
+                    filter_queries,
+                    &sort,
+                    start.saturating_add(rows),
+                    plan.aggregations.clone(),
+                )
+            });
+            match attempt {
+                Some(Ok((outcome, aggs))) => {
+                    facet_field_aggs = Some(aggs);
+                    outcome
+                }
+                // An aggregation-class refusal (bucket limit, memory limit,
+                // a malformed aggregation) is exactly the error the unfused
+                // path raises out of `facet_counts` as a 400
+                // `wayfinder::FacetError` with the `response` block attached
+                // -- not the 500 `wayfinder::SearchError` it would become
+                // here. Un-fuse and let that path answer it, so the wire
+                // output stays bit-identical whichever way the request went.
+                Some(Err(e)) if crate::core_index::is_aggregation_error(&e) => {
+                    facet_field_plan = None;
+                    unfused()?
+                }
+                Some(Err(e)) => {
+                    return Err(WfError::internal("wayfinder::SearchError", e.to_string())
+                        .with_params(&params));
+                }
+                None => unfused()?,
+            }
+        }
     };
 
     let num_found = outcome.num_found;
@@ -2481,26 +2540,37 @@ async fn select(
     // they are emitted in, so `warnings` has to be known before the object
     // literal is written.
     let facet_result = if facet_requested {
-        Some(
-            facet::facet_counts(&state.index, &state.config, &params, &default_field, &base)
-                .map_err(|e| {
-                    // Issue #35: `facet.range` is detected before the base
-                    // query ever runs (Solr's own `facet_err_range_single.json`
-                    // has no `response` block), while `facet.query`/
-                    // `facet.field` errors are detected after it (Solr's
-                    // `facet_unknown_field.json` / `facet_err_query_single.json`
-                    // do). `facet::facet_counts` marks the former with
-                    // `PreQueryFacetError` so only the latter gets `response`
-                    // attached here.
-                    let err = WfError::bad_request("wayfinder::FacetError", e.to_string())
-                        .with_params(&params);
-                    if e.downcast_ref::<facet::PreQueryFacetError>().is_some() {
-                        err
-                    } else {
-                        err.with_response(Value::Object(response.clone()))
-                    }
-                })?,
-        )
+        // Issue #246: when the plan phase succeeded above, `facet.field`'s
+        // buckets are already computed and only need shaping; otherwise this
+        // is the unchanged, unfused path.
+        let counts = match (&facet_field_plan, &facet_field_aggs) {
+            (Some(plan), Some(aggs)) => facet::facet_counts_fused(
+                &state.index,
+                &state.config,
+                &params,
+                &default_field,
+                &base,
+                (plan, aggs),
+            ),
+            _ => facet::facet_counts(&state.index, &state.config, &params, &default_field, &base),
+        };
+        Some(counts.map_err(|e| {
+            // Issue #35: `facet.range` is detected before the base
+            // query ever runs (Solr's own `facet_err_range_single.json`
+            // has no `response` block), while `facet.query`/
+            // `facet.field` errors are detected after it (Solr's
+            // `facet_unknown_field.json` / `facet_err_query_single.json`
+            // do). `facet::facet_counts` marks the former with
+            // `PreQueryFacetError` so only the latter gets `response`
+            // attached here.
+            let err =
+                WfError::bad_request("wayfinder::FacetError", e.to_string()).with_params(&params);
+            if e.downcast_ref::<facet::PreQueryFacetError>().is_some() {
+                err
+            } else {
+                err.with_response(Value::Object(response.clone()))
+            }
+        })?)
     } else {
         None
     };
