@@ -13,7 +13,8 @@ below are invisible from inside a single issue.
 **Status:** waves 0, 1 and 2 are complete — #306, #307, #310; #297, #299, #308, #295;
 #298, #289, #294, #290. **Wave 3 is current: #296 and #300** — #301 is closed
 documentation-only (one core per site, see wave 3). #300 is free of open questions;
-#296 needs its premise settled with fixtures first.
+#296's premise is now settled by capture (PR #324, findings 147-150) and it turned out
+to be two pieces of work, not one — read H below before starting it.
 
 ## Where parity actually stands
 
@@ -217,7 +218,7 @@ What K settled, for the branches that follow it:
 
 | Branch | Issue | Note |
 |---|---|---|
-| H | #296 per-field `f.<field>.facet.*` | Unblocked by E, but **its scope is in question — settle the premise below before starting.** Extends `FacetFieldPlan`; keeps mincount/missing post-exclusion |
+| H | #296 per-field facet settings | Fixtures landed (#324). **Scope grew: `f.<field>.facet.{limit,mincount,sort}` *and* facet settings as local params on `facet.field`** — findings 147-149. Extends `FacetFieldPlan` and `src/local_params.rs`; keeps limit/mincount/missing post-exclusion (150) |
 | J | #300 non-default data types | `FieldMapper`, `supportsDataType()`, `presets/search-api.toml`. Ten closed types; `solr_text_custom*` is a named descope (finding 134) |
 | M1 | #301 site hash | **Closed documentation-only** — the hash is not being built; one core per site is the supported topology. README + `DocumentBuilder` `ponytail:`. See below |
 
@@ -273,31 +274,55 @@ override at all; correct it when this lands.
 This is the same shape as the #297 and #308 premise corrections — the third and fourth
 times a ticket's stated premise did not survive contact with a fixture.
 
-**2. The capture needs an exclusion row, not just precedence rows.** #296 already
-required fixtures for global-set / per-field-set / both-set / per-field-on-an-unfaceted-
-field. Since E and K landed, add **an OR facet carrying a per-field setting** —
-`{!ex=cat}` plus a per-field `limit` on the same facet. Finding 140 pins that
-`facet.mincount`/`facet.missing` apply *post*-exclusion; whether a per-field `limit`
-does the same is unverified, and it is exactly the combination a real facet block
-produces.
+**2. The capture is done.** PR #324: 26 fixtures, findings 147-150, 20
+`EXPECTED_DIVERGENCES` entries, and a `pf296_app` in `tests/differential.rs` for the
+dedicated facet-sort core. It covers global-set / per-field-set / both-set /
+per-field-on-a-field-nobody-faceted, the local-param form of each setting, two facets on
+one field, and the OR-facet rows the old requirement asked for — including the decisive
+`fq=category:garden` pair that shows `facet.limit` ranking the *excluded* list
+(finding 150). H starts from fixtures, not from a capture session.
 
 **3. `buildFacets()` now has one prefix-construction site — extend it, don't add a
 second.** K rewrote the `facet.field` prefix into a single `$prefix` string assembled
-from `ex=` then `key=`. Per-field settings either become more params in that same block
-(if the premise resolves that way) or stay separate `f.<field>.facet.*` params, but
-either way the prefix is built in one place. Preserve both invariants K established:
-`ex` precedes `key`, and a hostile delta drops the `key` half while keeping `ex`.
+from `ex=` then `key=`. Finding 148 decides what goes in it: the per-facet settings
+become **more local params in that same block** (`{!ex=… key=<delta> facet.limit=…}`),
+not `f.<field>.facet.*` params, because the module's facets are keyed by delta and a
+per-field param addresses the field (finding 147). Preserve both invariants K
+established: `ex` precedes `key`, and a hostile delta drops the `key` half while keeping
+`ex` — a hostile *setting value* needs the same treatment, and there is no existing
+guard for it.
+
+**3b. The server needs both halves, and they are separable.** `f.<field>.facet.{limit,
+mincount,sort}` is the smaller one and matches what the real `search_api_solr` wire
+sends (its `local_key` is always the Solr field name, so key and field coincide there);
+local-param facet settings are the larger one and the only half the module can actually
+use. Landing the per-field half alone would close the ticket's letter and leave the
+module unable to express two facets on one field — the case #296 exists for. Ship the
+local-param half, or say explicitly why not.
+
+**3c. Emitting local-param settings is wire usage the reference client never produces.**
+`search_api_solr` cannot reach this shape at all: `setFacets()` discards the Search API
+delta, so it never has two facets on one field to disambiguate (finding 147's upstream
+note). That means `coverage/search_api_coverage_contract.json` will not cover the
+params the module starts emitting, and the differential fixtures are the only evidence
+for them. Solr accepts the shape — that is what findings 148/149 pin — but record the
+divergence from client behaviour deliberately rather than discovering it in review.
+
+**3d. `src/local_params.rs` must accept `facet.*` keys inside a block.** Wave 1 made a
+block whose params are all in `{tag, ex, key}` an inert prefix and left everything else
+to the typed path. A block carrying `facet.limit` is neither, today. Whatever widens
+that set is the same code L3 (#292) leans on for chained blocks — check both together.
 
 **4. The rebase conflict is known and localised.** K's report predicts it: whichever of
 #296/#298 landed second needs a local resolution inside `buildFacets()`. #296 is the one
 landing second, and the conflict is the ~10-line `$prefix` block, not the method.
 
-**5. Its capture session is the cheapest chance at the grouping+facet gap.** G (#290)
-left `group=true` + `facet=true` unfixtured, with `group.truncate`/`group.facet` as
-documented no-ops. H is the next branch to stand up a Solr container for facet work, so
-adding those rows costs a capture block rather than a whole session. Optional, and
-strictly a capture — implementing collapsed-group facet counts is #290's follow-up, not
-H's.
+**5. The grouping+facet capture was not taken, and its cheap slot has passed.** G
+(#290) left `group=true` + `facet=true` unfixtured, with `group.truncate`/`group.facet`
+as documented no-ops. #324's capture session was the cheapest chance to add those rows;
+it stayed scoped to #296 instead. They now cost their own session, so fold them into the
+next branch that stands up a Solr container for facet work — L1, L2 or I — rather than
+scheduling one for them alone.
 
 **6. Do not fix the two open `tagFilterQuery()` ceilings here.** The #298 review found
 an unguarded tag value and tag loss below the top level; both belong in their own issue
@@ -314,7 +339,7 @@ configset and capture block.
 | L | #292 spatial | **three server pieces, not two, plus the Drupal half** — see below |
 | M2 | #302 multi-valued text sort | `DocumentBuilder`, after M1. May close as a verified no-op |
 | I | #291 suggest / SuggestComponent | after J (#300) — `solr_text_suggester` is the field the suggester is built from. Its own configset and capture prep |
-| N | #293 `_version_` via JSON facets | last. Needs `json.facet` with aggregations and nesting; its only client is an admin screen |
+| N | #293 `_version_` via JSON facets | last. Needs `json.facet` with aggregations and nesting; its only client is an admin screen. **Carries its own per-facet settings inside the JSON object** — #296's local-param work does not transfer, and neither does its parser |
 
 **#292's pieces** (finding 133). L1 and L2 each need their own field type and therefore
 their own configset:
@@ -326,7 +351,10 @@ their own configset:
   than forking a second one.
 - **L3 — the distance-facet rewrite.** N `facet.query` entries shaped
   `{!key=spatial-<field>__distance-<min>-<max>}{!frange l=<min> u=<max>}geodist()`.
-  Depends on L2 and on `facet.query`.
+  Depends on L2 and on `facet.query`. It also shares H's local-params problem: whatever
+  widens `src/local_params.rs` to carry `facet.*` keys inside a block (H's requirement
+  3d) is the same code that has to survive L3's *chained* inert-plus-typed blocks, which
+  no fixture exercises yet. Land them in one direction or the other, not concurrently.
 - **L4 — the Drupal half.** `location`/`rpt` Search API types, after J and L2.
 
 ## Critical path
@@ -363,6 +391,17 @@ conflicts actually survive:
 - **The OR-facet tag string is `facet:<search_api_field_name>`.** Not our choice — the
   facets module defines it and `search_api_solr` reproduces it verbatim. Set by K
   (#298), and the label L3 (#292's distance facets) must not collide with.
+- **Per-facet settings ride as local params on `facet.field`; `f.<X>.facet.*` addresses
+  the *field*.** Findings 147-149, captured in #324. `f.<key>.facet.*` is silently
+  ignored by Solr, so a facet keyed by a Search API delta (contract above) cannot be
+  configured that way — and two facets on one field can only be told apart by local
+  params. Binding on H (#296) and on L3 (#292's distance facets), which builds
+  `{!key=spatial-…}` blocks on `facet.query` and would otherwise invent its own answer.
+- **`facet.limit` is post-exclusion, like `facet.mincount` and `facet.missing`.**
+  Finding 150. An OR facet's limit truncates the wider, unfiltered list — truncating the
+  filtered one first would silently discard the values the OR facet exists to show, and
+  it is invisible unless the two rankings disagree (which is why the fixtures use
+  `fq=category:garden`, not `category:animals`).
 - **The `{!tag}`/`{!ex}` exclusion machinery in `src/facet.rs` has one implementation.**
   Set by E (#295): `FacetFieldPlan.ex`, `FacetFieldsPlan.exclusion_active`,
   `excluded_base_clauses`. H, K and L3 extend it; none forks a second exclusion path,
@@ -400,6 +439,12 @@ Unchanged from `CLAUDE.md`, restated because this batch will hit all three:
 - Fixtures are ground truth. `--only` removes the need for the old back-up-and-restore
   dance, but not the rule: never re-capture existing fixtures as a side effect, and
   commit new fixtures before any full re-run.
+- **`capture.sh --only` takes an unanchored prefix.** A block guarded by
+  `want_any '^myprefix_'` is *not* entered by `--only '^myprefix_'` — the guard matches
+  the two strings against each other as regexes, and a literal `^` in the subject never
+  matches. `--only 'myprefix_'` works. Getting this wrong is silent in the worst way:
+  `want` still matches each row name, so the block's captures run against a container
+  that was never started and the script dies on a curl exit 7 partway down.
 - Findings 129-135 come from reading the client, not from a capture. They are ground
   truth for **scope** only — anything implemented from them still needs a real `solr:9`
   fixture for the response shape.
