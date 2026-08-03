@@ -1073,13 +1073,15 @@ async fn classification_guards_exercise_real_router_strict_param_and_renderer_be
          probes classify as covered: {body}"
     );
     // The other half of "the classifier reflects the router": a param
-    // `TERMS_PARAMS` deliberately omits (issue #155 scoped `terms.limit` out)
-    // must still 400 under strict params, so no future coverage claim can rest
-    // on a param the handler silently ignores.
+    // `TERMS_PARAMS` deliberately omits must still 400 under strict params, so
+    // no future coverage claim can rest on a param the handler silently
+    // ignores. This used `terms.limit` until issue #308 implemented it (and
+    // added it to `TERMS_PARAMS`), so it moves to `terms.mincount`, still
+    // genuinely unimplemented and listed as such in `TERMS_PARAMS`' ponytail.
     let (status, body) = common::request_full(
         &app,
         "GET",
-        "content/terms?terms=true&terms.fl=body&terms.limit=5",
+        "content/terms?terms=true&terms.fl=body&terms.mincount=1",
         None,
     )
     .await;

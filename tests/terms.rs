@@ -31,7 +31,8 @@
 //! that same ten-term, same-counts, same-order set. This pins the captured
 //! stemming outcome, not Search API's full Solr analyzer chain.
 //! Nothing here is derived from what Wayfinder's own `/terms` handler
-//! happens to produce — the handler does not exist yet.
+//! happens to produce — the tests assert against independently-verified
+//! corpora, so a handler bug cannot make a test circularly agree with itself.
 //!
 //! ## Premises verified before writing these tests (per the task spec)
 //!
@@ -73,28 +74,30 @@
 //!
 //! ## Envelope shape
 //!
-//! `{terms: {<field>: [term, count, term, count, ...]}}` — the flat
-//! `json.nl=flat` array shape is the only shape this endpoint's response
-//! takes (per the ticket, no general named-list machinery is needed).
-//! `omitHeader=true` (which the module always sends) suppresses
-//! `responseHeader` entirely; its absence, or `omitHeader=false`, keeps it.
+//! `{terms: {<field>: <per-field value>}}` — the outer object is always keyed
+//! by field name; each field's value is a Solr NamedList of `(term, count)`
+//! pairs, so it honours `json.nl` (finding 142): `flat` -> `[term, count, ...]`
+//! (the default), `map` -> `{term: count}`, `arrarr`/`arrmap` likewise — the
+//! same `render_named_list` machinery facets use. `omitHeader=true` (which the
+//! module always sends) suppresses `responseHeader` entirely; its absence, or
+//! `omitHeader=false`, keeps it.
 //!
-//! ## An interpretation this file had to make
+//! ## Settled by a capture (issue #308)
 //!
-//! The "undefined field in `terms.fl` errors in Solr's envelope" acceptance
-//! criterion has no captured fixture behind it (the ticket's "Not in this
-//! ticket" section explicitly defers a `terms` capture). There is no base
-//! query for `/terms` to have partially run, so
-//! `terms_undefined_field_errors_with_solr_envelope` below follows the
-//! *pre-query* error precedent already in this codebase (`facet.range`'s
-//! `PreQueryFacetError`, which renders with no `response` key at all — see
-//! `src/lib.rs` around the `facet_result` block, and
-//! `WfError` tests `without_with_response_there_is_no_response_key`) rather
-//! than the *post-query* precedent (`facet_unknown_field.json`, which does
-//! carry a `response` block). It asserts status 400, `error.code == 400`,
-//! `error.msg` mentioning the undefined field's name, and the absence of a
-//! `response` key and of a `terms` key — but does not pin the exact wording
-//! of `error.msg`, since no fixture backs one.
+//! The "undefined field in `terms.fl`" case was once an *inference* with no
+//! fixture behind it, and this file inferred a 400 (the pre-query error
+//! precedent). Finding 141 / `terms_prefix_unknown_field` has now settled it
+//! the other way: `terms.fl=nosuchfield&terms.prefix=a` answers **HTTP 200**
+//! with `{"terms":{"nosuchfield":[]}}` — the field's key is present with an
+//! empty list, not a 400. `terms_undefined_field_yields_an_empty_list` below
+//! pins that. This matters for #308's own purpose: stock
+//! `search_api_autocomplete` names fulltext fields that an index may not
+//! have, and a 400 there breaks autocomplete on any index missing one.
+//!
+//! What stays a 400 is a *defined but non-text* field
+//! (`terms_non_text_field_is_rejected_rather_than_lossily_decoded`): no
+//! fixture covers it either way, so its comment still says so, and it keeps
+//! its 400. The undefined-vs-non-text split lives in `check_terms_field`.
 
 // The `dead_code` allow for partially-used shared helpers is an inner
 // attribute inside `tests/common/mod.rs`; a second `#![allow(dead_code)]`
@@ -372,37 +375,32 @@ async fn terms_response_header_present_when_omit_header_false() {
 
 // --- undefined field ------------------------------------------------------
 
+/// An undefined `terms.fl` answers **HTTP 200** with the field's key present
+/// and an empty list — finding 141 / `terms_prefix_unknown_field`, the capture
+/// that settled the inference this file used to make (a 400). See the
+/// "Settled by a capture" note in the module docs above.
+///
+/// This is the case that matters for #308's purpose: stock
+/// `search_api_autocomplete` names fulltext fields an index may not have, so a
+/// 400 here breaks autocomplete on any such index.
 #[tokio::test]
-async fn terms_undefined_field_errors_with_solr_envelope() {
+async fn terms_undefined_field_yields_an_empty_list() {
     let (app, _dir) = terms_app(&trace_corpus()).await;
     let (status, body) = get(&app, "terms?terms=true&terms.fl=nosuchfield").await;
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
-        "an undefined terms.fl field must 400, not panic or silently return an \
-         empty block, got {body}"
+        StatusCode::OK,
+        "an undefined terms.fl must 200 with an empty list, not 400 -- \
+         finding 141 / terms_prefix_unknown_field settled this, got {body}"
     );
     assert_eq!(
-        body.pointer("/error/code").and_then(Value::as_u64),
-        Some(400),
-        "got {body}"
-    );
-    let msg = body
-        .pointer("/error/msg")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("no /error/msg string in {body}"));
-    assert!(
-        msg.contains("nosuchfield"),
-        "error.msg should name the offending field, got {msg:?}"
+        body.pointer("/terms/nosuchfield"),
+        Some(&json!([])),
+        "the undefined field's key must be present with an empty list, got {body}"
     );
     assert!(
-        body.get("response").is_none(),
-        "terms has no base query to have partially run, so no response block \
-         should be attached, got {body}"
-    );
-    assert!(
-        body.get("terms").is_none(),
-        "an undefined field must not silently render an empty terms block, got {body}"
+        body.get("error").is_none(),
+        "an undefined field is not an error, got {body}"
     );
 }
 
@@ -874,41 +872,28 @@ async fn terms_dynamic_fields_do_not_leak_across_the_shared_catch_all_container(
 }
 
 /// A name matching no `[[dynamic_fields]]` pattern and no `[[fields]]` entry
-/// must still 400 -- the fix for the dynamic-resolution gap must not turn
-/// `check_terms_field` into a rubber stamp that accepts anything.
+/// yields an empty list (200), exactly like any other undefined field after
+/// finding 141 (`terms_prefix_unknown_field`). The guard that a dynamic-only
+/// name must not be a rubber stamp now lives entirely in the *non-text*
+/// rejection: `terms_dynamic_field_of_non_text_type_is_rejected` below still
+/// 400s a dynamically-resolved `int`. An undefined name is no longer an error
+/// at all.
 #[tokio::test]
-async fn terms_dynamic_name_matching_no_rule_is_still_a_400() {
+async fn terms_dynamic_name_matching_no_rule_yields_an_empty_list() {
     let (app, _dir) = dynamic_terms_app(&dynamic_trace_corpus()).await;
     let (status, body) = get(&app, "terms?terms=true&terms.fl=zz_no_such_prefix").await;
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
-        "a name matching no [[dynamic_fields]] rule and no static field must \
-         still 400 as undefined, got {body}"
+        StatusCode::OK,
+        "a name matching no rule is simply undefined, and an undefined field \
+         yields an empty list (200) after finding 141, got {body}"
     );
     assert_eq!(
-        body.pointer("/error/code").and_then(Value::as_u64),
-        Some(400),
-        "got {body}"
+        body.pointer("/terms/zz_no_such_prefix"),
+        Some(&json!([])),
+        "the requested name must be present as a key with an empty list, got {body}"
     );
-    let msg = body
-        .pointer("/error/msg")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("no /error/msg string in {body}"));
-    assert!(
-        msg.contains("zz_no_such_prefix"),
-        "error.msg should name the offending field, got {msg:?}"
-    );
-    assert_eq!(
-        body.pointer("/error/metadata/3").and_then(Value::as_str),
-        Some("wayfinder::UndefinedField"),
-        "a name matching no rule must be rejected as undefined, not merely as \
-         some other 400 (e.g. non-text), got {body}"
-    );
-    assert!(
-        body.get("terms").is_none(),
-        "an undefined field must not silently render an empty terms block, got {body}"
-    );
+    assert!(body.get("error").is_none(), "got {body}");
 }
 
 /// A name matched only by a `[[dynamic_fields]]` rule whose type is non-text
@@ -1036,19 +1021,19 @@ async fn terms_resolves_the_shipped_drupal_preset_tm_x3b_en_title_field() {
     );
 }
 
-// --- json.nl honesty ---------------------------------------------------------
+// --- json.nl shapes ----------------------------------------------------------
 //
-// `TERMS_PARAMS` lists `json.nl` and accepts it with any value, but the
-// handler always renders the flat `[term, count, ...]` shape regardless --
-// unlike `src/facet.rs`'s `JsonNl::from_params`, which actually honours
-// `map`/`arrarr`/`arrmap` for facet counts. The handler's own doc comment
-// argues "listing a param here that the handler ignores would be worse than
-// 400ing it, since it would silently answer the wrong question"; these tests
-// hold the handler to that standard rather than merely restating the status
-// quo. Chosen interpretation: `json.nl=flat` (and the default, absent
-// `json.nl`) is accepted since flat is the only shape `/terms` ever renders;
-// any other value this codebase already gives a documented meaning to
-// (`map`/`arrarr`/`arrmap`) is a 400, not a silently-flat 200.
+// `/terms` is a Solr NamedList, so it honours `json.nl` through the same
+// `render_named_list` machinery facets use (finding 142 /
+// `terms_prefix_json_nl_map`): the outer `terms` object stays keyed by field
+// name, and each field's `(term, count)` list reshapes per `json.nl` -- `flat`
+// -> `[term, count, ...]` (the default), `map` -> `{term: count}`, `arrarr` ->
+// `[[term, count], ...]`, `arrmap` -> `[{term: count}, ...]`. The old
+// `check_terms_json_nl` guard (a placeholder "until the named-list machinery
+// landed", issue #153) 400d everything but flat; #308's map fixture retired it.
+// `map` is fixture-pinned; `arrarr`/`arrmap` ride the same shared renderer
+// facets are already backed by, and are held here rather than re-asserting the
+// old 400.
 
 #[tokio::test]
 async fn terms_json_nl_flat_is_accepted() {
@@ -1063,38 +1048,60 @@ async fn terms_json_nl_flat_is_accepted() {
     assert!(body.get("terms").is_some(), "got {body}");
 }
 
+/// `json.nl=map` renders each field's (term, count) pairs as an object —
+/// finding 142 / `terms_prefix_json_nl_map`. The `/terms` response is a Solr
+/// NamedList exactly as facets are, so it honours `json.nl` through the same
+/// `render_named_list` machinery (`src/facet.rs`); the old guard that 400d this
+/// was a placeholder "until the named-list machinery landed" (issue #153), and
+/// #308's fixture is what retires it.
 #[tokio::test]
-async fn terms_json_nl_map_is_rejected_rather_than_silently_ignored() {
+async fn terms_json_nl_map_renders_an_object() {
     let (app, _dir) = terms_app(&trace_corpus()).await;
     let (status, body) = get(&app, "terms?terms=true&terms.fl=title&json.nl=map").await;
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
-        "json.nl=map is a shape this handler cannot actually produce (it \
-         always renders flat), so per the handler's own doc comment this must \
-         400 rather than silently answer a different question than the one \
-         asked, got {body}"
+        StatusCode::OK,
+        "json.nl=map must render, not 400 -- finding 142 settled this, got {body}"
     );
+    // The outer `terms` object stays keyed by field name under every json.nl;
+    // only the inner (term, count) list reshapes.
     assert_eq!(
-        body.pointer("/error/code").and_then(Value::as_u64),
-        Some(400),
-        "got {body}"
+        body.pointer("/terms/title"),
+        Some(&json!({
+            "dog": 2, "lazi": 2, "quick": 2, "about": 1, "afternoon": 1,
+            "archiv": 1, "brown": 1, "cat": 1, "day": 1, "document": 1,
+        })),
+        "json.nl=map must render the term/count pairs as an object keyed by \
+         term, got {body}"
     );
 }
 
+/// `json.nl=arrarr` renders each pair as a two-element `[term, count]`
+/// array — the same NamedList shape facets already render through
+/// `render_named_list`. No `terms` fixture pins `arrarr` specifically (only
+/// `map` is captured), but the shared machinery renders it identically to
+/// facets, so this holds the handler to that rather than re-asserting the old
+/// 400 placeholder.
 #[tokio::test]
-async fn terms_json_nl_arrarr_is_rejected_rather_than_silently_ignored() {
+async fn terms_json_nl_arrarr_renders_nested_arrays() {
     let (app, _dir) = terms_app(&trace_corpus()).await;
     let (status, body) = get(&app, "terms?terms=true&terms.fl=title&json.nl=arrarr").await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
     assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "json.nl=arrarr is likewise a shape this handler cannot produce, got {body}"
-    );
-    assert_eq!(
-        body.pointer("/error/code").and_then(Value::as_u64),
-        Some(400),
-        "got {body}"
+        body.pointer("/terms/title"),
+        Some(&json!([
+            ["dog", 2],
+            ["lazi", 2],
+            ["quick", 2],
+            ["about", 1],
+            ["afternoon", 1],
+            ["archiv", 1],
+            ["brown", 1],
+            ["cat", 1],
+            ["day", 1],
+            ["document", 1],
+        ])),
+        "json.nl=arrarr must render each pair as a [term, count] array, got {body}"
     );
 }
 
@@ -1132,5 +1139,356 @@ async fn terms_doc_frequency_includes_deleted_docs_without_a_merge() {
         Some(2),
         "document frequency must still include the deleted (but not yet \
          merged-away) w1, so widgetzz must remain at 2, not drop to 1, got {after:?}"
+    );
+}
+
+// --- terms.prefix (issue #308, finding 141) -------------------------------
+//
+// `terms.prefix` filters each field's term dictionary LITERALLY before the
+// count-descending sort: no analyzer runs over the prefix, and the match is
+// against the indexed (already-analyzed) term, so it is case-sensitive
+// (`str::starts_with` on the raw term). An absent or empty prefix means no
+// filter. The prefix is a single global param applied independently to every
+// `terms.fl`.
+//
+// These assert behaviour on corpora whose analyzed terms are already pinned by
+// the trace-shaped tests above; they do NOT assert against
+// `solr-ref/responses/` values that depend on Solr's `text_en` stemming
+// (`dai` vs Tantivy's `day`, finding 103 / issue #205). The differential
+// harness (`tests/differential.rs`) compares against the captured fixtures;
+// the `terms_*` rows there are the compatibility evidence.
+
+/// Several matches, count-descending then term-ascending. `prefix=d` on the
+/// trace's `title` keeps `dog`(2), `day`(1), `document`(1) -- `dog` first by
+/// count, then `day`/`document` tie-broken alphabetically. Filtering happens
+/// before the sort, so the count ordering of the survivors is unchanged.
+#[tokio::test]
+async fn terms_prefix_filters_before_the_count_sort() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=title&terms.prefix=d").await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        body.pointer("/terms/title"),
+        Some(&json!(["dog", 2, "day", 1, "document", 1])),
+        "terms.prefix=d must keep only the d-prefixed terms, ordered \
+         count-desc then term-asc, got {body}"
+    );
+}
+
+/// A single match.
+#[tokio::test]
+async fn terms_prefix_single_match() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=title&terms.prefix=da").await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        body.pointer("/terms/title"),
+        Some(&json!(["day", 1])),
+        "terms.prefix=da matches only `day` (`document` starts with `do`), \
+         got {body}"
+    );
+}
+
+/// No match is not an error: HTTP 200 with an empty list (finding 141,
+/// `terms_prefix_body_none`).
+#[tokio::test]
+async fn terms_prefix_no_match_returns_empty_with_200() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=title&terms.prefix=zzz").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a prefix matching nothing is not an error, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/terms/title"),
+        Some(&json!([])),
+        "a prefix matching no term must yield an empty list, got {body}"
+    );
+}
+
+/// A count tie breaks term-ascending: `prefix=a` keeps `about`/`afternoon`/
+/// `archiv`, all at 1, in alphabetical order (finding 141, `terms_prefix_tie`).
+#[tokio::test]
+async fn terms_prefix_count_tie_breaks_term_ascending() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=title&terms.prefix=a").await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        body.pointer("/terms/title"),
+        Some(&json!(["about", 1, "afternoon", 1, "archiv", 1])),
+        "terms.prefix=a keeps the three a-terms tied at count 1, in \
+         term-ascending order, got {body}"
+    );
+}
+
+/// The prefix is matched against the indexed term, case-sensitive: `D` matches
+/// nothing even though `d` matches three terms (finding 141,
+/// `terms_prefix_case`) -- the component reads the dictionary, it does not run
+/// the field's analyzer over the prefix.
+#[tokio::test]
+async fn terms_prefix_is_case_sensitive() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=title&terms.prefix=D").await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        body.pointer("/terms/title"),
+        Some(&json!([])),
+        "terms.prefix=D (uppercase) must match none of the lowercase-indexed \
+         terms -- the prefix is not analyzed, got {body}"
+    );
+}
+
+/// An empty `terms.prefix=` means no filter at all (finding 141,
+/// `terms_prefix_empty`): the default `terms.limit=10` still applies, so this
+/// is exactly the no-prefix list.
+#[tokio::test]
+async fn terms_prefix_empty_means_no_filter() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=title&terms.prefix=").await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        body.pointer("/terms/title"),
+        Some(&json!([
+            "dog",
+            2,
+            "lazi",
+            2,
+            "quick",
+            2,
+            "about",
+            1,
+            "afternoon",
+            1,
+            "archiv",
+            1,
+            "brown",
+            1,
+            "cat",
+            1,
+            "day",
+            1,
+            "document",
+            1,
+        ])),
+        "terms.prefix= (empty) must be equivalent to no prefix: the full \
+         default-limit-10 list, got {body}"
+    );
+}
+
+/// `terms.prefix` works on a `string` field's raw dictionary too: `id` values
+/// are unanalyzed, so the prefix matches the literal stored value (finding 141,
+/// `terms_prefix_string_field`).
+fn string_id_corpus() -> Value {
+    json!([
+        {"id": "apple", "body": "x"},
+        {"id": "apricot", "body": "x"},
+        {"id": "banana", "body": "x"},
+        {"id": "cherry", "body": "x"},
+    ])
+}
+
+#[tokio::test]
+async fn terms_prefix_on_a_string_field() {
+    let (app, _dir) = terms_app(&string_id_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=id&terms.prefix=ap").await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        body.pointer("/terms/id"),
+        Some(&json!(["apple", 1, "apricot", 1])),
+        "terms.prefix on a string field filters the literal stored values, \
+         got {body}"
+    );
+}
+
+/// One prefix, applied independently per `terms.fl` (finding 141,
+/// `terms_prefix_two_fields`). `prefix=c` on title+body keeps each field's own
+/// `cat`; `prefix=qu` matches title's `quick` but nothing in body, so body's
+/// list is empty while title's is not.
+#[tokio::test]
+async fn terms_prefix_is_applied_per_field_independently() {
+    let (app, _dir) = terms_app(&multi_field_corpus()).await;
+
+    let (status, body) = get(
+        &app,
+        "terms?terms=true&terms.fl=title&terms.fl=body&terms.prefix=c",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        body.pointer("/terms/title"),
+        Some(&json!(["cat", 1])),
+        "title's c-prefixed term only, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/terms/body"),
+        Some(&json!(["cat", 1])),
+        "body's c-prefixed term only -- the same prefix applied to a different \
+         field's dictionary, got {body}"
+    );
+
+    let (status, body) = get(
+        &app,
+        "terms?terms=true&terms.fl=title&terms.fl=body&terms.prefix=qu",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        body.pointer("/terms/title"),
+        Some(&json!(["quick", 2])),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/terms/body"),
+        Some(&json!([])),
+        "body has no qu-prefixed term, so its list is empty while title's is \
+         not -- per-field independence, got {body}"
+    );
+}
+
+// --- terms.limit (issue #308, finding 142) --------------------------------
+//
+// `terms.limit` truncates each field's list AFTER the count-descending sort,
+// defaults to 10 (`TERMS_DEFAULT_LIMIT`) when absent, and a negative value is
+// the "unlimited" sentinel. `0` means zero, not "default".
+
+/// `terms.limit` truncates the already-sorted list: `prefix=d&limit=1` keeps
+/// only `dog`, the highest-count survivor (finding 142, `terms_limit_below`).
+#[tokio::test]
+async fn terms_limit_truncates_after_the_sort() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(
+        &app,
+        "terms?terms=true&terms.fl=title&terms.prefix=d&terms.limit=1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        body.pointer("/terms/title"),
+        Some(&json!(["dog", 2])),
+        "terms.limit=1 keeps only the first (highest-count) term, applied \
+         after the sort, got {body}"
+    );
+}
+
+/// A limit above the match count returns all matches with no padding
+/// (finding 142, `terms_limit_above`).
+#[tokio::test]
+async fn terms_limit_above_match_count_does_not_pad() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(
+        &app,
+        "terms?terms=true&terms.fl=title&terms.prefix=d&terms.limit=99",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        body.pointer("/terms/title"),
+        Some(&json!(["dog", 2, "day", 1, "document", 1])),
+        "terms.limit=99 returns all matches rather than padding, got {body}"
+    );
+}
+
+/// `terms.limit=0` means zero, not "default" (finding 142, `terms_limit_zero`).
+#[tokio::test]
+async fn terms_limit_zero_means_zero_not_default() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(
+        &app,
+        "terms?terms=true&terms.fl=title&terms.prefix=d&terms.limit=0",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        body.pointer("/terms/title"),
+        Some(&json!([])),
+        "terms.limit=0 must yield an empty list, not the default 10, got {body}"
+    );
+}
+
+/// A negative `terms.limit` is the "unlimited" sentinel, not a clamp-to-zero:
+/// `limit=-1` on the twelve-term corpus returns all twelve where the default
+/// of 10 would have dropped `theta`/`zeta` (finding 142, `terms_limit_negative`).
+///
+/// `-1` is the only negative value captured; per the spec any negative is
+/// treated as unlimited, and the handler's comment names that single captured
+/// value as the extent of the evidence.
+#[tokio::test]
+async fn terms_limit_negative_means_unlimited() {
+    let (app, _dir) = terms_app(&twelve_term_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=title&terms.limit=-1").await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    let flat = flat_terms(&body, "title");
+    assert_eq!(
+        flat.len(),
+        24,
+        "terms.limit=-1 must return all 12 (term, count) pairs, not the \
+         default 10, got {flat:?}"
+    );
+    for dropped in ["theta", "zeta"] {
+        assert!(
+            term_count(flat, dropped).is_some(),
+            "terms.limit=-1 must keep {dropped:?}, which the default limit of \
+             10 would have dropped, got {flat:?}"
+        );
+    }
+}
+
+/// With no `terms.prefix`, `terms.limit` applies to the whole dictionary:
+/// `limit=2` gives the top two of the trace's `title` -- `dog` and `lazi`, the
+/// two lowest-sorting of the three count-2 terms (finding 142,
+/// `terms_limit_no_prefix`).
+#[tokio::test]
+async fn terms_limit_without_prefix_truncates_the_whole_dictionary() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=title&terms.limit=2").await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(
+        body.pointer("/terms/title"),
+        Some(&json!(["dog", 2, "lazi", 2])),
+        "terms.limit=2 with no prefix keeps the top two of the whole \
+         dictionary, got {body}"
+    );
+}
+
+/// `terms.limit=abc` is the one error case in the set: HTTP 400 with an
+/// **empty but present** `terms:{}` object alongside `error` (finding 142,
+/// `terms_limit_invalid`). Solr has already emitted the component's container
+/// when the integer parse fails, so Wayfinder's error envelope must reproduce
+/// that sibling rather than a bare error. The *shape* -- status 400,
+/// `error.code` 400, `metadata` present, `terms` present and empty -- is what
+/// must match; `error.msg` is normalised away by the differential harness
+/// (finding 10), so its wording is not pinned here.
+#[tokio::test]
+async fn terms_limit_invalid_returns_400_with_empty_terms_sibling() {
+    let (app, _dir) = terms_app(&trace_corpus()).await;
+    let (status, body) = get(
+        &app,
+        "terms?terms=true&terms.fl=body&terms.limit=abc&omitHeader=true",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a non-numeric terms.limit must 400, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/error/code").and_then(Value::as_u64),
+        Some(400),
+        "got {body}"
+    );
+    assert!(
+        body.pointer("/error/metadata")
+            .and_then(Value::as_array)
+            .is_some(),
+        "the error must carry a metadata array (Solr's error-class shape), \
+         got {body}"
+    );
+    assert_eq!(
+        body.get("terms"),
+        Some(&json!({})),
+        "the 400 must carry an empty but present terms object alongside \
+         error -- Solr emits the component's container before the parse fails, \
+         got {body}"
     );
 }

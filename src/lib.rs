@@ -468,22 +468,31 @@ const MLT_PARAMS: &[&str] = &[
     "json.nl",
 ];
 
-/// `/terms` params in scope for issue #155 (Solr's TermsComponent). `terms`
-/// gates the component, `terms.fl` (repeatable) names the fields;
-/// `omitHeader`/`wt`/`json.nl` are the envelope params `search_api_solr`
-/// always sends on this endpoint (`solr-ref/search-api/trace/00028.json`).
+/// `/terms` params (Solr's TermsComponent). `terms` gates the component,
+/// `terms.fl` (repeatable) names the fields; `terms.prefix`/`terms.limit` are
+/// the autocomplete params `search_api_solr`'s `setAutocompleteTermQuery()`
+/// sends (issue #308, findings 141/142); `omitHeader`/`wt`/`json.nl` are the
+/// envelope params it always sends here (`solr-ref/search-api/trace/00028.json`).
 ///
 /// ponytail: deliberately absent, so `strict_params = true` still 400s them —
-/// `terms.limit`, `terms.sort`, `terms.prefix`, `terms.lower`/`upper`,
-/// `terms.mincount`/`maxcount`, `terms.regex`, `terms.raw`, `terms.ttf`. The
-/// ceiling is Solr's defaults only (`limit=10`, `sort=count`), which is
-/// exactly what the trace exercises and what the coverage contract asks for.
-/// Add the rest when the suggester work (PRD v3) produces a capture that needs
-/// them — listing a param here that the handler ignores would be worse than
-/// 400ing it, since it would silently answer the wrong question.
-const TERMS_PARAMS: &[&str] = &["terms", "terms.fl", "omitHeader", "wt", "json.nl"];
+/// `terms.sort`, `terms.lower`/`upper`, `terms.mincount`/`maxcount`,
+/// `terms.regex`, `terms.raw`, `terms.ttf`. `terms.sort` is honoured only as
+/// its default (`count`); the rest are unimplemented. Add them when a capture
+/// needs them — listing a param here that the handler ignores would be worse
+/// than 400ing it, since it would silently answer the wrong question.
+const TERMS_PARAMS: &[&str] = &[
+    "terms",
+    "terms.fl",
+    "terms.prefix",
+    "terms.limit",
+    "omitHeader",
+    "wt",
+    "json.nl",
+];
 
-/// Solr's `terms.limit` default. Not configurable here — see `TERMS_PARAMS`.
+/// Solr's `terms.limit` default (finding 142). Applied per field when
+/// `terms.limit` is absent; a negative value means unlimited, so the default
+/// is the `Some(TERMS_DEFAULT_LIMIT)` case of [`parse_terms_limit`].
 const TERMS_DEFAULT_LIMIT: usize = 10;
 
 /// Builds the Wayfinder HTTP app for a single core with all server-config
@@ -3619,27 +3628,30 @@ async fn mlt(
 ///   term/frequency pair.
 /// - `terms.fl` is repeatable, one key under `terms` per field, each
 ///   independent.
-/// - The value is the flat `[term, count, term, count, ...]` array. That is
-///   what `json.nl=flat` produces and the only shape this endpoint's response
-///   takes, so no general named-list machinery is needed (issue #153 is
-///   deliberately not a prerequisite). `json.nl=flat` and an absent `json.nl`
-///   are accepted; `map`/`arrarr`/`arrmap` are 400d rather than silently
-///   answered flat — see `check_terms_json_nl`.
+/// - The per-field value is a Solr NamedList of `(term, count)` pairs, so it
+///   honours `json.nl` through the same `render_named_list` facets use (finding
+///   142 / `terms_prefix_json_nl_map`): `flat` -> `[term, count, ...]` (the
+///   default), `map` -> `{term: count}`, `arrarr`/`arrmap` likewise. The outer
+///   `terms` object stays keyed by field name under every shape.
 /// - Ordering is Solr's `terms.sort=count` default: count descending, ties
 ///   broken by term ascending. The trace pins both halves — `dog`/`lazi`/
 ///   `quick` tied at 2 ahead of the singletons, and the singletons themselves
 ///   alphabetical.
+/// - `terms.prefix` filters each field's term dictionary literally before the
+///   sort — no analyzer over the prefix, case-sensitive `str::starts_with` on
+///   the indexed term; absent or empty means no filter (finding 141).
 /// - `terms.limit` defaults to 10 (`TERMS_DEFAULT_LIMIT`), applied per field
-///   after the sort.
+///   after the sort; a negative value is the "unlimited" sentinel, and `0`
+///   means zero. A non-integer is a 400 with an empty `terms:{}` sibling
+///   (finding 142).
 /// - `omitHeader=true` (which the module always sends here) drops
 ///   `responseHeader` entirely.
 ///
-/// A `terms.fl` naming an undefined field is a 400 in Solr's envelope with no
-/// `response` key: unlike `facet.field`'s post-query error
-/// (`facet_unknown_field.json`, which carries the base query's `response`),
-/// `/terms` has no base query to have partially run, so this follows the
-/// pre-query precedent (`facet_err_range_single.json`). A `terms.fl` naming a
-/// *defined but non-text* field is a 400 the same way — see
+/// An *undefined* `terms.fl` is not an error: finding 141 /
+/// `terms_prefix_unknown_field` answers 200 with the field's key present and
+/// an empty list (which matters for #308's purpose — stock
+/// `search_api_autocomplete` names fields an index may not have). A `terms.fl`
+/// naming a *defined but non-text* field is still a 400 — see
 /// `check_terms_field`.
 ///
 /// `terms_body.json` and its `solr-ref/manifest.tsv` row cover this endpoint
@@ -3654,29 +3666,59 @@ async fn terms(
     let params = Params::parse(query.as_deref().unwrap_or("")).allow_omit_header();
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, TERMS_PARAMS, &params)?;
-    check_terms_json_nl(&params).map_err(|e| e.with_params(&params))?;
 
     let mut terms_block = Map::new();
     let terms_requested = params.bool_or("terms", false)?;
     if terms_requested {
+        // `terms.limit` is global to the component. A non-integer is the one
+        // error case in the set (finding 142 / `terms_limit_invalid`): Solr
+        // has already emitted the component's (still-empty) container when the
+        // parse fails, so the 400 carries an empty `terms:{}` alongside
+        // `error` via `ErrorExtra::terms`.
+        let limit =
+            parse_terms_limit(&params).map_err(|e| e.with_params(&params).with_terms(json!({})))?;
+        // `/terms` is a Solr NamedList, so it honours `json.nl` through the
+        // same `render_named_list` facets use (finding 142 /
+        // `terms_prefix_json_nl_map`); the outer `terms` object stays keyed
+        // by field name under every shape.
+        let nl = facet::JsonNl::from_params(&params);
+        // `terms.prefix` filters the indexed dictionary literally (no analyzer
+        // over the prefix), case-sensitive, applied per field before the sort
+        // (finding 141). Absent or empty means no filter.
+        let prefix = params.get("terms.prefix").filter(|p| !p.is_empty());
         for field_name in params.get_all("terms.fl") {
             check_terms_field(&state.index, field_name).map_err(|e| e.with_params(&params))?;
-            let totals = state.index.field_terms(field_name).map_err(|e| {
-                WfError::internal("wayfinder::TermsError", e.to_string()).with_params(&params)
-            })?;
+            let mut entries: Vec<(String, u64)> = if state.index.resolves_field_name(field_name) {
+                state
+                    .index
+                    .field_terms(field_name)
+                    .map_err(|e| {
+                        WfError::internal("wayfinder::TermsError", e.to_string())
+                            .with_params(&params)
+                    })?
+                    .into_iter()
+                    .filter(|(term, _)| prefix.is_none_or(|p| term.starts_with(p)))
+                    .collect()
+            } else {
+                // An undefined `terms.fl` is not an error: finding 141 /
+                // `terms_prefix_unknown_field` answers 200 with the field's
+                // key present and an empty list.
+                Vec::new()
+            };
             // `field_terms` yields terms ascending, so a *stable* sort on
             // count descending leaves equal counts in term-ascending order —
             // Solr's `terms.sort=count` tie-break, asserted against the
-            // trace's alphabetical run of singletons.
-            let mut entries: Vec<(String, u64)> = totals.into_iter().collect();
+            // trace's alphabetical run of singletons. The limit is applied
+            // AFTER the sort (finding 142).
             entries.sort_by(|(_, a), (_, b)| b.cmp(a));
-            entries.truncate(TERMS_DEFAULT_LIMIT);
-            let mut flat = Vec::with_capacity(entries.len() * 2);
-            for (term, count) in entries {
-                flat.push(json!(term));
-                flat.push(json!(count));
+            if let Some(limit) = limit {
+                entries.truncate(limit);
             }
-            terms_block.insert(field_name.to_string(), Value::Array(flat));
+            let named: Vec<(String, Value)> = entries
+                .into_iter()
+                .map(|(term, count)| (term, json!(count)))
+                .collect();
+            terms_block.insert(field_name.to_string(), facet::render_named_list(&named, nl));
         }
     }
 
@@ -3697,41 +3739,36 @@ async fn terms(
     Ok(axum::Json(Value::Object(body)).into_response())
 }
 
-/// Refuses a `json.nl` asking for a named-list shape `/terms` does not render.
+/// Parses `terms.limit` into a per-field truncation bound (finding 142).
 ///
-/// `json.nl` is in `TERMS_PARAMS` because `search_api_solr` always sends it
-/// (`solr-ref/search-api/trace/00028.json` sends `json.nl=flat`), and flat —
-/// `[term, count, term, count, ...]` — is the only shape this handler produces.
-/// Accepting `json.nl=map` and then answering flat anyway would be exactly the
-/// silent-wrong-answer `TERMS_PARAMS`' own doc comment argues against, so the
-/// three values this codebase already gives a documented, *fixture-pinned*
-/// meaning to for facet counts (`map`, `arrarr`, `arrmap` — see
-/// `src/facet.rs`'s `JsonNl`, backed by `facet_json_nl_map.json` and friends)
-/// are a 400 here rather than a 200 in the wrong shape.
+/// The `Option<usize>` return is the bound handed to `Vec::truncate`: `None`
+/// means "unlimited". An absent param yields the default
+/// `Some(TERMS_DEFAULT_LIMIT)`; a **negative** value is Solr's "unlimited"
+/// sentinel rather than a clamp-to-zero; `0` is `Some(0)` — zero means zero,
+/// not "default". A non-integer is the one error case, a 400 whose body the
+/// caller adorns with an empty `terms:{}` sibling via `WfError::with_terms`.
 ///
-/// Any other value is treated as flat, matching `JsonNl::from_params`' own
-/// fallback for an unrecognised value. Nothing here claims that is Solr's
-/// behaviour: no captured response shows Solr's reaction to a bogus `json.nl`,
-/// so this follows the one precedent in the tree instead of inventing one.
-/// Rendering these shapes for real (issue #153's named-list machinery) is what
-/// replaces this check.
-fn check_terms_json_nl(params: &Params) -> Result<(), WfError> {
-    match params.get("json.nl") {
-        Some(shape @ ("map" | "arrarr" | "arrmap")) => Err(WfError::bad_request(
-            "wayfinder::TermsUnsupportedJsonNl",
-            format!(
-                "json.nl={shape} is not supported on /terms: the terms block is only \
-                 rendered in the flat [term, count, ...] shape (json.nl=flat)"
-            ),
-        )),
-        _ => Ok(()),
+/// `-1` is the only negative value captured (`terms_limit_negative`); per the
+/// spec any negative is treated as unlimited, and this comment is the honest
+/// statement of the extent of that evidence.
+fn parse_terms_limit(params: &Params) -> Result<Option<usize>, WfError> {
+    match params.get("terms.limit") {
+        None => Ok(Some(TERMS_DEFAULT_LIMIT)),
+        Some(raw) => match raw.parse::<i64>() {
+            // Any negative is the unlimited sentinel (only -1 is captured).
+            Ok(n) if n < 0 => Ok(None),
+            Ok(n) => Ok(Some(n as usize)),
+            Err(_) => Err(WfError::bad_request(
+                "wayfinder::TermsInvalidLimit",
+                format!("terms.limit is not an integer: \"{raw}\""),
+            )),
+        },
     }
 }
 
-/// Refuses a `terms.fl` that `/terms` cannot enumerate, the same way
-/// `stats::check_statable` refuses an unaggregatable `stats.field` — an
-/// undefined field, or a defined one whose term dictionary does not hold UTF-8
-/// text.
+/// Refuses a *defined but non-text* `terms.fl` whose term dictionary does
+/// not hold UTF-8 text. (An *undefined* field is no longer refused — see
+/// below.)
 ///
 /// **Existence is resolved, not just looked up.** `CoreIndex::
 /// resolves_field_name` (the public face of `field_target`, the same
@@ -3741,7 +3778,9 @@ fn check_terms_json_nl(params: &Params) -> Result<(), WfError> {
 /// `terms.fl=tm_X3b_en_title` — `presets/search-api.toml`'s own `tm_X3b_en_*`
 /// rule, and the exact request `solr-ref/search-api/trace/00028.json` captures
 /// — as an undefined field while `q=tm_X3b_en_title:lazy` resolved fine on the
-/// same core. A name matching neither is still a 400.
+/// same core. A name matching neither is no longer an error: finding 141
+/// settles that an undefined `terms.fl` answers 200 with an empty list, which
+/// the handler renders itself.
 ///
 /// The type test is `resolved_value_kind` == `ValueKind::Text`, resolved with
 /// the same precedence: a declared field's own kind, else the matching dynamic
@@ -3777,13 +3816,18 @@ fn check_terms_json_nl(params: &Params) -> Result<(), WfError> {
 /// follows `check_statable`'s precedent of a clear unpinned 400 rather than
 /// inventing a fixture-shaped wording.
 fn check_terms_field(index: &CoreIndex, field_name: &str) -> Result<(), WfError> {
-    if !index.resolves_field_name(field_name) {
-        return Err(WfError::bad_request(
-            "wayfinder::UndefinedField",
-            format!("undefined field \"{field_name}\""),
-        ));
-    }
-    if index.wf_schema.resolved_value_kind(field_name) != Some(schema::ValueKind::Text) {
+    // A *defined but non-text* field is refused: its term dictionary holds
+    // Tantivy's fixed-width numeric/date encoding, not UTF-8, so decoding it
+    // lossily produced replacement-character keys and silently *summed*
+    // unrelated frequencies
+    // (`terms_non_text_field_is_rejected_rather_than_lossily_decoded`).
+    //
+    // An *undefined* field is no longer an error (finding 141 /
+    // `terms_prefix_unknown_field`): the handler renders it as an empty list,
+    // so only the defined-non-text case fails here.
+    if index.resolves_field_name(field_name)
+        && index.wf_schema.resolved_value_kind(field_name) != Some(schema::ValueKind::Text)
+    {
         return Err(WfError::bad_request(
             "wayfinder::TermsUnsupportedField",
             format!(

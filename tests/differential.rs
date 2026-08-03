@@ -1654,15 +1654,15 @@ const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[
          timestamps, real filesystem paths on the capture host) — same permanent category as \
          `admin_info_system` in EXPECTED_DIVERGENCES_MANIFEST_ERRORS above and `ping`'s `rid`",
     ),
-    // The 31 rows below are wave-1 capture prep for #295 (`{!tag}`/`{!ex}`) and
-    // #308 (`terms.prefix`/`terms.limit`), findings 136-142. Both features are
-    // unbuilt, so every one of these is a live divergence today; the three
-    // control rows captured with them -- `facet_extag_baseline`,
-    // `facet_extag_ex_no_tag` and `terms_prefix_empty` -- already match and are
-    // deliberately not listed. Delete each entry as its feature lands; the
-    // guard at the end of the test loop below fails if one starts matching
-    // while still listed (verified by mutation: listing `facet_extag_baseline`
-    // here fails the suite).
+    // The 16 rows below are the remaining wave-1 capture prep for #295
+    // (`{!tag}`/`{!ex}`), findings 136-140. #308's 15 `terms_*` rows landed and
+    // were deleted; #295 is still unbuilt, so each of these is a live
+    // divergence today; the three control rows captured with them --
+    // `facet_extag_baseline`, `facet_extag_ex_no_tag` and `terms_prefix_empty`
+    // -- already match and are deliberately not listed. Delete each entry as
+    // its feature lands; the guard at the end of the test loop below fails if
+    // one starts matching while still listed (verified by mutation: listing
+    // `facet_extag_baseline` here fails the suite).
     (
         "facet_extag_excluded",
         "issue #295: `{!ex=cat}` on `facet.field` must count as if the `{!tag=cat}`-carrying `fq` were absent \
@@ -1745,86 +1745,6 @@ const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[
         "facet_extag_missing",
         "issue #295: `facet.missing=true` appends its `null` bucket to the post-exclusion counts; Wayfinder \
          400s. Finding 140",
-    ),
-    (
-        "terms_prefix_body_multi",
-        "issue #308: `terms.prefix=d` must filter the term dictionary to `dog 2, dai 1`; `terms.prefix` is \
-         absent from `TERMS_PARAMS` so Wayfinder drops it and returns the unfiltered top 10. \
-         Finding 141",
-    ),
-    (
-        "terms_prefix_body_single",
-        "issue #308: `terms.prefix=th` must return only `think 1`; Wayfinder ignores the param and returns the \
-         unfiltered top 10. Finding 141",
-    ),
-    (
-        "terms_prefix_body_none",
-        "issue #308: a prefix matching nothing (`zzz`) must return an empty list with HTTP 200; Wayfinder \
-         ignores the param and returns 10 terms. Finding 141",
-    ),
-    (
-        "terms_prefix_tie",
-        "issue #308: within a prefix, a count tie breaks alphabetically (`afternoon 1, all 1`); Wayfinder \
-         ignores the prefix entirely. Finding 141",
-    ),
-    (
-        "terms_prefix_string_field",
-        "issue #308: `terms.prefix` works on a `string` field too (`category`, prefix `c` -> `classic 2`); \
-         Wayfinder returns all four categories. Finding 141",
-    ),
-    (
-        "terms_prefix_case",
-        "issue #308: the prefix is matched literally against the indexed dictionary, so `D` returns `[]` where \
-         `d` matches two terms -- no analysis of the prefix. Wayfinder ignores it and returns 10 terms. \
-         Finding 141",
-    ),
-    (
-        "terms_prefix_two_fields",
-        "issue #308: with two `terms.fl` values each field's list is filtered by the same prefix; Wayfinder \
-         filters neither. Finding 141",
-    ),
-    (
-        "terms_prefix_unknown_field",
-        "issue #308: an unknown `terms.fl` field must answer `{\"nosuchfield\": []}` with HTTP 200, because \
-         stock `search_api_autocomplete` will name fields an index may not have; Wayfinder 400s. \
-         Finding 141",
-    ),
-    (
-        "terms_limit_below",
-        "issue #308: `terms.limit=1` must truncate the ordered list to one entry; `terms.limit` is absent from \
-         `TERMS_PARAMS` so Wayfinder drops it and applies `TERMS_DEFAULT_LIMIT` (10). Finding 142",
-    ),
-    (
-        "terms_limit_above",
-        "issue #308: `terms.limit=99` returns the two matching terms rather than padding; Wayfinder ignores \
-         both `terms.prefix` and `terms.limit` here. Finding 142",
-    ),
-    (
-        "terms_limit_zero",
-        "issue #308: `terms.limit=0` must return an empty list, not the default 10; Wayfinder ignores the \
-         param. Finding 142",
-    ),
-    (
-        "terms_limit_negative",
-        "issue #308: `terms.limit=-1` is the unlimited sentinel and must return all 19 `body` terms; Wayfinder \
-         ignores it and stops at 10. Finding 142",
-    ),
-    (
-        "terms_limit_no_prefix",
-        "issue #308: `terms.limit=2` with no prefix must return the top two of the whole dictionary; Wayfinder \
-         returns 10. Finding 142",
-    ),
-    (
-        "terms_limit_invalid",
-        "issue #308: `terms.limit=abc` is the one error case in the set -- HTTP 400 carrying both an `error` \
-         object and an empty-but-present `terms: {}`. Wayfinder drops the unknown param and answers 200. \
-         Finding 142",
-    ),
-    (
-        "terms_prefix_json_nl_map",
-        "issue #308: `terms.prefix` combined with `json.nl=map` must render the filtered pairs as an object; \
-         Wayfinder supports `json.nl` already but 400s -- `strict_params` rejects `terms.prefix`. \
-         Finding 141",
     ),
 ];
 

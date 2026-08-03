@@ -9,7 +9,7 @@
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::params::Params;
 
@@ -50,6 +50,12 @@ struct ErrorExtra {
     /// all — not a regression for errors detected before any query runs
     /// (`facet_err_range_single.json`).
     response: Option<Value>,
+    /// Issue #308: `terms.limit=<non-integer>` is detected after the terms
+    /// component has already emitted its (empty) container, so Solr's fixture
+    /// (`terms_limit_invalid.json`) carries an empty `terms:{}` object
+    /// alongside `error`. `None` everywhere else -- no other error path grows
+    /// a `terms` key. Rendered immediately before `error`, like `response`.
+    terms: Option<Value>,
     /// Set only for the one captured 500 whose error object carries `msg,
     /// trace, code` with **no** `metadata` key at all (finding 59's
     /// `err_regex_bad_class.json`: a regex that parses as a query but fails
@@ -130,6 +136,14 @@ impl WfError {
         self.extra.trace = Some(trace.into());
         self
     }
+
+    /// Attaches a `terms` block (issue #308's `terms.limit` parse error), the
+    /// `ErrorExtra::terms` analogue of [`Self::with_response`]. Default
+    /// absent, so no other error path grows a `terms` key.
+    pub fn with_terms(mut self, terms: Value) -> Self {
+        self.extra.terms = Some(terms);
+        self
+    }
 }
 
 /// Renders just `msg`, so a `WfError` raised deep inside an `anyhow`-based
@@ -175,31 +189,43 @@ impl IntoResponse for WfError {
                 "code": code,
             }),
         };
-        let body = match self.envelope {
-            Envelope::Bare => json!({ "error": error }),
-            Envelope::NoParams if self.extra.omit_header => json!({ "error": error }),
-            Envelope::NoParams => json!({
-                "responseHeader": { "status": code, "QTime": 0 },
-                "error": error,
-            }),
-            Envelope::WithParams => match (self.extra.omit_header, self.extra.response) {
-                (true, Some(response)) => json!({
-                    "response": response,
-                    "error": error,
-                }),
-                (true, None) => json!({ "error": error }),
-                (false, Some(response)) => json!({
-                    "responseHeader": { "status": code, "QTime": 0, "params": self.extra.params },
-                    "response": response,
-                    "error": error,
-                }),
-                (false, None) => json!({
-                    "responseHeader": { "status": code, "QTime": 0, "params": self.extra.params },
-                    "error": error,
-                }),
-            },
-        };
-        (self.status, Json(body)).into_response()
+        // Assembled field-by-field rather than via `json!` so the optional
+        // sibling blocks (`response`, `terms`) can be inserted in their fixed
+        // position -- immediately before `error` -- only when set. Every key
+        // is absent by default; `serde_json` preserves insertion order (the
+        // `preserve_order` feature), so this matches Solr's key order, which
+        // `tests/json_key_order.rs` treats as contract.
+        let mut body = Map::new();
+        match self.envelope {
+            Envelope::Bare => {}
+            Envelope::NoParams if self.extra.omit_header => {}
+            Envelope::NoParams => {
+                body.insert(
+                    "responseHeader".to_string(),
+                    json!({ "status": code, "QTime": 0 }),
+                );
+            }
+            Envelope::WithParams => {
+                if !self.extra.omit_header {
+                    body.insert(
+                        "responseHeader".to_string(),
+                        json!({
+                            "status": code,
+                            "QTime": 0,
+                            "params": self.extra.params,
+                        }),
+                    );
+                }
+                if let Some(response) = &self.extra.response {
+                    body.insert("response".to_string(), response.clone());
+                }
+            }
+        }
+        if let Some(terms) = &self.extra.terms {
+            body.insert("terms".to_string(), terms.clone());
+        }
+        body.insert("error".to_string(), error);
+        (self.status, Json(Value::Object(body))).into_response()
     }
 }
 
