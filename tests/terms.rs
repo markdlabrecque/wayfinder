@@ -1087,8 +1087,16 @@ async fn terms_json_nl_arrarr_renders_nested_arrays() {
     assert_eq!(
         body.pointer("/terms/title"),
         Some(&json!([
-            ["dog", 2], ["lazi", 2], ["quick", 2], ["about", 1], ["afternoon", 1],
-            ["archiv", 1], ["brown", 1], ["cat", 1], ["day", 1], ["document", 1],
+            ["dog", 2],
+            ["lazi", 2],
+            ["quick", 2],
+            ["about", 1],
+            ["afternoon", 1],
+            ["archiv", 1],
+            ["brown", 1],
+            ["cat", 1],
+            ["day", 1],
+            ["document", 1],
         ])),
         "json.nl=arrarr must render each pair as a [term, count] array, got {body}"
     );
@@ -1239,8 +1247,26 @@ async fn terms_prefix_empty_means_no_filter() {
     assert_eq!(
         body.pointer("/terms/title"),
         Some(&json!([
-            "dog", 2, "lazi", 2, "quick", 2, "about", 1, "afternoon", 1, "archiv", 1,
-            "brown", 1, "cat", 1, "day", 1, "document", 1,
+            "dog",
+            2,
+            "lazi",
+            2,
+            "quick",
+            2,
+            "about",
+            1,
+            "afternoon",
+            1,
+            "archiv",
+            1,
+            "brown",
+            1,
+            "cat",
+            1,
+            "day",
+            1,
+            "document",
+            1,
         ])),
         "terms.prefix= (empty) must be equivalent to no prefix: the full \
          default-limit-10 list, got {body}"
@@ -1280,8 +1306,11 @@ async fn terms_prefix_on_a_string_field() {
 async fn terms_prefix_is_applied_per_field_independently() {
     let (app, _dir) = terms_app(&multi_field_corpus()).await;
 
-    let (status, body) =
-        get(&app, "terms?terms=true&terms.fl=title&terms.fl=body&terms.prefix=c").await;
+    let (status, body) = get(
+        &app,
+        "terms?terms=true&terms.fl=title&terms.fl=body&terms.prefix=c",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "got {body}");
     assert_eq!(
         body.pointer("/terms/title"),
@@ -1295,8 +1324,11 @@ async fn terms_prefix_is_applied_per_field_independently() {
          field's dictionary, got {body}"
     );
 
-    let (status, body) =
-        get(&app, "terms?terms=true&terms.fl=title&terms.fl=body&terms.prefix=qu").await;
+    let (status, body) = get(
+        &app,
+        "terms?terms=true&terms.fl=title&terms.fl=body&terms.prefix=qu",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "got {body}");
     assert_eq!(
         body.pointer("/terms/title"),
@@ -1322,8 +1354,11 @@ async fn terms_prefix_is_applied_per_field_independently() {
 #[tokio::test]
 async fn terms_limit_truncates_after_the_sort() {
     let (app, _dir) = terms_app(&trace_corpus()).await;
-    let (status, body) =
-        get(&app, "terms?terms=true&terms.fl=title&terms.prefix=d&terms.limit=1").await;
+    let (status, body) = get(
+        &app,
+        "terms?terms=true&terms.fl=title&terms.prefix=d&terms.limit=1",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "got {body}");
     assert_eq!(
         body.pointer("/terms/title"),
@@ -1338,8 +1373,11 @@ async fn terms_limit_truncates_after_the_sort() {
 #[tokio::test]
 async fn terms_limit_above_match_count_does_not_pad() {
     let (app, _dir) = terms_app(&trace_corpus()).await;
-    let (status, body) =
-        get(&app, "terms?terms=true&terms.fl=title&terms.prefix=d&terms.limit=99").await;
+    let (status, body) = get(
+        &app,
+        "terms?terms=true&terms.fl=title&terms.prefix=d&terms.limit=99",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "got {body}");
     assert_eq!(
         body.pointer("/terms/title"),
@@ -1352,8 +1390,11 @@ async fn terms_limit_above_match_count_does_not_pad() {
 #[tokio::test]
 async fn terms_limit_zero_means_zero_not_default() {
     let (app, _dir) = terms_app(&trace_corpus()).await;
-    let (status, body) =
-        get(&app, "terms?terms=true&terms.fl=title&terms.prefix=d&terms.limit=0").await;
+    let (status, body) = get(
+        &app,
+        "terms?terms=true&terms.fl=title&terms.prefix=d&terms.limit=0",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "got {body}");
     assert_eq!(
         body.pointer("/terms/title"),
@@ -1372,8 +1413,7 @@ async fn terms_limit_zero_means_zero_not_default() {
 #[tokio::test]
 async fn terms_limit_negative_means_unlimited() {
     let (app, _dir) = terms_app(&twelve_term_corpus()).await;
-    let (status, body) =
-        get(&app, "terms?terms=true&terms.fl=title&terms.limit=-1").await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=title&terms.limit=-1").await;
     assert_eq!(status, StatusCode::OK, "got {body}");
     let flat = flat_terms(&body, "title");
     assert_eq!(
@@ -1398,8 +1438,7 @@ async fn terms_limit_negative_means_unlimited() {
 #[tokio::test]
 async fn terms_limit_without_prefix_truncates_the_whole_dictionary() {
     let (app, _dir) = terms_app(&trace_corpus()).await;
-    let (status, body) =
-        get(&app, "terms?terms=true&terms.fl=title&terms.limit=2").await;
+    let (status, body) = get(&app, "terms?terms=true&terms.fl=title&terms.limit=2").await;
     assert_eq!(status, StatusCode::OK, "got {body}");
     assert_eq!(
         body.pointer("/terms/title"),
@@ -1420,8 +1459,11 @@ async fn terms_limit_without_prefix_truncates_the_whole_dictionary() {
 #[tokio::test]
 async fn terms_limit_invalid_returns_400_with_empty_terms_sibling() {
     let (app, _dir) = terms_app(&trace_corpus()).await;
-    let (status, body) =
-        get(&app, "terms?terms=true&terms.fl=body&terms.limit=abc&omitHeader=true").await;
+    let (status, body) = get(
+        &app,
+        "terms?terms=true&terms.fl=body&terms.limit=abc&omitHeader=true",
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
@@ -1433,7 +1475,9 @@ async fn terms_limit_invalid_returns_400_with_empty_terms_sibling() {
         "got {body}"
     );
     assert!(
-        body.pointer("/error/metadata").and_then(Value::as_array).is_some(),
+        body.pointer("/error/metadata")
+            .and_then(Value::as_array)
+            .is_some(),
         "the error must carry a metadata array (Solr's error-class shape), \
          got {body}"
     );
