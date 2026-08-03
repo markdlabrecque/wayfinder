@@ -1994,6 +1994,21 @@ const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[
          Wayfinder ignores the whole `f.<field>.facet.limit` param and returns 200, so this row \
          also pins that the validation lands with the feature rather than after it",
     ),
+    (
+        "facet_perfield_prec_lp_vs_field",
+        "issue #296 (finding 151): `f.category.facet.limit=3` beats a `{!key=cat facet.limit=1}` \
+         local param on the same facet -- `getFieldParam` tries the per-field name before the \
+         bare one, so a local param can only shadow the global. Wayfinder honours neither yet",
+    ),
+    (
+        "facet_perfield_prec_lp_vs_global",
+        "issue #296 (finding 151): the local param does beat the bare global `facet.limit`",
+    ),
+    (
+        "facet_perfield_prec_field_vs_global",
+        "issue #296 (finding 151): `f.<field>.facet.limit` beats the bare global, the ordinary \
+         Solr per-field precedence -- the same rule `f.<field>.facet.missing` already follows here",
+    ),
 ];
 
 /// The `EXPECTED_DIVERGENCES` reason for `name`, or `None` if `name` is not

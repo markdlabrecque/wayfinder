@@ -3394,3 +3394,17 @@ capp296 pf296_sort_two_lp       'select?q=*:*&rows=0&facet=true&facet.field=%7B%
 if want_any '^pf296_'; then
   release "$PF296_CONTAINER" "per-field facet-sort core '$PF296_CORE'"
 fi
+
+# --- #296 precedence: local param vs f.<field>.facet.* vs global -----------
+# Findings 147/148 established that both addresses work; they did not say which
+# wins when they disagree, and Solr's own mechanism makes the answer
+# non-obvious. `SimpleFacets.parseParams` does
+# `SolrParams.wrapDefaults(localParams, orig)` and then reads the setting with
+# `getFieldParam(field, "facet.limit")`, which looks for `f.<field>.facet.limit`
+# *before* the bare name -- so an `f.<field>.` param in the request could beat a
+# local param on the facet itself, which is the opposite of what "local params
+# shadow the request" suggests. These three rows decide it: each sets two of the
+# three addresses to conflicting limits over `category` (4 buckets).
+cap facet_perfield_prec_lp_vs_field  'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dcat%20facet.limit%3D1%7Dcategory&f.category.facet.limit=3&wt=json'
+cap facet_perfield_prec_lp_vs_global 'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dcat%20facet.limit%3D1%7Dcategory&facet.limit=3&wt=json'
+cap facet_perfield_prec_field_vs_global 'select?q=*:*&rows=0&facet=true&facet.field=category&f.category.facet.limit=1&facet.limit=3&wt=json'

@@ -245,3 +245,6 @@ facet_perfield_ex_two_facets	200	select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcatego
 facet_perfield_err_bad_limit	400	select?q=*:*&rows=0&facet=true&facet.field=category&f.category.facet.limit=abc&wt=json
 facet_perfield_ex_limit_rank	200	select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:garden&facet=true&facet.field=%7B%21ex%3Dcat%20key%3Dun%7Dcategory&f.category.facet.limit=1&wt=json
 facet_perfield_ex_lp_limit_rank	200	select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:garden&facet=true&facet.field=%7B%21ex%3Dcat%20key%3Dun%20facet.limit%3D1%7Dcategory&wt=json
+facet_perfield_prec_lp_vs_field	200	select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dcat%20facet.limit%3D1%7Dcategory&f.category.facet.limit=3&wt=json
+facet_perfield_prec_lp_vs_global	200	select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dcat%20facet.limit%3D1%7Dcategory&facet.limit=3&wt=json
+facet_perfield_prec_field_vs_global	200	select?q=*:*&rows=0&facet=true&facet.field=category&f.category.facet.limit=1&facet.limit=3&wt=json
