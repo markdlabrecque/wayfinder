@@ -270,9 +270,10 @@ chosen. Nothing may be added here without the same two things.
    surface is JSON-only and its clients parse JSON, so reproducing a servlet-container fallback
    would add a second error format solely for authentication failures. (issue #229; finding 118)
 
-10. **`/update/extract` omits `X-Parsed-By`, omits Tika's injected `shape="rect"`, requires
-    `extractOnly=true`, and answers 415 where Solr's Tika answers 500 on a corrupt PDF.** Four
-    separate divergences on the one endpoint, all from the issue #258 captures (findings 120-123):
+10. **`/update/extract` omits `X-Parsed-By`, omits Tika's injected `shape="rect"`,
+    indexes Wayfinder's own extraction (not Tika's) on the Solr-Cell path, and answers 415 where
+    Solr's Tika answers 500 on a corrupt PDF.** Four separate divergences on the one endpoint,
+    from the issue #258 and #259 captures (findings 120-123):
 
     - **`X-Parsed-By` is absent** from both `file_metadata` and the XHTML `<head>`. Its captured
       values are Java class names —
@@ -286,10 +287,20 @@ chosen. Nothing may be added here without the same two things.
       Tika adding it to a link whose source (`solr-ref/extract-inputs/sample.html`) has no such
       attribute. It is an artefact of Tika's HTML parser, not content, and reproducing it would
       mean fabricating markup that was never in the document.
-    - **`extractOnly=true` is required; without it the request is a 400**, where Solr answers 200
-      and indexes the extracted document. Server-side indexing of extracted content is out of v1
-      scope. The alternative — 200 with nothing indexed — is strictly worse: the client's next
-      query comes back empty with no error anywhere to explain it.
+    - **The Solr-Cell indexing path (#259) indexes Wayfinder's own extraction, not Tika's.**
+      `extractOnly=true` is no longer required (this retires #258's former "extractOnly required"
+      divergence): with it absent or false, `literal.*`/`fmap.*`/`uprefix`/`lowernames`/
+      `captureAttr` are applied to the extraction and the result is indexed through the same
+      commit path `/update` uses, answering the bare `responseHeader` (`extract_html_index.json`).
+      The indexed document's `body` is Wayfinder's `body_text` (its HTML text form), not Tika's
+      content-field serialization (which keeps the title plus a structure-dependent whitespace
+      layout Wayfinder does not replicate); and its `links` carry the real `<a>` attribute values
+      only — no fabricated `shape="rect"` (the bullet above). The follow-up select
+      (`extract_html_select.json`) therefore differs in `body` and `links`, asserted in
+      `tests/extract_index.rs` (which also proves the fixture still genuinely differs, so the
+      divergence cannot silently start matching). This is Solr-compatibility completeness for
+      non-Drupal clients — issue #259's own survey found no Drupal/Search-API consumer for
+      server-side indexing, so the divergence has no client behind it.
     - **A corrupt PDF is a 415, not the captured 500.** `extract_corrupt_pdf.json` is Tika
       *parsing* a malformed PDF and throwing, which Solr reports as a 500. Wayfinder ships no PDF
       extractor in v1, so the request never reaches a parse attempt: PDF is an unimplemented
@@ -302,10 +313,13 @@ chosen. Nothing may be added here without the same two things.
     The first two are normalised away in the differential harness by `normalize_extract`, with each
     affected row listed in `ACCEPTED_DIVERGENCES_MULTIPART` in `tests/differential.rs`; that runner
     asserts the raw envelopes really do still differ before normalisation, so the normaliser cannot
-    quietly start hiding something else. The fourth is a *status* divergence, which no normaliser
-    may hide: it is listed row-by-row in `DIVERGENT_STATUS_MULTIPART`, which pins the exact status
-    Wayfinder must return and fails if the capture ever starts agreeing.
-    (issue #258; findings 120-123)
+    quietly start hiding something else. The corrupt-PDF row is a *status* divergence, which no
+    normaliser may hide: it is listed row-by-row in `DIVERGENT_STATUS_MULTIPART`, which pins the
+    exact status Wayfinder must return and fails if the capture ever starts agreeing. The #259
+    indexing-path `body`/`links` divergence is a *value* divergence on a two-step index→select flow
+    the single-request manifest runner cannot express, so it lives in `tests/extract_index.rs`
+    rather than `ACCEPTED_DIVERGENCES_MULTIPART`.
+    (issues #258 and #259; findings 120-123)
 
 Note that divergence 3 is a difference from the *configset* the reference fixtures were captured
 against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, 4, 6, 7,

@@ -105,6 +105,23 @@ impl Params {
         self.pairs.iter().map(|(k, _)| k.as_str())
     }
 
+    /// Every `(suffix, value)` pair whose key starts with `prefix`, in request
+    /// order — `suffix` is the key with `prefix` stripped. `/update/extract`'s
+    /// `literal.<field>` / `fmap.<from>` Solr-Cell families (issue #259) are
+    /// the only consumer: repeated keys repeat, so a multivalued
+    /// `literal.cat=a&literal.cat=b` yields two pairs.
+    ///
+    /// `prefix` must end with the family delimiter (e.g. `"literal."`); a key
+    /// equal to the bare prefix (`"literal."` with no field) is excluded, since
+    /// it names no field.
+    pub fn pairs_with_prefix(&self, prefix: &str) -> Vec<(&str, &str)> {
+        self.pairs
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix) && k.len() > prefix.len())
+            .map(|(k, v)| (&k[prefix.len()..], v.as_str()))
+            .collect()
+    }
+
     /// Whether this endpoint's `omitHeader` policy suppresses `responseHeader`.
     ///
     /// An unsupported parameter or invalid value remains inert. Invalid values

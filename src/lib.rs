@@ -286,19 +286,28 @@ const UPDATE_PARAMS: &[&str] = &[
     "wt",
     "json.nl",
 ];
-/// `<core>/update/extract` (issue #258). Deliberately **not** a superset of
-/// `UPDATE_PARAMS`: this route only extracts, so every param whose meaning is
-/// "and then index the result" is absent and `strict_params = true` 400s it.
-/// That means no `commit`/`commitWithin`/`softCommit`/`overwrite`, and none of
-/// Solr's ExtractingRequestHandler literal/mapping family (`literal.*`,
-/// `fmap.*`, `uprefix`, `lowernames`, `captureAttr`, `capture`, `xpath`,
-/// `defaultField`, `boost.*`, `ignoreTikaException`) — accepting a param that
-/// silently does nothing would be a worse divergence than rejecting it, since
-/// the client would believe its field mapping had been applied.
+/// `<core>/update/extract` (issues #258 and #259). Two modes share this
+/// one allowlist:
 ///
-/// `extractOnly` is required rather than merely allowed (see `update_extract`);
-/// `extractFormat` selects `xml` (default) or `text`; `resource.name` names the
-/// document for Tika's detector and for the echoed `resourceName` metadata.
+/// - **extractOnly=true** (#258): the document is extracted and returned,
+///   never indexed. Only the extract-shape params apply.
+/// - **extractOnly absent/false** (#259, Solr Cell indexing semantics): the
+///   extracted content is indexed through the same commit path `/update`
+///   uses, so the commit family (`commit`/`commitWithin`/`softCommit`/
+///   `overwrite`) is admitted too, alongside Solr's ExtractingRequestHandler
+///   literal/mapping family.
+///
+/// The literal/mapping family is admitted as **prefix families** (the
+/// trailing-dot entries below): any `literal.<field>` sets a document field
+/// value, any `fmap.<from>=<to>` renames an extracted/captured field. The
+/// remaining shape params (`uprefix`, `lowernames`, `captureAttr`) are exact
+/// keys. `capture`/`xpath`/`defaultField`/`boost.*`/`ignoreTikaException`
+/// stay absent and 400 under `strict_params`: accepting a param that silently
+/// does nothing would be a worse divergence than rejecting it.
+///
+/// `extractOnly` is no longer required (issue #259 makes the indexing path
+/// reachable); `extractFormat`/`resource.name` are only meaningful to the
+/// extractOnly response and are accepted-and-ignored on the indexing path.
 const EXTRACT_PARAMS: &[&str] = &[
     "extractOnly",
     "extractFormat",
@@ -306,6 +315,19 @@ const EXTRACT_PARAMS: &[&str] = &[
     "wt",
     "omitHeader",
     "json.nl",
+    // Indexing path (#259): commit semantics shared with `/update`.
+    "commit",
+    "commitWithin",
+    "softCommit",
+    "overwrite",
+    // Indexing path (#259): Solr Cell field-mapping shape params.
+    "uprefix",
+    "lowernames",
+    "captureAttr",
+    // Prefix families — any `literal.<field>` / `fmap.<from>` is accepted
+    // (the trailing dot is what `check_params`'s prefix match keys on).
+    "literal.",
+    "fmap.",
 ];
 const PING_PARAMS: &[&str] = &["wt"];
 /// `/admin/info/system` (server-level) and `<core>/admin/system`
@@ -1188,6 +1210,15 @@ fn check_params(state: &AppState, allowed: &[&str], params: &Params) -> Result<(
     }
     let accepted = |key: &str| {
         allowed.contains(&key)
+            // A trailing-dot entry in `allowed` is a *prefix family*: any
+            // key starting with it (with at least one character after the
+            // dot) is accepted. Route-scoped by construction — only a route
+            // whose allowlist carries such an entry gets prefix matching —
+            // so `literal.id`/`fmap.content` are accepted on `/update/extract`
+            // (issue #259) but `literal.id` still 400s on `/select`.
+            || allowed.iter().any(|prefix| {
+                prefix.ends_with('.') && key.starts_with(prefix) && key.len() > prefix.len()
+            })
             || params::split_per_field_key(key, PER_FIELD_PARAMS)
                 .is_some_and(|(_, base)| allowed.contains(&base))
     };
@@ -2204,14 +2235,205 @@ impl extract::ChunkSource for FieldChunks<'_> {
 /// as `stream_content_type` (`extract_plain_text_xml.json`).
 const OCTET_STREAM: &str = "application/octet-stream";
 
-/// `POST /solr/{core}/update/extract?extractOnly=true` (issue #258).
+/// The Search-API configset's `ExtractingRequestHandler` defaults (issue
+/// #259), hardcoded because they are the only evidenced config — the
+/// captured index/select pair was taken against exactly these. "Wire format
+/// only, never Solr's config format" (CLAUDE.md) means matching that
+/// configset's wire behaviour, not exposing its `solrconfig.xml`. Request
+/// params override and extend: a request `fmap.<from>` wins over the default
+/// on the same `<from>` and adds new mappings; `lowernames`/`uprefix`/
+/// `captureAttr` are overridden outright when sent.
+const SOLR_CELL_DEFAULT_FMAP: &[(&str, &str)] = &[("a", "links"), ("div", "ignored_")];
+const SOLR_CELL_DEFAULT_UPREFIX: &str = "ignored_";
+
+/// Builds the indexed document's field map from an extraction and the
+/// request's Solr-Cell params (#259), in Solr's order: `lowernames` → `fmap`
+/// rename → `uprefix`-drop → `literal.*` overlay, then keep only fields that
+/// resolve against the schema (declared or a dynamic rule).
 ///
-/// Extraction only. Solr's ExtractingRequestHandler *also* indexes what it
-/// extracts unless `extractOnly=true`; Wayfinder requires the param and 400s
-/// without it. That is a **ratified divergence** (PRD): answering 200 to an
-/// indexing request while silently indexing nothing would be the worse
-/// failure, because the client's next query would come back empty with no
-/// error anywhere to explain it.
+/// Returns `field_name -> Vec<Value>` in insertion order; the caller wraps it
+/// as a JSON object and indexes it through the normal `/update` path. A field
+/// that does not resolve against the schema is dropped when `uprefix` is set
+/// — reproducing the observable effect of the Search-API configset's catch-all
+/// `<dynamicField name="*" type="ignored">` (stored/indexed false), which is
+/// what makes `uprefix=ignored_` drop unmapped fields from selects. Without
+/// `uprefix`, the field passes through so `add_documents` errors on a
+/// genuinely unknown field exactly as strict Solr
+/// (`-Dupdate.autoCreateFields=false`) does.
+///
+/// ponytail: Wayfinder drops uprefix'd fields outright rather than indexing
+/// them into a catch-all ignored-type field. The observable result is
+/// identical (the field never appears in a select); reproducing the
+/// ignored-type field would need a schema change for no wire benefit. Trigger:
+/// a captured index whose select returns a value Solr stored under the
+/// catch-all but Wayfinder dropped.
+///
+/// The indexed `body`/`links` values come from Wayfinder's own extractors and
+/// so diverge from the captured select fixture (`extract_html_select.json`):
+/// Wayfinder does not replicate Tika's content-field whitespace, and PRD
+/// divergence 10 forbids fabricating `shape="rect"`, so `links` carries only
+/// the real attribute values. That divergence is recorded in the PRD and
+/// asserted by the route tests; this function is where it originates.
+fn solr_cell_fields(
+    doc: &extract::ExtractedDocument,
+    params: &Params,
+    schema: &schema::WayfinderSchema,
+) -> Result<Vec<(String, Vec<Value>)>, WfError> {
+    let lowernames = params.bool_or("lowernames", true)?;
+    let capture_attr = params.bool_or("captureAttr", true)?;
+    let uprefix = params.get("uprefix").unwrap_or(SOLR_CELL_DEFAULT_UPREFIX);
+    let uprefix_set = !uprefix.is_empty();
+
+    // `fmap`: defaults merged with request params (request wins on conflict).
+    let mut fmap: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for (from, to) in SOLR_CELL_DEFAULT_FMAP {
+        fmap.insert(from, to);
+    }
+    for (from, to) in params.pairs_with_prefix("fmap.") {
+        fmap.insert(from, to);
+    }
+    let rename = |name: &str| -> String {
+        fmap.get(name)
+            .map(|s| (*s).to_string())
+            .unwrap_or_else(|| name.to_string())
+    };
+    let resolves = |name: &str| schema.is_static(name) || schema.match_dynamic(name).is_some();
+
+    // Source fields: extracted text/metadata, plus captured element
+    // attributes when `captureAttr` is on.
+    let mut source: Vec<(String, Vec<String>)> = doc.solr_cell_source_fields();
+    if capture_attr {
+        for (element, value) in &doc.captured_attrs {
+            if let Some(entry) = source.iter_mut().find(|(name, _)| name == element) {
+                entry.1.push(value.clone());
+            } else {
+                source.push((element.clone(), vec![value.clone()]));
+            }
+        }
+    }
+
+    let mut fields: Vec<(String, Vec<Value>)> = Vec::new();
+    let push = |raw_name: String, values: Vec<String>, fields: &mut Vec<(String, Vec<Value>)>| {
+        let name = if lowernames {
+            raw_name.to_ascii_lowercase()
+        } else {
+            raw_name
+        };
+        let name = rename(&name);
+        if !resolves(&name) {
+            // With `uprefix` set, unknown fields are dropped — the observable
+            // effect of the Search-API configset's catch-all ignored-type
+            // dynamic field, which `uprefix=ignored_` relies on. Without it,
+            // the field passes through to `add_documents`, which errors on a
+            // genuinely unknown field as strict Solr does.
+            if uprefix_set {
+                return;
+            }
+        }
+        let vals: Vec<Value> = values.into_iter().map(Value::String).collect();
+        if let Some(entry) = fields.iter_mut().find(|(n, _)| *n == name) {
+            entry.1.extend(vals);
+        } else {
+            fields.push((name, vals));
+        }
+    };
+    for (name, values) in source {
+        push(name, values, &mut fields);
+    }
+    // `literal.*` overlay: explicit field values, added after extraction
+    // (Solr merges them into the document; a literal naming a field the
+    // extractor also produced multivalues). `lowernames` applies; `fmap` does
+    // not — `fmap` is for extracted/captured fields, and a literal is already
+    // the caller's chosen destination name.
+    for (field, value) in params.pairs_with_prefix("literal.") {
+        push(field.to_string(), vec![value.to_string()], &mut fields);
+    }
+    Ok(fields)
+}
+
+/// The indexing half of `/update/extract` (issue #259): takes the extraction
+/// and the request's Solr-Cell params, builds the document through
+/// [`solr_cell_fields`], and indexes it through the same commit path `/update`
+/// uses — `add_documents` then the `commit`/`softCommit`/`commitWithin`
+/// semantics, answering the bare `responseHeader` envelope
+/// (`extract_html_index.json`).
+///
+/// Every boolean is validated at entry (issue #187), so `commit=maybe`
+/// 400s here rather than being silently read as `false` — exactly as `/update`
+/// does. The bound-then-OR pattern is copied from there for the same reason:
+/// short-circuiting would let an invalid `softCommit` hide behind a true
+/// `commit`.
+async fn solr_cell_index(
+    state: &AppState,
+    params: &Params,
+    doc: &extract::ExtractedDocument,
+) -> Result<Response, WfError> {
+    let no_params = |class: &'static str, msg: String| {
+        WfError::bad_request(class, msg)
+            .with_params(params)
+            .envelope(Envelope::NoParams)
+    };
+    let commit = params
+        .bool_or("commit", false)
+        .map_err(|e| e.envelope(Envelope::NoParams))?;
+    let soft_commit = params
+        .bool_or("softCommit", false)
+        .map_err(|e| e.envelope(Envelope::NoParams))?;
+    let overwrite = params
+        .bool_or("overwrite", true)
+        .map_err(|e| e.envelope(Envelope::NoParams))?;
+    let commit_requested = commit || soft_commit;
+
+    let fields = solr_cell_fields(doc, params, &state.index.wf_schema)
+        .map_err(|e| e.envelope(Envelope::NoParams))?;
+    let mut obj = Map::new();
+    for (name, values) in fields {
+        // Single value -> scalar, multi -> array, matching the JSON shape
+        // `/update` bodies use and `add_documents` expects.
+        let value = if values.len() == 1 {
+            values.into_iter().next().expect("len == 1")
+        } else {
+            Value::Array(values)
+        };
+        obj.insert(name, value);
+    }
+    state
+        .index
+        .add_documents(&[Value::Object(obj)], overwrite)
+        .map_err(|e| no_params("wayfinder::IndexError", e.to_string()))?;
+    if commit_requested {
+        state.index.commit().map_err(|e| {
+            WfError::internal("wayfinder::CommitError", e.to_string())
+                .with_params(params)
+                .envelope(Envelope::NoParams)
+        })?;
+    }
+    if let Some(ms) = params
+        .get("commitWithin")
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        state.index.schedule_commit(ms);
+    }
+    Ok(update_success(params))
+}
+
+/// `POST /solr/{core}/update/extract` (issues #258 and #259).
+///
+/// Two modes share this one handler, selected by the resolved `extractOnly`
+/// boolean:
+///
+/// - **`extractOnly=true`** (#258): extract the document and return Tika's
+///   `{responseHeader, file, file_metadata}` envelope, never indexing it.
+/// - **`extractOnly` absent/false** (#259, Solr Cell indexing): apply the
+///   extracted content to the index through the same commit path `/update`
+///   uses, answering the bare `responseHeader` envelope
+///   (`extract_html_index.json`). See [`solr_cell_index`].
+///
+/// #258 shipped requiring `extractOnly=true` (PRD divergence 10): indexing was
+/// out of v1 scope, so a 200 that silently indexed nothing was the worse
+/// failure. #259 retires that half of the divergence — the indexing path now
+/// exists — while keeping the other halves (no `X-Parsed-By`, no fabricated
+/// `shape="rect"`, 415 for unsupported formats).
 ///
 /// Shape of the work, in the order the budgets need it:
 ///
@@ -2249,28 +2471,28 @@ async fn update_extract(
     check_core(&state, &core, &params, Envelope::NoParams)?;
     check_params(&state, EXTRACT_PARAMS, &params).map_err(|e| e.envelope(Envelope::NoParams))?;
 
-    // The resolved boolean, not the param's presence: `extractOnly=false`
-    // asks for the indexing behaviour just as plainly as omitting it does.
-    if !params
+    // `extractOnly` selects the two modes this handler serves: #258's
+    // extract-only response, and #259's Solr-Cell indexing. The resolved
+    // boolean, not the param's presence: `extractOnly=false` asks for
+    // indexing just as plainly as omitting it does.
+    let extract_only = params
         .bool_or("extractOnly", false)
-        .map_err(|e| e.envelope(Envelope::NoParams))?
-    {
-        return Err(extract_err(
-            "wayfinder::ExtractOnlyRequired",
-            "extractOnly=true is required: this handler extracts document content and does \
-             not index it"
-                .to_string(),
-        ));
-    }
-    let as_text = match params.get("extractFormat") {
-        None | Some("xml") => false,
-        Some("text") => true,
-        Some(other) => {
-            return Err(extract_err(
-                "wayfinder::InvalidParam",
-                format!("invalid extractFormat value: {other}"),
-            ));
+        .map_err(|e| e.envelope(Envelope::NoParams))?;
+    // `extractFormat` is only meaningful to the extractOnly response; on the
+    // indexing path it is accepted-and-ignored (it remains in the allowlist).
+    let as_text = if extract_only {
+        match params.get("extractFormat") {
+            None | Some("xml") => false,
+            Some("text") => true,
+            Some(other) => {
+                return Err(extract_err(
+                    "wayfinder::InvalidParam",
+                    format!("invalid extractFormat value: {other}"),
+                ));
+            }
         }
+    } else {
+        false
     };
 
     let mut multipart = multipart.map_err(|e| {
@@ -2417,6 +2639,12 @@ async fn update_extract(
         .await
         .and_then(|inner| inner)
         .map_err(|e| WfError::from(e).with_params(&params))?;
+
+    if !extract_only {
+        // Indexing path (issue #259): apply Solr-Cell field mapping to the
+        // extraction and index through the normal `/update` commit path.
+        return solr_cell_index(&state, &params, &doc).await;
+    }
 
     let render = extract::ExtractRender {
         part_name: &part_name,
