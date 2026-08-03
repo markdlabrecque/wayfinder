@@ -1,0 +1,33 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "q":"{!func}max(rating,price)",
+      "fl":"id,score",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "maxScore":15.0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"d2",
+      "score":15.0
+    },{
+      "id":"d3",
+      "score":10.0
+    },{
+      "id":"d5",
+      "score":8.0
+    },{
+      "id":"d1",
+      "score":5.0
+    },{
+      "id":"d4",
+      "score":1.0
+    }]
+  }
+}

@@ -33,6 +33,7 @@ pub mod edismax;
 mod error;
 pub mod extract;
 mod facet;
+mod function_query;
 mod grouping;
 mod highlight;
 mod local_params;
@@ -2918,25 +2919,11 @@ async fn select(
     // component; false and an absent param leave its key out of the envelope.
     let spellcheck_requested = params.bool_or("spellcheck", false)?;
 
-    // Function queries are accepted for compatibility, but cannot affect
-    // ranking until their evaluator lands. Surface that consequential gap
-    // rather than silently returning a differently ranked result.
+    // `bf` and `boost` no longer need the #232 accept-and-warn treatment:
+    // function queries are implemented (issue #289), so a function-form
+    // `boost` and any `bf` are applied rather than ignored. `select_warnings`
+    // still collects facet warnings below.
     let mut select_warnings = Vec::new();
-    if params.get("bf").is_some() {
-        select_warnings.push(
-            "Ignoring function-query parameter `bf`: function queries are not implemented."
-                .to_string(),
-        );
-    }
-    if params
-        .get("boost")
-        .is_some_and(|value| value.parse::<f32>().is_err())
-    {
-        select_warnings.push(
-            "Ignoring function-query parameter `boost`: function queries are not implemented."
-                .to_string(),
-        );
-    }
 
     let default_field = params
         .get("df")
@@ -2953,8 +2940,17 @@ async fn select(
             // `q`'s own parser to the dismax-style qf/pf/mm/tie/boost/bq
             // composition (`CoreIndex::parse_edismax_query`) — `fq` below is
             // untouched, always the plain Solr query grammar, matching real
-            // Solr (`defType` only ever governs `q`).
-            let query = if params.get("defType") == Some("edismax") {
+            // Solr (`defType` only ever governs `q`). A `q` beginning with a
+            // function-query local-params block (`{!func}` / `{!boost b=}`)
+            // takes precedence over `defType` — those are query parsers in
+            // their own right (issue #289).
+            let query = if let Some(func_q) = state
+                .index
+                .parse_function_query_q(q, &default_field)
+                .map_err(|e| query_parse_error(anyhow::Error::from(e), &params))?
+            {
+                func_q
+            } else if params.get("defType") == Some("edismax") {
                 let qf = params.get("qf").unwrap_or("");
                 let pf = params.get("pf");
                 let mm = params.get("mm");
@@ -2967,19 +2963,30 @@ async fn select(
                     .into_iter()
                     .map(str::to_string)
                     .collect();
-                // `boost` is documented as a function query in real Solr (a
-                // plain number like `boost=2` is just its simplest constant
-                // function), but Wayfinder has no function-query evaluator
-                // (PRD v1 scope explicitly excludes it, same as `bf` --
-                // issue #108/finding 75). A non-numeric `boost` value (e.g.
-                // `recip(rord(date),1,1000,1000)`) therefore fails `.parse()`
-                // and falls back to `None` here -- accepted and warned rather
-                // than rejected, matching `bf`'s compatibility treatment
-                // (issue #232).
-                let boost: Option<f32> = params.get("boost").and_then(|s| s.parse().ok());
+                // `boost` and `bf` are function-query params (issue #289): a
+                // plain number like `boost=2` is Solr's simplest constant
+                // function, a function form like `boost=product(rating,2)` or
+                // any `bf` is evaluated per document. Both are passed raw to
+                // `parse_edismax_query`, which applies them.
+                let boost = params.get("boost").map(str::to_string);
+                let bf: Vec<String> = params
+                    .get_all("bf")
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
                 state
                     .index
-                    .parse_edismax_query(q, &default_field, qf, pf, mm, tie, &bq, boost)
+                    .parse_edismax_query(
+                        q,
+                        &default_field,
+                        qf,
+                        pf,
+                        mm,
+                        tie,
+                        &bq,
+                        boost.as_deref(),
+                        &bf,
+                    )
                     .map_err(|e| query_parse_error(anyhow::Error::from(e), &params))?
             } else {
                 state

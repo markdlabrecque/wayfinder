@@ -1,0 +1,33 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"{!boost b=sum(boost_document,rating)}*:*",
+      "fl":"id,score",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "maxScore":8.0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"d3",
+      "score":8.0
+    },{
+      "id":"d5",
+      "score":7.5
+    },{
+      "id":"d2",
+      "score":7.0
+    },{
+      "id":"d1",
+      "score":3.0
+    },{
+      "id":"d4",
+      "score":1.5
+    }]
+  }
+}

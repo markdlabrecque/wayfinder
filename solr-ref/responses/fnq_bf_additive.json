@@ -1,0 +1,36 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":5,
+    "params":{
+      "q":"*:*",
+      "defType":"edismax",
+      "bf":"sum(views,rating)",
+      "qf":"body",
+      "fl":"id,score",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "maxScore":42.0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"d4",
+      "score":42.0
+    },{
+      "id":"d2",
+      "score":35.0
+    },{
+      "id":"d3",
+      "score":27.0
+    },{
+      "id":"d1",
+      "score":13.0
+    },{
+      "id":"d5",
+      "score":6.0
+    }]
+  }
+}

@@ -619,6 +619,80 @@ async fn facets33_app() -> (Router, TempDir) {
     (app, dir)
 }
 
+// --- function-query corpus for manifest-errors.tsv's `fnq` rows (issue #289).
+// The 5-doc corpus `capture.sh`'s fnq block indexes into the `fnq` core:
+// numeric `docValues` fields so `{!func}`/`{!boost b=}` have values to score
+// on, with `d4` missing `price` and `d5` missing `views` to pin the
+// missing-numeric-value -> 0 default. Like `facets33`, this schema names its
+// core `content`, so `fnq/...` rows are rewritten to `content/...` in
+// `app_and_request_url` below. The corpus is byte-for-byte the one indexed
+// into the live `solr:9` container the fixtures were captured from.
+const FNQ_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "boost_document"
+type = "float"
+stored = true
+fast = true
+
+[[fields]]
+name = "views"
+type = "int"
+stored = true
+fast = true
+
+[[fields]]
+name = "rating"
+type = "float"
+stored = true
+fast = true
+
+[[fields]]
+name = "price"
+type = "double"
+stored = true
+fast = true
+"#;
+
+/// The 5-doc corpus `capture.sh`'s fnq block indexes into the `fnq` core.
+fn fnq_corpus() -> Value {
+    json!([
+        {"id":"d1","body":"quick brown fox","boost_document":1.0,"views":10,"rating":2.0,"price":5.0},
+        {"id":"d2","body":"lazy dog","boost_document":3.0,"views":30,"rating":4.0,"price":15.0},
+        {"id":"d3","body":"quick dog","boost_document":2.0,"views":20,"rating":6.0,"price":10.0},
+        {"id":"d4","body":"quick fox","boost_document":0.5,"views":40,"rating":1.0},
+        {"id":"d5","body":"lazy brown","boost_document":2.5,"rating":5.0,"price":8.0}
+    ])
+}
+
+async fn fnq_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), FNQ_SCHEMA_TOML).expect("fnq app must build");
+    let (status, body) = post_docs(&app, &fnq_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the fnq corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
 // --- duplicated schema/corpus for manifest-errors.tsv's `update9` rows
 // (issue #9). Mirrors `tests/update_pipeline.rs::UPDATE9_SCHEMA_TOML` /
 // `update9_corpus` exactly — same duplication precedent as `sortdebt`/
@@ -2166,12 +2240,14 @@ fn app_and_request_url<'a>(
     fragsize_app: &'a Router,
     spellcheck_app: &'a Router,
     grouping_app: &'a Router,
+    fnq_app: &'a Router,
 ) -> (&'a Router, String) {
     match entry.url.split_once('/') {
         Some(("content", rest)) => (content_app, format!("content/{rest}")),
         Some(("facets", rest)) => (facets_app, format!("content/{rest}")),
         Some(("keyorder", rest)) => (keyorder_app, format!("content/{rest}")),
         Some(("facets33", rest)) => (facets33_app, format!("content/{rest}")),
+        Some(("fnq", rest)) => (fnq_app, format!("content/{rest}")),
         Some(("sortdebt", _)) => (sortdebt_app, entry.url.clone()),
         Some(("update9", _)) => (update9_app, entry.url.clone()),
         Some(("stats", _)) => (stats_app, entry.url.clone()),
@@ -2218,6 +2294,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let (fragsize_app, _fragsize_dir) = fragsize_app().await;
     let (spellcheck_app, _spellcheck_dir) = spellcheck_223_app().await;
     let (grouping_app, _grouping_dir) = grouping_app().await;
+    let (fnq_app, _fnq_dir) = fnq_app().await;
 
     let mut ran = 0usize;
     let mut diffed = 0usize;
@@ -2242,6 +2319,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
             &fragsize_app,
             &spellcheck_app,
             &grouping_app,
+            &fnq_app,
         );
         // `update_select_commitwithin_visible` follows a `commitWithin=500`
         // row with no settle delay in this hermetic replay, unlike
