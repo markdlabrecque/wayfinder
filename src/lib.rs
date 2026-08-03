@@ -3004,6 +3004,18 @@ async fn select(
     } else {
         None
     };
+    // #295: an excluded facet.field (`{!ex=...}`) counts against a reduced
+    // filter set, which the fused aggregation (over the full q+fq set) cannot
+    // produce. Drop the plan so the dispatch below takes the unfused path,
+    // which builds a per-facet base. Multi-select facet requests are rare and
+    // not the hot path, so forgoing fusing for them is a deliberate
+    // simplification (see `FacetFieldsPlan::exclusion_active`).
+    if facet_field_plan
+        .as_ref()
+        .is_some_and(|plan| plan.exclusion_active)
+    {
+        facet_field_plan = None;
+    }
 
     // Bounded search (issue #242): only the first `start + rows` hits are
     // materialised; `num_found` and `max_score` still cover every match.

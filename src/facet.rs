@@ -180,12 +180,16 @@ fn facet_counts_inner(
     // unfused path, which runs `facet_fields`' own aggregation passes here.
     let facet_ranges = facet_ranges(index, params, base, nl)
         .map_err(|e| anyhow::Error::new(PreQueryFacetError(e)))?;
-    let facet_queries = facet_queries(index, params, default_field, base)?;
+    // #295: the `{!tag=...}` each `fq` carries, so a facet's `{!ex=...}` can
+    // drop the clauses it names. Aligned positionally with `base`'s trailing
+    // fq clauses (index 0 is the main query).
+    let fq_tags = fq_tag_lists(params);
+    let facet_queries = facet_queries(index, params, default_field, base, &fq_tags)?;
     let (facet_fields, warnings) = match fused {
         Some((plan, agg_results)) => {
             render_facet_fields(index, config, params, base, plan, agg_results)?
         }
-        None => facet_fields(index, config, params, base, nl)?,
+        None => facet_fields(index, config, params, base, nl, &fq_tags)?,
     };
     let mut counts = Map::new();
     counts.insert("facet_queries".to_string(), facet_queries);
@@ -208,20 +212,89 @@ pub(crate) fn narrowed(base: &BaseClauses, occur: Occur, extra: Box<dyn Query>) 
     BooleanQuery::from(clauses)
 }
 
+/// The comma-separated local-param `key` (e.g. `tag` or `ex`) on a param
+/// *value*, as a list. `{!tag=a,b}...` -> `["a", "b"]`; a value with no block,
+/// or an empty value (`{!ex=}`) -> `[]`. Reads `fq` tags and `facet.field`/
+/// `facet.query` exclusions without re-parsing the query — the query itself is
+/// parsed separately (`parse_query` strips these inert prefixes, #295).
+fn local_param_csv(value: &str, key: &str) -> Vec<String> {
+    let Some((local, _)) = local_params::parse_block(value) else {
+        return Vec::new();
+    };
+    match local.get(key) {
+        None | Some("") => Vec::new(),
+        Some(s) => s
+            .split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect(),
+    }
+}
+
+/// One tag list per `fq` param, in request order — aligned positionally with
+/// the trailing `fq` clauses of `base` (whose index 0 is the main `q` clause,
+/// built in `select`). `base`'s `fq` clauses and these lists line up 1:1
+/// whenever the request reached faceting, because a parse failure on any `fq`
+/// already 400'd the whole request.
+fn fq_tag_lists(params: &Params) -> Vec<Vec<String>> {
+    params
+        .get_all("fq")
+        .into_iter()
+        .map(|fq| local_param_csv(fq, "tag"))
+        .collect()
+}
+
+/// `base` with every `fq` clause whose `{!tag=...}` intersects `excluded`
+/// dropped. `base` is `[main_query, fq_0, fq_1, ...]` (the shape `select`
+/// builds), so the leading main query is never excludable — a `{!tag}` on `q`
+/// is inert (finding 136) — and the per-`fq` tags align positionally with
+/// `fq_tags`. An `excluded` entry naming no set tag drops nothing, which is
+/// the silent no-op finding 136 requires; matching is set-intersection, so a
+/// single `{!tag=a,b}` fq is dropped by `{!ex=b}` (finding 137).
+fn excluded_base_clauses(
+    base: &BaseClauses,
+    fq_tags: &[Vec<String>],
+    excluded: &[String],
+) -> BaseClauses {
+    let mut clauses: BaseClauses = Vec::with_capacity(base.len());
+    if let Some((occur, query)) = base.first() {
+        clauses.push((*occur, query.box_clone()));
+    }
+    for (i, (occur, query)) in base.get(1..).unwrap_or(&[]).iter().enumerate() {
+        let excluded_here = fq_tags
+            .get(i)
+            .is_some_and(|tags| tags.iter().any(|t| excluded.iter().any(|e| e == t)));
+        if !excluded_here {
+            clauses.push((*occur, query.box_clone()));
+        }
+    }
+    clauses
+}
+
 /// `facet.query`, repeatable. The key is the query string verbatim and the
 /// value is how many documents match it *and* `q` *and* every `fq`
 /// (`facet_query_with_fq.json`). A facet query matching nothing keeps its key,
-/// at 0 (`facet_query_zero.json`).
+/// at 0 (`facet_query_zero.json`). A `{!ex=...}` prefix (#295, finding 139)
+/// counts with the tagged `fq` clauses excluded, while the key still carries
+/// the `{!ex=...}` text verbatim — Solr does not strip local params from
+/// `facet_queries` keys.
 fn facet_queries(
     index: &CoreIndex,
     params: &Params,
     default_field: &str,
     base: &BaseClauses,
+    fq_tags: &[Vec<String>],
 ) -> Result<Value> {
     let mut out = Map::new();
     for facet_query in params.get_all("facet.query") {
         let parsed = index.parse_query(facet_query, default_field)?;
-        let count = index.count(&narrowed(base, Occur::Must, parsed))?;
+        let excluded = local_param_csv(facet_query, "ex");
+        let count = if excluded.is_empty() {
+            index.count(&narrowed(base, Occur::Must, parsed))?
+        } else {
+            let reduced = excluded_base_clauses(base, fq_tags, &excluded);
+            index.count(&narrowed(&reduced, Occur::Must, parsed))?
+        };
         out.insert(facet_query.to_string(), json!(count));
     }
     Ok(Value::Object(out))
@@ -274,12 +347,15 @@ fn facet_fields(
     params: &Params,
     base: &BaseClauses,
     nl: JsonNl,
+    fq_tags: &[Vec<String>],
 ) -> Result<(Value, Vec<String>)> {
     let plan = plan_facet_fields(index, params)?;
     if plan.fields.is_empty() {
         return Ok((json!({}), Vec::new()));
     }
 
+    // The full filter set (q AND every fq) every non-excluded facet counts
+    // against, built once.
     let base_query = BooleanQuery::from(
         base.iter()
             .map(|(occur, query)| (*occur, query.box_clone()))
@@ -289,10 +365,33 @@ fn facet_fields(
     let shaping = BucketShaping::from_params(config, params);
     let mut out = Map::new();
     for field in &plan.fields {
-        let counts = index.term_facet(&field.column, field.kind, &base_query)?;
+        // #295: `{!ex=...}` on a facet.field counts against the filter set with
+        // the tagged fq clauses dropped (finding 136). An empty or
+        // non-matching `ex` reduces to the full set, so the common no-exclusion
+        // path keeps one shared `base_query`. `facet.missing` (shape_field,
+        // finding 140) must read the same base the buckets were counted
+        // against, so the reduced set is threaded to it too.
+        let reduced = if field.ex.is_empty() {
+            None
+        } else {
+            Some(excluded_base_clauses(base, fq_tags, &field.ex))
+        };
+        let counts = match reduced.as_ref() {
+            Some(clauses) => {
+                let query = BooleanQuery::from(
+                    clauses
+                        .iter()
+                        .map(|(occur, q)| (*occur, q.box_clone()))
+                        .collect::<BaseClauses>(),
+                );
+                index.term_facet(&field.column, field.kind, &query)?
+            }
+            None => index.term_facet(&field.column, field.kind, &base_query)?,
+        };
+        let missing_base = reduced.as_ref().unwrap_or(base);
         out.insert(
             field.label.clone(),
-            shape_field(index, base, field, counts, &shaping, nl)?,
+            shape_field(index, missing_base, field, counts, &shaping, nl)?,
         );
     }
     Ok((Value::Object(out), plan.warnings.clone()))
@@ -320,6 +419,11 @@ pub struct FacetFieldPlan {
     /// The effective `facet.missing` for this field, after the
     /// `f.<field>.facet.missing` override.
     pub missing: bool,
+    /// The `{!ex=...}` tag list on this facet.field (#295): count this facet
+    /// against the filter set with the `fq` clauses carrying any of these
+    /// tags dropped. Empty for a plain `facet.field`, which counts the full
+    /// set.
+    pub ex: Vec<String>,
 }
 
 /// The whole `facet.field` request, planned: one entry per requested value,
@@ -330,6 +434,11 @@ pub struct FacetFieldsPlan {
     pub fields: Vec<FacetFieldPlan>,
     pub aggregations: tantivy::aggregation::agg_req::Aggregations,
     pub warnings: Vec<String>,
+    /// True when any planned facet.field carries a non-empty `{!ex=...}`
+    /// (#295): such a facet counts a reduced filter set the fused `/select`
+    /// aggregation (against the full q+fq set) cannot provide, so `select`
+    /// falls back to the unfused path rather than fusing.
+    pub exclusion_active: bool,
 }
 
 /// Plan/validate phase of `facet.field` (issue #246): resolves every requested
@@ -350,6 +459,7 @@ pub fn plan_facet_fields(index: &CoreIndex, params: &Params) -> Result<FacetFiel
             fields: Vec::new(),
             aggregations: tantivy::aggregation::agg_req::Aggregations::default(),
             warnings: Vec::new(),
+            exclusion_active: false,
         });
     }
 
@@ -372,6 +482,10 @@ pub fn plan_facet_fields(index: &CoreIndex, params: &Params) -> Result<FacetFiel
         // The label reaches the response envelope; the field reaches
         // resolution, validation and every error message (issue #138).
         let (label, field_name) = split_facet_key(value);
+        // #295: `{!ex=...}` on this facet.field -- the tags to drop from the
+        // filter set when counting it (finding 136). `key`/`ex` compose in
+        // either order, and `split_facet_key` already took the `key` label.
+        let ex = local_param_csv(value, "ex");
         // Finding 102: Solr can emit duplicate `facet_fields` object members,
         // but serde_json's Map cannot represent them. Refuse before validating
         // or aggregating the second field rather than silently overwriting the
@@ -437,12 +551,15 @@ pub fn plan_facet_fields(index: &CoreIndex, params: &Params) -> Result<FacetFiel
             kind,
             agg_name,
             missing,
+            ex,
         });
     }
+    let exclusion_active = fields.iter().any(|f| !f.ex.is_empty());
     Ok(FacetFieldsPlan {
         fields,
         aggregations,
         warnings,
+        exclusion_active,
     })
 }
 
@@ -1241,7 +1358,7 @@ fast = true
             let plan_err = plan_facet_fields(&index, &params)
                 .expect_err(&format!("`{query_string}` must be a plan-time error"))
                 .to_string();
-            let facet_fields_err = facet_fields(&index, &config, &params, &base, nl)
+            let facet_fields_err = facet_fields(&index, &config, &params, &base, nl, &[])
                 .expect_err(&format!(
                     "`{query_string}` must still error out of facet_fields"
                 ))
@@ -1304,7 +1421,7 @@ fast = true
                 let nl = JsonNl::from_params(&params);
 
                 let (expected_fields, expected_warnings) =
-                    facet_fields(&index, &config, &params, &base, nl)
+                    facet_fields(&index, &config, &params, &base, nl, &[])
                         .unwrap_or_else(|e| panic!("facet_fields for `{qs}`: {e}"));
 
                 let plan = plan_facet_fields(&index, &params)

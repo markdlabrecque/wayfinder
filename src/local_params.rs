@@ -397,6 +397,11 @@ pub fn extract_nested_queries(q: &str) -> Result<Option<Rewritten>, String> {
     // query text is an ordinary term character (an apostrophe), unlike inside
     // a block body where it quotes a value.
     let mut in_quote = false;
+    // True once a type-less inert block (`{!tag=...}`/`{!ex=...}`/`{!key=...}`)
+    // has been stripped below: with no nested queries lifted, the loop would
+    // otherwise return `Ok(None)` and the caller would re-parse the *original*
+    // string (block and all). A strip is itself a rewrite.
+    let mut rewrote = false;
     while !rest.is_empty() {
         // A `{!` inside a quoted phrase is literal text, not a block.
         if !in_quote
@@ -414,9 +419,29 @@ pub fn extract_nested_queries(q: &str) -> Result<Option<Rewritten>, String> {
                     ));
                 }
                 None => {
-                    return Err(format!(
-                        "local-params block with no query parser type: `{block_src}`"
-                    ));
+                    // Type-less block (the `{!key=Foo}` shape issue #138 also
+                    // uses on `facet.field`). On `q`/`fq`/`bq`/`facet.query`
+                    // only the inert prefix params `tag`/`ex`/`key` are
+                    // accepted (issue #295): they tag or relabel a query but
+                    // select no parser, so the block is a prefix to strip and
+                    // the remainder is the query itself — not a nested query
+                    // to bind. A bare `{!}` or params like `qf=` that would
+                    // imply a parser keep the hard 400: no capture defines
+                    // their meaning, so they must not silently half-work
+                    // (issue #137's open question 5).
+                    let inert = !local.params.is_empty()
+                        && local
+                            .params
+                            .iter()
+                            .all(|(k, _)| matches!(k.as_str(), "tag" | "ex" | "key"));
+                    if !inert {
+                        return Err(format!(
+                            "local-params block with no query parser type: `{block_src}`"
+                        ));
+                    }
+                    rest = &rest[consumed..];
+                    rewrote = true;
+                    continue;
                 }
             }
             rest = &rest[consumed..];
@@ -434,7 +459,7 @@ pub fn extract_nested_queries(q: &str) -> Result<Option<Rewritten>, String> {
         outer.push(c);
         rest = &rest[c.len_utf8()..];
     }
-    if nested.is_empty() {
+    if nested.is_empty() && !rewrote {
         return Ok(None);
     }
     Ok(Some(Rewritten {
@@ -639,26 +664,46 @@ mod tests {
         assert!(extract_nested_queries("{!qf=title}quick").is_err());
     }
 
-    /// Round-2 review items 2 and 3: the message must not claim `q` (this is
-    /// also `fq`/`bq`/`facet.query`/`/mlt`'s parser) and must echo the block
-    /// rather than reconstructing an empty `{!}` for the type-less case.
+    /// Round-2 review item 2: the rejection message must not claim `q` (this
+    /// is also `fq`/`bq`/`facet.query`/`/mlt`'s parser) and must echo the block
+    /// the caller can find in their own query. Covers a typed block; the
+    /// type-less `{!tag=...}` case moved to its own test below because #295
+    /// made it accepted rather than rejected.
     #[test]
     fn rejection_messages_echo_the_block_and_name_no_param() {
         let typed = extract_nested_queries("{!lucene df=id}quick").expect_err("rejected");
         assert!(typed.contains("`lucene`"), "{typed}");
         assert!(typed.contains("{!lucene df=id}"), "{typed}");
         assert!(!typed.contains("in `q`"), "must not claim `q`: {typed}");
+    }
 
-        let typeless = extract_nested_queries("{!tag=x}quick").expect_err("rejected");
-        assert!(
-            typeless.contains("{!tag=x}"),
-            "the type-less case must echo the block body, not `{{!}}`: {typeless}"
-        );
-        assert!(!typeless.contains("{!}"), "{typeless}");
-        assert!(
-            !typeless.contains("in `q`"),
-            "must not claim `q`: {typeless}"
-        );
+    /// #295: a type-less block whose params are all inert (`tag`/`ex`/`key`)
+    /// is a prefix to strip, not a nested query to bind. The remainder parses
+    /// as the ordinary outer query, so `{!tag=cat}category:animals` becomes
+    /// `category:animals` with no nested queries lifted.
+    #[test]
+    fn inert_typeless_blocks_are_a_stripped_prefix_not_a_nested_query() {
+        let rewritten = extract_nested_queries("{!tag=cat}category:animals")
+            .expect("an inert prefix is accepted, not rejected")
+            .expect("stripping a block is itself a rewrite, so this is Some");
+        assert_eq!(rewritten.outer, "category:animals");
+        assert!(rewritten.nested.is_empty());
+
+        // `ex` and `key` are inert here too, in any combination/order.
+        let r = extract_nested_queries("{!ex=cat key=u}x")
+            .expect("ex/key are inert")
+            .expect("rewrote");
+        assert_eq!(r.outer, "x");
+        assert!(r.nested.is_empty());
+    }
+
+    /// A type-less block with a non-inert param (`qf=`, which would imply a
+    /// parser) is still the hard 400 — #295 accepted only `tag`/`ex`/`key`.
+    #[test]
+    fn a_typeless_block_with_a_non_inert_param_still_400s() {
+        assert!(extract_nested_queries("{!qf=title}quick").is_err());
+        // A bare `{!}` selects nothing and is not an inert prefix either.
+        assert!(extract_nested_queries("{!}quick").is_err());
     }
 
     #[test]
