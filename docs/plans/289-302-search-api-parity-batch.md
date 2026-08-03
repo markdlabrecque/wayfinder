@@ -11,8 +11,9 @@ before starting any branch in the batch, because several of the sequencing const
 below are invisible from inside a single issue.
 
 **Status:** waves 0 and 1 are complete (#306, #307, #310; #297, #299, #308, #295 merged).
-Wave 2 is running, four branches wide: #289, #290, #294 (freed by #278) and **#298,
-promoted out of wave 4** now that #295 has removed its only blocker.
+Wave 2 is running: **#298 has landed** (`d4cd89e`, promoted out of wave 4 once #295
+removed its only blocker); #289, #290 and #294 (freed by #278) are the branches in
+flight. #296's requirements were revised after #298 — see wave 3.
 
 ## Where parity actually stands
 
@@ -152,14 +153,14 @@ The predicted collision points all held: `src/lib.rs` (#308's terms handler vs #
 discipline (facet tests beside facet tests, MLT tests beside MLT tests). **Carry that
 rule into wave 2**: G and C's successors land in the same two PHP test classes.
 
-## Wave 2 — next, contended on `src/lib.rs`
+## Wave 2 — in flight, contended on `src/lib.rs`
 
 | Branch | Issue | Owns |
 |---|---|---|
 | F | #289 function queries | new `src/function_query.rs`, `src/query.rs`, `src/edismax.rs`, the warning sites at `src/lib.rs:2880` |
 | G | #290 grouping | `src/collector.rs`, plus the Drupal half (`QueryBuilder`, `ResponseParser`, `WayfinderBackend`) |
 | B' | #294 PDF extraction | `src/extract.rs` — fully isolated; **#278 has landed, so this is free** |
-| K | #298 OR facets | `QueryBuilder::buildFacets()` and `getSupportedFeatures()` — **promoted from wave 4**, see below |
+| K | #298 OR facets | **Landed** — `d4cd89e`, `docs/reports/2026-08-03-298-or-facets.md` |
 
 Both F and G add to `SELECT_PARAMS`. **Do not prep-land the param names.** An
 accepted-but-unimplemented param is precisely the silent-wrong-answer shape #232 exists
@@ -167,30 +168,36 @@ to prevent, so each branch adds its own contiguous block in the same commit as i
 implementation, and the rebase order is **F -> G** (E has landed). Those conflicts are
 mechanical.
 
-**K (#298) takes the fourth slot, not H (#296).** Both were freed by E landing, and the
-plan previously ordered `E -> H -> K`. That ordering was file contention in
-`buildFacets()`, not a dependency: OR facets need *tagging*, which E shipped, not
-per-field settings. K is now PHP-only, needs no capture, and is the most user-visible
-bug left in the module — #298's own words, "the behaviour Drupal site builders most
-often report as *the facets are broken*". H is deferred behind it because its scope is
-in question (see wave 3).
+**K (#298) took the fourth slot ahead of H (#296) and has landed.** The plan's old
+`E -> H -> K` ordering was file contention in `buildFacets()`, not a dependency: OR
+facets need *tagging*, which E shipped, not per-field settings. K was PHP-only plus one
+hermetic parser pin, needed no capture, and closed the most user-visible bug in the
+module.
 
-Two constraints on K:
+What K settled, for the branches that follow it:
 
-- **The tag string is fixed by the facets module, not by us.** `search_api_solr` emits
-  `addExcludes(['facet:' . $info['field']])`
-  (`coverage/search_api_solr_4.4.0_source/src/Plugin/search_api/backend/SearchApiSolrBackend.php:3928-3935`),
-  so the tag is `facet:<search_api_field_name>` — built from the **Search API** field
-  name, not the mapped Solr field, and carrying a colon. `local_params::read_value`
-  takes a colon in a bare value, but K pins that with a hermetic test rather than
-  assuming it.
-- **K and G collide in `getSupportedFeatures()`** — a five-line array each adds one line
-  to (`WayfinderBackend.php:201-205`). Same shape as wave 1's `QueryBuilderTest.php`
-  collision, same remedy: agree the insertion point before both start.
+- **The tag string is `facet:<search_api_field_id>`**, built from the Search API field
+  id and not the mapped Solr field, because the `facets` module puts that same string on
+  the `fq` (`SearchApiSolrBackend.php:3928-3935`). It carries a colon;
+  `local_params::read_value` keeps a colon in a bare value, now pinned by
+  `bare_local_param_value_keeps_its_colon` and mutation-tested.
+- **`{!ex=…}` precedes `{!key=…}`** in the `facet.field` prefix, matching
+  `facet_extag_both_facets`. A delta failing `[A-Za-z0-9_:-]+` drops the `key` half only;
+  the `ex` half is unaffected because it is built from the field id, not the delta.
+- **`getSupportedFeatures()` is one feature per line now**, so G (#290) adds
+  `search_api_grouping` on its own line and merges mechanically. The collision the plan
+  predicted was designed out rather than sequenced around.
+- **Condition-group tags reach the wire through `QueryBuilder::tagFilterQuery()`**, which
+  prefixes `{!tag=…}` on the `fq` of a *top-level* tagged group. Two ceilings came out of
+  the review and are not yet guarded, both silent when hit: an arbitrary tag value is
+  interpolated without the safe-character check the sibling delta path applies, and a
+  tagged group nested below the top level — or any group under an OR root — loses its
+  tag, dropping the facet back to filtered counts with no signal. See the follow-up note
+  under wave 3.
 
-G's Drupal half touches the two files C owns, so C must have landed. It also touches
-`QueryBuilder.php`, which K edits in `buildFacets()` — different method, and the wave-1
-insertion-point discipline covers the shared test class.
+G's Drupal half touches the two files C owns, so C has landed. It also touches
+`QueryBuilder.php`, which K edited in `buildFacets()` and `build()` — different methods,
+and the wave-1 insertion-point discipline covers the shared test class.
 
 F is the batch's long pole (see the critical path below) — start it as soon as a slot
 frees.
@@ -210,22 +217,45 @@ targets are `sum`, a bare field reference (`boost_document`), and `payload_score
 J moves earlier than its original wave-3 slot only in that it now gates #291; the work
 itself is unchanged.
 
-**H's premise, to settle with fixtures before scoping it.** The client emits per-facet
-settings through Solarium as `f.<key>.facet.limit`, and `search_api_solr`'s key is the
-Solr field name. Since C (#299) landed, *our* module keys facets by the Search API
-delta. So it is an open question whether Solr resolves `f.<X>.facet.*` against the
-`{!key=}` label or against the underlying field name — and the answer decides H's scope:
+### H (#296) — requirements, updated after #298 landed
 
-- If it resolves by **field name**, then `f.<field>.facet.*` alone does **not** fix the
-  case the README bullet actually describes (two facets on *one* field disagreeing on
-  limit), and the mechanism is instead facet settings carried as local params on
-  `facet.field` itself, which Solr also accepts.
+**1. Settle the premise with fixtures before writing the parser.** The client emits
+per-facet settings through Solarium as `f.<key>.facet.limit`, and `search_api_solr`'s
+key is the Solr field name. Since C (#299), *our* module keys facets by the Search API
+delta. So it is an open question whether Solr resolves `f.<X>.facet.*` against the
+`{!key=}` label or against the underlying field name — and the answer decides the scope:
+
+- If it resolves by **field name**, `f.<field>.facet.*` alone does **not** fix the case
+  the README bullet describes (two facets on *one* field disagreeing on limit), and the
+  mechanism is instead facet settings carried as local params on `facet.field` itself,
+  which Solr also accepts.
 - If it resolves by **key**, #296 stands as written.
 
-#296 already requires a capture. Add rows for both shapes and let the fixtures decide,
-rather than discovering it at the green gate. This is the same shape as the #297 and
-#308 premise corrections — the third and fourth times a ticket's stated premise did not
-survive contact with a fixture.
+This is the same shape as the #297 and #308 premise corrections — the third and fourth
+times a ticket's stated premise did not survive contact with a fixture.
+
+**2. The capture needs an exclusion row, not just precedence rows.** #296 already
+required fixtures for global-set / per-field-set / both-set / per-field-on-an-unfaceted-
+field. Since E and K landed, add **an OR facet carrying a per-field setting** —
+`{!ex=cat}` plus a per-field `limit` on the same facet. Finding 140 pins that
+`facet.mincount`/`facet.missing` apply *post*-exclusion; whether a per-field `limit`
+does the same is unverified, and it is exactly the combination a real facet block
+produces.
+
+**3. `buildFacets()` now has one prefix-construction site — extend it, don't add a
+second.** K rewrote the `facet.field` prefix into a single `$prefix` string assembled
+from `ex=` then `key=`. Per-field settings either become more params in that same block
+(if the premise resolves that way) or stay separate `f.<field>.facet.*` params, but
+either way the prefix is built in one place. Preserve both invariants K established:
+`ex` precedes `key`, and a hostile delta drops the `key` half while keeping `ex`.
+
+**4. The rebase conflict is known and localised.** K's report predicts it: whichever of
+#296/#298 landed second needs a local resolution inside `buildFacets()`. #296 is the one
+landing second, and the conflict is the ~10-line `$prefix` block, not the method.
+
+**5. Do not fix the two open `tagFilterQuery()` ceilings here.** The #298 review found
+an unguarded tag value and tag loss below the top level; both belong in their own issue
+against `build()`, not folded into a facet-settings branch.
 
 H is also **the only near-term branch that needs `capture.sh`**, so it can be scheduled
 purely on capture contention: keep it clear of L1, L2 and I, which each need their own
