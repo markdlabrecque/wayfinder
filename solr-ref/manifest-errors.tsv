@@ -175,3 +175,11 @@ fnq_err_unknown_func	400	GET	fnq/select?q=%7B%21func%7Dbogus%281,2%29&fl=id,scor
 fnq_err_unbalanced	400	GET	fnq/select?q=%7B%21func%7Dsum%28boost_document&fl=id,score&wt=json		http://localhost:9060/solr
 fnq_err_empty	400	GET	fnq/select?q=%7B%21func%7D&fl=id,score&wt=json		http://localhost:9060/solr
 fnq_err_unknown_field	400	GET	fnq/select?q=%7B%21func%7Dnosuchfield&fl=id,score&wt=json		http://localhost:9060/solr
+pf296_sort_global_count	200	GET	pf296/select?q=*:*&rows=0&facet=true&facet.field=topic&wt=json		http://localhost:9071/solr
+pf296_sort_global_index	200	GET	pf296/select?q=*:*&rows=0&facet=true&facet.field=topic&facet.sort=index&wt=json		http://localhost:9071/solr
+pf296_sort_field	200	GET	pf296/select?q=*:*&rows=0&facet=true&facet.field=topic&f.topic.facet.sort=index&wt=json		http://localhost:9071/solr
+pf296_sort_field_wins	200	GET	pf296/select?q=*:*&rows=0&facet=true&facet.field=topic&facet.sort=count&f.topic.facet.sort=index&facet.limit=1&wt=json		http://localhost:9071/solr
+pf296_sort_key_by_field	200	GET	pf296/select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dk%7Dtopic&f.topic.facet.sort=index&facet.limit=1&wt=json		http://localhost:9071/solr
+pf296_sort_key_by_key	200	GET	pf296/select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dk%7Dtopic&f.k.facet.sort=index&facet.limit=1&wt=json		http://localhost:9071/solr
+pf296_sort_lp	200	GET	pf296/select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dk%20facet.sort%3Dindex%7Dtopic&facet.limit=1&wt=json		http://localhost:9071/solr
+pf296_sort_two_lp	200	GET	pf296/select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dbycount%20facet.sort%3Dcount%20facet.limit%3D1%7Dtopic&facet.field=%7B%21key%3Dbyindex%20facet.sort%3Dindex%20facet.limit%3D1%7Dtopic&wt=json		http://localhost:9071/solr

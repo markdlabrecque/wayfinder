@@ -1,0 +1,31 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "f.b.facet.limit":"3",
+      "q":"*:*",
+      "facet.field":["{!key=a}category","{!key=b}category"],
+      "f.a.facet.limit":"1",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{
+      "a":["animals",2,"classic",2,"garden",1,"misc",1],
+      "b":["animals",2,"classic",2,"garden",1,"misc",1]
+    },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  }
+}

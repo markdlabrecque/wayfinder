@@ -2565,3 +2565,48 @@ fixes the scope of #289's "first targets".
       `"undefined field: \"nosuchfield\""` (`fnq_err_*`). All are HTTP 400 with
       `error.code: 400`; `error.msg`/`metadata`/`trace` are dropped by
       `normalize`, so only status + `error.code` are wire-compared.
+
+147. **`f.<X>.facet.*` resolves `X` against the field name, never against the
+      `{!key=}` label.** `facet.field={!key=cat}category&f.category.facet.limit=1`
+      returns one bucket under the label `cat`; the same query with
+      `f.cat.facet.limit=1` returns all four
+      (`facet_perfield_key_by_field` / `facet_perfield_key_by_key`, and
+      `pf296_sort_key_by_field` / `pf296_sort_key_by_key` for `facet.sort`).
+      This settles the premise #296 was written on. It also means the two
+      addresses are not interchangeable in one direction only: a per-field
+      param naming the key is silently ignored, not an error. Upstream never
+      meets the distinction — `SearchApiSolrBackend::setFacets()` discards the
+      Search API delta and sets `local_key` to the Solr field name, so key and
+      field are always the same string on the real client wire (the captured
+      contract's `f.ss_type.facet.missing` is that shape).
+
+148. **`facet.*` settings can be carried as local params on `facet.field`, and
+      Solr honours them.** `facet.field={!key=cat facet.limit=1}category`
+      limits that facet; so do `facet.mincount`, `facet.missing` and
+      `facet.sort` (`facet_perfield_lp_*`, `pf296_sort_lp`). A `key` is not
+      required — `{!facet.limit=1}category` works and keeps the field name as
+      the label (`facet_perfield_lp_no_key`). The mechanism is
+      `SimpleFacets.parseParams`, which does
+      `SolrParams.wrapDefaults(localParams, orig)`: the local params of the
+      facet being parsed shadow the request params for that facet only.
+
+149. **Local params are the only way to give two facets on one field different
+      settings.** `{!key=a facet.limit=1}category` plus
+      `{!key=b facet.limit=3}category` returns one bucket under `a` and three
+      under `b` (`facet_perfield_two_lp`, and `pf296_sort_two_lp` for two
+      different sort orders). The per-field form cannot express it: both
+      facets share the field, so `f.category.facet.limit` sets both, and
+      `f.a.facet.limit`/`f.b.facet.limit` set neither (finding 147,
+      `facet_perfield_two_by_key`). This is the shape #299's delta-keyed
+      facets produce and the reason #296 cannot be built out of
+      `f.<field>.facet.*` alone.
+
+150. **`facet.limit` is applied after `{!ex=}` exclusion, like
+      `facet.mincount` and `facet.missing` (finding 140).** With
+      `fq={!tag=cat}category:garden` and
+      `facet.field={!ex=cat key=un}category&f.category.facet.limit=1`, Solr
+      returns `animals 2` — the top bucket of the *excluded* (wider) list.
+      Ranking the filtered counts would have returned `garden`
+      (`facet_perfield_ex_limit_rank`, and its local-param twin). The
+      `fq=category:animals` variants cannot show this: `animals` is the top
+      bucket under either ranking, which is why the `garden` rows exist.

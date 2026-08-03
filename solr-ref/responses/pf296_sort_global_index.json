@@ -1,0 +1,29 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"*:*",
+      "facet.field":"topic",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json",
+      "facet.sort":"index"
+    }
+  },
+  "response":{
+    "numFound":4,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{
+      "topic":["apple",1,"mango",2,"zebra",3]
+    },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  }
+}

@@ -3250,3 +3250,147 @@ capf289 fnq_err_unknown_field  'select?q=%7B%21func%7Dnosuchfield&fl=id,score&wt
 if want_any '^fnq_'; then
   release "$FNQ_CONTAINER" "function-query core '$FNQ_CORE'"
 fi
+
+# --- per-field facet settings: f.<X>.facet.* and facet.* as local params (#296)
+# The premise this block exists to settle. `search_api_solr` emits per-facet
+# settings through Solarium as `f.<local_key>.facet.limit|mincount|missing`, and
+# its `local_key` is always the *Solr field name* (SearchApiSolrBackend::setFacets
+# discards the Search API delta and calls createFacetField($solr_field)). Since
+# #299 *this* module keys facets by the delta, so key and field name can differ,
+# and nothing in the captured contract says which of the two `f.<X>.facet.*`
+# resolves against. Wayfinder implements exactly one per-field setting today --
+# `f.<field>.facet.missing`, issue #140, keyed by field name (src/facet.rs:527) --
+# so the field-name reading is the presumption, not a finding.
+#
+# Rows are core-relative GETs against `content`, so they land in `manifest.tsv`
+# alongside the `facet_extag_*` block above, and reuse its corpus: category is
+# animals 2 (doc1, doc4), classic 2 (doc1, doc3), garden 1 (doc2), misc 1 (doc3),
+# with doc5 carrying no category at all. `id` is the second facet field
+# throughout -- five buckets of 1 -- and is there to show whether an
+# `f.category.facet.*` override leaks onto a field it does not name.
+#
+# Local params are percent-encoded for the same reason as the block above: the
+# differential harness GETs each manifest path verbatim.
+
+# A. Per-field overrides keyed by field name, no {!key} in play. If these do not
+# work the whole feature is misconceived, so they come first.
+cap facet_perfield_limit            'select?q=*:*&rows=0&facet=true&facet.field=category&facet.field=id&f.category.facet.limit=1&wt=json'
+cap facet_perfield_mincount         'select?q=*:*&rows=0&facet=true&facet.field=category&facet.field=id&f.category.facet.mincount=2&wt=json'
+cap facet_perfield_sort_index       'select?q=*:*&rows=0&facet=true&facet.field=category&f.category.facet.sort=index&wt=json'
+cap facet_perfield_overrides_global 'select?q=*:*&rows=0&facet=true&facet.field=category&facet.field=id&facet.limit=1&f.category.facet.limit=-1&wt=json'
+cap facet_perfield_unknown_field    'select?q=*:*&rows=0&facet=true&facet.field=category&f.nosuchfield.facet.limit=1&wt=json'
+
+# B. The decisive pair: one keyed facet, and the override addressed once by the
+# field name and once by the key. Whichever row shows a limited list is the
+# answer; both showing it means either address works.
+cap facet_perfield_key_by_field     'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dcat%7Dcategory&f.category.facet.limit=1&wt=json'
+cap facet_perfield_key_by_key       'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dcat%7Dcategory&f.cat.facet.limit=1&wt=json'
+
+# C. The other candidate mechanism: the setting carried as a local param on the
+# facet.field itself. SimpleFacets.parseParams wraps the local params over the
+# request params (SolrParams.wrapDefaults), which would make this work for any
+# facet.* setting -- and unlike `f.<X>.facet.*` it is unambiguous when two facets
+# share a field.
+cap facet_perfield_lp_limit         'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dcat%20facet.limit%3D1%7Dcategory&wt=json'
+cap facet_perfield_lp_mincount      'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dcat%20facet.mincount%3D2%7Dcategory&wt=json'
+cap facet_perfield_lp_sort          'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dcat%20facet.sort%3Dindex%7Dcategory&wt=json'
+cap facet_perfield_lp_missing       'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dcat%20facet.missing%3Dtrue%7Dcategory&wt=json'
+cap facet_perfield_lp_no_key        'select?q=*:*&rows=0&facet=true&facet.field=%7B%21facet.limit%3D1%7Dcategory&wt=json'
+
+# D. Two facets on one field with *different* settings -- the case #296 exists
+# for, and the one `f.<field>.facet.*` cannot express if it resolves by field
+# name. Captured both ways.
+cap facet_perfield_two_lp           'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Da%20facet.limit%3D1%7Dcategory&facet.field=%7B%21key%3Db%20facet.limit%3D3%7Dcategory&wt=json'
+cap facet_perfield_two_by_key       'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Da%7Dcategory&facet.field=%7B%21key%3Db%7Dcategory&f.a.facet.limit=1&f.b.facet.limit=3&wt=json'
+
+# E. Against an excluded (OR) facet. Finding 140 pins facet.mincount and
+# facet.missing as post-exclusion; it says nothing about facet.limit, and limit
+# applied pre-exclusion would silently truncate the wider list an OR facet exists
+# to show. The last row is the full search_api_solr OR shape: the filtered facet
+# and the excluded one, told apart by key, with a setting on the excluded one.
+cap facet_perfield_ex_limit         'select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:animals&facet=true&facet.field=%7B%21ex%3Dcat%20key%3Dun%7Dcategory&f.category.facet.limit=1&wt=json'
+cap facet_perfield_ex_lp_limit      'select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:animals&facet=true&facet.field=%7B%21ex%3Dcat%20key%3Dun%20facet.limit%3D1%7Dcategory&wt=json'
+cap facet_perfield_ex_two_facets    'select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:animals&facet=true&facet.field=%7B%21key%3Dfiltered%7Dcategory&facet.field=%7B%21ex%3Dcat%20key%3Dun%20facet.limit%3D1%7Dcategory&wt=json'
+
+# F. Error shape: a non-numeric per-field limit. The differential harness
+# normalises error.msg/metadata away, so this pins status and error.code only.
+cap facet_perfield_err_bad_limit    'select?q=*:*&rows=0&facet=true&facet.field=category&f.category.facet.limit=abc&wt=json'
+
+# The pair above is not decisive on its own: with `fq=category:animals` the top
+# bucket is `animals` whether the limit ranks the filtered counts or the excluded
+# ones. `fq=category:garden` separates them -- filtered ranking puts `garden`
+# first, excluded ranking puts `animals` first -- so these two rows are the ones
+# that say whether facet.limit is applied before or after the exclusion.
+cap facet_perfield_ex_limit_rank    'select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:garden&facet=true&facet.field=%7B%21ex%3Dcat%20key%3Dun%7Dcategory&f.category.facet.limit=1&wt=json'
+cap facet_perfield_ex_lp_limit_rank 'select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:garden&facet=true&facet.field=%7B%21ex%3Dcat%20key%3Dun%20facet.limit%3D1%7Dcategory&wt=json'
+
+# --- per-field facet.sort, on a corpus that can show it (#296) --------------
+# `facet.sort` is the one setting the `content` corpus cannot pin: its category
+# values are animals 2, classic 2, garden 1, misc 1, so count order and index
+# order are the same list and every ordering claim would be vacuous. This core
+# exists only to break that tie -- `topic` is zebra 3, mango 2, apple 1, so count
+# order is zebra, mango, apple and index order is apple, mango, zebra, and a
+# limit of 1 tells them apart outright. Field and key names are deliberately
+# different strings (`topic` vs `k`) so `f.<X>.facet.sort` cannot accidentally
+# address both.
+#
+# Rows land in `manifest-errors.tsv` (own core, like `fnq_*`/`group_*`) and need
+# their own app in `tests/differential.rs` when #296 lands.
+PF296_CONTAINER=wayfinder-solr-296
+PF296_SOLR=http://localhost:9071/solr
+PF296_CORE=pf296
+if want_any '^pf296_'; then
+  if ! docker ps --format '{{.Names}}' | grep -qx "$PF296_CONTAINER"; then
+    docker rm -f "$PF296_CONTAINER" >/dev/null 2>&1 || true
+    docker run -d --name "$PF296_CONTAINER" -p 9071:8983 \
+      solr:9 solr-precreate "$PF296_CORE" >/dev/null
+  fi
+  echo -n "waiting for pf296 solr"
+  for _ in $(seq 60); do
+    if curl -sf "$PF296_SOLR/$PF296_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n "."; sleep 1
+  done
+  curl -s "$PF296_SOLR/$PF296_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field": [
+      {"name":"topic","type":"string","indexed":true,"stored":true,
+       "docValues":true,"multiValued":true}
+    ]
+  }' >/dev/null
+  curl -sf "$PF296_SOLR/$PF296_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"s1","topic":["zebra"]},
+    {"id":"s2","topic":["zebra","mango"]},
+    {"id":"s3","topic":["zebra","mango","apple"]},
+    {"id":"s4"}
+  ]' >/dev/null
+fi
+
+capp296() {  # capp296 <name> <path-after-core>
+  local name=$1 suffix=$2
+  want "$name" || return 0
+  curl -sg "$PF296_SOLR/$PF296_CORE/$suffix" \
+    -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$PF296_CORE/$suffix" "" "$PF296_SOLR" \
+    >> "$MANIFEST_ERRORS"
+  rm -f "$OUT/$name.status"
+}
+
+# Controls: the two orderings, requested globally.
+capp296 pf296_sort_global_count 'select?q=*:*&rows=0&facet=true&facet.field=topic&wt=json'
+capp296 pf296_sort_global_index 'select?q=*:*&rows=0&facet=true&facet.field=topic&facet.sort=index&wt=json'
+
+# Per-field, by field name -- with and without a {!key}, and against a global
+# that says the opposite.
+capp296 pf296_sort_field        'select?q=*:*&rows=0&facet=true&facet.field=topic&f.topic.facet.sort=index&wt=json'
+capp296 pf296_sort_field_wins   'select?q=*:*&rows=0&facet=true&facet.field=topic&facet.sort=count&f.topic.facet.sort=index&facet.limit=1&wt=json'
+capp296 pf296_sort_key_by_field 'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dk%7Dtopic&f.topic.facet.sort=index&facet.limit=1&wt=json'
+capp296 pf296_sort_key_by_key   'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dk%7Dtopic&f.k.facet.sort=index&facet.limit=1&wt=json'
+
+# Local param, including the two-facets-one-field case that per-field params
+# cannot express: one facet ordered by count, the other by index, same field.
+capp296 pf296_sort_lp           'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dk%20facet.sort%3Dindex%7Dtopic&facet.limit=1&wt=json'
+capp296 pf296_sort_two_lp       'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dbycount%20facet.sort%3Dcount%20facet.limit%3D1%7Dtopic&facet.field=%7B%21key%3Dbyindex%20facet.sort%3Dindex%20facet.limit%3D1%7Dtopic&wt=json'
+
+if want_any '^pf296_'; then
+  release "$PF296_CONTAINER" "per-field facet-sort core '$PF296_CORE'"
+fi
