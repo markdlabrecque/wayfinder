@@ -271,9 +271,10 @@ chosen. Nothing may be added here without the same two things.
    would add a second error format solely for authentication failures. (issue #229; finding 118)
 
 10. **`/update/extract` omits `X-Parsed-By`, omits Tika's injected `shape="rect"`,
-    indexes Wayfinder's own extraction (not Tika's) on the Solr-Cell path, and answers 415 where
-    Solr's Tika answers 500 on a corrupt PDF.** Four separate divergences on the one endpoint,
-    from the issue #258 and #259 captures (findings 120-123):
+    indexes Wayfinder's own extraction (not Tika's) on the Solr-Cell path, and extracts a
+    malformed-content-stream PDF to empty (200) where Tika throws (500).** Several separate
+    divergences on the one endpoint, from the issue #258, #259, and #294 captures (findings
+    120-123):
 
     - **`X-Parsed-By` is absent** from both `file_metadata` and the XHTML `<head>`. Its captured
       values are Java class names —
@@ -301,25 +302,37 @@ chosen. Nothing may be added here without the same two things.
       divergence cannot silently start matching). This is Solr-compatibility completeness for
       non-Drupal clients — issue #259's own survey found no Drupal/Search-API consumer for
       server-side indexing, so the divergence has no client behind it.
-    - **A corrupt PDF is a 415, not the captured 500.** `extract_corrupt_pdf.json` is Tika
-      *parsing* a malformed PDF and throwing, which Solr reports as a 500. Wayfinder ships no PDF
-      extractor in v1, so the request never reaches a parse attempt: PDF is an unimplemented
-      format and the honest answer is 415 unsupported media type. This is narrowly about that one
-      row — a well-formed file in an unsupported format is 415 in both readings, and every format
-      Wayfinder *does* parse reports parse failure as Solr does. **The PDF extractor (phase 2b)
-      retires this entry**: once Wayfinder can fail inside a PDF parser the captured 500 becomes
-      reachable and the divergence must be deleted, not re-justified.
+    - **PDF body whitespace differs from Tika/PDFBox (normalized away).**
+      `pdf-extract`'s coordinate-based text device and Tika/PDFBox emit the same words in the
+      same order but different whitespace — single vs double newline between columns, none vs
+      `\n\n\n\n` between pages. The #261 GO report ratified this as "match (whitespace divergence
+      only) ... a normalisation detail for the renderer, not an extraction defect", so the
+      differential harness compares the PDF `extractFormat=text` body by its non-whitespace token
+      sequence (`normalize_extract`'s PDF branch), applied symmetrically so it cannot hide a
+      real content difference. The six success-path PDF corpus rows are listed in
+      `ACCEPTED_DIVERGENCES_MULTIPART`. (issue #294; report `2026-08-03-pdf-extraction-corpus.md`)
+    - **A malformed-content-stream PDF extracts to empty (200), where Tika throws (500).**
+      `extract_pdf_malformed_objects.json` is Tika/PDFBox throwing `DataFormatException` on a
+      broken Flate stream; `pdf-extract` swallows an unfilterable stream as "no text" rather
+      than erroring (#261 Q1 divergence #1) and cannot distinguish that from a legitimately
+      empty image-only PDF, so Wayfinder emits the same 200-empty shape for both. This is a
+      *status* divergence, recorded in `DIVERGENT_STATUS_MULTIPART`. The **former** corrupt-PDF
+      415 divergence — `broken.pdf` (`extract_corrupt_pdf.json`) — is **retired by #294**: the
+      PDF extractor now reaches a parse failure inside `lopdf` (the `%PDF-` header has no xref)
+      and answers 500, matching the capture, so that entry is deleted rather than re-justified —
+      exactly as this bullet predicted. (issue #294)
 
-    The first two are normalised away in the differential harness by `normalize_extract`, with each
-    affected row listed in `ACCEPTED_DIVERGENCES_MULTIPART` in `tests/differential.rs`; that runner
-    asserts the raw envelopes really do still differ before normalisation, so the normaliser cannot
-    quietly start hiding something else. The corrupt-PDF row is a *status* divergence, which no
+    The first two, plus the PDF body-whitespace divergence, are normalised away in the
+    differential harness by `normalize_extract`, with each affected row listed in
+    `ACCEPTED_DIVERGENCES_MULTIPART` in `tests/differential.rs`; that runner asserts the raw
+    envelopes really do still differ before normalisation, so the normaliser cannot quietly start
+    hiding something else. The malformed-content-stream PDF row is a *status* divergence, which no
     normaliser may hide: it is listed row-by-row in `DIVERGENT_STATUS_MULTIPART`, which pins the
     exact status Wayfinder must return and fails if the capture ever starts agreeing. The #259
     indexing-path `body`/`links` divergence is a *value* divergence on a two-step index→select flow
     the single-request manifest runner cannot express, so it lives in `tests/extract_index.rs`
     rather than `ACCEPTED_DIVERGENCES_MULTIPART`.
-    (issues #258 and #259; findings 120-123)
+    (issues #258, #259, and #294; findings 120-123)
 
 Note that divergence 3 is a difference from the *configset* the reference fixtures were captured
 against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, 4, 6, 7,
