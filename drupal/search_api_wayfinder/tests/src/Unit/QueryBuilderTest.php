@@ -489,9 +489,10 @@ class QueryBuilderTest extends TestCase {
    * guessed): an associative array keyed by facet delta (in practice the
    * facet's field identifier), each entry `['field' => <SA field id>,
    * 'limit' => int, 'operator' => 'and'|'or', 'min_count' => int,
-   * 'missing' => bool, 'query_type' => string]`. Plan doc locked decision 4
-   * says OR facets are out of scope (no `{!ex}`/`{!tag}`), so 'operator' is
-   * not translated to anything here.
+   * 'missing' => bool, 'query_type' => string]`. 'operator' => 'or' now
+   * translates to {!ex=facet:<field>} (#298, reversing plan doc locked
+   * decision 4 once the server served {!ex}/{!tag} in #295); 'and' (and an
+   * absent key) stays unexcluded.
    *
    * `facet.sort` is not part of that contrib shape (`getFacetOptions()` never
    * sets a 'sort' key) but the plan doc calls for "facet.sort from the
@@ -501,7 +502,7 @@ class QueryBuilderTest extends TestCase {
    * `src/facet.rs` (`facet_fields()`) reads `facet.limit`/`facet.mincount`/
    * `facet.missing`/`facet.sort` as single global params applied to every
    * `facet.field` entry -- there is no `f.<field>.facet.*` per-field
-   * override and no local-params support (matches locked decision 4). So
+   * override (#296 is that ceiling). So
    * these tests only exercise multi-facet requests where every facet shares
    * identical limit/mincount/missing/sort settings; a query with two facets
    * asking for different values is left unspecified deliberately (see
@@ -778,6 +779,206 @@ class QueryBuilderTest extends TestCase {
 
     // Single hostile facet -> bare mapped field name, still a single string.
     $this->assertSame('ss_category', $params['facet.field']);
+  }
+
+  /**
+   * #298: an OR-operator facet emits {!ex=facet:<field>} so its counts run
+   * against the base query minus its own tagged fq (server-side {!ex}/{!tag}
+   * landed in #295). The ex tag is the *Search API field id* -- the exact
+   * string search_api_solr's SearchApiSolrBackend puts in {!ex=...} via
+   * addExcludes(['facet:' . $info['field']]) and the facets module matches in
+   * {!tag=...} -- never the mapped Solr field. The delta key (#299) is kept
+   * so ResponseParser still resolves the facet by key.
+   *
+   * @covers ::build
+   */
+  public function testOrOperatorFacetEmitsExclusionTagOnTheSearchApiField(): void {
+    $index = $this->mockIndex([], [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+    ]);
+    $facets = [
+      'category' => [
+        'field' => 'category',
+        'limit' => 10,
+        'min_count' => 1,
+        'missing' => FALSE,
+        'operator' => 'or',
+        'query_type' => 'search_api_string',
+      ],
+    ];
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], ['search_api_facets' => $facets]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    // ex before key -- the shape solr-ref/responses/facet_extag_both_facets.json
+    // proves is the reproducible OR-facet UI. The tag carries a colon, which
+    // the server's local_params::read_value reads as a bare value (pinned in
+    // src/local_params.rs).
+    $this->assertSame('{!ex=facet:category key=category}ss_category', $params['facet.field']);
+  }
+
+  /**
+   * Regression for #298: the AND-operator case is unchanged -- no {!ex}. The
+   * whole point of the exclusion is that only OR facets get it.
+   *
+   * @covers ::build
+   * @dataProvider nonOrOperatorProvider
+   */
+  public function testNonOrOperatorFacetEmitsNoExclusionTag(?string $operator): void {
+    $index = $this->mockIndex([], [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+    ]);
+    $facet = [
+      'field' => 'category',
+      'limit' => 10,
+      'min_count' => 1,
+      'missing' => FALSE,
+    ];
+    if ($operator !== NULL) {
+      $facet['operator'] = $operator;
+    }
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], ['search_api_facets' => ['category' => $facet]]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('{!key=category}ss_category', $params['facet.field']);
+  }
+
+  public static function nonOrOperatorProvider(): array {
+    return [
+      'explicit and' => ['and'],
+      'absent (defaults to and)' => [NULL],
+    ];
+  }
+
+  /**
+   * #298: an OR facet whose delta is not a safe local-params value still gets
+   * its {!ex} (built from the field id, not the delta) but drops the key, the
+   * same fallback #299 established for the key half.
+   *
+   * @covers ::build
+   */
+  public function testOrFacetWithHostileDeltaKeepsExButDropsKey(): void {
+    $index = $this->mockIndex([], [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+    ]);
+    $facets = [
+      'bad delta' => [
+        'field' => 'category',
+        'limit' => 10,
+        'min_count' => 1,
+        'missing' => FALSE,
+        'operator' => 'or',
+      ],
+    ];
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], ['search_api_facets' => $facets]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('{!ex=facet:category}ss_category', $params['facet.field']);
+  }
+
+  /**
+   * #298: a condition group tagged by the facets module with
+   * facet:<search_api_field_name> emits {!tag=...} on its fq, the matching
+   * half of the {!ex} on the facet field. search_api_solr does this in
+   * reduceFilterQueries(): condition-group tags become {!tag} local params on
+   * the resulting fq. The index-scope fq is never tagged.
+   *
+   * @covers ::build
+   */
+  public function testTaggedConditionGroupEmitsTagLocalParamOnItsFq(): void {
+    $index = $this->mockIndex([], [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+    ]);
+    $facetFilter = (new ConditionGroup('OR', ['facet:category']))
+      ->addCondition('category', 'animals')
+      ->addCondition('category', 'classic');
+    $conditions = (new ConditionGroup('AND'))->addConditionGroup($facetFilter);
+
+    $params = (new QueryBuilder())->build($this->mockQuery(NULL, NULL, $index, $conditions));
+
+    $this->assertSame([
+      'index_id:"my_index"',
+      '{!tag=facet:category}(ss_category:"animals" OR ss_category:"classic")',
+    ], $params['fq']);
+  }
+
+  /**
+   * #298: multiple tags on one condition group render comma-separated
+   * ({!tag=a,b}), the form solr-ref/responses/facet_extag_multi_tag.json
+   * captures. Each tag keeps its colon as one bare token.
+   *
+   * @covers ::build
+   */
+  public function testMultipleTagsOnAConditionGroupRenderCommaSeparated(): void {
+    $index = $this->mockIndex([], [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+    ]);
+    $facetFilter = (new ConditionGroup('OR', ['facet:category', 'facet:brand']))
+      ->addCondition('category', 'animals')
+      ->addCondition('category', 'classic');
+    $conditions = (new ConditionGroup('AND'))->addConditionGroup($facetFilter);
+
+    $params = (new QueryBuilder())->build($this->mockQuery(NULL, NULL, $index, $conditions));
+
+    $this->assertSame(
+      '{!tag=facet:category,facet:brand}(ss_category:"animals" OR ss_category:"classic")',
+      $params['fq'][1],
+    );
+  }
+
+  /**
+   * Regression for #298: an untagged condition group emits no {!tag} prefix,
+   * so existing facet-free queries are byte-identical.
+   *
+   * @covers ::build
+   */
+  public function testUntaggedConditionGroupEmitsNoTagLocalParam(): void {
+    $index = $this->mockIndex([], [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+    ]);
+    $or = (new ConditionGroup('OR'))
+      ->addCondition('category', 'animals')
+      ->addCondition('category', 'classic');
+    $conditions = (new ConditionGroup('AND'))->addConditionGroup($or);
+
+    $params = (new QueryBuilder())->build($this->mockQuery(NULL, NULL, $index, $conditions));
+
+    $this->assertSame('(ss_category:"animals" OR ss_category:"classic")', $params['fq'][1]);
+  }
+
+  /**
+   * #298: the full OR-facet UI shape -- a tagged fq AND an ex-tagged facet on
+   * the same field in one request. This is the Drupal-side analogue of
+   * solr-ref/responses/facet_extag_both_facets.json: the facet counts run
+   * against the base minus the tagged fq, and the result resolves by key.
+   *
+   * @covers ::build
+   */
+  public function testOrFacetWithTaggedFilterEmitsBothHalves(): void {
+    $index = $this->mockIndex([], [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+    ]);
+    $facetFilter = (new ConditionGroup('OR', ['facet:category']))
+      ->addCondition('category', 'animals')
+      ->addCondition('category', 'classic');
+    $conditions = (new ConditionGroup('AND'))->addConditionGroup($facetFilter);
+    $facets = [
+      'category' => [
+        'field' => 'category',
+        'limit' => 10,
+        'min_count' => 1,
+        'missing' => FALSE,
+        'operator' => 'or',
+      ],
+    ];
+    $query = $this->mockQuery(NULL, NULL, $index, $conditions, [], ['search_api_facets' => $facets]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('{!tag=facet:category}(ss_category:"animals" OR ss_category:"classic")', $params['fq'][1]);
+    $this->assertSame('{!ex=facet:category key=category}ss_category', $params['facet.field']);
   }
 
   /**
