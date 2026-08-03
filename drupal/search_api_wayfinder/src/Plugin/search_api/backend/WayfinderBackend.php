@@ -333,6 +333,34 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
   }
 
   /**
+   * Extracts text from a file via Wayfinder's /update/extract endpoint.
+   *
+   * Mirrors search_api_solr's SearchApiSolrBackend::extractContentFromFile()
+   * signature and contract (the evidenced client path #171/#258 captured):
+   * upload the file, read the extracted text back. The file_attachments
+   * processor (issue #262) reaches this through the index's server backend.
+   *
+   * Extraction failure propagates as SearchApiException; the processor's
+   * per-file catch turns that into a logged skip so one bad attachment never
+   * fails the whole index batch. A response without a "file" key yields an
+   * empty string, so the item still indexes minus that attachment's text.
+   *
+   * @param string $filepath
+   *   Real filesystem path to the file to extract.
+   *
+   * @return string
+   *   The extracted plain text.
+   *
+   * @throws \Drupal\search_api\SearchApiException
+   */
+  public function extractContentFromFile(string $filepath): string {
+    $response = $this->getClient()->extract($filepath);
+    // The multipart part name "file" is the result key (#258), not
+    // resource.name; Wayfinder emits the raw key and we read it directly.
+    return (string) ($response['file'] ?? '');
+  }
+
+  /**
    * Builds the base core URL from the current configuration.
    */
   protected function getCoreUrl(): string {

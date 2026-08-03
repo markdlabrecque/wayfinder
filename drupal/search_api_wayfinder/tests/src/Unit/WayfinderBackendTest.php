@@ -15,6 +15,7 @@ use Drupal\search_api\Item\FieldInterface;
 use Drupal\search_api\Query\ConditionGroup;
 use Drupal\search_api\Query\QueryInterface;
 use Drupal\search_api\Query\ResultSet;
+use Drupal\search_api\SearchApiException;
 use Drupal\search_api\Utility\FieldsHelper;
 use Drupal\search_api_wayfinder\Plugin\search_api\backend\WayfinderBackend;
 use Drupal\search_api_wayfinder\WayfinderClient;
@@ -461,6 +462,60 @@ class WayfinderBackendTest extends TestCase {
       fn (array $row) => (string) $row['label'] === 'Wayfinder version'
     );
     $this->assertSame([], $versionRows, 'A failed admin/system handshake must not produce a version row.');
+  }
+
+  /**
+   * @covers ::extractContentFromFile
+   */
+  public function testExtractContentFromFileReturnsExtractedTextUnderFileKey(): void {
+    // The mock client returns the full /update/extract envelope; the backend
+    // reads the text out of the "file" key (the multipart part name -- #258).
+    $client = $this->createMock(WayfinderClient::class);
+    $client->expects($this->once())
+      ->method('extract')
+      ->with('/tmp/sample.txt')
+      ->willReturn(['responseHeader' => ['status' => 0], 'file' => "Hello plain text.\nSecond line."]);
+
+    $backend = $this->backendWithClient($client);
+
+    $this->assertSame("Hello plain text.\nSecond line.", $backend->extractContentFromFile('/tmp/sample.txt'));
+  }
+
+  /**
+   * A response that carries no "file" key yields an empty string rather than
+   * a missing-index notice: the item still indexes, just without attachment
+   * text. This is the backend half of "extraction failure must not fail the
+   * whole index batch" (#262).
+   *
+   * @covers ::extractContentFromFile
+   */
+  public function testExtractContentFromFileReturnsEmptyStringWhenResponseHasNoFileKey(): void {
+    $client = $this->createMock(WayfinderClient::class);
+    $client->method('extract')->willReturn(['responseHeader' => ['status' => 0]]);
+
+    $backend = $this->backendWithClient($client);
+
+    $this->assertSame('', $backend->extractContentFromFile('/tmp/sample.txt'));
+  }
+
+  /**
+   * A non-200 /update/extract response (or transport failure) propagates as
+   * SearchApiException out of the backend -- the processor's per-file catch
+   * is what stops it failing the batch, not the backend swallowing it.
+   *
+   * @covers ::extractContentFromFile
+   */
+  public function testExtractContentFromFilePropagatesSearchApiExceptionFromClient(): void {
+    $client = $this->createMock(WayfinderClient::class);
+    $client->method('extract')
+      ->willThrowException(new SearchApiException('authentication required'));
+
+    $backend = $this->backendWithClient($client);
+
+    $this->expectException(SearchApiException::class);
+    $this->expectExceptionMessage('authentication required');
+
+    $backend->extractContentFromFile('/tmp/sample.txt');
   }
 
   /**
