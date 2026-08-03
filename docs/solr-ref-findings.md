@@ -2506,3 +2506,62 @@ the same run; the fixture prefixes keep them separable (`facet_extag_*` for
      emits the component's container before the parse fails, which Wayfinder's
      error envelope must reproduce. `json.nl=map` renders the pairs as an object,
      `{"body": {"dog": 2, "dai": 1}}` (`terms_prefix_json_nl_map`).
+
+## Findings from the wave 2 function-query capture (#289)
+
+Captured 2026-08-04 against a real `solr:9` on a dedicated `fnq` core (5 docs,
+numeric `docValues` fields `boost_document`/`views`/`rating`/`price`, with `d4`
+missing `price` and `d5` missing `views` to pin the missing-value default).
+15 rows in `solr-ref/manifest-errors.tsv` under a dedicated `fnq_app` in
+`tests/differential.rs`. This is the wire evidence for finding 129's
+correction — the module emits `{!boost b=...}` on `q`, never `bf=` — and it
+fixes the scope of #289's "first targets".
+
+143. **A match-all scores a constant `1.0`, which is what makes a function
+      boost's score comparable.** `q=*:*` (and `*:*` under `defType=edismax`)
+      scores every document exactly `1.0`, so `{!boost b=<f>}*:*` is
+      `1.0 * <f>` and `bf=<f>` under edismax is `1.0 + <f>` — the captured
+      score is the pure function value, with no BM25 base. That keeps the
+      differential comparison exact rather than under PRD's ratified
+      BM25-magnitude divergence, and is the reason the `bf`/`boost`/`{!boost}`
+      fixtures below all use `q=*:*` rather than a text query. `{!func}<f>`
+      ranks by `<f>` directly (the function value *is* the score), matching
+      all documents.
+
+144. **`bf` is additive, `boost` is multiplicative, and `{!boost b=}` is
+      multiplicative on the wrapped query.** Captured: `bf=sum(views,rating)`
+      under `*:*&defType=edismax` scores `1.0 + sum` (`fnq_bf_additive`:
+      d4=42, d2=35, …); `boost=product(rating,2)` scores `1.0 * product`
+      (`fnq_boost_param`: d3=12, d5=10, …); `{!boost b=sum(...)}` on `*:*`
+      scores `1.0 * sum` (`fnq_boost_sum`). `boost` may be a plain number
+      (`boost=2`, the simplest constant function) or a function
+      (`boost=product(rating,2)`); `bf` is always a function (a bare number is
+      its constant form). A missing numeric field value resolves to `0.0`
+      (`fnq_func_missing`: d5 has no `views`, so `sum(views,rating)` scores it
+      `0+5`).
+
+145. **`{!payload_score}` is a separate query parser over a payload-bearing
+      field type, not an arithmetic function — so it is a follow-up to #289's
+      evaluator, not part of it.** `Utility::flattenKeysToPayloadScore`
+      (`src/Utility/Utility.php:981`, fetched from `git.drupalcode.org`'s
+      `4.4.x` branch — outside the three-file snapshot) emits
+      `{!payload_score f=boost_term v=<term> func=max}` blocks, one per search
+      term, over a `boost_term_payload` field type (a text field with a
+      DelimitedPayload payload filter). That is the `{!payload_score}` query
+      parser reading indexed payloads — a different implementation site and a
+      different field-type requirement from the arithmetic evaluator
+      `{!boost b=...}` consumes. `ms`/`rord` are off the corrected client path
+      too (finding 129 corrected the
+      `product(...,recip(ms(...)))`-as-`bf` premise: `rord()` over a Points
+      field is a hard 400) and need date/ordinal field types. So #289's
+      arithmetic evaluator is the foundation; `{!payload_score}` and
+      `ms`/`rord` extend `src/function_query.rs` later.
+
+146. **Function-query errors are 400 `SyntaxError`s with Solr-Java messages
+      the differential harness normalises away.** `bogus(1,2)` →
+      `"Unknown function bogus in FunctionQuery(...)"`; `sum(boost_document`
+      (unbalanced) → `"Expected ')' at position 18"`; `{!func}` (empty) →
+      `"Expected identifier at pos 0 str=''"`; `nosuchfield` →
+      `"undefined field: \"nosuchfield\""` (`fnq_err_*`). All are HTTP 400 with
+      `error.code: 400`; `error.msg`/`metadata`/`trace` are dropped by
+      `normalize`, so only status + `error.code` are wire-compared.

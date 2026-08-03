@@ -1115,90 +1115,72 @@ async fn whitespace_only_mm_400s_like_an_empty_one() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
 
-// --- unsupported edismax params are ignored, not rejected (finding 75) -----
+// --- bf / boost are applied, not ignored (issue #289) -------------------
+// These were the #232/#110 accept-and-ignore guards: `bf` and a function-form
+// `boost` used to be silently dropped because there was no function-query
+// evaluator. #289 built one, so both params now affect the score. Exact
+// score behaviour (additive `bf`, multiplicative `boost`, every function the
+// client emits) is fixture-backed in `tests/differential.rs`'s `fnq` rows
+// against real `solr:9`; what remains here is a hermetic regression guard that
+// the params move the score at all, using field-independent constant
+// functions so it depends on no schema field beyond `qf`'s.
 
 #[tokio::test]
-async fn unsupported_bf_param_is_ignored_like_any_unknown_param() {
-    // `bf` (function-query boost) is explicitly out of scope (PRD §5); real
-    // Solr does NOT ignore it (finding 75), so this is a Wayfinder-internal
-    // consistency check, not a fixture comparison: passing `bf` must not
-    // change the response at all versus the identical query without it.
+async fn bf_adds_its_function_value_to_each_score() {
     let (app, _dir) = edismax_app().await;
-    let (status_without, without) = get(
-        &app,
-        "select?q=rocket&defType=edismax&qf=title+body&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json",
-    )
-    .await;
-    let (status_with, with) = get(
-        &app,
-        "select?q=rocket&defType=edismax&qf=title+body&bf=recip(rord(id),1,2,3)&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json",
-    )
-    .await;
-    assert_eq!(status_without, StatusCode::OK);
+    let base = "select?q=rocket&defType=edismax&qf=title+body&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json";
+    let (status_base, body_base) = get(&app, base).await;
+    let (status_bf, body_bf) = get(&app, "select?q=rocket&defType=edismax&qf=title+body&bf=sum(10)&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json").await;
+    assert_eq!(status_base, StatusCode::OK);
     assert_eq!(
-        status_with,
+        status_bf,
         StatusCode::OK,
-        "an unsupported edismax param must not 400, same as any other unknown param (finding 8)"
+        "`bf` must not 400 now that it is applied: {body_bf}"
     );
-    let scores_without = scores_by_id(&without);
-    let scores_with = scores_by_id(&with);
+    let scores_base = scores_by_id(&body_base);
+    let scores_bf = scores_by_id(&body_bf);
     assert_eq!(
-        scores_without.len(),
-        scores_with.len(),
-        "an ignored `bf` must not change which docs match"
+        scores_base.len(),
+        scores_bf.len(),
+        "`bf` must not change which docs match"
     );
-    for (id, score_without) in &scores_without {
-        let score_with = scores_with
+    for (id, base_score) in &scores_base {
+        let bf_score = scores_bf
             .get(id)
-            .unwrap_or_else(|| panic!("doc {id} missing once `bf` is added: {scores_with:?}"));
+            .expect("doc present without bf, present with");
         assert!(
-            (score_with - score_without).abs() <= score_tolerance(),
-            "an ignored `bf` must not change doc {id}'s score: without={score_without}, \
-             with={score_with}"
+            (bf_score - (base_score + 10.0)).abs() <= score_tolerance(),
+            "`bf=sum(10)` must add 10 to doc {id}'s score: base={base_score}, with bf={bf_score}"
         );
     }
 }
 
 #[tokio::test]
-async fn non_numeric_boost_is_ignored_like_any_unsupported_function_query_not_rejected() {
-    // Real Solr's `boost` is always a function query (`boost=2` just happens
-    // to be its simplest constant form); Wayfinder has no function-query
-    // evaluator (PRD v1 scope, same exclusion as `bf` -- issue #108/finding
-    // 75), so a non-numeric `boost` value must fail to parse and be ignored,
-    // not 400 (issue #110): same "unsupported param is silently a no-op"
-    // contract as `bf` above, applied to `boost` instead of `bf`.
+async fn function_form_boost_multiplies_each_score() {
     let (app, _dir) = edismax_app().await;
-    let (status_without, without) = get(
-        &app,
-        "select?q=rocket&defType=edismax&qf=title+body&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json",
-    )
-    .await;
-    let (status_with, with) = get(
-        &app,
-        "select?q=rocket&defType=edismax&qf=title+body&boost=recip(rord(id),1,2,3)&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json",
-    )
-    .await;
-    assert_eq!(status_without, StatusCode::OK);
+    let base = "select?q=rocket&defType=edismax&qf=title+body&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json";
+    let (status_base, body_base) = get(&app, base).await;
+    let (status_boost, body_boost) = get(&app, "select?q=rocket&defType=edismax&qf=title+body&boost=sum(2)&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json").await;
+    assert_eq!(status_base, StatusCode::OK);
     assert_eq!(
-        status_with,
+        status_boost,
         StatusCode::OK,
-        "a non-numeric `boost` must not 400, same as any other unsupported param (finding 8)"
+        "a function-form `boost` must not 400 now that it is applied: {body_boost}"
     );
-    let scores_without = scores_by_id(&without);
-    let scores_with = scores_by_id(&with);
+    let scores_base = scores_by_id(&body_base);
+    let scores_boost = scores_by_id(&body_boost);
     assert_eq!(
-        scores_without.len(),
-        scores_with.len(),
-        "an ignored function-query `boost` must not change which docs match"
+        scores_base.len(),
+        scores_boost.len(),
+        "`boost` must not change which docs match"
     );
-    for (id, score_without) in &scores_without {
-        let score_with = scores_with.get(id).unwrap_or_else(|| {
-            panic!("doc {id} missing once function-query `boost` is added: {scores_with:?}")
-        });
+    for (id, base_score) in &scores_base {
+        let boost_score = scores_boost
+            .get(id)
+            .expect("doc present without boost, present with");
         assert!(
-            (score_with - score_without).abs() <= score_tolerance(),
-            "an ignored function-query `boost` must not change doc {id}'s score: \
-             without={score_without}, with={score_with}"
+            (boost_score - (base_score * 2.0)).abs() <= score_tolerance(),
+            "`boost=sum(2)` must double doc {id}'s score: base={base_score}, with boost={boost_score}"
         );
     }
 }

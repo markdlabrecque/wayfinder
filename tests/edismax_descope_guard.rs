@@ -1,32 +1,28 @@
-//! Expiring guard for the edismax v1 six-param descope (#136, PRD §5 "v1
+//! Expiring guard for the edismax v1 five-param descope (#136, PRD §5 "v1
 //! exception — edismax").
 //!
-//! PRD §5 lists `bf` function queries, `pf2`/`pf3`, `ps`, `stopwords`, and
-//! `lowercaseOperators` as **Out** for v1. That descope is not "nobody asked
-//! for it yet" — it is ratified by two pieces of frozen capture evidence:
+//! PRD §5 lists `pf2`/`pf3`, `ps`, `stopwords`, and `lowercaseOperators` as
+//! **Out** for v1. (`bf` and function-form `boost` landed in #289 and are
+//! now **In**, verified separately by `prd_edismax_section_lists_bf_as_implemented_not_deferred`.)
+//! That descope is not "nobody asked for it yet" — it is ratified by two pieces
+//! of frozen capture evidence:
 //!
-//!   1. None of the six is ever *sent by the client* across the 28 committed
+//!   1. None of the five is ever *sent by the client* across the 28 committed
 //!      traces in `solr-ref/search-api/trace/`, on either of the two channels
 //!      a Solr param can arrive on: as a request query-string parameter name,
 //!      and as a local param inside a `{!...}` block in a query-string value
 //!      (`{!edismax qf='...'}` — the form `search_api_solr` actually uses, so
 //!      scanning query-string names alone would miss the one channel that
 //!      matters).
-//!   2. None of the six appears in the `captured_parameters` denominator in
+//!   2. None of the five appears in the `captured_parameters` denominator in
 //!      `coverage/search_api_coverage_contract.json`.
 //!
 //! Per CLAUDE.md's rule for deliberate skips, this file must fail the day
 //! that evidence stops holding — i.e. the day a future capture trace or a
-//! regenerated coverage contract starts mentioning any of the six. That is
+//! regenerated coverage contract starts mentioning any of the five. That is
 //! this file's whole point: it is a **self-deleting** guard. When it goes
 //! red, the fix is not to edit this file to make it pass again — it is to
 //! revisit PRD §5's descope (see issue #136) with the new evidence in hand.
-//!
-//! It also currently holds the (deliberately red, until stage 2's PRD edits
-//! land) assertions that ratify the descope in prose and resolve the two
-//! documented PRD defects: `bf`/`{!func}` listed with two different
-//! dispositions, and `boost` described as unconditionally supported when
-//! only its constant form is implemented (finding 83).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -34,8 +30,9 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::Value;
 
-/// The six params PRD §5 lists as **Out** for v1 edismax.
-const DESCOPED_PARAMS: &[&str] = &["bf", "pf2", "pf3", "ps", "stopwords", "lowercaseOperators"];
+/// The five params PRD §5 lists as **Out** for v1 edismax. (`bf` landed in
+/// #289 and is no longer descoped.)
+const DESCOPED_PARAMS: &[&str] = &["pf2", "pf3", "ps", "stopwords", "lowercaseOperators"];
 
 const TRACE_DIR: &str = "solr-ref/search-api/trace";
 const CONTRACT_JSON: &str = include_str!("../coverage/search_api_coverage_contract.json");
@@ -228,7 +225,7 @@ fn trace_corpus_is_the_28_traces_the_descope_was_ratified_against() {
 }
 
 #[test]
-fn none_of_the_six_descoped_edismax_params_appear_as_a_request_query_parameter_in_any_trace() {
+fn none_of_the_five_descoped_edismax_params_appear_as_a_request_query_parameter_in_any_trace() {
     let observed = observed_query_param_names();
     for param in DESCOPED_PARAMS {
         assert!(
@@ -315,7 +312,7 @@ fn no_trace_carries_a_form_encoded_body() {
 }
 
 #[test]
-fn none_of_the_six_descoped_edismax_params_appear_in_the_coverage_denominator() {
+fn none_of_the_five_descoped_edismax_params_appear_in_the_coverage_denominator() {
     let contract = contract();
     let names: BTreeSet<&str> = contract
         .captured_parameters
@@ -387,28 +384,32 @@ fn stopwords_the_analyzer_filter_is_present_but_does_not_trip_the_stopwords_para
 // review responsibility.
 
 #[test]
-fn prd_edismax_section_gives_bf_a_single_disposition_pointing_at_v4() {
+fn prd_edismax_section_lists_bf_as_implemented_not_deferred() {
     let section = edismax_section();
     assert!(
         section.contains("bf"),
-        "the v1 exception — edismax section should still mention `bf` as an Out item"
+        "the v1 exception — edismax section should still mention `bf`"
     );
+    // Issue #289 implemented the arithmetic function-query evaluator, so `bf`
+    // and function-form `boost` are applied, not accepted-and-ignored. The PRD
+    // must say so and must NOT still defer `bf` to v4 (the old #136 single-
+    // disposition the v4 phase table used to carry).
     assert!(
         edismax_paragraphs()
             .iter()
-            .any(|p| p.contains("bf") && p.contains("v4")),
-        "PRD §5's v1 edismax section lists `bf` function queries as Out without saying where \
-         they eventually land, while the v4 phase table separately lists `bf`/`{{!func}}` as in \
-         scope for v4 — two dispositions for the same param. Issue #136 asks for a single \
-         disposition: the v1 text should point at v4 (e.g. \"deferred to v4\") in the same breath \
-         as `bf`, instead of independently restating the exclusion."
+            .any(|p| p.contains("bf") && p.contains("#289")),
+        "PRD §5's edismax section should state `bf` landed with #289, not that it is deferred"
+    );
+    assert!(
+        !edismax_paragraphs()
+            .iter()
+            .any(|p| p.contains("bf") && p.contains("deferred to v4")),
+        "`bf` is implemented (#289); the PRD must not still present it as deferred to v4"
     );
     let out = list_item("- **Out:**");
     assert!(
-        !out.contains("bf") || out.contains("v4"),
-        "the **Out:** bullet still names `bf` without pointing at v4, which is the defect #136 \
-         describes: the same param carrying an independent v1 exclusion and a separate v4 \
-         commitment. Either drop `bf` from the bullet or have the bullet defer it to v4."
+        !out.contains("`bf`"),
+        "`bf` is implemented (#289), so the **Out:** bullet must not name it as an exclusion"
     );
 }
 

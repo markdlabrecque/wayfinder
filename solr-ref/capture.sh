@@ -3134,3 +3134,119 @@ capg group_err_unknown_field 'grouping/select?q=*:*&group=true&group.field=nosuc
 capg group_err_multivalued   'grouping/select?q=*:*&group=true&group.field=category&fl=id&wt=json'
 
 release "$GROUPING_CONTAINER" "grouping core '$GROUPING_CORE'"
+
+# --- function queries: {!func} and {!boost b=...} (issue #289) -------------
+# #289 (finding 129): search_api_solr's document-boost path emits the score
+# inline in `q` as `{!boost b=sum(boost_document,...)}` or `{!boost
+# b=boost_document}` (SearchApiSolrBackend.php:1953-1977) -- never as `bf=`.
+# That makes the function-query *evaluator* the real dependency, reached
+# through the `{!func}`/`{!boost}` query-parser local params, not a fixed
+# function list reached through `bf`. This block captures the wire shape and
+# exact scores of the arithmetic subset: constants, numeric field references,
+# and the functions `sum`/`max`/`product`/`recip`. (`payload_score` is a
+# *separate* query parser -- `{!payload_score f=boost_term v=... func=max}`
+# over a payload-bearing field type -- emitted by
+# Utility::flattenKeysToPayloadScore, which is outside the three-file
+# snapshot; verified against the 4.4.x source at git.drupalcode.org. It needs
+# its own `boost_term_payload` field type and is a follow-up increment, not
+# part of this arithmetic evaluator. `ms`/`rord` are off the corrected client
+# path -- BoostMoreRecent does not emit `product(...,recip(ms(...)))` as `bf`,
+# finding 129 corrected that premise -- and need date/ordinal field types, so
+# they are out of scope here too.)
+#
+# Every score fixture uses `q=*:*` (or `{!func}` alone): a `*:*` match scores
+# a constant 1.0 in Solr, so `{!boost b=<f>}*:*` is `1.0 * <f>` and `bf=<f>`
+# is `1.0 + <f>` -- the captured score is the pure function value, with no
+# BM25 base. That keeps the differential comparison exact rather than under
+# the BM25-magnitude ratified divergence (PRD div. 4), and it is the reason
+# the `bf`/`boost` rows below use `q=*:*` rather than a text query.
+#
+# Own container/port/core for the same reason every other appended block uses
+# one: a function-query corpus needs numeric `docValues` fields, which the
+# base `content` core does not have. Rows land in `manifest-errors.tsv` (not
+# `manifest.tsv`) and get a dedicated `fnq_app` in `tests/differential.rs`,
+# like `sortdebt`/`facets33`. d4 has no `price` and d5 has no `views` so a
+# missing numeric value resolves to 0, the Solr function-query default.
+FNQ_CONTAINER=wayfinder-solr-289
+FNQ_SOLR=http://localhost:9060/solr
+FNQ_CORE=fnq
+if want_any '^fnq_'; then
+  if ! docker ps --format '{{.Names}}' | grep -qx "$FNQ_CONTAINER"; then
+    docker rm -f "$FNQ_CONTAINER" >/dev/null 2>&1 || true
+    docker run -d --name "$FNQ_CONTAINER" -p 9060:8983 \
+      solr:9 solr-precreate "$FNQ_CORE" >/dev/null
+  fi
+  echo -n "waiting for fnq solr"
+  for _ in $(seq 60); do
+    if curl -sf "$FNQ_SOLR/$FNQ_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n "."; sleep 1
+  done
+  curl -s "$FNQ_SOLR/$FNQ_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field": [
+      {"name":"body","type":"text_general","indexed":true,"stored":true},
+      {"name":"boost_document","type":"pfloat","indexed":true,"stored":true,"docValues":true},
+      {"name":"views","type":"pint","indexed":true,"stored":true,"docValues":true},
+      {"name":"rating","type":"pfloat","indexed":true,"stored":true,"docValues":true},
+      {"name":"price","type":"pdouble","indexed":true,"stored":true,"docValues":true}
+    ]
+  }' >/dev/null
+  curl -sf "$FNQ_SOLR/$FNQ_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"d1","body":"quick brown fox","boost_document":1.0,"views":10,"rating":2.0,"price":5.0},
+    {"id":"d2","body":"lazy dog","boost_document":3.0,"views":30,"rating":4.0,"price":15.0},
+    {"id":"d3","body":"quick dog","boost_document":2.0,"views":20,"rating":6.0,"price":10.0},
+    {"id":"d4","body":"quick fox","boost_document":0.5,"views":40,"rating":1.0},
+    {"id":"d5","body":"lazy brown","boost_document":2.5,"rating":5.0,"price":8.0}
+  ]' >/dev/null
+fi
+
+capf289() {  # capf289 <name> <path-after-core>
+  local name=$1 suffix=$2
+  want "$name" || return 0
+  curl -sg "$FNQ_SOLR/$FNQ_CORE/$suffix" \
+    -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$FNQ_CORE/$suffix" "" "$FNQ_SOLR" \
+    >> "$MANIFEST_ERRORS"
+  rm -f "$OUT/$name.status"
+}
+
+# All suffixes are percent-encoded: `{`/`}`/`!`/`(`/`)`/space/inner `=` would
+# otherwise break the in-process axum URI the differential harness replays
+# against (tests/common/mod.rs builds `.uri("/solr/...")` from this column),
+# and `Params::parse` percent-decodes them back. curl sends the `%XX` form
+# verbatim and real Solr decodes it too, so capture and replay see the same
+# query. This matches the encoded convention every `{!...}` manifest row uses
+# (see `facet_extag_*`).
+#
+# {!func} query parser: ranks every doc by the function value (score = value).
+capf289 fnq_func_field         'select?q=%7B%21func%7Dboost_document&fl=id,score&wt=json'
+capf289 fnq_func_sum           'select?q=%7B%21func%7Dsum%28boost_document,rating%29&fl=id,score&wt=json'
+capf289 fnq_func_max           'select?q=%7B%21func%7Dmax%28rating,price%29&fl=id,score&wt=json'
+capf289 fnq_func_product       'select?q=%7B%21func%7Dproduct%28rating,2%29&fl=id,score&wt=json'
+capf289 fnq_func_recip         'select?q=%7B%21func%7Drecip%28rating,1,1,1%29&fl=id,score&wt=json'
+capf289 fnq_func_const         'select?q=%7B%21func%7Dsum%281,2,3%29&fl=id,score&sort=id%20asc&wt=json'
+capf289 fnq_func_missing       'select?q=%7B%21func%7Dsum%28views,rating%29&fl=id,score&wt=json'
+
+# {!boost b=<func>} query parser: multiplies the wrapped query's score by the
+# function value. With *:* (constant 1.0) the score is the function value.
+capf289 fnq_boost_field        'select?q=%7B%21boost%20b%3Dboost_document%7D*:*&fl=id,score&wt=json'
+capf289 fnq_boost_sum          'select?q=%7B%21boost%20b%3Dsum%28boost_document,rating%29%7D*:*&fl=id,score&wt=json'
+
+# edismax bf (additive) and boost (multiplicative) params with a function
+# value. *:* keeps the base score constant at 1.0 so the captured score is a
+# clean 1.0+value / 1.0*value. These two rows are why #232's bf/boost warnings
+# come off once this lands: a function-form value is now applied, not ignored.
+capf289 fnq_bf_additive        'select?q=*:*&defType=edismax&qf=body&bf=sum%28views,rating%29&fl=id,score&wt=json'
+capf289 fnq_boost_param        'select?q=*:*&defType=edismax&qf=body&boost=product%28rating,2%29&fl=id,score&wt=json'
+
+# Error shapes (400): unknown function, unbalanced parens, empty body, and
+# an unknown field reference. error.msg/metadata/trace are normalised away by
+# the differential harness; only status + error.code are compared.
+capf289 fnq_err_unknown_func   'select?q=%7B%21func%7Dbogus%281,2%29&fl=id,score&wt=json'
+capf289 fnq_err_unbalanced     'select?q=%7B%21func%7Dsum%28boost_document&fl=id,score&wt=json'
+capf289 fnq_err_empty          'select?q=%7B%21func%7D&fl=id,score&wt=json'
+capf289 fnq_err_unknown_field  'select?q=%7B%21func%7Dnosuchfield&fl=id,score&wt=json'
+
+if want_any '^fnq_'; then
+  release "$FNQ_CONTAINER" "function-query core '$FNQ_CORE'"
+fi

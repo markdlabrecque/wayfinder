@@ -1,0 +1,34 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2,
+    "params":{
+      "q":"{!func}sum(1,2,3)",
+      "fl":"id,score",
+      "sort":"id asc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "maxScore":6.0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"d1",
+      "score":6.0
+    },{
+      "id":"d2",
+      "score":6.0
+    },{
+      "id":"d3",
+      "score":6.0
+    },{
+      "id":"d4",
+      "score":6.0
+    },{
+      "id":"d5",
+      "score":6.0
+    }]
+  }
+}

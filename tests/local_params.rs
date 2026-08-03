@@ -395,12 +395,13 @@ async fn local_params_in_q_value_does_not_400_under_strict_params() {
 #[tokio::test]
 async fn unrecognised_local_params_type_400s_with_a_syntax_error_envelope() {
     let (app, _dir) = search_api_app().await;
-    // The three types PRD §2 divergence 6 names by hand, plus the type-less
+    // The types PRD §2 divergence 6 names by hand, plus the type-less
     // block `src/local_params.rs`'s ceiling note rejects alongside them.
+    // (`{!func}` and `{!boost}` are now implemented (#289), so they are not
+    // in this unrecognised set.)
     for (encoded, shape) in [
         ("%7B%21lucene%7Dquick", "{!lucene}quick"),
         ("%7B%21term%20f%3Did%7Ddoc1", "{!term f=id}doc1"),
-        ("%7B%21func%7Dsum%28a%2Cb%29", "{!func}sum(a,b)"),
         (
             "%7B%21qf%3Dtm_X3b_en_title%7Dquick",
             "{!qf=tm_X3b_en_title}quick",
@@ -541,9 +542,9 @@ fn prd_ratifies_the_hard_400_on_unrecognised_local_params_types() {
          only the error message"
     );
     assert!(
-        entry.contains("{!func}") && entry.contains("v4"),
-        "the entry must say that `{{!func}}` specifically belongs to v4 and so must not silently \
-         half-work"
+        entry.contains("{!func}") && entry.contains("#289"),
+        "the entry must reflect that `{{!func}}`/`{{!boost}}` landed in #289 (a real evaluator) \
+         and no longer silently half-work or belong to v4"
     );
     assert!(
         entry.contains("#137"),

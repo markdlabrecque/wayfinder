@@ -42,6 +42,7 @@ use crate::collector::{
 };
 use crate::config::ServerConfig;
 use crate::edismax;
+use crate::function_query;
 use crate::local_params;
 use crate::query::{self, QueryError};
 use crate::schema::{self, ValueKind, WayfinderSchema};
@@ -1261,8 +1262,74 @@ impl CoreIndex {
         default_field_name: &str,
     ) -> Result<Box<dyn Query>> {
         let qf = nq.local.get("qf").unwrap_or("");
-        self.parse_edismax_query(&nq.text, default_field_name, qf, None, None, 0.0, &[], None)
-            .map_err(anyhow::Error::from)
+        self.parse_edismax_query(
+            &nq.text,
+            default_field_name,
+            qf,
+            None,
+            None,
+            0.0,
+            &[],
+            None,
+            &[],
+        )
+        .map_err(anyhow::Error::from)
+    }
+
+    /// Builds the query when `q` begins with a function-query local-params
+    /// block (`{!func}<expr>` or `{!boost b=<func>}<wrapped>`), the document-
+    /// boost path `search_api_solr` emits inline in `q` (finding 129). Returns
+    /// `Ok(None)` when `q` does not begin with `{!func}` / `{!boost`, so the
+    /// caller takes its normal `defType`/`parse_query` path unchanged. A bare
+    /// `{!func}` ranks every document by the function value; `{!boost b=f}`
+    /// multiplies the wrapped query's score by the function value per doc.
+    ///
+    /// Only the position-0 form is handled here: the client never nests these
+    /// mid-query, and an inline `{!func}`/`{!boost}` still reaches
+    /// `extract_nested_queries`'s unsupported-parser 400, which is the honest
+    /// answer until an inline evaluator is needed.
+    pub fn parse_function_query_q(
+        &self,
+        q: &str,
+        default_field_name: &str,
+    ) -> Result<Option<Box<dyn Query>>, QueryError> {
+        let Some((local, consumed)) = local_params::parse_block(q) else {
+            return Ok(None);
+        };
+        let rest = q[consumed..].trim_start();
+        let resolve = |n: &str| self.wf_schema.resolved_value_kind(n).is_some();
+        match local.query_type.as_deref() {
+            Some("func") => {
+                let func =
+                    function_query::parse(rest).map_err(|e| QueryError::Syntax(e.to_string()))?;
+                function_query::validate_fields(&func, resolve)
+                    .map_err(|e| QueryError::Syntax(e.to_string()))?;
+                Ok(Some(Box::new(function_query::FunctionScoreQuery::all(
+                    func,
+                ))))
+            }
+            Some("boost") => {
+                let b = local.get("b").ok_or_else(|| {
+                    QueryError::Syntax("`{!boost}` requires a `b` function".to_string())
+                })?;
+                let func =
+                    function_query::parse(b).map_err(|e| QueryError::Syntax(e.to_string()))?;
+                function_query::validate_fields(&func, resolve)
+                    .map_err(|e| QueryError::Syntax(e.to_string()))?;
+                // No wrapped query text -> nothing to boost; an empty `q`
+                // matches nothing, the same as the no-`q` path in `select`.
+                let child: Box<dyn Query> = if rest.is_empty() {
+                    Box::new(EmptyQuery)
+                } else {
+                    self.parse_query(rest, default_field_name)
+                        .map_err(|e| QueryError::Syntax(e.to_string()))?
+                };
+                Ok(Some(Box::new(
+                    function_query::FunctionScoreQuery::multiply(child, func),
+                )))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Builds a `defType=edismax` query (issue #7, PRD §5 v1 exception):
@@ -1303,7 +1370,8 @@ impl CoreIndex {
         mm: Option<&str>,
         tie: f32,
         bq: &[String],
-        boost: Option<f32>,
+        boost: Option<&str>,
+        bf: &[String],
     ) -> Result<Box<dyn Query>, QueryError> {
         // Real Solr 400s if *any* named `qf` field is undefined, even when
         // other fields in the same `qf` are valid (issue #111) -- unlike
@@ -1338,7 +1406,10 @@ impl CoreIndex {
         // parser. A valid (or absent) `qf` is irrelevant to the result here —
         // every doc matches — so nothing below this point needs to run.
         if q.trim() == "*:*" {
-            return Ok(Box::new(AllQuery));
+            // `*:*` matches every doc; the only thing left to apply is
+            // `boost`/`bf` (issue #289), which the composition path below would
+            // otherwise be short-circuited out of.
+            return self.apply_edismax_boost_bf(Box::new(AllQuery), boost, bf);
         }
 
         let default_field = self.wf_schema.field(default_field_name).ok_or_else(|| {
@@ -1456,7 +1527,7 @@ impl CoreIndex {
             outer_clauses.push((Occur::Should, bq_query));
         }
 
-        let mut composed: Box<dyn Query> = if outer_clauses.len() == 1 {
+        let composed: Box<dyn Query> = if outer_clauses.len() == 1 {
             outer_clauses
                 .into_iter()
                 .next()
@@ -1466,10 +1537,64 @@ impl CoreIndex {
             Box::new(BooleanQuery::new(outer_clauses))
         };
 
-        if let Some(boost_factor) = boost {
-            composed = Box::new(BoostQuery::new(composed, boost_factor));
-        }
+        // `boost` (multiplicative) and `bf` (additive) are function-query
+        // params (issue #289), applied by the shared helper the `q=*:*`
+        // short-circuit below also uses. Errors there — a malformed function
+        // or an unknown field reference — are the same `Syntax` 400s `{!func}`
+        // raises.
+        self.apply_edismax_boost_bf(composed, boost, bf)
+    }
 
+    /// Applies edismax's `boost` (multiplicative) and `bf` (additive)
+    /// function-query params to `composed` (issue #289). Extracted so the
+    /// `q=*:*` short-circuit and the full composition path share one
+    /// implementation — `*:*` matches every doc but still honours `boost`/`bf`,
+    /// so it cannot bypass this. `boost` may be a plain number (`boost=2`,
+    /// Solr's simplest constant function) or a function
+    /// (`boost=product(rating,2)`); `bf` is always a function (a bare number
+    /// is its constant form). A constant `boost` stays a `BoostQuery` (no
+    /// per-doc work); anything else builds the per-document evaluator
+    /// (`function_query::FunctionScoreQuery`). A malformed function or an
+    /// unknown field reference is a `Syntax` 400, the same class `{!func}`
+    /// raises.
+    fn apply_edismax_boost_bf(
+        &self,
+        mut composed: Box<dyn Query>,
+        boost: Option<&str>,
+        bf: &[String],
+    ) -> Result<Box<dyn Query>, QueryError> {
+        let resolve = |n: &str| self.wf_schema.resolved_value_kind(n).is_some();
+        if let Some(boost_value) = boost {
+            match boost_value.parse::<f32>() {
+                Ok(factor) => composed = Box::new(BoostQuery::new(composed, factor)),
+                Err(_) => {
+                    let func = function_query::parse(boost_value)
+                        .map_err(|e| QueryError::Syntax(e.to_string()))?;
+                    function_query::validate_fields(&func, resolve)
+                        .map_err(|e| QueryError::Syntax(e.to_string()))?;
+                    composed =
+                        Box::new(function_query::FunctionScoreQuery::multiply(composed, func));
+                }
+            }
+        }
+        if !bf.is_empty() {
+            // Multiple `bf` values each add their function value; summing them
+            // into one function applies the lot in a single scoring pass.
+            let mut funcs = Vec::with_capacity(bf.len());
+            for value in bf {
+                let func =
+                    function_query::parse(value).map_err(|e| QueryError::Syntax(e.to_string()))?;
+                function_query::validate_fields(&func, resolve)
+                    .map_err(|e| QueryError::Syntax(e.to_string()))?;
+                funcs.push(func);
+            }
+            let combined = if funcs.len() == 1 {
+                funcs.into_iter().next().expect("checked len == 1")
+            } else {
+                function_query::FuncQuery::Sum(funcs)
+            };
+            composed = Box::new(function_query::FunctionScoreQuery::add(composed, combined));
+        }
         Ok(composed)
     }
 
