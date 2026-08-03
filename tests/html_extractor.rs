@@ -19,7 +19,9 @@
 //! `dispatch(ContentType::Html)`/`extract()` end to end and is genuinely red
 //! today, since `dispatch` has no HTML arm yet.
 
-use wayfinder::extract::{Budget, ExtractInput, ExtractLimits, detect, extract};
+use wayfinder::extract::{
+    Budget, ExtractError, ExtractInput, ExtractLimits, OutputLimitKind, detect, extract,
+};
 
 fn budget() -> Budget {
     Budget::new(ExtractLimits::default())
@@ -145,5 +147,48 @@ fn absent_title_leaves_metadata_title_none() {
         extracted.metadata.title, None,
         "no <title> element must leave metadata.title unset, got {:?}",
         extracted.metadata.title
+    );
+}
+
+/// `<title>` accumulation must be charged against the same `Budget` as the
+/// body text. The title is metadata, not body output, but it is still
+/// extracted content a hostile upload could grow without bound — the one
+/// unbudgeted allocation path left in the HTML extractor (issue #272).
+///
+/// A `<title>` long enough to exhaust a tiny `max_output_bytes`, with the
+/// overrun happening inside one long character run and no following tag
+/// token, also exercises the html5ever early-abort check (`||
+/// tokenizer.sink.state.borrow().error.is_some()`): a budget blown
+/// mid-character-run has no tag to carry `TokenSinkResult::Script`, so the
+/// per-chunk error probe is the only thing that stops the run. That check
+/// was the untested follow-up #4 from #258's tracer report; this test
+/// covers it too.
+#[test]
+fn title_accumulation_is_charged_against_the_output_budget() {
+    let big_title = "x".repeat(1000);
+    let html =
+        format!("<html><head><title>{big_title}</title></head><body><p>hi</p></body></html>");
+    let input = ExtractInput {
+        declared_type: Some("text/html"),
+        resource_name: "bigtitle.html",
+        bytes: html.as_bytes(),
+    };
+    // Every other default limit is generous enough not to trip; only the
+    // output-byte ceiling is tightened so the title alone busts it.
+    let limits = ExtractLimits {
+        max_output_bytes: 10,
+        ..ExtractLimits::default()
+    };
+    let mut budget = Budget::new(limits);
+    let result = extract(&input, &mut budget);
+    assert!(
+        matches!(
+            result,
+            Err(ExtractError::OutputTooLarge(OutputLimitKind::Bytes))
+        ),
+        "a <title> long enough to exhaust max_output_bytes must fail as \
+         OutputTooLarge(Bytes) — the documented 400 budget-violation status \
+         (extraction-output-too-large) — rather than accumulating without \
+         limit, got {result:?}"
     );
 }
