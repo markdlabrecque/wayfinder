@@ -1,0 +1,8 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":4
+  },
+  "file":"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\">\n<head>\n<meta name=\"stream_size\" content=\"31\" />\n<meta name=\"X-Parsed-By\" content=\"org.apache.tika.parser.DefaultParser\" />\n<meta name=\"X-Parsed-By\" content=\"org.apache.tika.parser.csv.TextAndCSVParser\" />\n<meta name=\"stream_content_type\" content=\"application/octet-stream\" />\n<meta name=\"stream_name\" content=\"file\" />\n<meta name=\"stream_source_info\" content=\"sample.txt\" />\n<meta name=\"Content-Encoding\" content=\"ISO-8859-1\" />\n<meta name=\"resourceName\" content=\"sample.txt\" />\n<meta name=\"Content-Type\" content=\"text/plain; charset=ISO-8859-1\" />\n<title></title>\n</head>\n<body><p>Hello plain text.\nSecond line.\n</p>\n</body></html>",
+  "file_metadata":[["resourceName",["sample.txt","sample.txt"]],["Content-Type",["application/octet-stream","text/plain; charset=ISO-8859-1"]],["stream_name",["file","file"]],["stream_source_info",["sample.txt","sample.txt"]],["stream_size",["31","31"]],["stream_content_type",["application/octet-stream","application/octet-stream"]],["X-Parsed-By",["org.apache.tika.parser.DefaultParser","org.apache.tika.parser.csv.TextAndCSVParser"]],["Content-Encoding",["ISO-8859-1"]]]
+}

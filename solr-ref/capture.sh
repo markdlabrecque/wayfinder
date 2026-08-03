@@ -2719,3 +2719,85 @@ for ext in docx pptx xlsx ods odt odp rtf; do
 done
 echo "captured issue #260 office/ODF/RTF extractOnly fixtures from '$EXTRACT260_CONTAINER' (port 9030)"
 docker rm -f "$EXTRACT260_CONTAINER" >/dev/null
+
+# --- /update/extract extractOnly: json.nl named-list shapes (issue #274) -----
+#
+# #258's follow-up 3: `EXTRACT_PARAMS` allowlists `json.nl` (consistent with
+# the other routes), but the handler rendered `file_metadata` in the flat
+# alternating array regardless of it. Capturing here to settle, per the
+# compatibility contract, what real Solr does with each `json.nl` value on
+# `extractOnly` -- so the fixture decides implement-vs-drop rather than the
+# issue guessing.
+#
+# Result: Solr honours `json.nl` on the extract response. `file_metadata` is a
+# plain (not `SimpleOrderedMap`) NamedList, so it reshapes per the param --
+# `flat` (default) -> `["key",[values],...]`, `map` -> `{"key":[values],...}`,
+# `arrarr` -> `[["key",[values]],...]`, `arrmap` -> `[{"key":[values]},...]`.
+# `responseHeader` is a `SimpleOrderedMap` and stays an object in every shape,
+# and `file` is a String value (not a nested NamedList), so neither moves.
+# The `flat` baseline is already `extract_plain_text_xml.json` (#171); this
+# block captures the three non-flat shapes on the same plain-text input so the
+# only varying factor is `json.nl` itself.
+#
+# Same ExtractingRequestHandler config as #258/#260 (lowernames/uprefix/
+# captureAttr/fmap.a/fmap.div), plain-text input, default (xml/XHTML)
+# extractFormat. Separate container/core/port for the same reason #258 used
+# one. Like the other extract blocks these are multipart POSTs and live in
+# `solr-ref/manifest-multipart.tsv`.
+#
+# Side note (not captured): an *invalid* `json.nl` value (e.g. `json.nl=garbage`)
+# makes Solr's JSONWriter emit truncated, invalid JSON (`"file_metadata"` with
+# no value) while still answering HTTP 200. Wayfinder deliberately does not
+# reproduce malformed JSON -- unknown values fall back to `flat` via
+# `facet::JsonNl::from_params`, consistent with the facet routes. That is a
+# defensible divergence from actively-worse captured behaviour (PRD section 2),
+# not a to-do, and is not captured as a fixture because the malformed body
+# cannot be parsed by the differential harness.
+EXTRACT274_CONTAINER=wayfinder-solr-274
+EXTRACT274_SOLR=http://localhost:9040/solr
+EXTRACT274_CORE=extract274
+docker rm -f "$EXTRACT274_CONTAINER" >/dev/null 2>&1 || true
+docker run -d --name "$EXTRACT274_CONTAINER" -p 9040:8983 \
+  -e SOLR_MODULES=extraction solr:9.10.1 solr-precreate "$EXTRACT274_CORE" >/dev/null
+extract274_ready=false
+for _ in $(seq 90); do
+  if curl -sf "$EXTRACT274_SOLR/$EXTRACT274_CORE/admin/ping?wt=json" >/dev/null 2>&1; then
+    extract274_ready=true
+    break
+  fi
+  sleep 1
+done
+if [ "$extract274_ready" != true ]; then
+  echo "extract274 Solr did not become ready" >&2
+  exit 1
+fi
+curl -sSf "$EXTRACT274_SOLR/$EXTRACT274_CORE/config" -H 'Content-Type: application/json' -d '{
+  "add-requesthandler": {
+    "name":"/update/extract",
+    "class":"solr.extraction.ExtractingRequestHandler",
+    "startup":"lazy",
+    "defaults": {
+      "lowernames":"true", "uprefix":"ignored_", "captureAttr":"true",
+      "fmap.a":"links", "fmap.div":"ignored_"
+    }
+  }
+}' >/dev/null
+
+cap_extract274() { # cap_extract274 <name> <query-without-json.nl> <json.nl>
+  local name=$1 base=$2 nl=$3 actual
+  actual=$(curl -sS -X POST \
+    "$EXTRACT274_SOLR/$EXTRACT274_CORE/update/extract?${base}&json.nl=${nl}" \
+    -F "file=@$HERE/extract-inputs/sample.txt;type=application/octet-stream;filename=sample.txt" \
+    -o "$OUT/$name.json" -w '%{http_code}')
+  if [ "$actual" != 200 ]; then
+    echo "$name: expected HTTP 200, got $actual" >&2
+    exit 1
+  fi
+}
+
+BASE274='extractOnly=true&resource.name=sample.txt&wt=json'
+cap_extract274 extract_plain_text_json_nl_map    "$BASE274" map
+cap_extract274 extract_plain_text_json_nl_arrarr "$BASE274" arrarr
+cap_extract274 extract_plain_text_json_nl_arrmap "$BASE274" arrmap
+echo "captured issue #274 json.nl extractOnly fixtures from '$EXTRACT274_CONTAINER' (port 9040)"
+docker rm -f "$EXTRACT274_CONTAINER" >/dev/null

@@ -211,6 +211,115 @@ async fn extract_declared_charset_text_matches_fixture() {
     .await;
 }
 
+// --- json.nl named-list shapes (issue #274) -------------------------------
+//
+// `EXTRACT_PARAMS` allowlists `json.nl` (consistent with the other routes);
+// issue #274 closed the gap where the handler rendered `file_metadata` in
+// the flat alternating array regardless of it. The captured ground truth
+// (`extract_plain_text_json_nl_{map,arrarr,arrmap}.json`, finding 128) shows
+// Solr honours `json.nl` here exactly as it does on the facet routes:
+// `file_metadata` is a plain NamedList and reshapes per the param, while
+// `responseHeader` (a `SimpleOrderedMap`) and `file` (a String value) are
+// untouched. The flat baseline is `extract_plain_text_xml` (#171) above.
+
+#[tokio::test]
+async fn extract_plain_text_json_nl_map_matches_fixture() {
+    assert_matches_fixture(
+        "update/extract?extractOnly=true&resource.name=sample.txt&wt=json&json.nl=map",
+        "sample.txt",
+        "",
+        "extract_plain_text_json_nl_map",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn extract_plain_text_json_nl_arrarr_matches_fixture() {
+    assert_matches_fixture(
+        "update/extract?extractOnly=true&resource.name=sample.txt&wt=json&json.nl=arrarr",
+        "sample.txt",
+        "",
+        "extract_plain_text_json_nl_arrarr",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn extract_plain_text_json_nl_arrmap_matches_fixture() {
+    assert_matches_fixture(
+        "update/extract?extractOnly=true&resource.name=sample.txt&wt=json&json.nl=arrmap",
+        "sample.txt",
+        "",
+        "extract_plain_text_json_nl_arrmap",
+    )
+    .await;
+}
+
+/// Pins the handler's `file_metadata` JSON shape per `json.nl` value directly,
+// independently of `normalize_extract`, so the failure is unambiguous while the
+// handler still ignores the param (the pre-#274 state): every value currently
+// renders flat. Each arm asserts the shape Solr's fixture dictates (finding
+// 128): flat/arrarr/arrmap are arrays, map is an object.
+#[tokio::test]
+async fn extract_file_metadata_shape_follows_json_nl() {
+    let (app, _dir) = default_app().await;
+    let bytes = input_bytes("sample.txt");
+
+    for (nl, expect_object) in [
+        // (json.nl value, is file_metadata an object rather than an array?)
+        ("flat", false),
+        ("map", true),
+        ("arrarr", false),
+        ("arrmap", false),
+    ] {
+        let query = format!(
+            "update/extract?extractOnly=true&resource.name=sample.txt&wt=json&json.nl={nl}"
+        );
+        let (status, v) = request_multipart(
+            &app,
+            &format!("{CORE}/{query}"),
+            "file",
+            "sample.txt",
+            "",
+            &bytes,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "json.nl={nl}: got {status}: {v}");
+        let fm = &v["file_metadata"];
+        assert_eq!(
+            fm.is_object(),
+            expect_object,
+            "json.nl={nl}: file_metadata shape wrong, got {fm}"
+        );
+        // `responseHeader` is a `SimpleOrderedMap` and stays an object under
+        // every json.nl; `file` is a String value, never reshaped.
+        assert!(
+            v["responseHeader"].is_object(),
+            "json.nl={nl}: responseHeader must stay an object"
+        );
+        assert!(
+            v["file"].is_string(),
+            "json.nl={nl}: file must stay a string"
+        );
+    }
+}
+
+/// The captured flat baseline (`extract_plain_text_xml`, #171) must still
+/// match with `json.nl` made explicit, so honouring the param does not
+/// regress the default shape. `flat` is what the handler already produced
+/// before #274, so this is a guard against a future change collapsing the
+/// explicit-flat path onto something else.
+#[tokio::test]
+async fn extract_explicit_json_nl_flat_matches_the_flat_baseline_fixture() {
+    assert_matches_fixture(
+        "update/extract?extractOnly=true&resource.name=sample.txt&wt=json&json.nl=flat",
+        "sample.txt",
+        "",
+        "extract_plain_text_xml",
+    )
+    .await;
+}
+
 /// The corrupt-PDF row is a **recorded status divergence**, not a fixture
 /// match. `extract_corrupt_pdf.json` is Solr's Tika parsing a malformed PDF
 /// and throwing, which is a 500. Wayfinder has no PDF extractor at all, so it

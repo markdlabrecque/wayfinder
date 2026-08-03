@@ -75,3 +75,11 @@ extract_broken_ods	500	content/update/extract?extractOnly=true&extractFormat=tex
 extract_broken_odt	500	content/update/extract?extractOnly=true&extractFormat=text&resource.name=broken.odt&wt=json	file	broken.odt
 extract_broken_odp	500	content/update/extract?extractOnly=true&extractFormat=text&resource.name=broken.odp&wt=json	file	broken.odp
 extract_broken_rtf	500	content/update/extract?extractOnly=true&extractFormat=text&resource.name=broken.rtf&wt=json	file	broken.rtf
+# Issue #274 -- json.nl named-list shapes on extractOnly (plain text, default
+# xml extractFormat). The flat baseline is `extract_plain_text_xml` (#171);
+# these three vary only json.nl. `file` and `responseHeader` are unaffected by
+# json.nl (finding 128); only `file_metadata` reshapes, so the rows use the
+# same plain-text input as the baseline.
+extract_plain_text_json_nl_map	200	content/update/extract?extractOnly=true&resource.name=sample.txt&wt=json&json.nl=map	file	sample.txt
+extract_plain_text_json_nl_arrarr	200	content/update/extract?extractOnly=true&resource.name=sample.txt&wt=json&json.nl=arrarr	file	sample.txt
+extract_plain_text_json_nl_arrmap	200	content/update/extract?extractOnly=true&resource.name=sample.txt&wt=json&json.nl=arrmap	file	sample.txt
