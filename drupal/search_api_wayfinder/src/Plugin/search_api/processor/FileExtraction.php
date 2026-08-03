@@ -90,19 +90,6 @@ class FileExtraction extends FileExtractionProcessorBase {
   /**
    * {@inheritdoc}
    *
-   * extraction_mode: 'inline' (default) extracts during indexing with a cache
-   * probe; 'queue' defers each uncached file to cron via the
-   * wayfinder_extraction queue worker, so a slow parser never stalls an index
-   * batch. The admin form that surfaces this lands in #266; the default keeps
-   * the tracer's inline behaviour.
-   */
-  public function defaultConfiguration(): array {
-    return ['extraction_mode' => 'inline'] + parent::defaultConfiguration();
-  }
-
-  /**
-   * {@inheritdoc}
-   *
    * Gates the processor to indexes served by the Wayfinder backend, so it
    * never appears on a search_api_solr or database-backend index.
    */
