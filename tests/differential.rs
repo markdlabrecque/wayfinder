@@ -1654,15 +1654,15 @@ const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[
          timestamps, real filesystem paths on the capture host) — same permanent category as \
          `admin_info_system` in EXPECTED_DIVERGENCES_MANIFEST_ERRORS above and `ping`'s `rid`",
     ),
-    // The 31 rows below are wave-1 capture prep for #295 (`{!tag}`/`{!ex}`) and
-    // #308 (`terms.prefix`/`terms.limit`), findings 136-142. Both features are
-    // unbuilt, so every one of these is a live divergence today; the three
-    // control rows captured with them -- `facet_extag_baseline`,
-    // `facet_extag_ex_no_tag` and `terms_prefix_empty` -- already match and are
-    // deliberately not listed. Delete each entry as its feature lands; the
-    // guard at the end of the test loop below fails if one starts matching
-    // while still listed (verified by mutation: listing `facet_extag_baseline`
-    // here fails the suite).
+    // The 16 rows below are the remaining wave-1 capture prep for #295
+    // (`{!tag}`/`{!ex}`), findings 136-140. #308's 15 `terms_*` rows landed and
+    // were deleted; #295 is still unbuilt, so each of these is a live
+    // divergence today; the three control rows captured with them --
+    // `facet_extag_baseline`, `facet_extag_ex_no_tag` and `terms_prefix_empty`
+    // -- already match and are deliberately not listed. Delete each entry as
+    // its feature lands; the guard at the end of the test loop below fails if
+    // one starts matching while still listed (verified by mutation: listing
+    // `facet_extag_baseline` here fails the suite).
     (
         "facet_extag_excluded",
         "issue #295: `{!ex=cat}` on `facet.field` must count as if the `{!tag=cat}`-carrying `fq` were absent \

@@ -31,7 +31,8 @@
 //! that same ten-term, same-counts, same-order set. This pins the captured
 //! stemming outcome, not Search API's full Solr analyzer chain.
 //! Nothing here is derived from what Wayfinder's own `/terms` handler
-//! happens to produce — the handler does not exist yet.
+//! happens to produce — the tests assert against independently-verified
+//! corpora, so a handler bug cannot make a test circularly agree with itself.
 //!
 //! ## Premises verified before writing these tests (per the task spec)
 //!
@@ -73,11 +74,13 @@
 //!
 //! ## Envelope shape
 //!
-//! `{terms: {<field>: [term, count, term, count, ...]}}` — the flat
-//! `json.nl=flat` array shape is the only shape this endpoint's response
-//! takes (per the ticket, no general named-list machinery is needed).
-//! `omitHeader=true` (which the module always sends) suppresses
-//! `responseHeader` entirely; its absence, or `omitHeader=false`, keeps it.
+//! `{terms: {<field>: <per-field value>}}` — the outer object is always keyed
+//! by field name; each field's value is a Solr NamedList of `(term, count)`
+//! pairs, so it honours `json.nl` (finding 142): `flat` -> `[term, count, ...]`
+//! (the default), `map` -> `{term: count}`, `arrarr`/`arrmap` likewise — the
+//! same `render_named_list` machinery facets use. `omitHeader=true` (which the
+//! module always sends) suppresses `responseHeader` entirely; its absence, or
+//! `omitHeader=false`, keeps it.
 //!
 //! ## Settled by a capture (issue #308)
 //!
@@ -1018,19 +1021,19 @@ async fn terms_resolves_the_shipped_drupal_preset_tm_x3b_en_title_field() {
     );
 }
 
-// --- json.nl honesty ---------------------------------------------------------
+// --- json.nl shapes ----------------------------------------------------------
 //
-// `TERMS_PARAMS` lists `json.nl` and accepts it with any value, but the
-// handler always renders the flat `[term, count, ...]` shape regardless --
-// unlike `src/facet.rs`'s `JsonNl::from_params`, which actually honours
-// `map`/`arrarr`/`arrmap` for facet counts. The handler's own doc comment
-// argues "listing a param here that the handler ignores would be worse than
-// 400ing it, since it would silently answer the wrong question"; these tests
-// hold the handler to that standard rather than merely restating the status
-// quo. Chosen interpretation: `json.nl=flat` (and the default, absent
-// `json.nl`) is accepted since flat is the only shape `/terms` ever renders;
-// any other value this codebase already gives a documented meaning to
-// (`map`/`arrarr`/`arrmap`) is a 400, not a silently-flat 200.
+// `/terms` is a Solr NamedList, so it honours `json.nl` through the same
+// `render_named_list` machinery facets use (finding 142 /
+// `terms_prefix_json_nl_map`): the outer `terms` object stays keyed by field
+// name, and each field's `(term, count)` list reshapes per `json.nl` -- `flat`
+// -> `[term, count, ...]` (the default), `map` -> `{term: count}`, `arrarr` ->
+// `[[term, count], ...]`, `arrmap` -> `[{term: count}, ...]`. The old
+// `check_terms_json_nl` guard (a placeholder "until the named-list machinery
+// landed", issue #153) 400d everything but flat; #308's map fixture retired it.
+// `map` is fixture-pinned; `arrarr`/`arrmap` ride the same shared renderer
+// facets are already backed by, and are held here rather than re-asserting the
+// old 400.
 
 #[tokio::test]
 async fn terms_json_nl_flat_is_accepted() {
