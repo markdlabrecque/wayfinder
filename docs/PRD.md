@@ -219,24 +219,25 @@ chosen. Nothing may be added here without the same two things.
    indexes into it (finding 78) — getting it wrong breaks the client, not just cosmetics.
    (issue #59)
 
-6. **A local-params block in `q` naming any query parser other than `edismax` is a hard 400, where
-   Solr parses it.** Real Solr registers a parser per type, so `{!lucene}quick`, `{!term f=id}doc1`
-   and `{!func}...` all parse; Wayfinder recognises `{!edismax ...}` only and answers everything
-   else with a `SyntaxError` 400 in the Solr error envelope. The evidence is the v1.5 capture rather
-   than a per-shape fixture, and that is stated plainly here because the rule above demands it: the
-   only local-params types the captured client ever sends are `{!edismax qf='...'}` in `q` (7 traces)
-   and `{!key=...}` in `facet.field` (2 traces) across the 28 committed traces in
-   `solr-ref/search-api/trace/`, so no fixture exercises `{!lucene}`/`{!term}`/`{!func}` at all and
-   real Solr's answers for them are documented, not captured. Two reasons this is the right call
-   anyway. First, **it is not a regression and this PR did not introduce it**: before issue #137,
-   `q={!lucene}quick` already 400d, because `tantivy::query_grammar::parse_query` rejects the raw
-   `{!` string outright (`{` opens an exclusive range in Tantivy's grammar) — issue #137 changed the
-   error *message*, not the status. Second, `{!func}` is **v4** scope (§5's phase table, "Function
-   queries (`bf`, `{!func}`)") and v1 has no function-query evaluator, so a `{!func}` block that
-   parsed into something would silently half-work — the accept-and-ignore treatment `bf` gets is
-   defensible for an optional relevance-tuning param and indefensible for the query itself. A 400
-   is the honest answer until the parser it names exists. (issue #137's open question 5; findings
-   90-92)
+6. **A local-params block in `q` naming any query parser other than `edismax`, `func`, or
+   `boost` is a hard 400, where Solr parses it.** Real Solr registers a parser per type, so
+   `{!lucene}quick`, `{!term f=id}doc1` and `{!func}...` all parse; Wayfinder recognises
+   `{!edismax ...}`, `{!func <expr>}`, and `{!boost b=<func>}` (issue #289 added the latter two)
+   and answers everything else with a `SyntaxError` 400 in the Solr error envelope. The evidence
+   is the v1.5 capture rather than a per-shape fixture, and that is stated plainly here because
+   the rule above demands it: the only local-params types the captured client ever sends are
+   `{!edismax qf='...'}` in `q` (7 traces) and `{!key=...}` in `facet.field` (2 traces) across
+   the 28 committed traces in `solr-ref/search-api/trace/`, so no fixture exercises
+   `{!lucene}`/`{!term}` and real Solr's answers for them are documented, not captured. Two
+   reasons this is the right call anyway. First, **it is not a regression and this PR did not
+   introduce it**: before issue #137, `q={!lucene}quick` already 400d, because
+   `tantivy::query_grammar::parse_query` rejects the raw `{!` string outright (`{` opens an
+   exclusive range in Tantivy's grammar) — issue #137 changed the error *message*, not the
+   status. Second, `{!func}` and `{!boost}` now have a real evaluator (issue #289, the `fnq_*`
+   fixtures), so they parse and score rather than 400; `{!lucene}`/`{!term}` still have no
+   parser, and accept-and-ignore would silently half-work — indefensible for the query itself.
+   A 400 is the honest answer until the parser it names exists. (issue #137's open question 5;
+   findings 90-92)
 
 7. **Colliding `facet.field` response labels are a hard 400, where Solr returns 200 with duplicate
    JSON object members.** `facet_collision_field_flat.json` and
@@ -564,22 +565,24 @@ Lucene min/max selector for multi-valued fields, and missing values last in both
 Not a Tantivy feature, but *composition* of Tantivy primitives rather than missing capability:
 `qf` is a set of per-field `BoostQuery` clauses, `pf` a phrase clause over the same fields,
 `tie` dis-max tie-breaking across the per-field scorers, `boost` a multiplicative wrapper around
-the composed query — for a constant multiplier only, see below.
+the composed query, and `bf` an additive one — both via the function-query evaluator (`src/function_query.rs`, issue #289).
 
-- **In:** `defType`, `q`, `qf`, `pf`, `mm`, `tie`, `bq`, quoted phrases, `+`/`-`, and `boost`
-  restricted to a constant numeric multiplier.
-- **Out:** `pf2`/`pf3`, `ps`, `stopwords`, `lowercaseOperators`. `bf` and the full Solr
-  function-query syntax are **not** a second, independent v1 exclusion: their single
-  disposition is the **v4** "Function queries (`bf`, `{!func}`)" line in the phase table
-  below. v1 has no function-query evaluator at all, so a function-query argument is
-  accepted-and-ignored rather than rejected (findings 75 and 83).
+- **In:** `defType`, `q`, `qf`, `pf`, `mm`, `tie`, `bq`, quoted phrases, `+`/`-`, and `boost`/`bf`
+  over the arithmetic function-query subset (issue #289): constants, numeric field references,
+  and `sum`/`product`/`max`/`min`/`recip`, reached through `bf` (additive), `boost`
+  (multiplicative, constant or function form), and the `{!func}`/`{!boost b=...}` query parsers.
+- **Out:** `pf2`/`pf3`, `ps`, `stopwords`, `lowercaseOperators`. The `{!payload_score}` query
+  parser (`Utility::flattenKeysToPayloadScore`, a separate parser over a payload-bearing
+  `boost_term_payload` field type) and the date/ordinal functions `ms`/`rord` (off the
+  corrected client path — finding 129) are a follow-up to the arithmetic evaluator, not a v1
+  exclusion: they extend `src/function_query.rs` rather than re-scoping it (findings 75, 83, 129).
 
-**`boost` is constant-only, deliberately.** Real Solr's `boost` is a *function-query* parameter,
-not a plain float (finding 83, `docs/solr-ref-findings.md`), and Wayfinder implements no
-function-query evaluator. Only the constant-numeric form (`boost=2.5`) is therefore applied; a
-function-query form such as `boost=recip(rord(title),1,1000,1000)` parses to no boost and is
-ignored, the same accept-and-ignore treatment `bf` gets, and lands properly with **v4**'s
-function queries. Listing `boost` as flatly **In** would overstate what v1 does.
+**`boost` and `bf` apply function queries (issue #289).** Real Solr's `boost` is a
+*function-query* parameter (finding 83), not a plain float — a constant like `boost=2.5` is just
+its simplest function. Wayfinder's `function_query` evaluator applies both: `boost` multiplies
+the composed score per document, `bf` adds to it, and `{!func}`/`{!boost b=...}` on `q` route
+through the same evaluator. The earlier constant-only accept-and-warn treatment (#232) is
+gone — those params now affect ranking.
 
 **The Out items are ratified by the v1.5 capture, not merely undemanded (issue #136).** Across
 the 28 committed Drupal traces in `solr-ref/search-api/trace/`, client usage of `bf`, `pf2`,
@@ -633,7 +636,7 @@ conditional lists (`2<-1 5<80%`). Implement it fully; it is a small self-contain
 | **v2.75 — the contract's remaining endpoints** | The four endpoints in the coverage denominator that Wayfinder does not yet serve: `/terms` (#155), `/schema/fieldtypes` (#156), `/admin/luke` (#157), `/admin/mbeans` (#158). Completing them closes the endpoints bucket. See below. |
 | **Document extraction — staged** | First the client-evidenced `extractOnly=true` path for plain text and HTML, behind request/concurrency/output limits; then DOCX/PPTX and spreadsheet/ODF/RTF families; PDF only after a separate parser-quality and cancellation decision. See below. |
 | **v3** | Result caches + autowarm; spellcheck's delivered tracer slice accepts `spellcheck`, `spellcheck.q`, `spellcheck.dictionary`, and `spellcheck.collate` and returns the captured empty envelope (#222), while real suggestions/collations remain #223; the separate `suggest` path also remains here (`terms` moved earlier to v2.75). Also grouping (`group=true` — see note below on why "collapse" left this line) and `_version_` (issue TBD — scope narrowed, see below). |
-| **v4** | Function queries (`bf`, `{!func}`) — client-evidenced: the module's `BoostMoreRecent` processor emits `product(…,recip(ms(…)))` — spatial (`{!geofilt}`, `bbox`, `{!frange}geodist()`, heatmap facets), snapshot-based read replicas |
+| **v4** | ~~Function queries (`bf`, `{!func}`)~~ **arithmetic function queries landed (#289)** — `{!payload_score}` and date/ordinal `ms`/`rord` remain — spatial (`{!geofilt}`, `bbox`, `{!frange}geodist()`, heatmap facets), snapshot-based read replicas |
 | **Solr 9.x parity** | Solr features with zero client evidence, deliberately unscheduled — the table below. |
 | **Deep roadmap** | Distributed / sharded search, SolrCloud. The majority of Solr's complexity and directly opposed to the operational-simplicity goal. |
 
