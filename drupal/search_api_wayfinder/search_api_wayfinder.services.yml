@@ -19,6 +19,14 @@ services:
     class: Drupal\search_api_wayfinder\FileReferenceMap
     arguments: ['@search_api_wayfinder.kv.file_map']
 
+  # Resolves files linked/embedded in content (#265) so the
+  # LinkedFileExtraction processor can index their text. Pure discovery: it
+  # loads files/media by uuid/id/uri and reconstructs hrefs via the stream
+  # wrapper manager, but touches neither the extraction client nor the index.
+  search_api_wayfinder.linked_file_discoverer:
+    class: Drupal\search_api_wayfinder\LinkedFileDiscoverer
+    arguments: ['@entity_type.manager', '@stream_wrapper_manager']
+
   # Marks referencing items for reindex on file change/delete. The
   # search_api_wayfinder.module hooks forward to this.
   search_api_wayfinder.extraction_invalidator:
