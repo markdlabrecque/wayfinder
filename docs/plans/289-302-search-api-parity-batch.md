@@ -11,9 +11,9 @@ before starting any branch in the batch, because several of the sequencing const
 below are invisible from inside a single issue.
 
 **Status:** waves 0, 1 and 2 are complete — #306, #307, #310; #297, #299, #308, #295;
-#298, #289, #294, #290. **Wave 3 is current: #296, #300, #301.** Of those only #300 is
-free of an open question; #296 needs its premise settled with fixtures first, and #301's
-scope decision has been made (see wave 3) but its close still has a sub-choice.
+#298, #289, #294, #290. **Wave 3 is current: #296 and #300** — #301 is closed
+documentation-only (one core per site, see wave 3). #300 is free of open questions;
+#296 needs its premise settled with fixtures first.
 
 ## Where parity actually stands
 
@@ -219,7 +219,7 @@ What K settled, for the branches that follow it:
 |---|---|---|
 | H | #296 per-field `f.<field>.facet.*` | Unblocked by E, but **its scope is in question — settle the premise below before starting.** Extends `FacetFieldPlan`; keeps mincount/missing post-exclusion |
 | J | #300 non-default data types | `FieldMapper`, `supportsDataType()`, `presets/search-api.toml`. Ten closed types; `solr_text_custom*` is a named descope (finding 134) |
-| M1 | #301 site hash | **Decided: not building the hash** — one core per site stands as a provisional restriction. See below |
+| M1 | #301 site hash | **Closed documentation-only** — the hash is not being built; one core per site is the supported topology. README + `DocumentBuilder` `ponytail:`. See below |
 
 J moves earlier than its original wave-3 slot only in that it now gates #291; the work
 itself is unchanged. It is the only one of the three that is startable with no open
@@ -235,17 +235,15 @@ enforced at `src/lib.rs:1002`), so several sites on one host is several Wayfinde
 processes, one core each — available today, no work. One *process* serving several
 cores is what would reopen that PRD line, and nothing here needs it.
 
-What remains is one sub-choice, still open:
+The remaining sub-choice is settled: **document-only, no guard, no follow-up issue** —
+the marker-document check was weighed against a use case nobody could name. So the
+restriction ships as documentation and the residual risk is accepted explicitly: two
+sites pointed at one core overwrite each other silently, and nothing detects it.
 
-- **Document-only.** Replace the README descope with the stated restriction. Cheap, but
-  two sites pointed at one core still overwrite each other silently.
-- **Document plus a guard.** #301's own wording — "a site-identifier check on the core
-  that refuses (or warns loudly about) a second site writing to it". A reserved marker
-  document holding the site UUID keeps this module-side, matching the plan's "no server
-  work" for M1; anything core-level is server work and changes the ticket's size.
-
-The guard is the difference between a restriction and a hope, but #301 is marked low
-priority with no known consumer, so document-only is a defensible close.
+Closed by the README "Not supported" rewrite plus the `DocumentBuilder` `ponytail:`
+comment, both of which now state one-core-per-site as a decision rather than a
+simplification awaiting work. No expiry guard, because nothing here expires — this is
+a supported-topology statement, not a deferred task.
 
 ### H (#296) — requirements, updated after #298 landed
 

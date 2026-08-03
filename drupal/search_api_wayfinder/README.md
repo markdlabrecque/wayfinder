@@ -52,10 +52,17 @@ will silently fail to match the fields the module writes and queries.
 Deliberate descopes, each with its reason. (Each is also marked with a
 `ponytail:` comment at its site in `src/`.)
 
-- **Site hash in document ids** (`DocumentBuilder`) — ids are
-  `<index_id>-<item_id>`, with no `search_api_solr`-style site-hash component.
-  Single-site-per-core assumption; a hash component is only needed for
-  multi-site-one-core.
+- **Two Drupal sites sharing one core** (`DocumentBuilder`) — ids are
+  `<index_id>-<item_id>`, with no `search_api_solr`-style site-hash component,
+  so **one core per site is the supported topology**. This is a decision
+  (issue #301), not a pending simplification: several sites on one host means
+  several Wayfinder processes with one core each, which the server already
+  assumes — it serves a single core per process (`docs/PRD.md` open question 1).
+
+  Nothing enforces this. Point two sites at one core and documents whose index
+  and item ids coincide overwrite each other silently, with no error on either
+  side. The module cannot detect it; keep the topology correct by
+  configuration.
 - **Only the six default Search API data types** — `text`, `string`,
   `integer`, `decimal`, `date`, `boolean` (`FieldMapper`,
   `WayfinderBackend::supportsDataType()`). `solr_*` and location/spatial types
