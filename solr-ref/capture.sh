@@ -2537,3 +2537,82 @@ cap_extract258 extract_declared_charset_text 200 \
 
 echo "captured issue #258 extractOnly fixtures from '$EXTRACT258_CONTAINER' (port 9020)"
 docker rm -f "$EXTRACT258_CONTAINER" >/dev/null
+
+# --- /update/extract PDF corpus (issue #261) ---------------------------------
+# Captured 2026-08-03 against solr:9.10.1 with the `extraction` module and the
+# same Search-API-shaped ExtractingRequestHandler as the #171/#258 blocks.
+# Separate container/core/port for the same reason: no shared state, no churn
+# of existing fixtures. These are the born-digital PDF evaluation corpus from
+# the #261 exploration report (docs/reports/2026-08-03-pdf-extraction-corpus.md):
+# one fixture per corpus file, captured as Tika ground truth for the go/no-go.
+#
+# Corpus provenance (all generated, all redistributable; fonts are DejaVu,
+# Bitstream-Vera-family, embedded as subsets by WeasyPrint/HarfBuzz so the
+# ToUnicode CMaps and OpenType ligatures are the same shape Word/LibreOffice
+# emit): see the report. Files live in solr-ref/extract-inputs/pdf-*.pdf.
+#
+# Like #171/#258 these are multipart POSTs and stay OUT of manifest-multipart.tsv
+# for now: Wayfinder has no PDF extractor yet, so adding them there would turn
+# exploration evidence into permanent expected divergences. The implementation
+# issue (the #261 go-issue follow-up) extends the runner and adds the rows.
+EXTRACT261_CONTAINER=wayfinder-solr-261
+EXTRACT261_SOLR=http://localhost:9030/solr
+EXTRACT261_CORE=extract261
+docker rm -f "$EXTRACT261_CONTAINER" >/dev/null 2>&1 || true
+docker run -d --name "$EXTRACT261_CONTAINER" -p 9030:8983 \
+  -e SOLR_MODULES=extraction solr:9.10.1 solr-precreate "$EXTRACT261_CORE" >/dev/null
+extract261_ready=false
+for _ in $(seq 90); do
+  if curl -sf "$EXTRACT261_SOLR/$EXTRACT261_CORE/admin/ping?wt=json" >/dev/null 2>&1; then
+    extract261_ready=true
+    break
+  fi
+  sleep 1
+done
+if [ "$extract261_ready" != true ]; then
+  echo "extract261 Solr did not become ready" >&2
+  exit 1
+fi
+curl -sSf "$EXTRACT261_SOLR/$EXTRACT261_CORE/config" -H 'Content-Type: application/json' -d '{
+  "add-requesthandler": {
+    "name":"/update/extract",
+    "class":"solr.extraction.ExtractingRequestHandler",
+    "startup":"lazy",
+    "defaults": {
+      "lowernames":"true", "uprefix":"ignored_", "captureAttr":"true",
+      "fmap.a":"links", "fmap.div":"ignored_"
+    }
+  }
+}' >/dev/null
+
+cap_extract261() { # cap_extract261 <name> <expected-status> <input>
+  local name=$1 expected=$2 input=$3 actual
+  local query="extractOnly=true&extractFormat=text&resource.name=$input&wt=json"
+  actual=$(curl -sS -X POST "$EXTRACT261_SOLR/$EXTRACT261_CORE/update/extract?$query" \
+    -F "file=@$HERE/extract-inputs/$input;type=application/pdf;filename=$input" \
+    -o "$OUT/$name.json" -w '%{http_code}')
+  if [ "$actual" != "$expected" ]; then
+    echo "$name: expected HTTP $expected, got $actual" >&2
+    exit 1
+  fi
+}
+
+# Success cases (200): subset font + ToUnicode, ligatures, multi-column, a
+# multi-page document (the per-page checkpoint needs >1 page), the
+# Info-dict-vs-XMP metadata-conflict document, and the image-only "scanned"
+# page (no text layer -> legitimate empty body, no OCR).
+cap_extract261 extract_pdf_embedded_font     200 pdf-embedded-font.pdf
+cap_extract261 extract_pdf_ligatures         200 pdf-ligatures.pdf
+cap_extract261 extract_pdf_multicolumn       200 pdf-multicolumn.pdf
+cap_extract261 extract_pdf_multipage         200 pdf-multipage.pdf
+cap_extract261 extract_pdf_metadata_conflict 200 pdf-metadata-conflict.pdf
+cap_extract261 extract_pdf_image_only        200 pdf-image-only.pdf
+# Failure cases (500): an AES-encrypted PDF posted with no password (the wire
+# shape -- the client never sends one) and a structurally-valid PDF with a
+# corrupted content stream. Both are captured in the same Solr error envelope
+# as extract_corrupt_pdf.json (SolrException root).
+cap_extract261 extract_pdf_encrypted         500 pdf-encrypted.pdf
+cap_extract261 extract_pdf_malformed_objects 500 pdf-malformed-objects.pdf
+
+echo "captured issue #261 PDF corpus fixtures from '$EXTRACT261_CONTAINER' (port 9030)"
+docker rm -f "$EXTRACT261_CONTAINER" >/dev/null
