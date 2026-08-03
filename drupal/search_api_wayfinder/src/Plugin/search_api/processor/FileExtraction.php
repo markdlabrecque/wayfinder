@@ -7,13 +7,17 @@ namespace Drupal\search_api_wayfinder\Plugin\search_api\processor;
 use Drupal\Core\Entity\EntityInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Field\FieldDefinitionInterface;
+use Drupal\Core\Queue\QueueInterface;
 use Drupal\Core\StringTranslation\TranslatableMarkup;
+use Drupal\file\FileInterface;
 use Drupal\search_api\Attribute\SearchApiProcessor;
 use Drupal\search_api\Datasource\DatasourceInterface;
 use Drupal\search_api\Item\ItemInterface;
 use Drupal\search_api\Processor\ProcessorPluginBase;
 use Drupal\search_api\Processor\ProcessorProperty;
 use Drupal\search_api\SearchApiException;
+use Drupal\search_api_wayfinder\Cache\ExtractionCacheInterface;
+use Drupal\search_api_wayfinder\FileReferenceMapInterface;
 use Drupal\search_api_wayfinder\Plugin\search_api\backend\WayfinderBackend;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\DependencyInjection\ContainerInterface;
@@ -35,9 +39,10 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
  *   case. Only plain file-typed fields are discovered here.
  * - Extraction-result caching. Every reindex re-extracts; the Wayfinder
  *   server's own extraction budgets (#257) bound the work, but a persistent
- *   cache is the obvious next slice.
- * - The excluded-extensions / max-filesize / number-indexed configuration.
- * - A fallback queue for transient extraction failures.
+ *   cache is the obvious next slice. -- DONE in #263: see extractOrGetFromCache().
+ * - The excluded-extensions / max-filesize / number-indexed configuration. -- DONE in #264.
+ * - A fallback queue for transient extraction failures. -- DONE in #263:
+ *   queue mode defers extraction to cron via the wayfinder_extraction worker.
  *
  * Field naming (decision 1, hard to change later): the `saw_` property prefix
  * (search_api_wayfinder) is distinct from search_api_attachments' `saa_`, so
@@ -82,6 +87,18 @@ class FileExtraction extends ProcessorPluginBase {
    *   The entity type manager, for loading file entities from field values.
    * @param \Psr\Log\LoggerInterface $logger
    *   The logger channel for extraction failures.
+   * @param \Drupal\search_api_wayfinder\Cache\ExtractionCacheInterface|null $cache
+   *   (optional) The extraction cache. When NULL, every file is extracted
+   *   inline with no caching -- the #262 tracer behaviour, retained for tests
+   *   that do not exercise the cache.
+   * @param \Drupal\Core\Queue\QueueInterface|null $queue
+   *   (optional) The extraction queue, used only in queue mode. When NULL,
+   *   queue mode degrades to inline extraction.
+   * @param \Drupal\search_api_wayfinder\FileReferenceMapInterface|null $fileMap
+   *   (optional) The file->item reference map, populated during indexing so a
+   *   file change/delete can reindex every referencing item (#263) and #265's
+   *   linked files can record references with no entity-reference field. When
+   *   NULL, no mapping is recorded.
    */
   public function __construct(
     array $configuration,
@@ -89,6 +106,9 @@ class FileExtraction extends ProcessorPluginBase {
     array $plugin_definition,
     protected ?EntityTypeManagerInterface $entityTypeManager = NULL,
     protected ?LoggerInterface $logger = NULL,
+    protected ?ExtractionCacheInterface $cache = NULL,
+    protected ?QueueInterface $queue = NULL,
+    protected ?FileReferenceMapInterface $fileMap = NULL,
   ) {
     parent::__construct($configuration, $plugin_id, $plugin_definition);
   }
@@ -103,7 +123,23 @@ class FileExtraction extends ProcessorPluginBase {
       $plugin_definition,
       $container->get('entity_type.manager'),
       $container->get('logger.factory')->get('search_api_wayfinder'),
+      $container->get('search_api_wayfinder.extraction_cache'),
+      $container->get('queue')->get('wayfinder_extraction'),
+      $container->get('search_api_wayfinder.file_reference_map'),
     );
+  }
+
+  /**
+   * {@inheritdoc}
+   *
+   * extraction_mode: 'inline' (default) extracts during indexing with a cache
+   * probe; 'queue' defers each uncached file to cron via the
+   * wayfinder_extraction queue worker, so a slow parser never stalls an index
+   * batch. The admin form that surfaces this lands in #266; the default keeps
+   * the tracer's inline behaviour.
+   */
+  public function defaultConfiguration(): array {
+    return ['extraction_mode' => 'inline'] + parent::defaultConfiguration();
   }
 
   /**
@@ -167,22 +203,14 @@ class FileExtraction extends ProcessorPluginBase {
         $extraction = '';
         foreach ($files as $file) {
           // @var \Drupal\file\FileInterface $file
-          // FileInterface is duck-typed here (getFileUri()); a real site loads
-          // File entities, which satisfy it.
-          try {
-            $extraction .= $backend->extractContentFromFile($file->getFileUri());
+          // Record the file->item reference so a later file change or delete
+          // (#263 invalidation) can reindex this item, and #265's linked-file
+          // discovery can reuse the same map. Guarded so an uninjected map (the
+          // tracer and tests that do not exercise it) records nothing.
+          if ($this->fileMap !== NULL) {
+            $this->fileMap->record($this->getIndex()->id(), (int) $file->id(), $item->getId());
           }
-          catch (\Throwable $e) {
-            // Decision: extraction failure must not fail the whole index
-            // batch. Log and index the item without this attachment's text.
-            $this->logger?->error('Failed to extract text from file in field @field on @type @id while indexing @index: @message', [
-              '@field' => $field_name,
-              '@type' => $entity->getEntityTypeId(),
-              '@id' => $entity->id(),
-              '@index' => $this->getIndex()->id(),
-              '@message' => $e->getMessage(),
-            ]);
-          }
+          $extraction .= $this->extractOrGetFromCache($file, $item);
         }
 
         if ($extraction !== '') {
@@ -190,6 +218,83 @@ class FileExtraction extends ProcessorPluginBase {
         }
       }
     }
+  }
+
+  /**
+   * Returns extracted text for a file, hitting the cache first.
+   *
+   * Issue #263: the cache is keyed by file content hash, so a file referenced
+   * by many items is extracted once, and a changed file (new hash) naturally
+   * misses and is re-extracted. On a cache miss in queue mode the file is
+   * deferred to the wayfinder_extraction cron worker instead of stalling the
+   * index batch, and '' is indexed for now; the worker caches the text and
+   * marks the item for reindex so the next pass hits the cache.
+   *
+   * Extraction failure is logged and returns '' (decision from #262): one bad
+   * attachment never fails the whole batch.
+   *
+   * @param \Drupal\file\FileInterface $file
+   *   The file to extract.
+   * @param \Drupal\search_api\Item\ItemInterface $item
+   *   The item being indexed, used as queue-item context for later reindex.
+   *
+   * @return string
+   *   The extracted text, or '' on a cache miss in queue mode or on failure.
+   */
+  protected function extractOrGetFromCache(FileInterface $file, ItemInterface $item): string {
+    if ($this->cache !== NULL) {
+      $cached = $this->cache->get($file);
+      if ($cached !== NULL) {
+        return $cached;
+      }
+    }
+
+    if ($this->isQueueMode() && $this->queue !== NULL) {
+      $this->queueItem($file, $item);
+      return '';
+    }
+
+    try {
+      $backend = $this->getBackend();
+      $text = $backend !== NULL ? (string) $backend->extractContentFromFile($file->getFileUri()) : '';
+    }
+    catch (\Throwable $e) {
+      // Decision: extraction failure must not fail the whole index batch. Log
+      // and index the item without this attachment's text.
+      $this->logger?->error('Failed to extract text from file @uri while indexing: @message', [
+        '@uri' => $file->getFileUri(),
+        '@message' => $e->getMessage(),
+      ]);
+      return '';
+    }
+
+    if ($text !== '' && $this->cache !== NULL) {
+      $this->cache->set($file, $text);
+    }
+    return $text;
+  }
+
+  /**
+   * Whether the processor is configured to defer extraction to the queue.
+   */
+  private function isQueueMode(): bool {
+    return ($this->configuration['extraction_mode'] ?? 'inline') === 'queue';
+  }
+
+  /**
+   * Enqueues one extraction job for a file referenced by an item.
+   *
+   * The worker (ExtractorQueue) reloads the file and index, extracts+caches,
+   * and marks the item for reindex so its next index pass hits the cache. The
+   * item id is the combined form (datasource:raw); the worker splits it for
+   * trackItemsUpdated().
+   */
+  private function queueItem(FileInterface $file, ItemInterface $item): void {
+    $this->queue->createItem([
+      'file_id' => (int) $file->id(),
+      'index_id' => $this->getIndex()->id(),
+      'item_id' => $item->getId(),
+    ]);
   }
 
   /**
