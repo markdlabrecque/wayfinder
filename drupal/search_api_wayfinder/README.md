@@ -72,10 +72,6 @@ Deliberate descopes, each with its reason. (Each is also marked with a
   the Wayfinder wire; there is no `f.<field>.facet.*` override. A query whose
   facets disagree on those settings cannot be expressed: the last facet's
   settings win for the whole request.
-- **Two facets on the same field collapse** (`ResponseParser`) — the core
-  answers one key per field name, so only the last delta gets parsed results.
-  Distinguishing them needs per-facet tagging Wayfinder has no wire support
-  for.
 
 ## Testing
 

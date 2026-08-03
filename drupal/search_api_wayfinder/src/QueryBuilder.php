@@ -447,13 +447,26 @@ class QueryBuilder {
 
     $fields = [];
     $params = [];
-    foreach ($facets as $facet) {
+    foreach ($facets as $delta => $facet) {
       $fieldId = $facet['field'] ?? NULL;
       if (!is_string($fieldId) || $fieldId === '' || !($field = $index->getField($fieldId))) {
         throw new \InvalidArgumentException('Facet field is missing or is not part of the index.');
       }
 
-      $fields[] = $this->fieldMapper->fieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
+      $fieldName = $this->fieldMapper->fieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
+      // Emit each facet under its own {!key=<delta>} label so two facets on
+      // one field answer under distinct keys (src/facet.rs split_facet_key,
+      // solr-ref/responses/facet_extag_both_facets.json); ResponseParser then
+      // matches on the key, not the field name. The delta is the array key of
+      // search_api_facets -- "in practice the facet's field identifier", but
+      // not constrained to a machine name: one carrying '}' or whitespace
+      // would break the local-params block (src/local_params.rs terminates on
+      // '}' and splits pairs on whitespace), so fall back to the bare field
+      // name for a delta that is not [A-Za-z0-9_:-]+ rather than emit a
+      // broken prefix. parseFacets() registers both keys to resolve either.
+      $fields[] = preg_match('/^[A-Za-z0-9_:-]+$/', (string) $delta)
+        ? '{!key=' . $delta . '}' . $fieldName
+        : $fieldName;
 
       if (isset($facet['limit'])) {
         // Search API uses limit <= 0 for "no limit" (every facet array in

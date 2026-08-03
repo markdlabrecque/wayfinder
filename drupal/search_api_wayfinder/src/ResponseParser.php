@@ -104,26 +104,29 @@ class ResponseParser {
 
     $index = $query->getIndex();
 
-    // Wayfinder keys facet_fields by the mapped dynamic field name, the same
-    // name QueryBuilder emitted in facet.field, so map back to the deltas.
-    //
-    // ponytail: two deltas facetting the same field collapse -- facet.field is
-    // sent twice, the core answers with one key, and only the last delta gets
-    // parsed results. Distinguishing them needs per-facet tagging Wayfinder
-    // has no wire support for.
-    $deltaByFieldName = [];
+    // QueryBuilder emits each facet under {!key=<delta>}<field>, so the core
+    // labels that facet's buckets with the delta and facet_fields is keyed by
+    // it -- two facets on one field thus answer under two distinct keys
+    // (src/facet.rs split_facet_key,
+    // solr-ref/responses/facet_extag_both_facets.json). A delta that is not a
+    // safe local-params value falls back to the bare field name there, so
+    // register the delta AND the mapped field name as keys for the same
+    // delta: the normal response is delta-keyed, the fallback is
+    // field-name-keyed, and only one of the two ever appears.
+    $deltaByKey = [];
     foreach ($requested as $delta => $facet) {
       $fieldId = $facet['field'] ?? NULL;
       if (!is_string($fieldId) || !($field = $index->getField($fieldId))) {
         continue;
       }
       $fieldName = $this->fieldMapper->fieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
-      $deltaByFieldName[$fieldName] = $delta;
+      $deltaByKey[$delta] = $delta;
+      $deltaByKey[$fieldName] = $delta;
     }
 
     $facets = [];
-    foreach ($response['facet_counts']['facet_fields'] ?? [] as $fieldName => $pairs) {
-      if (!isset($deltaByFieldName[$fieldName]) || !is_array($pairs)) {
+    foreach ($response['facet_counts']['facet_fields'] ?? [] as $key => $pairs) {
+      if (!isset($deltaByKey[$key]) || !is_array($pairs)) {
         continue;
       }
       $terms = [];
@@ -139,7 +142,7 @@ class ResponseParser {
           'filter' => $values[$i] === NULL ? '!' : '"' . (string) $values[$i] . '"',
         ];
       }
-      $facets[$deltaByFieldName[$fieldName]] = $terms;
+      $facets[$deltaByKey[$key]] = $terms;
     }
 
     return $facets;
