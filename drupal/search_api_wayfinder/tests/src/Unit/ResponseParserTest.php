@@ -261,10 +261,12 @@ class ResponseParserTest extends TestCase {
    * M3 facets. `facet_counts.facet_fields`' flat array-pairs shape
    * (`["term", count, "term", count, ...]`, no `json.nl` sent) is ground
    * truth from `solr-ref/responses/facet_basic.json` and
-   * `facet_missing.json` -- read directly, not guessed; only the field-name
-   * *key* here is search_api_wayfinder's own mapped name (`ss_category`)
-   * rather than the raw core-Wayfinder fixture's plain `category`, since the
-   * fixture is captured against a bare core, not Search-API-mapped traffic.
+   * `facet_missing.json` -- read directly, not guessed. The `facet_fields`
+   * key is the facet delta: QueryBuilder emits `{!key=<delta>}<field>`
+   * (issue #299), so the core labels each facet's buckets with the delta
+   * rather than the mapped field name (see
+   * testParseAttachesBothDeltasWhenTwoFacetsShareOneField for the case this
+   * fixes).
    *
    * The extra-data shape (`[$delta => [['count' => int, 'filter' => string],
    * ...]]`) matches what `facets/src/Plugin/facets/query_type/
@@ -295,7 +297,7 @@ class ResponseParserTest extends TestCase {
       'response' => ['numFound' => 5, 'start' => 0, 'docs' => []],
       'facet_counts' => [
         'facet_fields' => [
-          'ss_category' => ['animals', 2, 'classic', 2, 'garden', 1, 'misc', 1],
+          'category' => ['animals', 2, 'classic', 2, 'garden', 1, 'misc', 1],
         ],
       ],
     ];
@@ -328,11 +330,10 @@ class ResponseParserTest extends TestCase {
       'response' => ['numFound' => 5, 'start' => 0, 'docs' => []],
       'facet_counts' => [
         'facet_fields' => [
-          'ss_category' => ['animals', 2, 'classic', 3],
-          // "brand" is multi-valued, so its facet_counts key must use the
-          // 'm' mapped name -- exactly as QueryBuilder emitted it in
-          // facet.field.
-          'sm_brand' => ['acme', 4],
+          // #299: facet_fields is keyed by the facet delta (the {!key=...}
+          // label QueryBuilder emitted), not the mapped field name.
+          'category' => ['animals', 2, 'classic', 3],
+          'brand' => ['acme', 4],
         ],
       ],
     ];
@@ -370,7 +371,7 @@ class ResponseParserTest extends TestCase {
       'response' => ['numFound' => 5, 'start' => 0, 'docs' => []],
       'facet_counts' => [
         'facet_fields' => [
-          'ss_category' => ['animals', 2, 'classic', 2, 'garden', 1, 'misc', 1, NULL, 1],
+          'category' => ['animals', 2, 'classic', 2, 'garden', 1, 'misc', 1, NULL, 1],
         ],
       ],
     ];
@@ -400,6 +401,86 @@ class ResponseParserTest extends TestCase {
     $resultSet = (new ResponseParser())->parse($response, $this->mockQuery('my_index'));
 
     $this->assertFalse($resultSet->hasExtraData('search_api_facets'));
+  }
+
+  /**
+   * #299: two Search API facets on the same field must each get their own
+   * results. QueryBuilder emits a distinct {!key=<delta>} per facet, so the
+   * core answers facet_fields under two distinct keys (one per delta) even
+   * though both count the same column. Response shape derived from
+   * solr-ref/responses/facet_extag_both_facets.json (one field, two {!key=}
+   * labels, two distinct keys with different counts) -- not from what the
+   * code produces.
+   *
+   * @covers ::parse
+   */
+  public function testParseAttachesBothDeltasWhenTwoFacetsShareOneField(): void {
+    $facets = [
+      'category_top' => ['field' => 'category', 'limit' => 10, 'min_count' => 1, 'missing' => FALSE],
+      'category_all' => ['field' => 'category', 'limit' => 10, 'min_count' => 1, 'missing' => FALSE],
+    ];
+    $index = ['category' => $this->mockIndexField('category', 'string', FALSE)];
+    // Both keys facet the same field; counts differ (mirroring
+    // facet_extag_both_facets.json's filtered/unfiltered pair) to prove the
+    // two results are not collapsed.
+    $response = [
+      'response' => ['numFound' => 5, 'start' => 0, 'docs' => []],
+      'facet_counts' => [
+        'facet_fields' => [
+          'category_top' => ['animals', 2, 'classic', 1, 'garden', 0, 'misc', 0],
+          'category_all' => ['animals', 2, 'classic', 2, 'garden', 1, 'misc', 1],
+        ],
+      ],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $this->mockQuery('my_index', $index, $facets));
+    $extraData = $resultSet->getExtraData('search_api_facets');
+
+    $this->assertSame([
+      ['count' => 2, 'filter' => '"animals"'],
+      ['count' => 1, 'filter' => '"classic"'],
+      ['count' => 0, 'filter' => '"garden"'],
+      ['count' => 0, 'filter' => '"misc"'],
+    ], $extraData['category_top']);
+    $this->assertSame([
+      ['count' => 2, 'filter' => '"animals"'],
+      ['count' => 2, 'filter' => '"classic"'],
+      ['count' => 1, 'filter' => '"garden"'],
+      ['count' => 1, 'filter' => '"misc"'],
+    ], $extraData['category_all']);
+  }
+
+  /**
+   * #299 fallback: when the facet delta is not a safe local-params value,
+   * QueryBuilder emits the bare mapped field name (no {!key=} prefix), so the
+   * core keys that facet's buckets by the field name. parseFacets must still
+   * resolve that field-name key back to the hostile delta -- this is the
+   * inverse of QueryBuilderTest::testHostileFacetDeltaFallsBackToBareFieldName.
+   *
+   * @covers ::parse
+   */
+  public function testParseResolvesAHostileDeltaByItsBareFieldNameKey(): void {
+    // Delta contains a space: not [A-Za-z0-9_:-]+, so QueryBuilder falls back
+    // to the bare mapped field name and the response is keyed by it.
+    $facets = [
+      'bad delta' => ['field' => 'category', 'limit' => 10, 'min_count' => 1, 'missing' => FALSE],
+    ];
+    $index = ['category' => $this->mockIndexField('category', 'string', FALSE)];
+    $response = [
+      'response' => ['numFound' => 5, 'start' => 0, 'docs' => []],
+      'facet_counts' => [
+        'facet_fields' => [
+          'ss_category' => ['animals', 2, 'classic', 3],
+        ],
+      ],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $this->mockQuery('my_index', $index, $facets));
+
+    $this->assertSame([
+      ['count' => 2, 'filter' => '"animals"'],
+      ['count' => 3, 'filter' => '"classic"'],
+    ], $resultSet->getExtraData('search_api_facets')['bad delta']);
   }
 
   /**

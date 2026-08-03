@@ -548,7 +548,9 @@ class QueryBuilderTest extends TestCase {
     $params = (new QueryBuilder())->build($query);
 
     $this->assertSame('true', $params['facet']);
-    $this->assertSame('ss_category', $params['facet.field']);
+    // #299: each facet is emitted under {!key=<delta>} so two facets on one
+    // field answer under distinct keys; a single facet is still one string.
+    $this->assertSame('{!key=category}ss_category', $params['facet.field']);
     $this->assertSame(10, $params['facet.limit']);
     $this->assertSame(2, $params['facet.mincount']);
     $this->assertSame('false', $params['facet.missing']);
@@ -629,10 +631,11 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    // "brand" is multi-valued (per mockIndexField's TRUE arg above), so its
-    // mapped name must use the 'm' infix, exactly as qf/fq mapping already
-    // does elsewhere in this test class.
-    $this->assertSame(['ss_category', 'sm_brand'], $params['facet.field']);
+    // #299: each entry carries its {!key=<delta>} prefix; here two facets on
+    // two different fields, so two distinct keys. "brand" is multi-valued
+    // (per mockIndexField's TRUE arg above), so its mapped name uses the 'm'
+    // infix, exactly as qf/fq mapping already does elsewhere in this class.
+    $this->assertSame(['{!key=category}ss_category', '{!key=brand}sm_brand'], $params['facet.field']);
     $this->assertSame(10, $params['facet.limit']);
     $this->assertSame(1, $params['facet.mincount']);
     $this->assertSame('false', $params['facet.missing']);
@@ -690,7 +693,91 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    $this->assertSame('its_weight', $params['facet.field']);
+    // #299: the facet.field value is {!key=<delta>}<mapped field>.
+    $this->assertSame('{!key=weight}its_weight', $params['facet.field']);
+  }
+
+  /**
+   * #299: two Search API facets on the same field must not collapse. The core
+   * answers one key per distinct facet.field value, so QueryBuilder emits a
+   * distinct {!key=<delta>} per facet -- here two facets over `category` come
+   * back under `category_top` and `category_all` instead of both under
+   * `ss_category`. Ground truth: solr-ref/responses/facet_extag_both_facets.json
+   * (one field, two {!key=} labels, two distinct result keys with different
+   * counts); the prefix wire format is fixed by src/facet.rs split_facet_key
+   * ({!key=label}field, no space).
+   *
+   * The two facets state different limits -- the routine Search API setup
+   * this issue is about -- but buildFacets() still writes facet.limit as one
+   * global param (last wins); per-facet settings are #296, out of scope here.
+   *
+   * @covers ::build
+   */
+  public function testTwoFacetsOnOneFieldEmitDistinctKeyedFacetFieldEntries(): void {
+    $index = $this->mockIndex([], [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+    ]);
+    $facets = [
+      'category_top' => [
+        'field' => 'category',
+        'limit' => 5,
+        'min_count' => 1,
+        'missing' => FALSE,
+      ],
+      'category_all' => [
+        'field' => 'category',
+        'limit' => 0,
+        'min_count' => 1,
+        'missing' => FALSE,
+      ],
+    ];
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], ['search_api_facets' => $facets]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    // Both entries facet the same mapped field (ss_category); only the
+    // {!key=} label differs, so the core answers two distinct keys.
+    $this->assertSame(
+      ['{!key=category_top}ss_category', '{!key=category_all}ss_category'],
+      $params['facet.field'],
+    );
+  }
+
+  /**
+   * #299 guard: the facet delta is the array key of search_api_facets, which
+   * is "in practice the facet's field identifier" (a machine name) but is not
+   * constrained to be one. A delta carrying `}` or whitespace would break out
+   * of the {!key=...} local-params block (src/local_params.rs terminates the
+   * block on `}` and splits pairs on whitespace), so buildFacets() falls back
+   * to the bare mapped field name for a delta that is not [A-Za-z0-9_:-]+
+   * rather than emit a broken prefix. parseFacets() registers both the delta
+   * and the field name as response keys to resolve either.
+   *
+   * Mutation-tested: removing the guard makes this emit
+   * '{!key=bad delta}ss_category' and the assertion fails.
+   *
+   * @covers ::build
+   */
+  public function testHostileFacetDeltaFallsBackToBareFieldName(): void {
+    $index = $this->mockIndex([], [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+    ]);
+    // Delta contains a space (and would also break on `}`): not a safe
+    // local-params value.
+    $facets = [
+      'bad delta' => [
+        'field' => 'category',
+        'limit' => 10,
+        'min_count' => 1,
+        'missing' => FALSE,
+      ],
+    ];
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], ['search_api_facets' => $facets]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    // Single hostile facet -> bare mapped field name, still a single string.
+    $this->assertSame('ss_category', $params['facet.field']);
   }
 
   /**
