@@ -1,0 +1,8 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2
+  },
+  "file":"\n\n\n\n\n\n\n\n\n\n\n\nODT HeadingFirst ODT paragraph.\nSecond ODT paragraph.\n",
+  "file_metadata":["resourceName",["sample.odt","sample.odt"],"Content-Type",["application/vnd.oasis.opendocument.text","application/vnd.oasis.opendocument.text"],"stream_name",["file","file"],"stream_source_info",["sample.odt","sample.odt"],"stream_size",["1559","1559"],"stream_content_type",["application/vnd.oasis.opendocument.text","application/vnd.oasis.opendocument.text"],"X-Parsed-By",["org.apache.tika.parser.DefaultParser","org.apache.tika.parser.odf.OpenDocumentParser"],"generator",["ODFPY/1.4.1"]]
+}

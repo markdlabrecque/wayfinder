@@ -1,0 +1,8 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2
+  },
+  "file":"\n\n\n\n\n\n\n\n\n\n\n\n\tODS cell text.\n\n\n",
+  "file_metadata":["resourceName",["sample.ods","sample.ods"],"Content-Type",["application/vnd.oasis.opendocument.spreadsheet","application/vnd.oasis.opendocument.spreadsheet"],"stream_name",["file","file"],"stream_source_info",["sample.ods","sample.ods"],"stream_size",["1509","1509"],"stream_content_type",["application/vnd.oasis.opendocument.spreadsheet","application/vnd.oasis.opendocument.spreadsheet"],"X-Parsed-By",["org.apache.tika.parser.DefaultParser","org.apache.tika.parser.odf.OpenDocumentParser"],"generator",["ODFPY/1.4.1"]]
+}

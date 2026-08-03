@@ -44,3 +44,34 @@ extract_latin1_text	200	content/update/extract?extractOnly=true&extractFormat=te
 extract_utf8_bom_text	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=sample-utf8-bom.txt&wt=json	file	sample-utf8-bom.txt
 extract_declared_charset_text	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=sample-latin1.txt&wt=json	file	sample-latin1.txt	text/plain; charset=ISO-8859-1
 extract_corrupt_pdf	500	content/update/extract?extractOnly=true&extractFormat=text&resource.name=broken.pdf&wt=json	file	broken.pdf
+# --- issue #260: office/ODF/RTF extractOnly fixtures ----------------------
+# Captured against solr:9.10.1 (see solr-ref/capture.sh's #260 block).
+# Tiny documents from solr-ref/extract-inputs/_gen_office.py. Each format has
+# an xml (default XHTML) and a text row; `broken.*` are the malformed inputs
+# that produce the captured 500 envelope (one per format, per acceptance).
+# These rows diverge from Solr in a documented, normalized way: Wayfinder's
+# metadata promise is narrow (title/author/created + the stream envelope),
+# where Tika emits a rich format-specific metadata set. See
+# ACCEPTED_DIVERGENCES_MULTIPART + normalize_extract's office handling in
+# tests/differential.rs.
+extract_docx_xml	200	content/update/extract?extractOnly=true&resource.name=sample.docx&wt=json	file	sample.docx	application/vnd.openxmlformats-officedocument.wordprocessingml.document
+extract_docx_text	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=sample.docx&wt=json	file	sample.docx	application/vnd.openxmlformats-officedocument.wordprocessingml.document
+extract_pptx_xml	200	content/update/extract?extractOnly=true&resource.name=sample.pptx&wt=json	file	sample.pptx	application/vnd.openxmlformats-officedocument.presentationml.presentation
+extract_pptx_text	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=sample.pptx&wt=json	file	sample.pptx	application/vnd.openxmlformats-officedocument.presentationml.presentation
+extract_xlsx_xml	200	content/update/extract?extractOnly=true&resource.name=sample.xlsx&wt=json	file	sample.xlsx	application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+extract_xlsx_text	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=sample.xlsx&wt=json	file	sample.xlsx	application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+extract_ods_xml	200	content/update/extract?extractOnly=true&resource.name=sample.ods&wt=json	file	sample.ods	application/vnd.oasis.opendocument.spreadsheet
+extract_ods_text	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=sample.ods&wt=json	file	sample.ods	application/vnd.oasis.opendocument.spreadsheet
+extract_odt_xml	200	content/update/extract?extractOnly=true&resource.name=sample.odt&wt=json	file	sample.odt	application/vnd.oasis.opendocument.text
+extract_odt_text	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=sample.odt&wt=json	file	sample.odt	application/vnd.oasis.opendocument.text
+extract_odp_xml	200	content/update/extract?extractOnly=true&resource.name=sample.odp&wt=json	file	sample.odp	application/vnd.oasis.opendocument.presentation
+extract_odp_text	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=sample.odp&wt=json	file	sample.odp	application/vnd.oasis.opendocument.presentation
+extract_rtf_xml	200	content/update/extract?extractOnly=true&resource.name=sample.rtf&wt=json	file	sample.rtf	application/rtf
+extract_rtf_text	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=sample.rtf&wt=json	file	sample.rtf	application/rtf
+extract_broken_docx	500	content/update/extract?extractOnly=true&extractFormat=text&resource.name=broken.docx&wt=json	file	broken.docx
+extract_broken_pptx	500	content/update/extract?extractOnly=true&extractFormat=text&resource.name=broken.pptx&wt=json	file	broken.pptx
+extract_broken_xlsx	500	content/update/extract?extractOnly=true&extractFormat=text&resource.name=broken.xlsx&wt=json	file	broken.xlsx
+extract_broken_ods	500	content/update/extract?extractOnly=true&extractFormat=text&resource.name=broken.ods&wt=json	file	broken.ods
+extract_broken_odt	500	content/update/extract?extractOnly=true&extractFormat=text&resource.name=broken.odt&wt=json	file	broken.odt
+extract_broken_odp	500	content/update/extract?extractOnly=true&extractFormat=text&resource.name=broken.odp&wt=json	file	broken.odp
+extract_broken_rtf	500	content/update/extract?extractOnly=true&extractFormat=text&resource.name=broken.rtf&wt=json	file	broken.rtf

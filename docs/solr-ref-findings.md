@@ -2192,3 +2192,56 @@ Search-API-shaped `ExtractingRequestHandler` as the #171 block. Fixtures:
      `.csv.TextAndCSVParser`, `.html.HtmlParser`) that do not exist in a Rust server, and the
      XHTML `file` value embeds them as `meta` elements. This is a ratified divergence, not a
      to-do: see the PRD's ratified-divergence list.
+
+124. **`extractFormat=text` leading newlines = (head `<meta>` count) + 2 when a
+     non-empty `<title>` is present, else + 4 — finding 121 generalized and
+     corrected.** Finding 121's "always exactly thirteen newlines" holds only
+     for the plain-text/HTML fixtures it was measured on (9/11 metas + the
+     empty/non-empty title). Office formats break it: DOCX has 41 head metas
+     and 43 leading newlines, PPTX 42/44, XLSX 28/30, ODS/ODT/ODP/RTF 8/12
+     (no title), HTML 11/13. The count is *driven by the head metadata size*,
+     so it is not independently reproducible once Wayfinder's narrower
+     metadata set (finding 125) means a different meta count than Tika. The
+     differential harness collapses leading newlines for these rows; the
+     constant-13 specialisation in `ExtractRender` stays correct for the
+     plain-text/HTML rows where it was captured.
+
+125. **Office/ODF/RTF metadata is rich and format-specific; Wayfinder's narrow
+     promise (title/author/created + the request envelope) is a documented,
+     normalized divergence.** Tika emits dozens of keys per format
+     (`date`, `cp:revision`, `dc:creator`, `extended-properties:*`,
+     `xmpTPg:NPages`, `meta:page-count`, ...) in a format-specific order in
+     both `file_metadata` and the XHTML head. The PRD's stated promise is the
+     narrow set only (`resourceName`, detected content type, format
+     title/author when reliable); unknown metadata is dropped. So the six
+     stream/resource keys plus `Content-Type` are the comparable core across
+     every format, and the rest is stripped by `normalize_extract` for the
+     office rows. This is the office-format counterpart of `X-Parsed-By`
+     (finding 123) — same kind of divergence (a Java/Tika artefact Wayfinder
+     has no honest equivalent for), larger cardinality.
+
+126. **Each office family emits a distinct, reproducible XHTML body shape.**
+     Captured (with embedded-content divs stripped from the python-docx/pptx
+     inputs):
+     - DOCX: `<h1>Heading</h1>\n<p>…</p>\n` — heading then paragraph blocks.
+     - PPTX: per slide, `<div class="slide-content"><p>title</p>\n<p>bullet</p>\n</div>\n<div class="slide-master-content" />`.
+     - XLSX: per sheet, `<div><h1>SheetName</h1>\n<table><tbody><tr>\t<td>…</td>…</tr>\n…</tbody></table>\n</div>\n`.
+     - ODS: `<table><tr>\t<td><p>…</p>\n</td></tr>\n</table>\n` (no sheet-name heading, no `tbody`).
+     - ODT: `<h1>Heading</h1><p>…</p>\n<p>…</p>` (no newline after the first `<h1>`).
+     - ODP: per slide, `<div><p>…</p>\n</div>\n`.
+     - RTF: `<p>…</p>\n<p><b>bold run</b></p>\n…` — paragraphs, inline `<b>` for bold runs.
+     The leading `\t` before each `<td>` is Tika's table-cell serializer, not
+     indentation; reproduced literally.
+
+127. **Malformed-input 500 envelopes: truncated archives choke the zip reader
+     (EOF/InvalidFormat); RTF is lenient and needs a multi-gigabyte `\bin`
+     declaration to fail.** A 64-byte truncation of any zip-based format
+     500s with a `root-error-class` like
+     `org.apache.poi.openxml4j.exceptions.InvalidFormatException`. RTF is the
+     exception: unbalanced groups, dangling control words, deep nesting, bad
+     hex, and a huge `\u` value all parse to 200 (empty or partial text) —
+     only `{\rtf1\ansi\bin9999999999 …` 500s, with
+     `java.io.EOFException` as Tika tries to skip the claimed bytes and runs
+     out. So the RTF malformed fixture is the `\bin` form, not a structural
+     break; Wayfinder's `rtf-parser` reaching the same input is expected to
+     error into the `Parse` arm (500) the same way.

@@ -1,0 +1,8 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":11
+  },
+  "file":"\n\n\n\n\n\n\n\n\n\n\n\nFirst RTF paragraph.\nBold RTF run.\nSecond RTF paragraph.\n",
+  "file_metadata":["resourceName",["sample.rtf","sample.rtf"],"Content-Type",["application/rtf","application/rtf"],"stream_name",["file","file"],"stream_source_info",["sample.rtf","sample.rtf"],"stream_size",["132","132"],"stream_content_type",["application/rtf","application/rtf"],"X-Parsed-By",["org.apache.tika.parser.DefaultParser","org.apache.tika.parser.rtf.RTFParser"]]
+}

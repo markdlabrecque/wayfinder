@@ -1,0 +1,8 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2
+  },
+  "file":"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\">\n<head>\n<meta name=\"stream_size\" content=\"1672\" />\n<meta name=\"X-Parsed-By\" content=\"org.apache.tika.parser.DefaultParser\" />\n<meta name=\"X-Parsed-By\" content=\"org.apache.tika.parser.odf.OpenDocumentParser\" />\n<meta name=\"stream_content_type\" content=\"application/vnd.oasis.opendocument.presentation\" />\n<meta name=\"stream_name\" content=\"file\" />\n<meta name=\"stream_source_info\" content=\"sample.odp\" />\n<meta name=\"resourceName\" content=\"sample.odp\" />\n<meta name=\"Content-Type\" content=\"application/vnd.oasis.opendocument.presentation\" />\n<title></title>\n</head>\n<body><div><p>ODP slide content.</p>\n</div>\n</body></html>",
+  "file_metadata":["resourceName",["sample.odp","sample.odp"],"Content-Type",["application/vnd.oasis.opendocument.presentation","application/vnd.oasis.opendocument.presentation"],"stream_name",["file","file"],"stream_source_info",["sample.odp","sample.odp"],"stream_size",["1672","1672"],"stream_content_type",["application/vnd.oasis.opendocument.presentation","application/vnd.oasis.opendocument.presentation"],"X-Parsed-By",["org.apache.tika.parser.DefaultParser","org.apache.tika.parser.odf.OpenDocumentParser"],"generator",["ODFPY/1.4.1"]]
+}
