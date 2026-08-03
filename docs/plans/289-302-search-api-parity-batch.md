@@ -2,18 +2,18 @@
 
 **Date:** 2026-08-03. Covers the fourteen issues opened after the parity review of
 2026-08-03: #289-#297 (server) and #298-#302 (the `search_api_wayfinder` module),
-plus #308, split out of #291 by the wave 0b sweep. **Updated 2026-08-03** for the
-completion of wave 1.
+plus #308, split out of #291 by the wave 0b sweep. **Updated 2026-08-07** for the
+completion of wave 2.
 
 This document is the batch's execution order, not its scope — each issue body carries
 its own scope and evidence requirements, and this plan does not restate them. Read it
 before starting any branch in the batch, because several of the sequencing constraints
 below are invisible from inside a single issue.
 
-**Status:** waves 0 and 1 are complete (#306, #307, #310; #297, #299, #308, #295 merged).
-Wave 2 is running: **#298 has landed** (`d4cd89e`, promoted out of wave 4 once #295
-removed its only blocker); #289, #290 and #294 (freed by #278) are the branches in
-flight. #296's requirements were revised after #298 — see wave 3.
+**Status:** waves 0, 1 and 2 are complete — #306, #307, #310; #297, #299, #308, #295;
+#298, #289, #294, #290. **Wave 3 is current: #296, #300, #301.** Of those only #300 is
+free of an open question; #296 needs its premise settled with fixtures first, and #301's
+scope decision has been made (see wave 3) but its close still has a sub-choice.
 
 ## Where parity actually stands
 
@@ -153,22 +153,40 @@ The predicted collision points all held: `src/lib.rs` (#308's terms handler vs #
 discipline (facet tests beside facet tests, MLT tests beside MLT tests). **Carry that
 rule into wave 2**: G and C's successors land in the same two PHP test classes.
 
-## Wave 2 — in flight, contended on `src/lib.rs`
+## Wave 2 — done
 
-| Branch | Issue | Owns |
-|---|---|---|
-| F | #289 function queries | new `src/function_query.rs`, `src/query.rs`, `src/edismax.rs`, the warning sites at `src/lib.rs:2880` |
-| G | #290 grouping | `src/collector.rs`, plus the Drupal half (`QueryBuilder`, `ResponseParser`, `WayfinderBackend`) |
-| B' | #294 PDF extraction | `src/extract.rs` — fully isolated; **#278 has landed, so this is free** |
-| K | #298 OR facets | **Landed** — `d4cd89e`, `docs/reports/2026-08-03-298-or-facets.md` |
+Four branches, all merged. The `SELECT_PARAMS` discipline held: each branch added its
+own block in the same commit as its implementation, and #290 went further by leaving
+`group.format`/`group.main` **out** of the list so they 400 under `strict_params`
+rather than being accepted-and-ignored — the #232 shape, pinned by two tests.
 
-Both F and G add to `SELECT_PARAMS`. **Do not prep-land the param names.** An
-accepted-but-unimplemented param is precisely the silent-wrong-answer shape #232 exists
-to prevent, so each branch adds its own contiguous block in the same commit as its
-implementation, and the rebase order is **F -> G** (E has landed). Those conflicts are
-mechanical.
+| Branch | Issue | Merged | Report |
+|---|---|---|---|
+| K | #298 OR facets | `d4cd89e` (#317) | `docs/reports/2026-08-03-298-or-facets.md` |
+| F | #289 function queries | `753e1d8` | `docs/reports/2026-08-04-289-function-queries.md` |
+| B' | #294 PDF extraction | `f7ecec6` (#318) | `docs/reports/2026-08-07-pdf-extraction-implementation.md` |
+| G | #290 result grouping | `7760e4c` (#321) | `docs/reports/2026-08-07-290-result-grouping.md` |
 
-**K (#298) took the fourth slot ahead of H (#296) and has landed.** The plan's old
+**What wave 2 leaves for the branches behind it:**
+
+- **`src/function_query.rs` exists and is the one evaluator.** Parser, AST and a
+  bespoke Tantivy `FunctionScoreQuery`, covering constants, numeric field references and
+  `sum`/`product`/`max`/`min`/`recip`, with a missing value resolving to `0.0` (Solr's
+  default). L2 (#292) extends it for `geodist()`; it does not fork a second evaluator.
+  `ms`/`rord` were split off as a follow-up increment and need date/ordinal field types.
+- **Grouping returns `grouped` alone.** A request setting both `group=true` and
+  `facet=true` gets no `facet_counts` block, and `group.truncate`/`group.facet` are
+  no-ops with a `ponytail:` naming the ceiling. Correct for every captured request, but
+  unfixtured — see H's requirement 6 below.
+- **`QueryBuilder.php` and `ResponseParser.php` now carry a grouping half too**, on top
+  of the facet halves from C and K. They are the module's two hot files; every remaining
+  Drupal branch touches at least one.
+- **`getSupportedFeatures()` was designed out as a collision.** K converted it to one
+  feature per line, and G's `search_api_grouping` then landed on its own line with no
+  conflict — the prediction and the remedy both held, which is the pattern worth
+  repeating on the next shared list.
+
+**K (#298) took the fourth slot ahead of H (#296).** The plan's old
 `E -> H -> K` ordering was file contention in `buildFacets()`, not a dependency: OR
 facets need *tagging*, which E shipped, not per-field settings. K was PHP-only plus one
 hermetic parser pin, needed no capture, and closed the most user-visible bug in the
@@ -195,27 +213,39 @@ What K settled, for the branches that follow it:
   tag, dropping the facet back to filtered counts with no signal. See the follow-up note
   under wave 3.
 
-G's Drupal half touches the two files C owns, so C has landed. It also touches
-`QueryBuilder.php`, which K edited in `buildFacets()` and `build()` — different methods,
-and the wave-1 insertion-point discipline covers the shared test class.
-
-F is the batch's long pole (see the critical path below) — start it as soon as a slot
-frees.
-
-Per finding 129, F is a function-query *parser and evaluator* reached through
-`{!boost b=...}` on `q`, not a fixed list of functions reached through `bf=`. Its first
-targets are `sum`, a bare field reference (`boost_document`), and `payload_score`.
-
-## Wave 3 — disjoint
+## Wave 3 — current, disjoint
 
 | Branch | Issue | Note |
 |---|---|---|
 | H | #296 per-field `f.<field>.facet.*` | Unblocked by E, but **its scope is in question — settle the premise below before starting.** Extends `FacetFieldPlan`; keeps mincount/missing post-exclusion |
 | J | #300 non-default data types | `FieldMapper`, `supportsDataType()`, `presets/search-api.toml`. Ten closed types; `solr_text_custom*` is a named descope (finding 134) |
-| M1 | #301 site hash | `DocumentBuilder` only, no server work. **Fetch `search_api_solr`'s `Utility::getSiteHash()` first** — it is not in the three-file snapshot, and bug-compatibility means matching it exactly |
+| M1 | #301 site hash | **Decided: not building the hash** — one core per site stands as a provisional restriction. See below |
 
 J moves earlier than its original wave-3 slot only in that it now gates #291; the work
-itself is unchanged.
+itself is unchanged. It is the only one of the three that is startable with no open
+question in front of it.
+
+### M1 (#301) — decided: one core per site
+
+The hash is **not** being ported, so `Utility::getSiteHash()` no longer needs fetching
+and the ticket's first bullet ("decide whether to support it at all") is answered. The
+restriction is provisional and matches what the server already enforces: PRD open
+question 1 is resolved as **single-core-per-process** (`docs/PRD.md:1114-1121`,
+enforced at `src/lib.rs:1002`), so several sites on one host is several Wayfinder
+processes, one core each — available today, no work. One *process* serving several
+cores is what would reopen that PRD line, and nothing here needs it.
+
+What remains is one sub-choice, still open:
+
+- **Document-only.** Replace the README descope with the stated restriction. Cheap, but
+  two sites pointed at one core still overwrite each other silently.
+- **Document plus a guard.** #301's own wording — "a site-identifier check on the core
+  that refuses (or warns loudly about) a second site writing to it". A reserved marker
+  document holding the site UUID keeps this module-side, matching the plan's "no server
+  work" for M1; anything core-level is server work and changes the ticket's size.
+
+The guard is the difference between a restriction and a hope, but #301 is marked low
+priority with no known consumer, so document-only is a defensible close.
 
 ### H (#296) — requirements, updated after #298 landed
 
@@ -253,7 +283,14 @@ either way the prefix is built in one place. Preserve both invariants K establis
 #296/#298 landed second needs a local resolution inside `buildFacets()`. #296 is the one
 landing second, and the conflict is the ~10-line `$prefix` block, not the method.
 
-**5. Do not fix the two open `tagFilterQuery()` ceilings here.** The #298 review found
+**5. Its capture session is the cheapest chance at the grouping+facet gap.** G (#290)
+left `group=true` + `facet=true` unfixtured, with `group.truncate`/`group.facet` as
+documented no-ops. H is the next branch to stand up a Solr container for facet work, so
+adding those rows costs a capture block rather than a whole session. Optional, and
+strictly a capture — implementing collapsed-group facet counts is #290's follow-up, not
+H's.
+
+**6. Do not fix the two open `tagFilterQuery()` ceilings here.** The #298 review found
 an unguarded tag value and tag loss below the top level; both belong in their own issue
 against `build()`, not folded into a facet-settings branch.
 
@@ -275,8 +312,9 @@ their own configset:
 
 - **L1 — heatmap.** `rpt` type, `facet.heatmap.*`, the `counts_ints2D` response.
 - **L2 — point distance.** `location` type, `sfield`/`pt`/`d`, `{!geofilt}`/`{!bbox}`,
-  `{!frange l= u=}geodist()`, `geodist()` in `fl` and in `sort`. Depends on F for the
-  function evaluator.
+  `{!frange l= u=}geodist()`, `geodist()` in `fl` and in `sort`. **F has landed**, so the
+  evaluator it depends on exists: extend `src/function_query.rs` with `geodist()` rather
+  than forking a second one.
 - **L3 — the distance-facet rewrite.** N `facet.query` entries shaped
   `{!key=spatial-<field>__distance-<min>-<max>}{!frange l=<min> u=<max>}geodist()`.
   Depends on L2 and on `facet.query`.
@@ -284,15 +322,15 @@ their own configset:
 
 ## Critical path
 
-- **Longest chain:** `F (#289) -> L2 -> L3 -> L4`. Spatial is the schedule, so
-  starting #289 early matters more than its own size suggests. F is behind nothing now
-  that 0b has landed.
+- **Longest chain:** `F (#289) -> L2 -> L3 -> L4`, and **F has landed** — the head of
+  the batch's longest chain is off the board. Spatial (#292) is now the schedule on its
+  own, and L2 is startable whenever a slot frees; it does not wait on wave 3.
 - **Second chain: dissolved.** It was `E -> H -> K`; E landed, and K turned out not to
   depend on H, so both are now single branches rather than a chain. Nothing behind
   them.
 - **Third chain:** `J (#300) -> I (#291)`.
-- **Off the path entirely:** #301, #302, #294 (now unblocked). #308, #297 and #299 are
-  done.
+- **Off the path entirely:** #301, #302. Everything else off the path — #308, #297,
+  #299, #294, #298 — is done.
 
 ## Concurrency bound
 
