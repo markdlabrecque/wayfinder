@@ -52,7 +52,7 @@
 //! extraction into a separate OS process that can actually be killed.
 //! Revisit at that issue, not before.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::fmt;
 use std::future::Future;
 use std::io::Write;
@@ -208,12 +208,37 @@ pub struct Extracted {
 
 /// Object-safe extraction trait. `dispatch()` hands back `&'static dyn
 /// Extractor` for a given `ContentType`.
+///
+/// # Encapsulation contract (issue #278)
+///
+/// An extractor receives a **shared** [`Budget`] reference. It can push
+/// output ([`Budget::push_str`]) and advance the structural counters, but it
+/// **cannot replace the whole budget** — reassignment would mint fresh
+/// counters and a fresh deadline, escaping every ceiling the budget was
+/// admitted under. That is enforced by the reference type itself, not by
+/// convention: a shared `&Budget` cannot be assigned through. The
+/// `compile_fail` doctest below is the permanent guard; the mutation test
+/// (flip this signature back to `&mut Budget`) makes it fail.
+///
+/// ```compile_fail
+/// use wayfinder::extract::{Extractor, ExtractInput, Budget, Extracted, ExtractError, ExtractLimits};
+/// struct Rogue;
+/// impl Extractor for Rogue {
+///     fn extract(
+///         &self,
+///         _input: &ExtractInput<'_>,
+///         budget: &Budget,
+///     ) -> Result<Extracted, ExtractError> {
+///         // Must not compile: an extractor may not replace its budget,
+///         // or it mints fresh counters and a fresh deadline.
+///         *budget = Budget::new(ExtractLimits::default());
+///         unreachable!()
+///     }
+/// }
+/// ```
 pub trait Extractor: Send + Sync {
-    fn extract(
-        &self,
-        input: &ExtractInput<'_>,
-        budget: &mut Budget,
-    ) -> Result<Extracted, ExtractError>;
+    fn extract(&self, input: &ExtractInput<'_>, budget: &Budget)
+    -> Result<Extracted, ExtractError>;
 }
 
 const OLE2_SIGNATURE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
@@ -482,7 +507,7 @@ impl Extractor for PlainTextExtractor {
     fn extract(
         &self,
         input: &ExtractInput<'_>,
-        budget: &mut Budget,
+        budget: &Budget,
     ) -> Result<Extracted, ExtractError> {
         let start = budget.output_text().len();
         let mut rest = input.bytes;
@@ -562,7 +587,7 @@ fn decode_chunk_len(rest: &[u8], max: usize) -> usize {
 /// `UnsupportedFormat` when there is no extractor for the detected content
 /// type. `LegacyOle` in particular comes out here as `UnsupportedFormat`,
 /// never silently routed to a ZIP/OOXML extractor.
-pub fn extract(input: &ExtractInput<'_>, budget: &mut Budget) -> Result<Extracted, ExtractError> {
+pub fn extract(input: &ExtractInput<'_>, budget: &Budget) -> Result<Extracted, ExtractError> {
     let content_type = detect(input.declared_type, input.resource_name, input.bytes);
     let extractor =
         dispatch(content_type).ok_or(ExtractError::UnsupportedFormat { content_type })?;
@@ -882,7 +907,7 @@ impl Extractor for HtmlExtractor {
     fn extract(
         &self,
         input: &ExtractInput<'_>,
-        budget: &mut Budget,
+        budget: &Budget,
     ) -> Result<Extracted, ExtractError> {
         let start = budget.output_text().len();
         // The bytes reaching an extractor are already UTF-8 (see
@@ -981,7 +1006,7 @@ fn char_boundary_len(s: &str, max: usize) -> usize {
 }
 
 struct SinkState<'a> {
-    budget: &'a mut Budget,
+    budget: &'a Budget,
     xhtml: String,
     text: String,
     title: Option<String>,
@@ -1013,8 +1038,9 @@ struct SinkState<'a> {
 /// `TokenSink::process_token` takes `&self` (html5ever 0.39), so the sink's
 /// mutable state lives behind a `RefCell`. Single-threaded by construction:
 /// the whole tokenizer run happens inside one `spawn_extraction` closure on
-/// one pool thread, which is also why the `&mut Budget` can be borrowed in
-/// here at all.
+/// one pool thread, which is also why the borrowed `&Budget` is enough here
+/// — output accumulation is interior-mutable (issue #278), so the sink
+/// never needs the `&mut` it no longer has.
 struct HtmlSink<'a> {
     state: RefCell<SinkState<'a>>,
 }
@@ -1391,7 +1417,7 @@ const ZIP_READ_CHUNK: usize = 8 * 1024;
 /// (declared ratio, declared cumulative) run over their metadata.
 fn collect_zip_parts(
     bytes: &[u8],
-    budget: &mut Budget,
+    budget: &Budget,
     want: &dyn Fn(&str) -> bool,
 ) -> Result<Vec<(String, Vec<u8>)>, ExtractError> {
     let limits = *budget.limits();
@@ -1453,7 +1479,7 @@ fn collect_zip_parts(
 /// per-part content types in `[Content_Types].xml`. Both are read off the
 /// archive's own manifest, so a renamed `.docx` or a wrong declared MIME type
 /// does not misroute the document.
-fn refine_zip_kind(bytes: &[u8], budget: &mut Budget) -> Result<ContentType, ExtractError> {
+fn refine_zip_kind(bytes: &[u8], budget: &Budget) -> Result<ContentType, ExtractError> {
     let parts = collect_zip_parts(bytes, budget, &|name| {
         name == "mimetype" || name == "[Content_Types].xml"
     })?;
@@ -1505,7 +1531,7 @@ fn local_name(qname: &[u8]) -> &[u8] {
 /// event per token against `max_xml_events`.
 fn office_core_properties(
     xml: &str,
-    budget: &mut Budget,
+    budget: &Budget,
 ) -> Result<(Option<String>, Option<String>), ExtractError> {
     let mut reader = quick_xml::Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -1549,7 +1575,7 @@ fn xml_read_error(e: impl std::fmt::Display) -> ExtractError {
 /// archive has one, and returns the narrow `(title, author)` promise.
 fn ooxml_core_from_parts(
     parts: &[(String, Vec<u8>)],
-    budget: &mut Budget,
+    budget: &Budget,
 ) -> Result<(Option<String>, Option<String>), ExtractError> {
     for (name, data) in parts {
         if name == "docProps/core.xml" {
@@ -1563,7 +1589,7 @@ fn ooxml_core_from_parts(
 /// rendering, keeping the two (which end up as `Extracted.text` and
 /// `Extracted.body_text`) in lockstep. Block boundaries are the caller's job;
 /// this is for inline runs and the block text itself.
-fn push_text(budget: &mut Budget, text: &mut String, s: &str) -> Result<(), ExtractError> {
+fn push_text(budget: &Budget, text: &mut String, s: &str) -> Result<(), ExtractError> {
     budget.push_str(s)?;
     text.push_str(s);
     Ok(())
@@ -1594,7 +1620,7 @@ impl Extractor for DocxExtractor {
     fn extract(
         &self,
         input: &ExtractInput<'_>,
-        budget: &mut Budget,
+        budget: &Budget,
     ) -> Result<Extracted, ExtractError> {
         let start = budget.output_text().len();
         let parts = collect_zip_parts(input.bytes, budget, &|name| {
@@ -1632,7 +1658,7 @@ impl Extractor for DocxExtractor {
 /// `Heading1..=6` flags the current paragraph as a heading.
 fn walk_docx_body(
     xml: &str,
-    budget: &mut Budget,
+    budget: &Budget,
     xhtml: &mut String,
     text: &mut String,
 ) -> Result<(), ExtractError> {
@@ -1693,7 +1719,7 @@ fn walk_docx_body(
 fn emit_block(
     heading: Option<u8>,
     para: &str,
-    budget: &mut Budget,
+    budget: &Budget,
     xhtml: &mut String,
     text: &mut String,
 ) -> Result<(), ExtractError> {
@@ -1743,7 +1769,7 @@ impl Extractor for PptxExtractor {
     fn extract(
         &self,
         input: &ExtractInput<'_>,
-        budget: &mut Budget,
+        budget: &Budget,
     ) -> Result<Extracted, ExtractError> {
         let start = budget.output_text().len();
         let parts = collect_zip_parts(input.bytes, budget, &|name| {
@@ -1807,7 +1833,7 @@ impl Extractor for PptxExtractor {
 
 /// Collects the text of every `<a:t>` in one slide, in document order. Each
 /// `<a:t>` is one `<p>` in Tika's output (a title is simply the first run).
-fn walk_pptx_slide(xml: &str, budget: &mut Budget) -> Result<Vec<String>, ExtractError> {
+fn walk_pptx_slide(xml: &str, budget: &Budget) -> Result<Vec<String>, ExtractError> {
     let mut reader = quick_xml::Reader::from_str(xml);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
@@ -1863,7 +1889,7 @@ impl Extractor for OdtExtractor {
     fn extract(
         &self,
         input: &ExtractInput<'_>,
-        budget: &mut Budget,
+        budget: &Budget,
     ) -> Result<Extracted, ExtractError> {
         let start = budget.output_text().len();
         let parts = collect_zip_parts(input.bytes, budget, &|name| {
@@ -1900,7 +1926,7 @@ impl Extractor for OdtExtractor {
 /// branches carry no extractable text.
 fn walk_odt_body(
     xml: &str,
-    budget: &mut Budget,
+    budget: &Budget,
     xhtml: &mut String,
     text: &mut String,
 ) -> Result<(), ExtractError> {
@@ -1998,7 +2024,7 @@ fn heading_level_attr(attrs: quick_xml::events::attributes::Attributes<'_>) -> O
 /// properties, which already accepts `initial-creator`.
 fn odf_meta_from_parts(
     parts: &[(String, Vec<u8>)],
-    budget: &mut Budget,
+    budget: &Budget,
 ) -> Result<(Option<String>, Option<String>), ExtractError> {
     for (name, data) in parts {
         if name == "meta.xml" {
@@ -2020,7 +2046,7 @@ impl Extractor for OdpExtractor {
     fn extract(
         &self,
         input: &ExtractInput<'_>,
-        budget: &mut Budget,
+        budget: &Budget,
     ) -> Result<Extracted, ExtractError> {
         let start = budget.output_text().len();
         let parts = collect_zip_parts(input.bytes, budget, &|name| {
@@ -2056,7 +2082,7 @@ impl Extractor for OdpExtractor {
 /// slide. Frames, shapes, and master pages are walked for depth only.
 fn walk_odp_body(
     xml: &str,
-    budget: &mut Budget,
+    budget: &Budget,
     xhtml: &mut String,
     text: &mut String,
 ) -> Result<(), ExtractError> {
@@ -2135,7 +2161,7 @@ impl Extractor for XlsxExtractor {
     fn extract(
         &self,
         input: &ExtractInput<'_>,
-        budget: &mut Budget,
+        budget: &Budget,
     ) -> Result<Extracted, ExtractError> {
         use calamine::Reader;
         let start = budget.output_text().len();
@@ -2167,7 +2193,7 @@ impl Extractor for OdsExtractor {
     fn extract(
         &self,
         input: &ExtractInput<'_>,
-        budget: &mut Budget,
+        budget: &Budget,
     ) -> Result<Extracted, ExtractError> {
         use calamine::Reader;
         let start = budget.output_text().len();
@@ -2207,7 +2233,7 @@ fn render_spreadsheet(
     content_type: ContentType,
     sheets: Vec<(String, calamine::Range<calamine::Data>)>,
     input: &ExtractInput<'_>,
-    budget: &mut Budget,
+    budget: &Budget,
     start: usize,
     flavour: SpreadsheetFlavour,
     title: Option<String>,
@@ -2336,7 +2362,7 @@ impl Extractor for RtfExtractor {
     fn extract(
         &self,
         input: &ExtractInput<'_>,
-        budget: &mut Budget,
+        budget: &Budget,
     ) -> Result<Extracted, ExtractError> {
         let start = budget.output_text().len();
         // RTF control words are ASCII; the bytes are scanned as a UTF-8/ASCII
@@ -2391,7 +2417,7 @@ impl Extractor for RtfExtractor {
 /// the document buffers. The walker borrows only the `Budget` (charging text
 /// as spans flush), so it never holds a second `&mut` alongside it.
 struct RtfWalker<'a> {
-    budget: &'a mut Budget,
+    budget: &'a Budget,
     /// Bold state per group nesting level; `len() == depth + 1`.
     bold_stack: Vec<bool>,
     /// Whether each group nesting level is a skipped destination.
@@ -2603,7 +2629,7 @@ pub fn extract_document(
     declared_type: Option<&str>,
     resource_name: &str,
     bytes: &[u8],
-    budget: &mut Budget,
+    budget: &Budget,
 ) -> Result<ExtractedDocument, ExtractError> {
     let content_type = detect(declared_type, resource_name, bytes);
     // A signature-detected ZIP may be an office package; open the archive to
@@ -3153,53 +3179,56 @@ pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 /// The live per-extraction state threaded to extractors: deadline, output
 /// counters, structural counters.
 ///
-/// `limits` is deliberately not a public field. Extractors receive
-/// `&mut Budget` — they must be able to push output and advance counters,
-/// and must *not* be able to raise the ceilings they are being held to.
+/// `limits` is deliberately not a public field, and extractors receive a
+/// **shared** `&Budget` (issue #278): they must be able to push output and
+/// advance counters, and must *not* be able to raise the ceilings they are
+/// being held to — or to replace the whole budget.
 ///
-/// ## What is unforgeable here, and what is not (#257 follow-up item E)
+/// ## What is unforgeable here (#257 follow-up item E, closed by #278)
 ///
-/// The six structural counters are private and `Cell`-backed, driven only
-/// through the delegating methods below (`enter_xml_element`,
-/// `count_xml_event`, ...). Those methods take `&self`, so an extractor
-/// holding this budget **cannot** raise a structural limit, reset a
-/// structural count, or reach a `decrement` for a counter that bounds
-/// cumulative work: `xml_events`, `sheets`, `cells`, and `pdf_pages` have no
-/// leave/decrement method at all, while `xml_depth` and `rtf_group_depth`
-/// have exactly one each. That split is now enforced by which methods exist,
-/// not by a doc comment asking nicely.
+/// Both halves of the encapsulation claim are now enforced by the type
+/// system, not by review:
 ///
-/// **That is the whole of the claim.** The `Extractor` trait still takes
-/// `&mut Budget`, so an in-tree extractor can still reassign the *whole*
-/// budget (`*budget = Budget::new(ExtractLimits { .. })`) and get fresh
-/// counters and a fresh deadline that way. The structural counters became
-/// unforgeable; whole-budget reassignment did not. Do not read this section
-/// as "guard integrity no longer rests on review of in-tree extractors" — it
-/// rests on it for exactly one, much more conspicuous, wholesale move.
+/// 1. **The six structural counters** are private and `Cell`-backed, driven
+///    only through the delegating methods below (`enter_xml_element`,
+///    `count_xml_event`, ...). Those methods take `&self`, so an extractor
+///    holding this budget **cannot** raise a structural limit, reset a
+///    structural count, or reach a `decrement` for a counter that bounds
+///    cumulative work: `xml_events`, `sheets`, `cells`, and `pdf_pages` have
+///    no leave/decrement method at all, while `xml_depth` and
+///    `rtf_group_depth` have exactly one each. (Item E, #257 round 2.)
 ///
-/// The trait was left on `&mut Budget` on purpose rather than by omission,
-/// and the reason is API shape, not cost. Moving the output `String` behind a
-/// `RefCell` — which `&Budget` requires, since `push_str` mutates it — means
-/// `output_text()` can no longer return `&str`. It would have to hand back a
-/// `Ref<'_, String>` (or a closure-taking `with_output_text`, or a copy), and
-/// that signature is part of the extractor contract every phase-1+ format
-/// will be written against. Designing it now would mean guessing at how
-/// extractors want to read accumulated output, with exactly one in-tree
-/// extractor to guess from.
+/// 2. **The binding that holds those counters** — the budget itself. The
+///    trait takes `&Budget`, so an extractor **cannot** reassign the whole
+///    budget (`*budget = Budget::new(ExtractLimits { .. })`) to mint fresh
+///    counters and a fresh deadline. A shared reference cannot be assigned
+///    through, and the `Extractor` trait's `compile_fail` doctest is the
+///    permanent guard. (#278, closing the one gap #257 left open.)
 ///
-/// It is worth being precise about what this does *not* cost, because an
-/// earlier draft of this comment got it wrong: nothing about the decode hot
-/// path gets slower. `PlainTextExtractor` already copies its slice out once
-/// via `output_text()[start..].to_string()`, and that copy happens either way
-/// — under a `RefCell` it simply happens inside one borrow, once, at the end.
-/// The hot path is `push_str`, one `borrow_mut` per 8 KiB chunk.
+/// The output `String` lives behind a `RefCell` (the private `BudgetOutput`)
+/// so that `push_str`/`charge_output` can take `&self` under this shared
+/// reference. That required one API-shape decision — what `output_text()`
+/// hands back — and it is recorded on [`Budget::output_text`]: a
+/// `Ref<'_, str>` guard, chosen over a closure-taking accessor or an
+/// unconditional copy because every in-tree read-back already copies its
+/// slice out, so `Ref` keeps that one-copy profile with no call-site churn.
 ///
-/// ponytail: the upgrade is `Extractor::extract(&self, input, budget:
-/// &Budget)` with the output buffer behind interior mutability too, which
-/// makes reassignment impossible because the extractor never holds a `&mut`.
-/// Trigger: the first extractor that does not need to read its own output
-/// back. At that point the read-back accessor's shape can be designed against
-/// two real call sites with different needs instead of one.
+/// The history matters because two earlier issues deferred exactly this:
+/// #257 round 2 made the counters unforgeable but left the trait on
+/// `&mut Budget` rather than fix the `output_text()` shape from a single call
+/// site; #258 landed a second, differently-shaped extractor (`HtmlSink`,
+/// already interior-mutable for its `TokenSink`) without spending scope on
+/// it. With two real call sites to design against — the trigger the deferral
+/// named — #278 makes the call.
+///
+/// ## Cost
+///
+/// Nothing about the decode hot path got slower. `PlainTextExtractor`
+/// already copies its slice out once via `output_text()[start..].to_string()`,
+/// and that copy happens either way — under the `RefCell` it happens inside
+/// one borrow, once, at the end. The hot path is `push_str`, one
+/// `borrow_mut` per 8 KiB chunk, on a `RefCell` that is borrowed nowhere else
+/// during a run.
 ///
 /// ## Threading
 ///
@@ -3225,8 +3254,11 @@ pub struct Budget {
     /// an absolute instant computed once, so repeated checks cannot drift.
     deadline_at: Instant,
     clock: Clock,
-    output: String,
-    output_scalars: usize,
+    /// Accumulated extracted text and its scalar count, behind one `RefCell`
+    /// (they are always charged together). This interior-mutable core is
+    /// what lets [`Extractor::extract`] take `&Budget` and still push output
+    /// — see the type-level "What is unforgeable" section.
+    output: RefCell<BudgetOutput>,
 }
 
 // The `## Threading` section above is a promise about auto traits, and a
@@ -3237,6 +3269,17 @@ const _: () = {
     const fn assert_send<T: Send>() {}
     assert_send::<Budget>();
 };
+
+/// Accumulated extracted text and its scalar count, behind one `RefCell`
+/// inside [`Budget`] (they are always charged together). Private: this is the
+/// interior-mutable core that lets `push_str`/`charge_output` take `&self` and
+/// [`Extractor::extract`] take `&Budget` (issue #278), so the counters a
+/// budget was admitted under cannot be reset by reassigning the whole budget.
+#[derive(Default)]
+struct BudgetOutput {
+    text: String,
+    scalars: usize,
+}
 
 impl Budget {
     pub fn new(limits: ExtractLimits) -> Self {
@@ -3256,8 +3299,7 @@ impl Budget {
         Budget {
             deadline_at: deadline_instant(now, limits.deadline),
             clock,
-            output: String::new(),
-            output_scalars: 0,
+            output: RefCell::new(BudgetOutput::default()),
             xml_depth: Cell::new(BoundedCounter::new(limits.max_xml_depth)),
             xml_events: Cell::new(BoundedCounter::new(limits.max_xml_events)),
             sheets: Cell::new(BoundedCounter::new(limits.max_sheets)),
@@ -3294,9 +3336,9 @@ impl Budget {
     /// producing a huge `String` and measuring it afterward. Nothing is
     /// appended when either check fails, so the accumulated output never
     /// exceeds either limit even transiently.
-    pub fn push_str(&mut self, s: &str) -> Result<(), ExtractError> {
+    pub fn push_str(&self, s: &str) -> Result<(), ExtractError> {
         self.charge_output(s.chars().count(), s.len())?;
-        self.output.push_str(s);
+        self.output.borrow_mut().text.push_str(s);
         Ok(())
     }
 
@@ -3305,25 +3347,48 @@ impl Budget {
     /// path's captured attribute values (#259) are a parallel output the
     /// extractOnly text never sees, but they are still extracted content a
     /// hostile upload could grow without bound, so they share the budget.
-    fn charge_output(&mut self, scalars: usize, bytes: usize) -> Result<(), ExtractError> {
-        if self.output_scalars + scalars > self.limits.max_output_scalars {
+    fn charge_output(&self, scalars: usize, bytes: usize) -> Result<(), ExtractError> {
+        let mut out = self.output.borrow_mut();
+        if out.scalars + scalars > self.limits.max_output_scalars {
             return Err(ExtractError::OutputTooLarge(OutputLimitKind::Scalars));
         }
-        if self.output.len() + bytes > self.limits.max_output_bytes {
+        if out.text.len() + bytes > self.limits.max_output_bytes {
             return Err(ExtractError::OutputTooLarge(OutputLimitKind::Bytes));
         }
-        self.output_scalars += scalars;
+        out.scalars += scalars;
         Ok(())
     }
 
     /// The accumulated output text.
-    pub fn output_text(&self) -> &str {
-        &self.output
+    ///
+    /// # Shape decision (issue #278)
+    ///
+    /// The output buffer lives behind a `RefCell` so that `push_str` and
+    /// `charge_output` can take `&self` and the [`Extractor`] trait can take
+    /// `&Budget`. A read-back accessor therefore cannot hand back a `&str`
+    /// tied to `&self`'s borrow — it returns a [`Ref<'_, str>`](Ref) guard
+    /// instead. That is the deliberate choice among the three the deferral
+    /// named (`Ref`, a closure-taking `with_output_text`, or an
+    /// unconditional copy): every in-tree read-back already copies its slice
+    /// out (`output_text()[start..].to_string()`), so a `Ref` keeps that
+    /// one-copy profile while a closure would reshape every call site and a
+    /// forced copy would allocate for the length-probe callers too. A `Ref`
+    /// derefs to `str`, so `.len()`, `[start..]`, and `.to_string()` all keep
+    /// working unchanged.
+    ///
+    /// The one rule callers must keep: **drop the `Ref` before pushing more
+    /// output.** Holding it across a `push_str` would panic the `RefCell`.
+    /// Every in-tree call site drops it immediately (a length probe, or a
+    /// `[start..]` slice copied out in the same expression); the trait's
+    /// `compile_fail` doctest is the permanent record that an extractor
+    /// never gets the `&mut` it would need to break this.
+    pub fn output_text(&self) -> Ref<'_, str> {
+        Ref::map(self.output.borrow(), |o| o.text.as_str())
     }
 
     /// Scalars accumulated so far (the byte count is `output_text().len()`).
     pub fn output_scalars(&self) -> usize {
-        self.output_scalars
+        self.output.borrow().scalars
     }
 
     // -- #257 follow-up item E: delegating methods on `&self` -----------
@@ -4490,9 +4555,9 @@ mod tests {
             resource_name: "mixed.txt",
             bytes,
         };
-        let mut budget = Budget::new(ExtractLimits::default());
+        let budget = Budget::new(ExtractLimits::default());
         let extracted = PlainTextExtractor
-            .extract(&input, &mut budget)
+            .extract(&input, &budget)
             .expect("invalid UTF-8 must not fail extraction");
         assert!(extracted.text.starts_with("ok "));
         assert!(extracted.text.ends_with(" tail"));
@@ -4513,9 +4578,9 @@ mod tests {
             resource_name: "wide.txt",
             bytes: text.as_bytes(),
         };
-        let mut budget = Budget::new(ExtractLimits::default());
+        let budget = Budget::new(ExtractLimits::default());
         let extracted = PlainTextExtractor
-            .extract(&input, &mut budget)
+            .extract(&input, &budget)
             .expect("multi-chunk decode must succeed");
         assert_eq!(extracted.text, text);
     }
@@ -4652,14 +4717,39 @@ mod tests {
             max_output_bytes: 4,
             ..ExtractLimits::default()
         };
-        let mut budget = Budget::new(limits);
+        let budget = Budget::new(limits);
         budget.push_str("ab").unwrap();
         assert!(budget.push_str("cde").is_err());
         assert_eq!(
-            budget.output_text(),
+            &*budget.output_text(),
             "ab",
             "a rejected push must not partially append"
         );
         assert_eq!(budget.output_scalars(), 2);
+    }
+
+    /// Compile-time guard for issue #278: the trait must hand an extractor a
+    /// **shared** `&Budget`, never a `&mut Budget` — that is the whole reason
+    /// an extractor cannot replace its budget and mint fresh counters. This
+    /// test compiles *only* while `Extractor::extract` takes `&Budget`; if a
+    /// later change reverts the trait to `&mut Budget`, passing `&budget`
+    /// (shared) stops coercing, the whole test binary fails to build, and the
+    /// `compile_fail` doctest on the trait fires too. The mutation test for
+    /// this issue flips the trait back to `&mut Budget` and confirms exactly
+    /// that.
+    #[test]
+    fn extractor_extract_accepts_only_a_shared_budget_reference() {
+        let input = ExtractInput {
+            declared_type: Some("text/plain"),
+            resource_name: "guard.txt",
+            bytes: b"",
+        };
+        let budget = Budget::new(ExtractLimits::default());
+        // `&budget` is a shared reference. This line is the guard: it
+        // compiles iff the trait takes `&Budget`.
+        let extracted = PlainTextExtractor
+            .extract(&input, &budget)
+            .expect("empty input extracts to empty text");
+        assert_eq!(extracted.text, "");
     }
 }

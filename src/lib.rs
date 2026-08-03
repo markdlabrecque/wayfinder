@@ -2633,8 +2633,8 @@ async fn update_extract(
     let doc = state
         .extraction
         .spawn_extraction(limits.deadline, move || {
-            let mut budget = extract::Budget::new(limits);
-            extract::extract_document(Some(&job_type), &job_resource, &bytes, &mut budget)
+            let budget = extract::Budget::new(limits);
+            extract::extract_document(Some(&job_type), &job_resource, &bytes, &budget)
         })
         .await
         .and_then(|inner| inner)

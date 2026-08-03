@@ -124,14 +124,9 @@ fn each_office_format_extracts_the_fixture_body_and_metadata() {
     for c in cases {
         let bytes = std::fs::read(extract_inputs_dir().join(format!("sample.{}", c.fmt)))
             .unwrap_or_else(|e| panic!("read sample.{}: {e}", c.fmt));
-        let mut budget = Budget::new(ExtractLimits::default());
-        let doc = extract_document(
-            Some(c.mime),
-            &format!("sample.{}", c.fmt),
-            &bytes,
-            &mut budget,
-        )
-        .unwrap_or_else(|e| panic!("{} must extract, got {e:?}", c.fmt));
+        let budget = Budget::new(ExtractLimits::default());
+        let doc = extract_document(Some(c.mime), &format!("sample.{}", c.fmt), &bytes, &budget)
+            .unwrap_or_else(|e| panic!("{} must extract, got {e:?}", c.fmt));
 
         assert_eq!(doc.content_type, c.content_type, "{} content_type", c.fmt);
         assert_eq!(doc.title.as_deref(), c.title, "{} title", c.fmt);
@@ -184,8 +179,8 @@ fn malformed_office_inputs_fail_gracefully_not_with_a_panic() {
     for (ext, mime) in cases {
         let bytes = std::fs::read(extract_inputs_dir().join(format!("broken.{ext}")))
             .unwrap_or_else(|e| panic!("read broken.{ext}: {e}"));
-        let mut budget = Budget::new(ExtractLimits::default());
-        let result = extract_document(Some(mime), &format!("broken.{ext}"), &bytes, &mut budget);
+        let budget = Budget::new(ExtractLimits::default());
+        let result = extract_document(Some(mime), &format!("broken.{ext}"), &bytes, &budget);
         assert!(
             result.is_err(),
             "broken.{ext} must extract to an Err, got {result:?}"
@@ -202,12 +197,12 @@ fn malformed_office_inputs_fail_gracefully_not_with_a_panic() {
 fn a_docx_shaped_zip_bomb_is_rejected_by_the_declared_ratio_guard() {
     let bytes = std::fs::read(extract_inputs_dir().join("bomb.docx"))
         .expect("bomb.docx fixture must exist");
-    let mut budget = Budget::new(ExtractLimits::default());
+    let budget = Budget::new(ExtractLimits::default());
     let err = extract_document(
         Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
         "bomb.docx",
         &bytes,
-        &mut budget,
+        &budget,
     )
     .expect_err("a zip bomb must be rejected, not extracted");
     assert!(

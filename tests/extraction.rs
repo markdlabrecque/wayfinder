@@ -345,7 +345,7 @@ async fn budget_push_str_rejects_over_the_scalar_limit() {
     limits.max_output_scalars = 5;
     // Deliberately not the byte-limit test: ASCII text, so scalar count and
     // byte count are equal — this isolates the scalar guard.
-    let mut budget = Budget::new(limits);
+    let budget = Budget::new(limits);
 
     for _ in 0..5 {
         budget
@@ -372,7 +372,7 @@ async fn budget_push_str_rejects_over_the_byte_limit() {
     let mut limits = permissive_limits();
     limits.max_output_bytes = 5;
     limits.max_output_scalars = 1_000_000; // generous, isolates the byte guard
-    let mut budget = Budget::new(limits);
+    let budget = Budget::new(limits);
 
     // "e" + combining acute accent renders as one visual character, but
     // Rust and Unicode both count it as a scalar per `char`; pick 2-byte
@@ -446,7 +446,7 @@ async fn plain_text_extractor_stops_mid_decode_when_the_deadline_expires_between
             }
         })
     };
-    let mut budget = Budget::with_clock(limits, clock);
+    let budget = Budget::with_clock(limits, clock);
 
     // Many decode chunks' worth of input, so "stopped part-way" is
     // unambiguous.
@@ -457,7 +457,7 @@ async fn plain_text_extractor_stops_mid_decode_when_the_deadline_expires_between
         bytes: text.as_bytes(),
     };
 
-    let result = PlainTextExtractor.extract(&input, &mut budget);
+    let result = PlainTextExtractor.extract(&input, &budget);
 
     assert!(
         matches!(result, Err(ExtractError::DeadlineExceeded)),
@@ -851,8 +851,8 @@ fn extract_returns_typed_unsupported_format_for_legacy_ole() {
         resource_name: "legacy.doc",
         bytes: &bytes,
     };
-    let mut budget = Budget::new(permissive_limits());
-    let result = extract(&input, &mut budget);
+    let budget = Budget::new(permissive_limits());
+    let result = extract(&input, &budget);
     assert!(
         matches!(
             result,
@@ -878,8 +878,8 @@ fn plain_text_extractor_round_trips_utf8_text() {
         resource_name: "note.txt",
         bytes: text.as_bytes(),
     };
-    let mut budget = Budget::new(permissive_limits());
-    let result = PlainTextExtractor.extract(&input, &mut budget);
+    let budget = Budget::new(permissive_limits());
+    let result = PlainTextExtractor.extract(&input, &budget);
     let extracted = result.expect("plain-text extraction of valid UTF-8 must succeed");
     assert_eq!(
         extracted.text, text,
@@ -899,8 +899,8 @@ fn plain_text_extractor_respects_the_output_byte_budget() {
     };
     let mut limits = permissive_limits();
     limits.max_output_bytes = 10;
-    let mut budget = Budget::new(limits);
-    let result = PlainTextExtractor.extract(&input, &mut budget);
+    let budget = Budget::new(limits);
+    let result = PlainTextExtractor.extract(&input, &budget);
     assert!(
         matches!(
             result,
@@ -921,11 +921,11 @@ fn plain_text_extractor_respects_the_deadline() {
     };
     let mut limits = permissive_limits();
     limits.deadline = Duration::from_millis(0);
-    let mut budget = Budget::new(limits);
+    let budget = Budget::new(limits);
     // A zero-length deadline, checked before any chunk is processed, must
     // report exceeded immediately rather than extracting the whole input.
     std::thread::sleep(Duration::from_millis(5));
-    let result = PlainTextExtractor.extract(&input, &mut budget);
+    let result = PlainTextExtractor.extract(&input, &budget);
     assert!(
         matches!(result, Err(ExtractError::DeadlineExceeded)),
         "extraction must consult the deadline and stop once it has passed, got {result:?}"

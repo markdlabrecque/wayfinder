@@ -55,8 +55,8 @@ fn xhtml_declared_document_reaches_the_html_extractor() {
         resource_name: "sample.html",
         bytes,
     };
-    let mut b = budget();
-    let result = extract(&input, &mut b);
+    let b = budget();
+    let result = extract(&input, &b);
     assert!(
         result.is_ok(),
         "an XHTML-declared document must reach the HTML extractor and succeed, got {result:?}"
@@ -80,8 +80,8 @@ fn script_style_template_content_is_excluded() {
         resource_name: "sample.html",
         bytes: html,
     };
-    let mut b = budget();
-    let extracted = extract(&input, &mut b)
+    let b = budget();
+    let extracted = extract(&input, &b)
         .unwrap_or_else(|e| panic!("HTML extraction must succeed once implemented, got {e:?}"));
 
     assert!(
@@ -113,8 +113,8 @@ fn title_and_author_are_retained_in_metadata() {
         resource_name: "sample.html",
         bytes: html,
     };
-    let mut b = budget();
-    let extracted = extract(&input, &mut b)
+    let b = budget();
+    let extracted = extract(&input, &b)
         .unwrap_or_else(|e| panic!("HTML extraction must succeed once implemented, got {e:?}"));
 
     assert_eq!(
@@ -142,8 +142,8 @@ fn absent_title_leaves_metadata_title_none() {
         resource_name: "sample.html",
         bytes: html,
     };
-    let mut b = budget();
-    let extracted = extract(&input, &mut b)
+    let b = budget();
+    let extracted = extract(&input, &b)
         .unwrap_or_else(|e| panic!("HTML extraction must succeed once implemented, got {e:?}"));
     assert_eq!(
         extracted.metadata.title, None,
@@ -182,8 +182,8 @@ fn title_accumulation_is_charged_against_the_output_budget() {
         max_output_bytes: 10,
         ..ExtractLimits::default()
     };
-    let mut budget = Budget::new(limits);
-    let result = extract(&input, &mut budget);
+    let budget = Budget::new(limits);
+    let result = extract(&input, &budget);
     assert!(
         matches!(
             result,
@@ -255,7 +255,7 @@ fn budget_exhausted_mid_character_run_aborts_within_one_chunk() {
     // Lock the premise first: the budget must actually be exhausted, on the
     // structural event counter, and the input must have no following tag for
     // `Script` to ride on.
-    let mut probe = Budget::new(ExtractLimits {
+    let probe = Budget::new(ExtractLimits {
         max_xml_events: MAX_XML_EVENTS,
         ..ExtractLimits::default()
     });
@@ -264,7 +264,7 @@ fn budget_exhausted_mid_character_run_aborts_within_one_chunk() {
         resource_name: "sample.html",
         bytes,
     };
-    let result = extract(&input, &mut probe);
+    let result = extract(&input, &probe);
     assert!(
         matches!(
             result,
@@ -288,12 +288,12 @@ fn budget_exhausted_mid_character_run_aborts_within_one_chunk() {
 
     let extract_ns = (0..5)
         .map(|_| {
-            let mut b = Budget::new(ExtractLimits {
+            let b = Budget::new(ExtractLimits {
                 max_xml_events: MAX_XML_EVENTS,
                 ..ExtractLimits::default()
             });
             let t = Instant::now();
-            let r = extract(&input, &mut b);
+            let r = extract(&input, &b);
             let ns = t.elapsed().as_nanos() as u64;
             assert!(
                 matches!(
