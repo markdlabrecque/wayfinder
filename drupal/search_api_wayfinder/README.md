@@ -64,11 +64,6 @@ Deliberate descopes, each with its reason. (Each is also marked with a
   collation-aware multi-value text selector needs a dedicated schema/type
   design first. Non-text types sort natively with Wayfinder's multi-value
   min/max selection.
-- **More Like This is not scoped to the index** (`QueryBuilder::buildMlt()`) —
-  Wayfinder's `/mlt` reads no `fq` at all (its `MLT_PARAMS` is `q`, `df`, `fl`,
-  `rows`, `start`, `wt` and the `mlt.*` family), so on a core holding more than
-  one index MLT can return documents from a sibling index. The fix is
-  server-side, not a client-side fake.
 - **OR facets** (`search_api_facets_operator_or` is not advertised) — these
   need `{!ex}`/`{!tag}` local params, which Wayfinder does not support, so
   every facet is filtered by the full `fq` set.

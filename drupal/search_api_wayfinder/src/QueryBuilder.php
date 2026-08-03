@@ -51,7 +51,7 @@ class QueryBuilder {
       $params['qf'] = $this->buildQf($query, $index);
     }
 
-    $filters = ['index_id:"' . $index->id() . '"'];
+    $filters = [$this->indexScopeFilter($index)];
     $conditions = $query->getConditionGroup();
     if (!$conditions->isEmpty()) {
       if ($conditions->getConjunction() === 'AND') {
@@ -99,14 +99,14 @@ class QueryBuilder {
    * mlt.fl is comma-joined, not space-joined like qf -- Solr's captured
    * convention (solr-ref/responses/mlt_baseline.json: 'mlt.fl=body,category').
    *
-   * ponytail: an MLT query is NOT scoped to this index. build() adds
-   * fq=index_id:"..." for that, but Wayfinder's /mlt accepts no fq at all --
-   * MLT_PARAMS (src/lib.rs) is q, df, fl, rows, start, wt and the mlt.*
-   * family only, and the handler never reads fq, so sending one would be
-   * silently dropped (or 400 under strict_params) rather than scoping
-   * anything. On a core holding more than one index, MLT can therefore return
-   * documents from a sibling index. The upgrade is server-side -- teach /mlt
-   * to honour fq, with its own captured fixture -- not a client-side fake.
+   * The similar-docs result set is scoped to this index with the same
+   * index_id:"<id>" fq build() seeds (locked decision 2, core
+   * multi-index-per-core wiring), via a shared helper. The server honours fq
+   * on /mlt for the result set only -- it never filters which document q
+   * resolves as the seed (finding 98; fixtures mlt_fq_scope /
+   * mlt_fq_seed_not_filtered / mlt_fq_multiple_and) -- so on a core holding
+   * more than one index this keeps MLT from returning documents from a
+   * sibling index.
    *
    * @return array<string, string|int|array<int, string>>
    */
@@ -120,9 +120,19 @@ class QueryBuilder {
     $params = [
       'q' => 'id:' . $this->fieldMapper->filterValue($index->id() . '-' . $option['id'], 'string'),
       'mlt.fl' => implode(',', $this->mapFieldNames((array) ($option['fields'] ?? []), $index)),
+      'fq' => $this->indexScopeFilter($index),
     ];
 
     return $params + $this->buildPaging($query);
+  }
+
+  /**
+   * The index scope filter both build() and buildMlt() seed their fq with
+   * (locked decision 2, core multi-index-per-core wiring). Shared so the two
+   * call sites cannot drift apart.
+   */
+  private function indexScopeFilter(IndexInterface $index): string {
+    return 'index_id:"' . $index->id() . '"';
   }
 
   /**

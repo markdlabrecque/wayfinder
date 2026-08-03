@@ -792,6 +792,31 @@ class QueryBuilderTest extends TestCase {
   }
 
   /**
+   * Issue #297: buildMlt() must scope the similar-docs result set to this
+   * index, reusing the exact index_id:"<id>" filter build() seeds rather
+   * than inventing a second convention. The server now honours fq on /mlt
+   * for the result set (finding 98; fixtures mlt_fq_scope /
+   * mlt_fq_seed_not_filtered / mlt_fq_multiple_and are already green in the
+   * differential harness), so without this fq a core holding more than one
+   * index can return documents from a sibling index. q's id: seed lookup is
+   * unchanged -- covered by testBuildMltRoutesByCompositeIdAndMapsConfiguredFields.
+   *
+   * @covers ::buildMlt
+   */
+  public function testBuildMltScopesResultsToTheIndex(): void {
+    $index = $this->mockIndex([], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+    ], 'my_index');
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], [
+      'search_api_mlt' => ['id' => 'entity:node/1:en', 'fields' => ['title']],
+    ]);
+
+    $params = (new QueryBuilder())->buildMlt($query);
+
+    $this->assertSame('index_id:"my_index"', $params['fq']);
+  }
+
+  /**
    * M4 (issue #78): highlighting is "optional-but-in-scope" (plan doc line
    * 84-87) -- unlike Search API core's own algorithmic "highlight" processor
    * ("needs nothing from the backend", same paragraph: confirmed against
