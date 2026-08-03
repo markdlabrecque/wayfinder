@@ -146,3 +146,17 @@ spellcheck_map	200	GET	spellcheck_223/select?q=*:*&rows=0&wt=json&omitHeader=tru
 spellcheck_dictionary_en_first	200	GET	spellcheck_223/select?q=*:*&rows=0&wt=json&omitHeader=true&spellcheck=true&spellcheck.q=qwick&spellcheck.dictionary=en&spellcheck.dictionary=und&spellcheck.collate=true&json.nl=flat		http://127.0.0.1:9012/solr
 spellcheck_dictionary_und_first	200	GET	spellcheck_223/select?q=*:*&rows=0&wt=json&omitHeader=true&spellcheck=true&spellcheck.q=qwick&spellcheck.dictionary=und&spellcheck.dictionary=en&spellcheck.collate=true&json.nl=flat		http://127.0.0.1:9012/solr
 spellcheck_unicode_offsets	200	GET	spellcheck_223/select?q=*:*&rows=0&wt=json&omitHeader=true&spellcheck=true&spellcheck.q=%C3%A9%20qwick&spellcheck.dictionary=en&spellcheck.collate=true&json.nl=flat		http://127.0.0.1:9012/solr
+group_basic	200	GET	grouping/select?q=*:*&group=true&group.field=type&group.ngroups=true&fl=id&wt=json		http://localhost:8997/solr
+group_ngroups_off	200	GET	grouping/select?q=*:*&group=true&group.field=type&fl=id&wt=json		http://localhost:8997/solr
+group_limit	200	GET	grouping/select?q=*:*&group=true&group.field=type&group.limit=2&group.ngroups=true&fl=id&wt=json		http://localhost:8997/solr
+group_offset	200	GET	grouping/select?q=*:*&group=true&group.field=type&group.offset=1&group.ngroups=true&fl=id&wt=json		http://localhost:8997/solr
+group_rows_start	200	GET	grouping/select?q=*:*&group=true&group.field=type&rows=2&start=1&group.ngroups=true&fl=id&wt=json		http://localhost:8997/solr
+group_sort	200	GET	grouping/select?q=*:*&group=true&group.field=type&group.sort=id+desc&group.limit=2&group.ngroups=true&fl=id&wt=json		http://localhost:8997/solr
+group_multi_field	200	GET	grouping/select?q=*:*&group=true&group.field=type&group.field=id&group.ngroups=true&fl=id&wt=json		http://localhost:8997/solr
+group_numeric	200	GET	grouping/select?q=*:*&group=true&group.field=popularity&group.ngroups=true&fl=id&wt=json		http://localhost:8997/solr
+group_fq	200	GET	grouping/select?q=*:*&fq=type:article&group=true&group.field=type&group.ngroups=true&fl=id&wt=json		http://localhost:8997/solr
+group_fl_score	200	GET	grouping/select?q=*:*&group=true&group.field=type&group.ngroups=true&fl=id,score&wt=json		http://localhost:8997/solr
+group_zero	200	GET	grouping/select?q=zzznomatch&df=body&group=true&group.field=type&group.ngroups=true&fl=id&wt=json		http://localhost:8997/solr
+group_err_no_field	400	GET	grouping/select?q=*:*&group=true&fl=id&wt=json		http://localhost:8997/solr
+group_err_unknown_field	400	GET	grouping/select?q=*:*&group=true&group.field=nosuchfield&fl=id&wt=json		http://localhost:8997/solr
+group_err_multivalued	400	GET	grouping/select?q=*:*&group=true&group.field=category&fl=id&wt=json		http://localhost:8997/solr

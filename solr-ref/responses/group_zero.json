@@ -1,0 +1,22 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":3,
+    "params":{
+      "q":"zzznomatch",
+      "df":"body",
+      "fl":"id",
+      "group.ngroups":"true",
+      "wt":"json",
+      "group.field":"type",
+      "group":"true"
+    }
+  },
+  "grouped":{
+    "type":{
+      "matches":0,
+      "ngroups":0,
+      "groups":[ ]
+    }
+  }
+}
