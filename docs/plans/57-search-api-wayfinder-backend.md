@@ -78,7 +78,11 @@ the module is emitting out-of-scope traffic.
    (issue #7) was built against. Filters go through `fq` in Lucene syntax.
 4. **No `search_api_facets_operator_or`.** OR facets require `{!ex}`/`{!tag}` local
    params, which Wayfinder does not implement. Declare plain `search_api_facets`
-   only.
+   only. **Superseded by #298** (wave 4 of the parity batch): the server grew
+   `{!ex}`/`{!tag}` in #295, and `WayfinderBackend::getSupportedFeatures()` now
+   advertises `search_api_facets_operator_or`; `QueryBuilder::buildFacets()` emits
+   `{!ex=facet:<field>}` on OR facets and `build()` tags the matching `fq`. Kept
+   as the original planning record.
 5. **Module lives in this repo at `drupal/search_api_wayfinder/`.** Composer deps:
    `drupal/search_api` only (plus core). `core_version_requirement: ^10.3 || ^11`.
 6. **Highlighting is optional-but-in-scope**: Wayfinder implements `hl`, and the

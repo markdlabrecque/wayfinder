@@ -56,11 +56,12 @@ class QueryBuilder {
     if (!$conditions->isEmpty()) {
       if ($conditions->getConjunction() === 'AND') {
         foreach ($conditions->getConditions() as $condition) {
-          $filters[] = $this->buildConditionMember($condition, $index, $condition instanceof ConditionGroupInterface);
+          $fq = $this->buildConditionMember($condition, $index, $condition instanceof ConditionGroupInterface);
+          $filters[] = $this->tagFilterQuery($condition, $fq);
         }
       }
       else {
-        $filters[] = $this->buildConditionGroup($conditions, $index, FALSE);
+        $filters[] = $this->tagFilterQuery($conditions, $this->buildConditionGroup($conditions, $index, FALSE));
       }
     }
     $params['fq'] = count($filters) === 1 ? $filters[0] : $filters;
@@ -260,6 +261,27 @@ class QueryBuilder {
   }
 
   /**
+   * Prefixes a built fq with {!tag=...} when its source carries Search API
+   * condition-group tags. The `facets` module tags an OR facet's filter
+   * condition group with `facet:<search_api_field_name>` (#298) -- the same
+   * string buildFacets() puts in {!ex=...} -- so the tag must reach the wire
+   * here for the exclusion to bite. search_api_solr does the same in
+   * reduceFilterQueries(): a condition group's tags become {!tag} local params
+   * on its resulting fq. Plain conditions carry no tags and pass through
+   * unchanged, so existing facet-free queries are byte-identical.
+   */
+  private function tagFilterQuery($member, string $fq): string {
+    if (!$member instanceof ConditionGroupInterface) {
+      return $fq;
+    }
+    $tags = array_keys($member->getTags());
+    if ($tags === []) {
+      return $fq;
+    }
+    return '{!tag=' . implode(',', $tags) . '}' . $fq;
+  }
+
+  /**
    * Translates one condition or nested group.
    */
   private function buildConditionMember($condition, IndexInterface $index, bool $nested): string {
@@ -433,9 +455,8 @@ class QueryBuilder {
    * expressed: the last facet's settings win for the whole request. That is
    * the ceiling until Wayfinder grows per-field facet params.
    *
-   * ponytail: 'operator' is not translated. OR facets need {!ex}/{!tag} local
-   * params, which Wayfinder does not support (plan doc locked decision 4), so
-   * every facet is filtered by the full fq set.
+   * 'operator' => 'or' translates to {!ex=facet:<field>} (#298); the matching
+   * {!tag=facet:<field>} lands on the facet's own fq in build().
    *
    * @return array<string, string|int|array<int, string>>
    */
@@ -454,19 +475,27 @@ class QueryBuilder {
       }
 
       $fieldName = $this->fieldMapper->fieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
-      // Emit each facet under its own {!key=<delta>} label so two facets on
-      // one field answer under distinct keys (src/facet.rs split_facet_key,
-      // solr-ref/responses/facet_extag_both_facets.json); ResponseParser then
-      // matches on the key, not the field name. The delta is the array key of
-      // search_api_facets -- "in practice the facet's field identifier", but
-      // not constrained to a machine name: one carrying '}' or whitespace
-      // would break the local-params block (src/local_params.rs terminates on
-      // '}' and splits pairs on whitespace), so fall back to the bare field
-      // name for a delta that is not [A-Za-z0-9_:-]+ rather than emit a
-      // broken prefix. parseFacets() registers both keys to resolve either.
-      $fields[] = preg_match('/^[A-Za-z0-9_:-]+$/', (string) $delta)
-        ? '{!key=' . $delta . '}' . $fieldName
-        : $fieldName;
+      // Local-params prefix for this facet.field: always {!key=<delta>} (#299)
+      // so two facets on one field answer under distinct keys, plus
+      // {!ex=facet:<field>} for OR-operator facets (#298) so the facet counts
+      // against the base query minus its own tagged fq. The ex tag is the
+      // *Search API field id*, not the mapped Solr field: search_api_solr's
+      // SearchApiSolrBackend emits addExcludes(['facet:' . $info['field']]) --
+      // the exact string the facets module puts in {!tag=...} on the fq, built
+      // from the Search API field name. A colon in that tag is fine: the
+      // server's local_params::read_value treats it as a bare value (pinned in
+      // src/local_params.rs). A delta failing [A-Za-z0-9_:-]+ falls back to the
+      // bare field name for the key half only; the ex half is unaffected
+      // because it is built from the field id, not the delta. ex precedes key,
+      // the order solr-ref/responses/facet_extag_both_facets.json captures.
+      $prefix = '';
+      if (strtolower((string) ($facet['operator'] ?? 'and')) === 'or') {
+        $prefix = 'ex=facet:' . $fieldId;
+      }
+      if (preg_match('/^[A-Za-z0-9_:-]+$/', (string) $delta)) {
+        $prefix .= ($prefix === '' ? '' : ' ') . 'key=' . $delta;
+      }
+      $fields[] = $prefix === '' ? $fieldName : '{!' . $prefix . '}' . $fieldName;
 
       if (isset($facet['limit'])) {
         // Search API uses limit <= 0 for "no limit" (every facet array in

@@ -523,6 +523,28 @@ mod tests {
         assert_eq!(local.get("key"), Some("Categories"));
     }
 
+    /// Issue #298: the `facets` module tags an OR facet's filter with
+    /// `facet:<search_api_field_name>` (the exact string `search_api_solr`'s
+    /// `SearchApiSolrBackend` puts in `{!ex=...}` via
+    /// `addExcludes(['facet:' . $info['field']])`). That tag carries a colon,
+    /// and `{!tag=...}`/`{!ex=...}` are *bare* local-param values that
+    /// `read_value` terminates on whitespace -- never on `:` -- so the whole
+    /// `facet:category` must survive as one value rather than being split at
+    /// the colon. Pin the parser's behaviour hermetically rather than assume
+    /// it: the colon is load-bearing wire, not decoration.
+    #[test]
+    fn bare_local_param_value_keeps_its_colon() {
+        let (tagged, _) = parse_block("{!tag=facet:category}category:animals").expect("block");
+        assert_eq!(tagged.get("tag"), Some("facet:category"));
+        let (excluded, _) = parse_block("{!ex=facet:category}category").expect("block");
+        assert_eq!(excluded.get("ex"), Some("facet:category"));
+        // The matching `{!ex=… key=…}` shape the Drupal module emits for an
+        // OR facet under a delta key -- both bare values keep their colons.
+        let (both, _) = parse_block("{!ex=facet:category key=category}ss_category").expect("block");
+        assert_eq!(both.get("ex"), Some("facet:category"));
+        assert_eq!(both.get("key"), Some("category"));
+    }
+
     #[test]
     fn a_closing_brace_inside_a_quoted_value_does_not_end_the_block() {
         let (local, consumed) = parse_block("{!edismax qf='a} b'}x").expect("block");

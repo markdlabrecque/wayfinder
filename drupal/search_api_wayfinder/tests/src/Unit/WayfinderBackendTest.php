@@ -60,6 +60,19 @@ class WayfinderBackendTest extends TestCase {
   }
 
   /**
+   * #298: OR facets are advertised now that the server serves {!ex}/{!tag}
+   * (#295) and QueryBuilder emits them. Without this the facets module keeps
+   * every facet AND-filtered against the full fq set.
+   *
+   * @covers ::getSupportedFeatures
+   */
+  public function testGetSupportedFeaturesIncludesSearchApiFacetsOperatorOr(): void {
+    $backend = new WayfinderBackend([], 'wayfinder', []);
+
+    $this->assertContains('search_api_facets_operator_or', $backend->getSupportedFeatures());
+  }
+
+  /**
    * A WayfinderBackend whose getClient() returns an injected mock instead of
    * constructing a real Guzzle-backed WayfinderClient.
    *

@@ -64,9 +64,6 @@ Deliberate descopes, each with its reason. (Each is also marked with a
   collation-aware multi-value text selector needs a dedicated schema/type
   design first. Non-text types sort natively with Wayfinder's multi-value
   min/max selection.
-- **OR facets** (`search_api_facets_operator_or` is not advertised) — these
-  need `{!ex}`/`{!tag}` local params, which Wayfinder does not support, so
-  every facet is filtered by the full `fq` set.
 - **Per-field facet settings** (`QueryBuilder::buildFacets()`) —
   `facet.limit`/`facet.mincount`/`facet.missing`/`facet.sort` are *global* on
   the Wayfinder wire; there is no `f.<field>.facet.*` override. A query whose

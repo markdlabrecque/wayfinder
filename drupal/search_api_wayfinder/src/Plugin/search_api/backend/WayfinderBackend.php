@@ -199,10 +199,15 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
    * {@inheritdoc}
    */
   public function getSupportedFeatures() {
-    // Facet support is AND-only: OR facets need {!ex}/{!tag}, which Wayfinder
-    // does not support, so 'search_api_facets_operator_or' stays unadvertised
-    // (plan doc locked decision 4).
-    return ['search_api_facets', 'search_api_mlt'];
+    // One feature per line so a sibling branch (#290 adds
+    // 'search_api_grouping') lands on its own line and merges mechanically,
+    // not by re-editing a single-line array. Order matches search_api_solr's
+    // SearchApiSolrBackend::getSupportedFeatures().
+    return [
+      'search_api_facets',
+      'search_api_facets_operator_or',
+      'search_api_mlt',
+    ];
   }
 
   /**
