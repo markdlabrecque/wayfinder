@@ -22,10 +22,12 @@
         }
     },
     "autoload-dev": {
-        "_comment": "Drupal\\search_api\\ below is a test-harness-only shim, not a runtime dependency declaration. search_api ships no composer autoload of its own (Drupal core's module classloader resolves it at runtime instead), so this unit-test sandbox needs Composer to find it at its vendor/ path. A real site running composer/installers relocates it to web/modules/contrib/..., where this hardcoded vendor/ path would not resolve -- hence autoload-dev, not autoload. Guzzle is a genuine runtime dependency (via Drupal core's http_client service) so it does not need a shim; it resolves normally through vendor/.",
+        "_comment": "The Drupal\\* entries below are test-harness-only shims, not runtime dependency declarations. search_api ships no composer autoload of its own, and Drupal\\file\\ / Drupal\\user\\ (e.g. FileInterface, which transitively extends Drupal\\user\\EntityOwnerInterface) are core *module* namespaces; both are resolved at runtime by Drupal core's module classloader on a real site, so this unit-test sandbox needs Composer to find them at their vendor/ paths. A real site running composer/installers relocates them to web/modules/contrib/... and web/core/modules/..., where these hardcoded vendor/ paths would not resolve -- hence autoload-dev, not autoload. Guzzle is a genuine runtime dependency (via Drupal core's http_client service) so it does not need a shim; it resolves normally through vendor/.",
         "psr-4": {
             "Drupal\\Tests\\search_api_wayfinder\\Unit\\": "tests/src/Unit/",
-            "Drupal\\search_api\\": "vendor/drupal/search_api/src/"
+            "Drupal\\search_api\\": "vendor/drupal/search_api/src/",
+            "Drupal\\file\\": "vendor/drupal/core/modules/file/src/",
+            "Drupal\\user\\": "vendor/drupal/core/modules/user/src/"
         }
     },
     "config": {
