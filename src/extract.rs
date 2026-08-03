@@ -1037,6 +1037,18 @@ impl SinkState<'_> {
         self.push_xhtml(&escape_xml_text(s))
     }
 
+    /// Charges title text against the same output ceilings as the body
+    /// (`max_output_bytes`/`max_output_scalars`) without accumulating into
+    /// the body's `output_text` — the title is metadata, not body output,
+    /// but it is still extracted content a hostile upload could grow
+    /// without bound (issue #272). Mirrors how captured attribute values
+    /// (#259) charge the budget without becoming body text.
+    fn push_title(&mut self, s: &str) -> Result<(), ExtractError> {
+        self.budget.charge_output(s.chars().count(), s.len())?;
+        self.title.get_or_insert_with(String::new).push_str(s);
+        Ok(())
+    }
+
     /// The XHTML rendering is a second buffer beside the budget's own output,
     /// so it gets the same ceiling explicitly rather than growing unbounded
     /// behind a budget that only sees the text.
@@ -1221,8 +1233,20 @@ impl TokenSink for HtmlSink<'_> {
                 if state.skip_depth > 0 || state.document_closed {
                     Ok(())
                 } else if state.in_title {
-                    state.title.get_or_insert_with(String::new).push_str(chars);
-                    Ok(())
+                    // Title text is metadata, not body output, so it never
+                    // goes through `push_text` (which would land it in the
+                    // body's `output_text`). But it is still extracted
+                    // content a hostile upload could grow without bound —
+                    // the one unbudgeted allocation path left in the HTML
+                    // extractor (issue #272) — so it is charged against the
+                    // same `max_output_bytes`/`max_output_scalars` ceilings
+                    // as the body text via `charge_output`, exactly the
+                    // pattern captured attributes use (#259). This is also
+                    // the path that proves the html5ever early-abort check
+                    // (the `error.is_some()` probe after every chunk): a
+                    // budget blown mid-title-run has no following tag to
+                    // carry `TokenSinkResult::Script`.
+                    state.push_title(chars)
                 } else if state.in_head {
                     Ok(())
                 } else {
