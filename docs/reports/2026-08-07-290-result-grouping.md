@@ -98,6 +98,36 @@ the collector per `group.field`, and shaping the per-field envelope (applying
 - `SELECT_PARAMS` gains the six implemented `group.*` params plus `group.truncate`/
   `group.facet` (parity), but **not** `group.format`/`group.main`.
 
+## Drupal backend
+
+The issue's scope called for the query/response halves in `QueryBuilder`/
+`ResponseParser` plus the feature advertisement, mirroring search_api_solr's
+`setGrouping()` (query) and extractResult half (response), both read from
+`coverage/search_api_solr_4.4.0_source` (finding 130):
+
+- **`getSupportedFeatures()`** advertises `search_api_grouping` (alphabetical,
+ one feature per line, as the existing comment anticipated).
+- **`QueryBuilder::buildGrouping()`** reads the `search_api_grouping` option and
+  emits `group=true`, `group.ngroups=true` (unconditional), and `group.field`
+  for each single-valued non-text field (fulltext/multi-valued fields are
+  skipped client-side, as `setGrouping` skips them, so a misconfigured grouping
+  never 400s the request). `group.limit`/`group.offset`/`group.sort`/
+  `group.truncate`/`group.facet` map straight through; `group.limit` is omitted
+  at its default of 1. `check_sort`'s field-id mapping was extracted into a
+  shared `mapSortFieldId()` so `sort` and `group.sort` honour the same
+  `search_api_*` pseudo-fields.
+- **`ResponseParser::extractResultDocs()`** branches on
+  `use_grouping`: a grouped response carries `grouped` INSTEAD of `response`,
+  so the docs are flattened out of each group's `doclist.docs` and the result
+  count is `ngroups` (single-field), exactly as search_api_solr's response half.
+
+The backend's `search()` needed no change — `search_api_grouping` flows through
+`$query->getOption()` in both halves. 8 new PHPUnit tests cover
+query-building (group params, limit/offset/sort/truncate/facet, multi-field,
+  fulltext/multi-valued skip, no-option default), grouped-response flattening
+  + ngroups count, the disabled-path guard, and the feature advertisement;
+  the full 267-test suite is green.
+
 ## Tests (TDD)
 
 Red tests first (`tests/grouping.rs`, 23 tests) confirmed failing for the right reasons,

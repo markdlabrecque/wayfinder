@@ -257,6 +257,18 @@ class WayfinderBackendTest extends TestCase {
   }
 
   /**
+   * Result grouping (issue #290): the backend advertises search_api_grouping
+   * so Search API enables its grouping feature for this backend.
+   *
+   * @covers ::getSupportedFeatures
+   */
+  public function testGetSupportedFeaturesIncludesSearchApiGrouping(): void {
+    $backend = new WayfinderBackend([], 'wayfinder', []);
+
+    $this->assertContains('search_api_grouping', $backend->getSupportedFeatures());
+  }
+
+  /**
    * Plan doc line 170-171: the "search_api_mlt" query option routes to
    * GET /mlt instead of /select.
    *
