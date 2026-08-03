@@ -2404,3 +2404,105 @@ needs a real `solr:9` fixture for the response shape.
      in the module's format, and the derivation function it must match lives in
      `search_api_solr`'s `Utility`, which is not in the snapshot and must be
      fetched before implementing.
+
+## Findings from the wave-1 capture prep of #295 and #308 (`{!tag}`/`{!ex}`, `terms.prefix`/`terms.limit`)
+
+Back to wire evidence: 34 fixtures captured 2026-08-03 against a real `solr:9`
+on the canonical `content` core (5 docs, `body` text_en, multiValued `category`),
+via `capture.sh --only '^(facet_extag_|terms_prefix_|terms_limit_)'`. Rows are in
+`manifest.tsv`, so the differential harness replays them verbatim.
+
+One shared capture serves both issues because both wanted the same corpus and
+the same run; the fixture prefixes keep them separable (`facet_extag_*` for
+#295, `terms_prefix_*`/`terms_limit_*` for #308).
+
+136. **`{!ex=<tag>}` on `facet.field` excludes exactly the `fq` carrying
+     `{!tag=<tag>}`, and every way of *not* matching a tag is a silent no-op,
+     never an error.** Baseline `fq=category:animals` with a plain
+     `facet.field=category` counts `animals 2, classic 1, garden 0, misc 0`
+     (`facet_extag_baseline`); tagging the `fq` and excluding it gives the
+     unfiltered distribution `animals 2, classic 2, garden 1, misc 1`
+     (`facet_extag_excluded`). All four near-misses return the *filtered* counts
+     with HTTP 200 and no warning: `{!tag}` present but no `{!ex}`
+     (`facet_extag_tag_no_ex`), `{!ex}` present but no `{!tag}`
+     (`facet_extag_ex_no_tag`), `{!ex=nosuch}` naming a tag nobody set
+     (`facet_extag_ex_unknown_tag`), and an empty value on either side —
+     `{!ex=}` (`facet_extag_ex_empty`) or `{!tag=}` (`facet_extag_tag_empty`).
+     For #295 this is the whole error model: there is none. A typo'd tag name
+     degrades to "filter still applied", which is also the pre-#295 Wayfinder
+     behaviour, so the feature can land without an error path.
+
+137. **Exclusion is per-`fq` and tags are comma lists on both sides.** With two
+     tagged filters, `{!ex=a}` drops only that one — `fq={!tag=a}animals` +
+     `fq={!tag=b}classic` + `{!ex=a}` counts `classic 2, animals 1, misc 1,
+     garden 0`, i.e. the `classic` filter is still in force
+     (`facet_extag_ex_one_of_two`) — while `{!ex=a,b}` drops both and returns
+     the fully unfiltered distribution (`facet_extag_ex_two_tags`). An untagged
+     sibling `fq` is never excludable (`facet_extag_two_fq_one_tagged`, same
+     counts as excluding one of two). A single `fq` may carry several tags:
+     `fq={!tag=a,b}animals` with `{!ex=b}` excludes it
+     (`facet_extag_multi_tag`), so the match is set-intersection between the
+     `ex` list and the `tag` list, not string equality.
+
+138. **`{!ex}` and `{!key}` compose in either order, and `key` still decides the
+     response label.** `{!ex=cat key=unfiltered}` and
+     `{!key=unfiltered ex=cat}` produce byte-identical bodies keyed
+     `unfiltered` (`facet_extag_ex_with_key`, `facet_extag_key_before_ex`), so
+     local-param order carries no meaning. Two `facet.field` entries on the same
+     field, one plain-keyed and one excluded-and-keyed, both appear:
+     `{"filtered": [animals 2, classic 1, garden 0, misc 0], "unfiltered":
+     [animals 2, classic 2, garden 1, misc 1]}` (`facet_extag_both_facets`).
+     That fixture is the direct evidence for #299's fix — one field, two facets,
+     two distinct keys, different counts — and it means #295 must key buckets
+     before deduplicating them, not after.
+
+139. **`facet.query` accepts `{!ex}`, and its response key is the raw parameter
+     value including the local-params prefix.** `facet.query={!ex=cat}category:classic`
+     under a tagged `fq` answers `"facet_queries": {"{!ex=cat}category:classic": 2}`
+     — count 2, the excluded value, under a key that still carries the
+     `{!ex=cat}` text verbatim (`facet_extag_facet_query_ex`). Solr does not
+     strip local params from `facet_queries` keys the way `{!key}` renames
+     `facet_fields` keys. Wayfinder echoes the raw `facet.query` string as its
+     key already, so this half needs the local params parsed for *effect* while
+     the key stays untouched.
+
+140. **`facet.mincount` and `facet.missing` apply to the post-exclusion counts.**
+     With `{!ex=cat}` active, `facet.mincount=2` keeps `animals 2, classic 2` and
+     drops `garden 1`/`misc 1` (`facet_extag_mincount`) — the `1`s are the
+     unfiltered counts, so exclusion runs first and mincount filters the result.
+     `facet.missing=true` appends the usual `null` bucket with count 1, doc5
+     having no `category` (`facet_extag_missing`). No interaction to special-case.
+
+141. **`terms.prefix` filters the term dictionary literally — no analysis, no
+     error for a miss.** `terms.prefix=d` on `body` returns
+     `["dog", 2, "dai", 1]`, count-descending then index-ascending
+     (`terms_prefix_body_multi`); `th` returns the single `["think", 1]`
+     (`terms_prefix_body_single`); `zzz` returns `[]` with HTTP 200
+     (`terms_prefix_body_none`). A count tie breaks alphabetically —
+     `a` gives `["afternoon", 1, "all", 1]` (`terms_prefix_tie`). The prefix is
+     **case-sensitive and unanalysed**: `D` returns `[]`
+     (`terms_prefix_case`) even though `d` matches two terms, so the component
+     reads the indexed dictionary rather than running the field's analyzer over
+     the prefix. It works on a `string` field too (`category`, prefix `c` ->
+     `["classic", 2]`, `terms_prefix_string_field`), an empty
+     `terms.prefix=` means no filter at all (`terms_prefix_empty`, 10 terms —
+     the default limit), two `terms.fl` values each get their own filtered list
+     (`terms_prefix_two_fields`), and an unknown field yields
+     `{"nosuchfield": []}`, not a 400 (`terms_prefix_unknown_field`). That last
+     one matters for #308: stock `search_api_autocomplete` will name fields that
+     may not exist on the index.
+
+142. **`terms.limit` defaults to 10, truncates after ordering, and `-1` means
+     unlimited.** `terms.limit=1` on prefix `d` keeps only `["dog", 2]`
+     (`terms_limit_below`), `99` returns both terms rather than padding
+     (`terms_limit_above`), `0` returns `[]` (`terms_limit_zero`), and `-1`
+     returns all 19 `body` terms (`terms_limit_negative`) — so the limit is
+     applied to the already-ordered list and negative is a sentinel, not a
+     clamp-to-zero. With no `terms.prefix`, `terms.limit=2` gives the top two of
+     the whole dictionary (`terms_limit_no_prefix`). A non-numeric value is the
+     one error case in the whole set: `terms.limit=abc` is **HTTP 400** with
+     `"error": {"code": 400, "msg": "For input string: \"abc\""}` and an *empty
+     but present* `"terms": {}` alongside it (`terms_limit_invalid`) — Solr
+     emits the component's container before the parse fails, which Wayfinder's
+     error envelope must reproduce. `json.nl=map` renders the pairs as an object,
+     `{"body": {"dog": 2, "dai": 1}}` (`terms_prefix_json_nl_map`).
