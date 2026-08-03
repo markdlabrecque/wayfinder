@@ -126,6 +126,14 @@ const STATIC_FIELDS: &[StaticExpectation] = &[
         required: false,
         fast: true,
     },
+    // issue #300: solr_text_suggester sink field.
+    StaticExpectation {
+        name: "twm_suggest",
+        type_: "text_general",
+        stored: true,
+        required: false,
+        fast: false,
+    },
 ];
 
 #[test]
@@ -329,6 +337,85 @@ const DYNAMIC_FIELDS: &[DynamicExpectation] = &[
         stored: true,
         fast: false,
     },
+    // --- issue #300: search_api_solr non-default data types -----------------
+    // solr_string_storage: string, stored, NOT fast (Solr's zs_/zm_ have no
+    // docValues).
+    DynamicExpectation {
+        name: "zs_notes",
+        type_: "string",
+        multi_valued: false,
+        stored: true,
+        fast: false,
+    },
+    DynamicExpectation {
+        name: "zm_notes",
+        type_: "string",
+        multi_valued: true,
+        stored: true,
+        fast: false,
+    },
+    // solr_string_docvalues: string, stored, fast (Solr's zdvs_/zdvm_ have
+    // docValues=true).
+    DynamicExpectation {
+        name: "zdvs_uuid",
+        type_: "string",
+        multi_valued: false,
+        stored: true,
+        fast: true,
+    },
+    DynamicExpectation {
+        name: "zdvm_uuid",
+        type_: "string",
+        multi_valued: true,
+        stored: true,
+        fast: true,
+    },
+    // solr_text_unstemmed / solr_text_omit_norms / solr_text_wstoken all map to
+    // text_general (their Solr analyzer distinctions are a documented
+    // scoring-quality divergence, not a type-level difference Wayfinder can
+    // express).
+    DynamicExpectation {
+        name: "tus_unstemmed",
+        type_: "text_general",
+        multi_valued: false,
+        stored: true,
+        fast: false,
+    },
+    DynamicExpectation {
+        name: "tum_unstemmed",
+        type_: "text_general",
+        multi_valued: true,
+        stored: true,
+        fast: false,
+    },
+    DynamicExpectation {
+        name: "tos_omitnorms",
+        type_: "text_general",
+        multi_valued: false,
+        stored: true,
+        fast: false,
+    },
+    DynamicExpectation {
+        name: "tom_omitnorms",
+        type_: "text_general",
+        multi_valued: true,
+        stored: true,
+        fast: false,
+    },
+    DynamicExpectation {
+        name: "tws_wstoken",
+        type_: "text_general",
+        multi_valued: false,
+        stored: true,
+        fast: false,
+    },
+    DynamicExpectation {
+        name: "twm_wstoken",
+        type_: "text_general",
+        multi_valued: true,
+        stored: true,
+        fast: false,
+    },
     DynamicExpectation {
         name: "sort_title",
         type_: "string",
@@ -416,6 +503,19 @@ fn representative_doc() -> Value {
 
         "bs_status": "true",
         "bm_flags": ["true", "false"],
+
+        // --- issue #300: search_api_solr non-default data types ----------
+        "zs_notes": "private note",
+        "zm_notes": ["note one", "note two"],
+        "zdvs_uuid": "abc-123",
+        "zdvm_uuid": ["u1", "u2"],
+        "tus_unstemmed": "Unstemmed Title",
+        "tum_unstemmed": ["Alpha Unstemmed", "Beta Unstemmed"],
+        "tos_omitnorms": "Omitnorms Title",
+        "tom_omitnorms": ["Alpha Norms", "Beta Norms"],
+        "tws_wstoken": "Whitespace Body",
+        "twm_wstoken": ["Alpha Ws", "Beta Ws"],
+        "twm_suggest": ["Suggestion One", "Suggestion Two"],
 
         "spellcheck_suggestions": ["Nautical Term"],
         "sort_title": "alpha"
@@ -672,6 +772,168 @@ async fn bm_field_round_trips_boolean_as_string() {
     );
 }
 
+// -- issue #300: solr_string_storage / solr_string_docvalues round-trip -------
+
+#[tokio::test]
+async fn zs_field_round_trips_storage_only_string() {
+    // solr_string_storage is storage-only in Solr (indexed=false); the
+    // documented Wayfinder divergence is that it IS indexed here, so the
+    // field is queryable as well as retrievable.
+    let (app, _dir) = preset_app_with_doc().await;
+    let (status, resp) = common::get(&app, "select?q=zs_notes:%22private+note%22&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        resp.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "{resp}"
+    );
+}
+
+#[tokio::test]
+async fn zm_field_round_trips_storage_only_string_multi() {
+    let (app, _dir) = preset_app_with_doc().await;
+    let (status, resp) = common::get(&app, "select?q=zm_notes:%22note+two%22&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        resp.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "{resp}"
+    );
+}
+
+#[tokio::test]
+async fn zdvs_field_round_trips_docvalues_string() {
+    let (app, _dir) = preset_app_with_doc().await;
+    let (status, resp) = common::get(&app, "select?q=zdvs_uuid:abc-123&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        resp.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "{resp}"
+    );
+}
+
+#[tokio::test]
+async fn zdvm_field_round_trips_docvalues_string_multi() {
+    let (app, _dir) = preset_app_with_doc().await;
+    let (status, resp) = common::get(&app, "select?q=zdvm_uuid:u2&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        resp.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "{resp}"
+    );
+}
+
+#[tokio::test]
+async fn zdvs_field_is_facetable() {
+    // zdvs_* is fast=true (docValues), string-like, so facet.field works --
+    // mirroring the ss_* facet test. This is the docValues-only type's one
+    // practical advantage over storage-only in Solr, and Wayfinder preserves
+    // it via fast=true.
+    let (app, _dir) = preset_app_with_doc().await;
+    let (status, resp) = common::get(
+        &app,
+        "select?q=*:*&rows=0&facet=true&facet.field=zdvs_uuid&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    let bucket = flat_facet(&resp, "zdvs_uuid");
+    assert_eq!(bucket, vec![json!("abc-123"), json!(1)], "{resp}");
+}
+
+// -- issue #300: solr_text_* variants all map to text_general -----------------
+
+#[tokio::test]
+async fn tus_field_is_full_text_queryable() {
+    let (app, _dir) = preset_app_with_doc().await;
+    let (status, resp) = common::get(&app, "select?q=tus_unstemmed:unstemmed&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        resp.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "{resp}"
+    );
+}
+
+#[tokio::test]
+async fn tum_field_is_full_text_queryable() {
+    let (app, _dir) = preset_app_with_doc().await;
+    let (status, resp) = common::get(&app, "select?q=tum_unstemmed:alpha&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        resp.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "{resp}"
+    );
+}
+
+#[tokio::test]
+async fn tos_field_is_full_text_queryable() {
+    let (app, _dir) = preset_app_with_doc().await;
+    let (status, resp) = common::get(&app, "select?q=tos_omitnorms:omitnorms&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        resp.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "{resp}"
+    );
+}
+
+#[tokio::test]
+async fn tom_field_is_full_text_queryable() {
+    let (app, _dir) = preset_app_with_doc().await;
+    let (status, resp) = common::get(&app, "select?q=tom_omitnorms:beta&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        resp.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "{resp}"
+    );
+}
+
+#[tokio::test]
+async fn tws_field_is_full_text_queryable() {
+    let (app, _dir) = preset_app_with_doc().await;
+    let (status, resp) = common::get(&app, "select?q=tws_wstoken:whitespace&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        resp.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "{resp}"
+    );
+}
+
+#[tokio::test]
+async fn twm_wstoken_field_is_full_text_queryable() {
+    // Distinct from the twm_suggest static sink: this hits the twm_* dynamic
+    // rule (solr_text_wstoken multi-valued), proving both the static and the
+    // dynamic twm_ destinations resolve correctly.
+    let (app, _dir) = preset_app_with_doc().await;
+    let (status, resp) = common::get(&app, "select?q=twm_wstoken:alpha&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        resp.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "{resp}"
+    );
+}
+
+#[tokio::test]
+async fn twm_suggest_static_sink_is_full_text_queryable() {
+    // solr_text_suggester indexes into the fixed static field twm_suggest
+    // (static wins over the twm_* dynamic rule for this exact name). This is
+    // the field the SuggestComponent (#291) reads.
+    let (app, _dir) = preset_app_with_doc().await;
+    let (status, resp) = common::get(&app, "select?q=twm_suggest:suggestion&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        resp.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "{resp}"
+    );
+}
+
 #[tokio::test]
 async fn spellcheck_field_is_full_text_queryable() {
     let (app, _dir) = preset_app_with_doc().await;
@@ -907,6 +1169,52 @@ async fn stored_fields_are_returned_and_unstored_fields_are_not() {
         doc.get("bm_flags"),
         Some(&json!(["true", "false"])),
         "{doc}"
+    );
+
+    // issue #300: the solr_string_* and solr_text_* variant fields are all
+    // stored=true, so they echo back via plain fl alongside the classes above.
+    assert_eq!(doc.get("zs_notes"), Some(&json!("private note")), "{doc}");
+    assert_eq!(
+        doc.get("zm_notes"),
+        Some(&json!(["note one", "note two"])),
+        "{doc}"
+    );
+    assert_eq!(doc.get("zdvs_uuid"), Some(&json!("abc-123")), "{doc}");
+    assert_eq!(doc.get("zdvm_uuid"), Some(&json!(["u1", "u2"])), "{doc}");
+    assert_eq!(
+        doc.get("tus_unstemmed"),
+        Some(&json!("Unstemmed Title")),
+        "{doc}"
+    );
+    assert_eq!(
+        doc.get("tum_unstemmed"),
+        Some(&json!(["Alpha Unstemmed", "Beta Unstemmed"])),
+        "{doc}"
+    );
+    assert_eq!(
+        doc.get("tos_omitnorms"),
+        Some(&json!("Omitnorms Title")),
+        "{doc}"
+    );
+    assert_eq!(
+        doc.get("tom_omitnorms"),
+        Some(&json!(["Alpha Norms", "Beta Norms"])),
+        "{doc}"
+    );
+    assert_eq!(
+        doc.get("tws_wstoken"),
+        Some(&json!("Whitespace Body")),
+        "{doc}"
+    );
+    assert_eq!(
+        doc.get("twm_wstoken"),
+        Some(&json!(["Alpha Ws", "Beta Ws"])),
+        "{doc}"
+    );
+    assert_eq!(
+        doc.get("twm_suggest"),
+        Some(&json!(["Suggestion One", "Suggestion Two"])),
+        "twm_suggest is a stored static field and must echo back its values: {doc}"
     );
 
     // stored=false: only `sort_*` opts out of `useDocValuesAsStored`, so it

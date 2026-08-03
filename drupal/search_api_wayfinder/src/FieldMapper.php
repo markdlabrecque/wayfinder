@@ -23,30 +23,95 @@ use Drupal\search_api\SearchApiException;
  * Search API data type gets a single-letter (or two-letter) type prefix, plus
  * an 's' or 'm' infix for single/multi-valued, e.g. 'ts_title' / 'tm_body'.
  *
- * ponytail: only the six default Search API types are mapped (text, string,
- * integer, decimal, date, boolean) -- solr_* / location types are out of
- * scope per WayfinderBackend::supportsDataType().
+ * issue #300 widened this beyond the six default types to the search_api_solr
+ * non-default types that round-trip on Wayfinder's existing schema types:
+ * solr_string_storage, solr_string_docvalues, solr_text_unstemmed,
+ * solr_text_omit_norms, solr_text_wstoken (each a normal prefix+infix dynamic
+ * field), and solr_text_suggester (the fixed sink field 'twm_suggest'). The
+ * prefix table is ground truth from search_api_solr 4.4.0's
+ * Utility::getDataTypeInfo() (the six defaults) and the
+ * search_api_data_type_info_alter hook in src/Hook/SearchApiSolrHooks.php (the
+ * solr_* types). What is NOT here is an explicit descope, recorded with its
+ * reason in README "Not supported": solr_date_range (needs a server-side
+ * date-range type), solr_text_spellcheck (language-specific fixed sink),
+ * solr_text_custom* (site-defined analyzer escape hatch), location/rpt (#292).
  */
 class FieldMapper {
 
   /**
-   * Type prefixes, copied from search_api_solr's Utility::getDataTypeInfo().
+   * Type prefixes, copied from search_api_solr's Utility::getDataTypeInfo()
+   * and the search_api_data_type_info_alter hook in src/Hook/SearchApiSolrHooks.php.
    *
    * @var array<string, string>
    */
   private const TYPE_PREFIXES = [
+    // Six default Search API types (Utility::getDataTypeInfo lines 66-94).
     'text' => 't',
     'string' => 's',
     'integer' => 'it',
     'decimal' => 'ft',
     'date' => 'd',
     'boolean' => 'b',
+    // issue #300: search_api_solr non-default types (the alter hook's
+    // prefix table). Each maps to a Wayfinder type in presets/search-api.toml.
+    'solr_string_storage' => 'z',
+    'solr_string_docvalues' => 'zdv',
+    'solr_text_unstemmed' => 'tu',
+    'solr_text_omit_norms' => 'to',
+    'solr_text_wstoken' => 'tw',
   ];
+
+  /**
+   * The fixed sink field every solr_text_suggester field indexes into.
+   *
+   * search_api_solr special-cases this type before its generic prefix logic
+   * (SearchApiSolrBackend.php:2433-2437): regardless of field id or
+   * cardinality, the value lands in the one field the SuggestComponent reads.
+   * The SuggestComponent query itself is #291; #300 lands only the field type
+   * so the field stops being silently dropped at config time.
+   */
+  private const SUGGESTER_SINK_FIELD = 'twm_suggest';
+
+  /**
+   * Whether a Search API field type is a text type whose values are fulltext.
+   *
+   * Mirrors search_api_solr's addIndexField() normalisation
+   * (SearchApiSolrBackend.php:2706-2708): any type starting with 'solr_text_'
+   * is treated as 'text' for value formatting and phrase-quoting. Without
+   * this, a solr_text_unstemmed TextValue object would fall through
+   * formatValue()'s default branch and json_encode() to '{}' -- the exact
+   * malformed-body regression #83 fixed for plain 'text'.
+   */
+  private function isTextType(string $type): bool {
+    return $type === 'text' || str_starts_with($type, 'solr_text_');
+  }
+
+  /**
+   * Whether a Search API field type is a string type whose filter values are
+   * phrase-quoted.
+   *
+   * solr_string_storage / solr_string_docvalues extend search_api's
+   * StringDataType, so their filter values are phrase-quoted exactly like the
+   * 'string' type. (In Solr a storage-only field can't be filtered at all; in
+   * Wayfinder the documented divergence is that these fields ARE indexed, so a
+   * filter on them must still produce valid Lucene phrase syntax.)
+   */
+  private function isStringType(string $type): bool {
+    return $type === 'string' || str_starts_with($type, 'solr_string_');
+  }
 
   /**
    * Maps a Search API field to its Wayfinder dynamic field name.
    */
   public function fieldName(string $fieldId, string $type, bool $multiValued): string {
+    // solr_text_suggester is the one type that does NOT follow the
+    // prefix+infix dynamic-field convention: every field of this type indexes
+    // into the fixed sink field the SuggestComponent reads, regardless of id
+    // or cardinality. See SUGGESTER_SINK_FIELD.
+    if ($type === 'solr_text_suggester') {
+      return self::SUGGESTER_SINK_FIELD;
+    }
+
     $prefix = self::TYPE_PREFIXES[$type] ?? $type;
     $infix = $multiValued ? 'm' : 's';
     return $prefix . $infix . '_' . $fieldId;
@@ -66,14 +131,18 @@ class FieldMapper {
       case 'boolean':
         return $value ? 'true' : 'false';
 
-      case 'text':
-        // Fulltext field values arrive as TextValue objects (not plain
-        // strings); json_encode() would otherwise serialize them to '{}'.
-        // __toString() delegates to toText(), reflecting the current text
-        // (post-mutation via setText()), not just the constructor value.
-        return $value instanceof \Stringable ? (string) $value : $value;
-
       default:
+        if ($this->isTextType($type)) {
+          // Fulltext field values arrive as TextValue objects (not plain
+          // strings); json_encode() would otherwise serialize them to '{}'.
+          // __toString() delegates to toText(), reflecting the current text
+          // (post-mutation via setText()), not just the constructor value.
+          // Covers plain 'text' and every 'solr_text_*' variant (#300):
+          // search_api_solr normalises the whole class to 'text' before
+          // formatting (SearchApiSolrBackend.php:2706-2708).
+          return $value instanceof \Stringable ? (string) $value : $value;
+        }
+
         return $value;
     }
   }
@@ -88,7 +157,13 @@ class FieldMapper {
    */
   public function filterValue($value, string $type): string {
     $formatted = $this->formatValue($value, $type);
-    if (in_array($type, ['text', 'string', 'boolean'], TRUE)) {
+    // search_api_solr 4.3.13 treats text, string, and boolean filters as
+    // phrases. Inside those phrases only a literal backslash or double quote
+    // is escaped; the other Lucene punctuation is ordinary phrase content.
+    // The solr_text_* variants (#300) phrase-quote exactly like plain 'text'
+    // (isTextType), and solr_string_* like 'string'. Numeric and date values
+    // remain bare after their normal Search API formatting.
+    if ($this->isTextType($type) || $this->isStringType($type) || $type === 'boolean') {
       return '"' . str_replace(['\\', '"'], ['\\\\', '\\"'], (string) $formatted) . '"';
     }
     return (string) $formatted;
@@ -102,7 +177,7 @@ class FieldMapper {
    * Wayfinder can use its native multi-value min/max selection.
    */
   public function sortFieldName(string $fieldId, string $type, bool $multiValued): string {
-    return $type === 'text'
+    return $this->isTextType($type)
       ? 'sort_' . $fieldId
       : $this->fieldName($fieldId, $type, $multiValued);
   }

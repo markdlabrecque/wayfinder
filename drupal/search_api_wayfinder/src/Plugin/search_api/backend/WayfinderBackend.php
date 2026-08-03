@@ -215,7 +215,40 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
    * {@inheritdoc}
    */
   public function supportsDataType($type) {
-    return in_array($type, ['text', 'string', 'integer', 'decimal', 'date', 'boolean'], TRUE);
+    // One type per line so a sibling branch that adds another lands on its
+    // own line and merges mechanically, not by re-editing a single-line array.
+    //
+    // The accepted set is exactly the types that round-trip through
+    // FieldMapper's prefix table AND presets/search-api.toml on Wayfinder's
+    // existing schema types: the six Search API defaults plus the
+    // search_api_solr non-default types implemented in issue #300.
+    //
+    // Anything NOT listed here is an explicit descope (README "Not
+    // supported"), returned FALSE so Search API surfaces the field as
+    // unsupported at config time rather than accepting it and failing at
+    // index time -- the silent-loss bug #300 exists to fix:
+    // - solr_date_range: needs a server-side date-range type (Wayfinder's
+    //   'date' holds a single instant, not a [start TO end] range).
+    // - solr_text_spellcheck: maps to the language-specific fixed sink
+    //   'spellcheck_<lang>'; FieldMapper has no language-aware naming yet.
+    // - solr_text_custom / solr_text_custom_omit_norms: site-defined analyzer
+    //   escape hatch (SolrFieldType entities); the preset has no equivalent.
+    // - location / rpt: spatial types, belong to #292.
+    $supported = [
+      'text',
+      'string',
+      'integer',
+      'decimal',
+      'date',
+      'boolean',
+      'solr_string_storage',
+      'solr_string_docvalues',
+      'solr_text_unstemmed',
+      'solr_text_omit_norms',
+      'solr_text_wstoken',
+      'solr_text_suggester',
+    ];
+    return in_array($type, $supported, TRUE);
   }
 
   /**

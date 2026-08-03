@@ -2610,3 +2610,42 @@ fixes the scope of #289's "first targets".
       (`facet_perfield_ex_limit_rank`, and its local-param twin). The
       `fq=category:animals` variants cannot show this: `animals` is the top
       bucket under either ranking, which is why the `garden` rows exist.
+## Findings from the #300 non-default data-type source sweep
+
+Fetched the full `search_api_solr` 4.4.0 source (outside the three-file
+snapshot) to pin the type→dynamic-field-prefix table that `Utility::getDataTypeInfo()`
+returns and that `SearchApiSolrBackend::supportsDataType()`/field-mapping rely on.
+This is the authoritative answer to finding 134's "not a flat enum to copy": the
+prefixes come from two distinct sites, and two of the twelve non-default types
+are special-cased to fixed sink fields before the prefix logic ever runs.
+
+151. **The data-type→prefix table has two sources, and suggester/spellcheck are
+      fixed-field sinks, not prefix mappings.** `Utility::getDataTypeInfo()`
+      (`src/Utility/Utility.php:56-110`) hard-codes the six defaults —
+      `text=>'t'`, `string=>'s'`, `integer=>'it'` ("Use trie field for better
+      sorting"), `decimal=>'ft'`, `date=>'d'`, `boolean=>'b'` — plus
+      `duration=>'it'`, `uri=>'s'`, and the Search-API-Location `location=>'loc'`/
+      `geohash=>'geo'`/`rpt=>'rpt'`. The `solr_*` non-default types get their
+      prefixes from the `search_api_data_type_info_alter` hook
+      (`src/Hook/SearchApiSolrHooks.php:837-861`), which sets
+      `solr_date_range=>'dr'`, `solr_string_docvalues=>'zdv'`,
+      `solr_string_storage=>'z'`, `solr_text_custom=>'tc'`,
+      `solr_text_custom_omit_norms=>'toc'`, `solr_text_omit_norms=>'to'`,
+      `solr_text_spellcheck=>'spellcheck'`, `solr_text_suggester=>'tw'`,
+      `solr_text_unstemmed=>'tu'`, `solr_text_wstoken=>'tw'`. Each data-type
+      plugin also declares its own prefix via `SearchApiDataTypePrefixInterface::
+      getPrefix()` (`src/Plugin/search_api/data_type/*.php`), matching the hook.
+      **But two of these never reach the generic prefix path:***
+      `SearchApiSolrBackend`'s field-mapping loop special-cases
+      `solr_text_suggester` → the fixed field `twm_suggest`
+      (`SearchApiSolrBackend.php:2433-2437`) and `solr_text_spellcheck` → the
+      fixed, language-specific field `spellcheck_<lang>` (`2440-2447`) *before*
+      the `getDataTypeInfo` lookup at `2448`. So their registered `'tw'`/
+      `'spellcheck'` prefixes are effectively dead for naming. For #300 this is
+      the decision rule: a type is expressible on Wayfinder as a normal
+      prefix+infix dynamic field iff it has a prefix and is NOT one of these two
+      sinks; the two sinks need either a fixed static field (`twm_suggest`) or
+      language-aware naming (`spellcheck_<lang>`). Value formatting is uniform —
+      `addIndexField` normalises any `solr_text_*` to `'text'` before its switch
+      (`2706-2708`), and `solr_date_range` is the lone extra branch, building
+      `[$start TO $end]` (`2764-2768`).

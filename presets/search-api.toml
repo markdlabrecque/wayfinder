@@ -27,6 +27,19 @@
 # configset's exhaustive prefix list -- spatial types, `random_*`, `access_*`,
 # `xs_`/`xm_` binary, `hs_`/`hts_` hierarchy, etc. are out of scope. Don't
 # mistake this for a complete `schema.xml` transliteration.
+#
+# issue #300 added the search_api_solr non-default data types that round-trip
+# on these existing Wayfinder types: `zs_*`/`zm_*` (solr_string_storage) and
+# `zdvs_*`/`zdvm_*` (solr_string_docvalues) -> string; `tus_*`/`tum_*`
+# (solr_text_unstemmed), `tos_*`/`tom_*` (solr_text_omit_norms),
+# `tws_*`/`twm_*` (solr_text_wstoken) -> text_general; plus the fixed sink
+# field `twm_suggest` (solr_text_suggester). The indexability divergence on
+# zs_/zm_/zdvs_/zdvm_ is the same shape as the boolean one below: Wayfinder
+# has no unindexed field, so a Solr storage/docValues-only string is also
+# indexed (and therefore queryable) here. The text variants all collapse onto
+# text_general, so their Solr analyzer-chain distinctions (unstemmed vs
+# omit-norms vs whitespace-tokenized) are not preserved -- a documented
+# scoring-quality divergence, not a data-integrity one.
 
 [core]
 name = "content"
@@ -71,6 +84,17 @@ name = "boost_document"
 type = "float"
 stored = true
 fast = true
+
+# solr_text_suggester sink field (issue #300): every field of this type
+# indexes into this one field, which the SuggestComponent (#291) reads. Solr
+# declares it as text_ws (whitespace); Wayfinder text_general is the closest
+# available type. This is a static field, so it wins over the twm_* dynamic
+# rule above for the exact name "twm_suggest".
+[[fields]]
+name = "twm_suggest"
+type = "text_general"
+multi_valued = true
+stored = true
 
 # --- dynamic fields: one rule per search_api_solr prefix convention --------
 
@@ -222,6 +246,83 @@ type = "string"
 multi_valued = true
 stored = true
 fast = true
+
+# --- issue #300: search_api_solr non-default data types ---------------------
+# Prefixes from search_api_solr 4.4.0's search_api_data_type_info_alter hook
+# (src/Hook/SearchApiSolrHooks.php) and the dynamicField declarations in
+# solr-ref/search-api/configset/schema.xml.
+
+# solr_string_storage: single/multi string, stored only (Solr indexed=false).
+# Wayfinder has no unindexed field, so these are indexed here too -- the one
+# directional divergence is that a storage-only field becomes queryable. No
+# fast (Solr's zs_/zm_ carry no docValues).
+[[dynamic_fields]]
+pattern = "zs_*"
+type = "string"
+stored = true
+
+[[dynamic_fields]]
+pattern = "zm_*"
+type = "string"
+multi_valued = true
+stored = true
+
+# solr_string_docvalues: single/multi string, docValues-only (Solr
+# indexed=false, stored=true, docValues=true). fast=true mirrors the docValues
+# columnar store; same indexed-when-Solr-isn't divergence as zs_/zm_.
+[[dynamic_fields]]
+pattern = "zdvs_*"
+type = "string"
+stored = true
+fast = true
+
+[[dynamic_fields]]
+pattern = "zdvm_*"
+type = "string"
+multi_valued = true
+stored = true
+fast = true
+
+# solr_text_unstemmed: Solr text_unstemmed_en/text_und; Wayfinder text_general
+# is unstemmed too, so this is the faithful mapping.
+[[dynamic_fields]]
+pattern = "tus_*"
+type = "text_general"
+stored = true
+
+[[dynamic_fields]]
+pattern = "tum_*"
+type = "text_general"
+multi_valued = true
+stored = true
+
+# solr_text_omit_norms: Solr text_en/text_und with omitNorms=true. Wayfinder
+# keeps length norms on (no per-field omitNorms toggle) -- documented scoring
+# divergence, the field still round-trips and is queryable.
+[[dynamic_fields]]
+pattern = "tos_*"
+type = "text_general"
+stored = true
+
+[[dynamic_fields]]
+pattern = "tom_*"
+type = "text_general"
+multi_valued = true
+stored = true
+
+# solr_text_wstoken: Solr text_ws (whitespace tokenizer, omitNorms). Wayfinder
+# text_general uses a simple tokenizer and keeps norms -- documented
+# tokenizer+norms divergence.
+[[dynamic_fields]]
+pattern = "tws_*"
+type = "text_general"
+stored = true
+
+[[dynamic_fields]]
+pattern = "twm_*"
+type = "text_general"
+multi_valued = true
+stored = true
 
 # spellcheck suggestion text, general tokenizer, always multi-valued
 [[dynamic_fields]]
