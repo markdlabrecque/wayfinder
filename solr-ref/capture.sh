@@ -1,7 +1,37 @@
 #!/usr/bin/env bash
 # Capture reference /select responses from a real Solr for the tracer-bullet schema.
 # Output: solr-ref/responses/*.json + manifest.tsv (query -> file)
+#
+# Usage:
+#   capture.sh                  full re-capture: wipes responses/ and every manifest
+#   capture.sh --only <regex>   capture only fixtures whose name matches <regex>,
+#                               leaving every other fixture and manifest row untouched
+#
+# `--only` exists because a full run rewrites all 400+ fixtures, and the QTime /
+# _version_ / rid churn that produces dirties every concurrent branch's diff (see
+# CLAUDE.md, "Never re-capture existing fixtures as a side effect"). A new capture
+# block should therefore be added at the end of this script and run with
+# `--only '^myprefix_'`, which is also what makes two branches able to capture
+# without clobbering each other's uncommitted fixtures.
+#
+# A block that starts its own container can skip that setup when nothing in the
+# block is wanted by guarding it with `want_any '^myprefix_'`. A filtered run
+# still walks the whole script, so it still starts the containers of blocks that
+# carry no such guard -- it takes minutes, and its guarantee is about what it
+# writes, not about how fast it is.
 set -euo pipefail
+
+ONLY=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --only)
+      [ $# -ge 2 ] || { echo "capture.sh: --only needs a regex" >&2; exit 2; }
+      ONLY=$2; shift 2 ;;
+    --only=*) ONLY=${1#--only=}; shift ;;
+    -h|--help) sed -n '2,21p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *) echo "capture.sh: unknown argument '$1'" >&2; exit 2 ;;
+  esac
+done
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$HERE/responses"
@@ -9,8 +39,77 @@ CORE=content
 SOLR=http://localhost:8983/solr
 CONTAINER=wayfinder-solr-ref
 
-rm -rf "$OUT"; mkdir -p "$OUT"
-: > "$HERE/manifest.tsv"
+# --- `--only` filtering ----------------------------------------------------
+# Every capture helper below starts with `want "$name" || return 0`, so a
+# filtered run performs no request and writes no file for a name that does not
+# match. `want_any` is the same predicate for a whole block, for guarding the
+# container setup a block needs before it can capture anything.
+want() { [ -z "$ONLY" ] || [[ $1 =~ $ONLY ]]; }
+# Heuristic, and deliberately generous: a block guard sees only its own name
+# prefix, not the names it is about to capture, so it matches in both directions
+# (`--only '^facet_ex'` must still enter the block whose prefix is `facet_`).
+# Over-entering a block costs a container start; under-entering would silently
+# capture nothing, so the bias is toward entering.
+want_any() { [ -z "$ONLY" ] || [[ $ONLY =~ $1 ]] || [[ $1 =~ $ONLY ]]; }
+
+# Manifest paths are variables so that a filtered run can send its rows somewhere
+# else entirely. Every append site below writes to `$MANIFEST` or
+# `$MANIFEST_ERRORS`, never to a literal path.
+MANIFEST="$HERE/manifest.tsv"
+MANIFEST_ERRORS="$HERE/manifest-errors.tsv"
+
+# A filtered run writes its rows into two scratch manifests and merges them into
+# the committed ones when the run finishes: a row whose name already exists is
+# replaced in place, so row order never churns, and a new row is appended.
+#
+# The committed manifests are never emptied, which is the whole point of doing it
+# this way. An earlier version saved copies aside, truncated the real files, and
+# restored them from a trap; interrupting that run left both manifests at zero
+# rows, because bash defers a signal trap until the current foreground command
+# returns and a capture run spends minutes inside `docker` and `curl` children.
+# Signal traps cannot make truncation safe, so nothing gets truncated: an
+# interrupted filtered run loses only the scratch rows, and the committed
+# manifests are byte-identical to what git has. The merge runs from an EXIT trap
+# so that a `set -e` failure mid-run still records what was actually captured.
+ONLY_SCRATCH=""
+only_merge() {
+  local scratch pair committed captured
+  [ -n "$ONLY_SCRATCH" ] && [ -d "$ONLY_SCRATCH" ] || return 0
+  # Clear first: this must be idempotent, EXIT can reach it more than once.
+  scratch=$ONLY_SCRATCH
+  ONLY_SCRATCH=""
+  for pair in "manifest.tsv:$HERE/manifest.tsv" "manifest-errors.tsv:$HERE/manifest-errors.tsv"; do
+    captured="$scratch/${pair%%:*}"
+    committed="${pair#*:}"
+    [ -s "$captured" ] || continue
+    awk -F'\t' '
+      NR == FNR { if (NF) { captured[$1] = $0; order[++cnt] = $1 } next }
+      { if ($1 in captured) { print captured[$1]; seen[$1] = 1 } else print }
+      END {
+        for (i = 1; i <= cnt; i++) {
+          n = order[i]
+          if (!(n in seen)) { print captured[n]; seen[n] = 1 }
+        }
+      }
+    ' "$captured" "$committed" > "$captured.merged"
+    mv "$captured.merged" "$committed"
+    echo "capture.sh: merged $(grep -c . "$captured") row(s) into $(basename "$committed")"
+  done
+  rm -rf "$scratch"
+}
+
+if [ -n "$ONLY" ]; then
+  ONLY_SCRATCH=$(mktemp -d)
+  MANIFEST="$ONLY_SCRATCH/manifest.tsv"
+  MANIFEST_ERRORS="$ONLY_SCRATCH/manifest-errors.tsv"
+  : > "$MANIFEST"; : > "$MANIFEST_ERRORS"
+  trap only_merge EXIT
+  mkdir -p "$OUT"
+  echo "capture.sh: --only '$ONLY' -- keeping existing fixtures and manifest rows"
+else
+  rm -rf "$OUT"; mkdir -p "$OUT"
+  : > "$MANIFEST"
+fi
 
 # --- Solr up ---------------------------------------------------------------
 if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
@@ -55,9 +154,10 @@ curl -sf "$SOLR/$CORE/update?commit=true" -H 'Content-Type: application/json' -d
 # --- Capture ---------------------------------------------------------------
 cap() {  # cap <name> <path-with-query>
   local name=$1 path=$2
+  want "$name" || return 0
   # -g: disable URL globbing, or curl chokes on '[' in the bad-syntax fixture
   curl -sg "$SOLR/$CORE/$path" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
-  printf '%s\t%s\t%s\n' "$name" "$(cat "$OUT/$name.status")" "$path" >> "$HERE/manifest.tsv"
+  printf '%s\t%s\t%s\n' "$name" "$(cat "$OUT/$name.status")" "$path" >> "$MANIFEST"
   rm -f "$OUT/$name.status"
 }
 
@@ -105,6 +205,7 @@ cap err_missing_q       'select?wt=json'
 # contract. Separate index: name, status, method, url-after-/solr/, body.
 capx() {  # capx <name> <method> <url-after-/solr/> [body]
   local name=$1 method=$2 suffix=$3 body=${4-}
+  want "$name" || return 0
   if [ -n "$body" ]; then
     curl -sg -X "$method" "$SOLR/$suffix" -H 'Content-Type: application/json' -d "$body" \
       -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
@@ -114,10 +215,10 @@ capx() {  # capx <name> <method> <url-after-/solr/> [body]
   fi
   printf '%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$(cat "$OUT/$name.status")" "$method" "$suffix" "$body" \
-    >> "$HERE/manifest-errors.tsv"
+    >> "$MANIFEST_ERRORS"
   rm -f "$OUT/$name.status"
 }
-: > "$HERE/manifest-errors.tsv"
+: > "$MANIFEST_ERRORS"
 
 capx err_missing_core    GET    "nosuchcore/select?q=*:*&wt=json"
 capx err_update_bad_json POST   "$CORE/update?commit=true&wt=json" '{not json'
@@ -140,11 +241,12 @@ capx err_update_put      PUT    "$CORE/update?wt=json" '[]'
 # plus a 6th column for the base URL, since the strict side runs on another port.
 cap_post() {  # cap_post <name> <path-with-query> <json-body> [base-url] [core]
   local name=$1 path=$2 body=$3 base=${4:-$SOLR} core=${5:-$CORE}
+  want "$name" || return 0
   curl -sg "$base/$core/$path" -H 'Content-Type: application/json' -d "$body" \
     -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$(cat "$OUT/$name.status")" POST "$core/$path" "$body" "$base" \
-    >> "$HERE/manifest-errors.tsv"
+    >> "$MANIFEST_ERRORS"
   rm -f "$OUT/$name.status"
 }
 
@@ -249,11 +351,11 @@ cap err_sort_field_before_direction 'select?q=*:*&sort=body+desc,id+sideways&wt=
 cap err_sort_direction_before_field 'select?q=*:*&sort=body+sideways&wt=json'
 
 echo
-column -t -s $'\t' "$HERE/manifest.tsv"
+column -t -s $'\t' "$MANIFEST"
 echo
-column -t -s $'\t' "$HERE/manifest-errors.tsv"
+column -t -s $'\t' "$MANIFEST_ERRORS"
 echo
-echo "captured $(wc -l < "$HERE/manifest.tsv" | tr -d ' ') responses -> $OUT"
+echo "captured $(wc -l < "$MANIFEST" | tr -d ' ') responses -> $OUT"
 echo "solr still running as '$CONTAINER' (docker rm -f $CONTAINER to stop)"
 echo "strict solr still running as '$STRICT_CONTAINER' (docker rm -f $STRICT_CONTAINER to stop)"
 
@@ -349,11 +451,11 @@ capx facet_stored_only_field GET \
   "$RANGE_CORE/select?q=*:*&rows=0&facet=true&facet.field=note&wt=json"
 
 echo
-column -t -s $'\t' "$HERE/manifest.tsv"
+column -t -s $'\t' "$MANIFEST"
 echo
-column -t -s $'\t' "$HERE/manifest-errors.tsv"
+column -t -s $'\t' "$MANIFEST_ERRORS"
 echo
-echo "captured $(wc -l < "$HERE/manifest.tsv" | tr -d ' ') manifest.tsv rows -> $OUT"
+echo "captured $(wc -l < "$MANIFEST" | tr -d ' ') manifest.tsv rows -> $OUT"
 echo "range-facet core '$RANGE_CORE' left in place on '$CONTAINER'"
 
 # --- JSON object key order (issue #25) -------------------------------------
@@ -419,11 +521,12 @@ curl -sf "$KEYORDER_SOLR/$KEYORDER_CORE/update?commit=true" -H 'Content-Type: ap
 # strict-container rows in manifest-errors.tsv already do.
 capk() {  # capk <name> <path-after-core>
   local name=$1 suffix=$2
+  want "$name" || return 0
   curl -sg "$KEYORDER_SOLR/$KEYORDER_CORE/$suffix" \
     -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$(cat "$OUT/$name.status")" GET "$KEYORDER_CORE/$suffix" "" "$KEYORDER_SOLR" \
-    >> "$HERE/manifest-errors.tsv"
+    >> "$MANIFEST_ERRORS"
   rm -f "$OUT/$name.status"
 }
 
@@ -479,10 +582,11 @@ curl -sf "$FACET_SOLR/$FACET_CORE/update?commit=true" -H 'Content-Type: applicat
 # differential harness must not GET them against the reference core.
 capf() {  # capf <name> <url-after-/solr/>
   local name=$1 suffix=$2
+  want "$name" || return 0
   curl -sg "$FACET_SOLR/$suffix" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$(cat "$OUT/$name.status")" GET "$suffix" "" "$FACET_SOLR" \
-    >> "$HERE/manifest-errors.tsv"
+    >> "$MANIFEST_ERRORS"
   rm -f "$OUT/$name.status"
 }
 
@@ -592,11 +696,12 @@ curl -sf "$SORTDEBT_SOLR/$SORTDEBT_CORE/update?commit=true" -H 'Content-Type: ap
 # against the reference core.
 caps() {  # caps <name> <path-after-core>
   local name=$1 suffix=$2
+  want "$name" || return 0
   curl -sg "$SORTDEBT_SOLR/$SORTDEBT_CORE/$suffix" \
     -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$(cat "$OUT/$name.status")" GET "$SORTDEBT_CORE/$suffix" "" "$SORTDEBT_SOLR" \
-    >> "$HERE/manifest-errors.tsv"
+    >> "$MANIFEST_ERRORS"
   rm -f "$OUT/$name.status"
 }
 
@@ -639,7 +744,7 @@ caps sort_mv_int_asc 'select?q=*:*&sort=nums+asc&fl=id,nums&wt=json'
 caps sort_mv_int_desc 'select?q=*:*&sort=nums+desc&fl=id,nums&wt=json'
 
 echo
-column -t -s $'\t' "$HERE/manifest-errors.tsv"
+column -t -s $'\t' "$MANIFEST_ERRORS"
 echo
 echo "numeric/date facet.field core '$FACET_CORE' left in place on '$FACET_CONTAINER'"
 echo "  (docker rm -f $FACET_CONTAINER to stop)"
@@ -699,10 +804,11 @@ curl -sf "$DEBT_SOLR/$DEBT_CORE/update?commit=true" -H 'Content-Type: applicatio
 # Same 6-column manifest-errors.tsv contract as `capf` above.
 capd() {  # capd <name> <url-after-/solr/>
   local name=$1 suffix=$2
+  want "$name" || return 0
   curl -sg "$DEBT_SOLR/$suffix" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$(cat "$OUT/$name.status")" GET "$suffix" "" "$DEBT_SOLR" \
-    >> "$HERE/manifest-errors.tsv"
+    >> "$MANIFEST_ERRORS"
   rm -f "$OUT/$name.status"
 }
 
@@ -866,22 +972,24 @@ curl -sf "$UPDATE9_SOLR/$UPDATE9_CORE/update?commit=true" -H 'Content-Type: appl
 # body, base URL).
 capup() {  # capup <name> <url-after-/solr/> <json-body>
   local name=$1 suffix=$2 body=$3
+  want "$name" || return 0
   curl -sg "$UPDATE9_SOLR/$suffix" -H 'Content-Type: application/json' -d "$body" \
     -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$(cat "$OUT/$name.status")" POST "$suffix" "$body" "$UPDATE9_SOLR" \
-    >> "$HERE/manifest-errors.tsv"
+    >> "$MANIFEST_ERRORS"
   rm -f "$OUT/$name.status"
 }
 # Arbitrary-method helper (GET /update, DELETE /admin/ping, unknown core),
 # same 6-column contract, empty body column.
 capu() {  # capu <name> <method> <url-after-/solr/>
   local name=$1 method=$2 suffix=$3
+  want "$name" || return 0
   curl -sg -X "$method" "$UPDATE9_SOLR/$suffix" \
     -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$(cat "$OUT/$name.status")" "$method" "$suffix" "" "$UPDATE9_SOLR" \
-    >> "$HERE/manifest-errors.tsv"
+    >> "$MANIFEST_ERRORS"
   rm -f "$OUT/$name.status"
 }
 
@@ -1066,8 +1174,9 @@ curl -sf "$WILDCARD_SOLR/$WILDCARD_CORE/update?commit=true" -H 'Content-Type: ap
 ]' >/dev/null
 capw() {  # capw <name> <path-with-query>, against $WILDCARD_SOLR/$WILDCARD_CORE
   local name=$1 path=$2
+  want "$name" || return 0
   curl -sg "$WILDCARD_SOLR/$WILDCARD_CORE/$path" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
-  printf '%s\t%s\t%s\n' "$name" "$(cat "$OUT/$name.status")" "$path" >> "$HERE/manifest.tsv"
+  printf '%s\t%s\t%s\n' "$name" "$(cat "$OUT/$name.status")" "$path" >> "$MANIFEST"
   rm -f "$OUT/$name.status"
 }
 capw select_wildcard_and_term   'select?q=*:*+AND+lazy&df=body&fl=id,body&wt=json'
@@ -1125,10 +1234,11 @@ curl -sf "$STATS_SOLR/$STATS_CORE/update?commit=true" -H 'Content-Type: applicat
 # Same 6-column manifest-errors.tsv contract as `capd`/`capw` above.
 caps() {  # caps <name> <url-after-/solr/>
   local name=$1 suffix=$2
+  want "$name" || return 0
   curl -sg "$STATS_SOLR/$suffix" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$(cat "$OUT/$name.status")" GET "$suffix" "" "$STATS_SOLR" \
-    >> "$HERE/manifest-errors.tsv"
+    >> "$MANIFEST_ERRORS"
   rm -f "$OUT/$name.status"
 }
 
@@ -1189,8 +1299,9 @@ curl -sf "$HL_SOLR/$HL_CORE/update?commit=true" -H 'Content-Type: application/js
 ]' >/dev/null
 caph() {  # caph <name> <path-with-query>, against $HL_SOLR/$HL_CORE
   local name=$1 path=$2
+  want "$name" || return 0
   curl -sg "$HL_SOLR/$HL_CORE/$path" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
-  printf '%s\t%s\t%s\n' "$name" "$(cat "$OUT/$name.status")" "$path" >> "$HERE/manifest.tsv"
+  printf '%s\t%s\t%s\n' "$name" "$(cat "$OUT/$name.status")" "$path" >> "$MANIFEST"
   rm -f "$OUT/$name.status"
 }
 
@@ -1339,10 +1450,11 @@ cap phrase_with_colon     'select?q=%22category:animals%22&df=body&wt=json'
 # r4=2020-01-05. Same 6-column contract as capf/capk/caps above.
 capq8() {  # capq8 <name> <path-after-core>
   local name=$1 suffix=$2
+  want "$name" || return 0
   curl -sg "$SOLR/facets/$suffix" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$(cat "$OUT/$name.status")" GET "facets/$suffix" "" "$SOLR" \
-    >> "$HERE/manifest-errors.tsv"
+    >> "$MANIFEST_ERRORS"
   rm -f "$OUT/$name.status"
 }
 
@@ -1466,8 +1578,9 @@ curl -sf "$MLT_SOLR/$MLT_CORE/update?commit=true" -H 'Content-Type: application/
 ]' >/dev/null
 capm() {  # capm <name> <path-with-query>, against $MLT_SOLR/$MLT_CORE
   local name=$1 path=$2
+  want "$name" || return 0
   curl -sg "$MLT_SOLR/$MLT_CORE/$path" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
-  printf '%s\t%s\t%s\n' "$name" "$(cat "$OUT/$name.status")" "$path" >> "$HERE/manifest.tsv"
+  printf '%s\t%s\t%s\n' "$name" "$(cat "$OUT/$name.status")" "$path" >> "$MANIFEST"
   rm -f "$OUT/$name.status"
 }
 # baseline: mlt1's nearest neighbour should be mlt2 (near-duplicate vocabulary)
@@ -1559,8 +1672,9 @@ curl -sf "$EDISMAX_SOLR/$EDISMAX_CORE/update?commit=true" -H 'Content-Type: appl
 ]' >/dev/null
 cape() {  # cape <name> <path-with-query>, against $EDISMAX_SOLR/$EDISMAX_CORE
   local name=$1 path=$2
+  want "$name" || return 0
   curl -sg "$EDISMAX_SOLR/$EDISMAX_CORE/$path" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
-  printf '%s\t%s\t%s\n' "$name" "$(cat "$OUT/$name.status")" "$path" >> "$HERE/manifest.tsv"
+  printf '%s\t%s\t%s\n' "$name" "$(cat "$OUT/$name.status")" "$path" >> "$MANIFEST"
   rm -f "$OUT/$name.status"
 }
 # happy path / envelope shape
@@ -1712,10 +1826,11 @@ curl -sf "$VERSION_SOLR/$VERSION_CORE/update?commit=true" -H 'Content-Type: appl
 # remains keyed by stats.field and exposes its normal metrics, including max.
 capv() {  # capv <name> <url-after-/solr/>
   local name=$1 suffix=$2
+  want "$name" || return 0
   curl -sg "$VERSION_SOLR/$suffix" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$(cat "$OUT/$name.status")" GET "$suffix" "" "$VERSION_SOLR" \
-    >> "$HERE/manifest-errors.tsv"
+    >> "$MANIFEST_ERRORS"
   rm -f "$OUT/$name.status"
 }
 capv stats_version_max "$VERSION_CORE/select?q=*:*&rows=0&stats=true&stats.field=_version_&function=max(_version_)&wt=json"
@@ -1750,10 +1865,11 @@ curl -sf "$FRAGSIZE_SOLR/$FRAGSIZE_CORE/update?commit=true" -H 'Content-Type: ap
 ]' >/dev/null
 capf() {  # capf <name> <url-after-/solr/>
   local name=$1 suffix=$2
+  want "$name" || return 0
   curl -sg "$FRAGSIZE_SOLR/$suffix" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$(cat "$OUT/$name.status")" GET "$suffix" "" "$FRAGSIZE_SOLR" \
-    >> "$HERE/manifest-errors.tsv"
+    >> "$MANIFEST_ERRORS"
   rm -f "$OUT/$name.status"
 }
 capf hl_fragsize_zero_whole_field "$FRAGSIZE_CORE/select?q=body:quick&hl=true&hl.fl=body&hl.fragsize=0&wt=json"
@@ -2208,6 +2324,7 @@ curl -sSf "$EXTRACT_SOLR/$EXTRACT_CORE/schema" -H 'Content-Type: application/jso
 
 cap_extract() { # cap_extract <name> <expected-status> <query> <input> [mime]
   local name=$1 expected=$2 query=$3 input=$4 mime=${5:-application/octet-stream} actual
+  want "$name" || return 0
   actual=$(curl -sS -X POST "$EXTRACT_SOLR/$EXTRACT_CORE/update/extract?$query" \
     -F "file=@$HERE/extract-inputs/$input;type=$mime;filename=$input" \
     -o "$OUT/$name.json" -w '%{http_code}')
@@ -2223,12 +2340,16 @@ cap_extract extract_plain_text_text 200 \
 cap_extract extract_html_index 200 \
   'literal.id=extract-html-captured&fmap.content=body&commit=true&resource.name=sample.html&wt=json' \
   sample.html
-extract_select_status=$(curl -sS \
-  "$EXTRACT_SOLR/$EXTRACT_CORE/select?q=id:extract-html-captured&fl=id,body,links&wt=json" \
-  -o "$OUT/extract_html_select.json" -w '%{http_code}')
-if [ "$extract_select_status" != 200 ]; then
-  echo "extract_html_select: expected HTTP 200, got $extract_select_status" >&2
-  exit 1
+# The one capture that does not go through a `cap*` helper, so it carries its
+# own `want` guard -- without it a filtered run would rewrite this fixture.
+if want extract_html_select; then
+  extract_select_status=$(curl -sS \
+    "$EXTRACT_SOLR/$EXTRACT_CORE/select?q=id:extract-html-captured&fl=id,body,links&wt=json" \
+    -o "$OUT/extract_html_select.json" -w '%{http_code}')
+  if [ "$extract_select_status" != 200 ]; then
+    echo "extract_html_select: expected HTTP 200, got $extract_select_status" >&2
+    exit 1
+  fi
 fi
 cap_extract extract_corrupt_pdf 500 \
   'extractOnly=true&extractFormat=text&resource.name=broken.pdf&wt=json' broken.pdf
@@ -2440,12 +2561,18 @@ curl -sf "$SPELL_SOLR/$SPELL_CORE/update?commit=true&wt=json" \
   ]' >/dev/null
 
 capspell() { # capspell <name> <query-after-select?>
-  local name=$1 query=$2 url="$SPELL_CORE/select?$query"
+  # Two `local`s, not one: bash expands every word of a `local` statement before
+  # any of its assignments take effect, so `url=...$query` on one line reads the
+  # *outer* `query` and dies under `set -u` (shellcheck SC2318). This function
+  # could never have run as written.
+  local name=$1 query=$2
+  local url="$SPELL_CORE/select?$query"
+  want "$name" || return 0
   curl -sg "$SPELL_SOLR/$url" -o "$OUT/$name.json" \
     -w '%{http_code}' > "$OUT/$name.status"
   printf '%s\t%s\tGET\t%s\t\t%s\n' \
     "$name" "$(cat "$OUT/$name.status")" "$url" "$SPELL_SOLR" \
-    >> "$HERE/manifest-errors.tsv"
+    >> "$MANIFEST_ERRORS"
   rm -f "$OUT/$name.status"
 }
 
@@ -2512,6 +2639,7 @@ curl -sSf "$EXTRACT258_SOLR/$EXTRACT258_CORE/config" -H 'Content-Type: applicati
 
 cap_extract258() { # cap_extract258 <name> <expected-status> <query> <input> [mime]
   local name=$1 expected=$2 query=$3 input=$4 mime=${5:-application/octet-stream} actual
+  want "$name" || return 0
   actual=$(curl -sS -X POST "$EXTRACT258_SOLR/$EXTRACT258_CORE/update/extract?$query" \
     -F "file=@$HERE/extract-inputs/$input;type=$mime;filename=$input" \
     -o "$OUT/$name.json" -w '%{http_code}')
@@ -2587,6 +2715,7 @@ curl -sSf "$EXTRACT261_SOLR/$EXTRACT261_CORE/config" -H 'Content-Type: applicati
 
 cap_extract261() { # cap_extract261 <name> <expected-status> <input>
   local name=$1 expected=$2 input=$3 actual
+  want "$name" || return 0
   local query="extractOnly=true&extractFormat=text&resource.name=$input&wt=json"
   actual=$(curl -sS -X POST "$EXTRACT261_SOLR/$EXTRACT261_CORE/update/extract?$query" \
     -F "file=@$HERE/extract-inputs/$input;type=application/pdf;filename=$input" \
@@ -2660,6 +2789,7 @@ curl -sSf "$EXTRACT260_SOLR/$EXTRACT260_CORE/config" -H 'Content-Type: applicati
 }' >/dev/null
 cap_extract260() { # cap_extract260 <name> <expected-status> <query> <input> [mime]
   local name=$1 expected=$2 query=$3 input=$4 mime=${5:-application/octet-stream} actual
+  want "$name" || return 0
   actual=$(curl -sS -X POST "$EXTRACT260_SOLR/$EXTRACT260_CORE/update/extract?$query" \
     -F "file=@$HERE/extract-inputs/$input;type=$mime;filename=$input" \
     -o "$OUT/$name.json" -w '%{http_code}')
