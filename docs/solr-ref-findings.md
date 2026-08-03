@@ -2266,3 +2266,141 @@ Search-API-shaped `ExtractingRequestHandler` as the #171 block. Fixtures:
      200 — actively-worse behaviour Wayfinder does not reproduce; unknown values
      fall back to `flat` instead (PRD section 2 divergence, not captured as a
      fixture because the malformed body is unparseable by the harness).
+
+## Findings from the `search_api_solr` 4.4.0 source sweep (wave 0b of #289-#302)
+
+Unlike every finding above, these come from reading the module, not from a Solr
+capture: `coverage/search_api_solr_4.4.0_source/` (three files —
+`SearchApiSolrBackend.php`, `SolrConnector/SolrConnectorPluginBase.php`,
+`SolrSpellcheckBackendTrait.php`). They answer "what does the client actually
+emit?", which the wire capture cannot show for a code path the capture never
+exercised. Line numbers are that snapshot's.
+
+They are still ground truth for *scope* — what the module can send — but not for
+Solr's *response* to it. Anything below that a Wayfinder issue implements still
+needs a real `solr:9` fixture for the response shape.
+
+129. **Function-query scoring is emitted inline in `q` as `{!boost b=...}`, never
+     as `bf=`.** `SearchApiSolrBackend.php:1953-1977`: when `defType` is not
+     `edismax` and the query sorts by `search_api_relevance`, the module
+     prepends to the flattened keys either
+     `{!boost b=sum(boost_document,<per-field boosts>)}` (when the index has
+     `solr_document_boost_factors`) or the bare `{!boost b=boost_document}`,
+     followed by `Utility::flattenKeysToPayloadScore($keys, $parse_mode)`. The
+     per-field boost strings are processor-supplied templates with a
+     `FIELD_PLACEHOLDER` substituted for the boostable field name, so the
+     *function set* is open-ended by construction — it is whatever a boost
+     processor writes, not a fixed list the module hard-codes. The only
+     functions this snapshot names itself are `sum()`, `max()`, `geodist()`,
+     and `payload_score` (via `flattenKeysToPayloadScore`, which is outside the
+     three-file snapshot). So #289 cannot be scoped as "implement these N
+     functions"; it must be scoped as a function-query *parser and evaluator*
+     with `sum`, `boost_document` as a field reference, and `payload_score` as
+     the concrete first targets, and `bf=` is not on the critical path at all.
+     Note also that `{!boost b=...}` is a *query parser* local param on `q`,
+     which is a different implementation site from the `bf`/`boost` request
+     params Wayfinder accepts-and-warns on today (`src/lib.rs:2880`).
+
+130. **`setGrouping()` sends exactly six `group.*` params, and always requests
+     `group.ngroups=true`.** `SearchApiSolrBackend.php:4575-4634`:
+     `group.field` (repeatable, one per grouping field), `group.ngroups=true`
+     unconditionally ("we always want the number of groups returned so that we
+     get pagers done right"), `group.truncate`, `group.facet`,
+     `group.limit` (only when set *and* not 1), `group.offset` (when set), and
+     `group.sort` as a single comma-joined string. `group=true` itself comes
+     from Solarium's grouping component. The module refuses to group on a
+     fulltext field or on anything it knows to be multiValued, logging an error
+     instead — so #290's server side only needs single-valued non-text fields.
+     Grouped responses are consumed at `2954` (`$result->getGrouping()`) and
+     `2971-2987`, reading `$response['grouped'][<field>]['groups']`, each
+     group's `['doclist']['docs']`, and `['ngroups']`. `group.format` and
+     `group.main` are never sent, so the flat/`simple` response shape is out of
+     scope for parity.
+
+131. **Stock `search_api_autocomplete` uses the `terms` component only — and it
+     sends `terms.prefix` and `terms.limit`, which Wayfinder's `TERMS_PARAMS`
+     does not accept.** `getAutocompleteSuggestions()` (3973-3994) calls
+     `setAutocompleteTermQuery()` (4033-4039), which sets exactly
+     `terms.fl` (the fulltext fields), `terms.prefix` (the incomplete key), and
+     `terms.limit` (`$query->getOption('limit') ?? 10`); results are read back
+     out of the terms component at 4055-4075. The suggester component is *not*
+     on this path: `twm_suggest` (2435-2436, a `solr_text_suggester` field) is
+     the suggester's backing field and is reached from a different plugin.
+     This is a live parity bug, not just a v3 gap. `TERMS_PARAMS` in
+     `src/lib.rs` is `["terms", "terms.fl", "omitHeader", "wt", "json.nl"]`, and
+     `TERMS_DEFAULT_LIMIT` is hard-coded — so with `strict_params = true` a
+     stock autocomplete request 400s, and without it the prefix is silently
+     dropped and the user gets the field's top 10 terms regardless of what they
+     typed. The 75/75 coverage claim does not catch it because trace `00028.json`
+     captured only `terms=true&terms.fl=tm_X3b_en_title`: the capture never typed
+     a partial word. **#291 splits**: accepting `terms.prefix`/`terms.limit` is a
+     small, urgent server fix that closes autocomplete, and the SuggestComponent
+     (`/suggest`) is a separate, later piece gated on the
+     `solr_text_suggester` data type (#300).
+
+132. **`_version_` is only ever read, and only through a JSON facet
+     aggregation.** All fourteen references
+     (`SearchApiSolrBackend.php:1067-1089`, `4934-4940`, `5023-5123`) are the
+     server-status "max document version" screens, which send
+     `json.facet` with `{local_key: maxVersion, function: 'max(_version_)'}`,
+     optionally nested under `terms` facets on `hash`, `index_id` and
+     `ss_search_api_datasource`. The module never *writes* `_version_` and never
+     sends it as an optimistic-concurrency precondition on update. So #293 is not
+     "store a per-document version"; the real dependency is **JSON facets with
+     aggregation functions and nesting**, a considerably larger and differently
+     shaped piece of work than the issue assumes, and one whose only client is an
+     admin diagnostics screen. Recommend rescoping #293 to that finding and
+     deprioritising it accordingly.
+
+133. **The module does emit `facet.heatmap`, and consumes the `counts_ints2D`
+     grid.** `setRpt()` (called from `1873-1874` for the `search_api_rpt` query
+     option) sends `facet=on`, `facet.heatmap=<field>`,
+     `facet.heatmap.geom`, `facet.heatmap.format`, `facet.heatmap.maxCells` and
+     `facet.heatmap.gridLevel`, plus an `fq` of `<field>:<geom>`; `geom` defaults
+     to `["-180 -90" TO "180 90"]`. Extraction at `3263-3286` requires
+     `facet_counts.facet_heatmaps.rpts_<name>` and sums `counts_ints2D`.
+     Separately, `setSpatial()` (3243, and the body at the `setSpatial`
+     definition) emits `sfield`/`pt`/`d` via Solarium's spatial component, adds
+     `fl=<distance_field>:geodist()`, rewrites a sort on the distance field to
+     `sort=geodist() <dir>`, filters with `{!geofilt}` / `{!bbox}` for `<`/`<=`
+     and `{!frange l=..[ u=..]}geodist()` for `>`/`>=`/`BETWEEN`, and turns a
+     facet on the distance field into N `facet.query` entries of the form
+     `{!key=spatial-<field>__distance-<min>-<max>}{!frange l=<min> u=<max>}geodist()`.
+     Every other operator throws. That fixes #292's split: heatmap
+     (`rpt` type) and point-distance (`location` type) are two separate features
+     with two separate field types, and the distance-facet rewrite is a third
+     piece that depends on both `facet.query` and `geodist()`.
+
+134. **The module declares twelve non-default data types plus an open-ended
+     `solr_text_custom:<code>` family.** `supportsDataType()` (795-826):
+     `location`, `rpt`, `solr_date_range`, `solr_string_storage`,
+     `solr_string_docvalues`, `solr_text_omit_norms`, `solr_text_suggester`,
+     `solr_text_spellcheck`, `solr_text_unstemmed`, `solr_text_wstoken`,
+     `solr_text_custom`, `solr_text_custom_omit_norms`; anything matching
+     `solr_text_custom:*` is accepted if the custom code is a configured
+     `SolrFieldType`; anything else falls back to
+     `Utility::getDataTypeInfo($type)['prefix']`. Field-name prefixing keys off
+     `solr_text_*` as a class (2729) and `solr_date_range` gets its own indexing
+     branch (2764). For #300 this means the type list is not a flat enum to
+     copy: `solr_text_custom` is by design an escape hatch for site-defined
+     analyzer chains, which Wayfinder's `presets/search-api.toml` has no
+     equivalent for. Recommend #300 implement the ten closed types and record
+     `solr_text_custom*` as an explicit descope with the reason.
+
+135. **The site hash is never derived by the backend — it is read from
+     `Utility::getSiteHash()` or overridden per datasource.**
+     `getTargetedSiteHash()` (4098-4107) returns
+     `$config['target_hash'] ?? Utility::getSiteHash()`, memoised per index;
+     `Utility` is outside the three-file snapshot, so the derivation itself is
+     not visible here. What *is* visible is the whole contract the server sees:
+     the hash appears only as document content written by `getDocuments()` —
+     `id` is `createId($site_hash, $index_id, $id)` (1333), the `hash` field is
+     set to it (1345), and `sm_context_tags` gains
+     `search_api_solr/site_hash:<hash>` (1346) — plus as an `fq` of
+     `+hash:* +index_id:*` and a `terms` facet on `hash` in the status query
+     (5019-5061). It is an opaque per-site string the client generates and the
+     server only stores and matches literally. **#301 therefore has no server
+     work at all**: it is a `DocumentBuilder` change to write the three fields
+     in the module's format, and the derivation function it must match lives in
+     `search_api_solr`'s `Utility`, which is not in the snapshot and must be
+     fetched before implementing.
