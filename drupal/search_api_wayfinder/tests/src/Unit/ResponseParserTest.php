@@ -545,4 +545,102 @@ class ResponseParserTest extends TestCase {
     $this->assertFalse($item->hasExtraData('highlighted_fields'));
   }
 
+  /**
+   * Result grouping (issue #290): when search_api_grouping.use_grouping is set,
+   * the server returns a `grouped` block instead of `response`. The parser
+   * must flatten each group's doclist.docs into the result items and set the
+   * count to ngroups (single-field), mirroring search_api_solr's extractResult
+   * half (finding 130). Server-side ground truth is
+   * solr-ref/responses/group_basic.json.
+   *
+   * @covers ::extractResultDocs
+   */
+  public function testGroupedResponseFlattensGroupsAndUsesNgroupsAsCount(): void {
+    $field = $this->mockIndexField('type', 'string', FALSE);
+    $index = $this->createMock(IndexInterface::class);
+    $index->method('id')->willReturn('my_index');
+    $index->method('getField')->willReturnCallback(fn (string $id) => $id === 'type' ? $field : NULL);
+    // FieldMapper::isMultiValued walks the field's index property
+    // definitions, so the mock field must report its index.
+    $field->method('getIndex')->willReturn($index);
+    // FieldMapper::isMultiValued walks property definitions.
+    $storage = $this->createMock(FieldStorageDefinitionInterface::class);
+    $storage->method('getCardinality')->willReturn(1);
+    $definition = $this->createMock(FieldDefinitionInterface::class);
+    $definition->method('isList')->willReturn(TRUE);
+    $definition->method('getFieldStorageDefinition')->willReturn($storage);
+    $index->method('getPropertyDefinitions')->willReturn(['type' => $definition]);
+
+    $query = $this->createMock(QueryInterface::class);
+    $query->method('getIndex')->willReturn($index);
+    $query->method('getOption')->willReturnCallback(
+      static fn (string $name, $default = NULL) => $name === 'search_api_grouping'
+        ? ['use_grouping' => TRUE, 'fields' => ['type']]
+        : $default
+    );
+    $resultSet = new ResultSet($query);
+    $query->method('getResults')->willReturn($resultSet);
+
+    // Two groups (article: g1/g2, page: g3), ngroups=2 -- the count is the
+    // number of GROUPS, while the docs list is flattened to 3 items.
+    $response = [
+      'grouped' => [
+        'ss_type' => [
+          'matches' => 3,
+          'ngroups' => 2,
+          'groups' => [
+            [
+              'groupValue' => 'article',
+              'doclist' => [
+                'numFound' => 2,
+                'docs' => [
+                  ['id' => 'my_index-g1', 'score' => 1.0],
+                  ['id' => 'my_index-g2', 'score' => 0.8],
+                ],
+              ],
+            ],
+            [
+              'groupValue' => 'page',
+              'doclist' => [
+                'numFound' => 1,
+                'docs' => [
+                  ['id' => 'my_index-g3', 'score' => 0.5],
+                ],
+              ],
+            ],
+          ],
+        ],
+      ],
+    ];
+
+    $result = (new ResponseParser())->parse($response, $query);
+
+    $this->assertSame(2, $result->getResultCount(), 'count is ngroups (number of groups), not docs');
+    $this->assertSame(['g1', 'g2', 'g3'], array_keys($result->getResultItems()), 'docs are flattened across groups in order');
+  }
+
+  /**
+   * Without use_grouping, a normal `response` block still drives the result
+   * set (the grouped branch is never taken). Guards against the grouping
+   * refactor accidentally changing the default path.
+   *
+   * @covers ::extractResultDocs
+   */
+  public function testGroupingDisabledStillReadsResponseDocs(): void {
+    $response = [
+      'response' => [
+        'numFound' => 5,
+        'start' => 0,
+        'docs' => [
+          ['id' => 'my_index-doc1', 'score' => 1.0],
+        ],
+      ],
+    ];
+
+    $result = (new ResponseParser())->parse($response, $this->mockQuery('my_index'));
+
+    $this->assertSame(5, $result->getResultCount());
+    $this->assertSame(['doc1'], array_keys($result->getResultItems()));
+  }
+
 }

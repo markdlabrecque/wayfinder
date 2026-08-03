@@ -206,6 +206,7 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
     return [
       'search_api_facets',
       'search_api_facets_operator_or',
+      'search_api_grouping',
       'search_api_mlt',
     ];
   }

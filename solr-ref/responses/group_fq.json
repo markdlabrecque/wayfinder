@@ -1,0 +1,32 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":6,
+    "params":{
+      "q":"*:*",
+      "fl":"id",
+      "fq":"type:article",
+      "group.ngroups":"true",
+      "wt":"json",
+      "group.field":"type",
+      "group":"true"
+    }
+  },
+  "grouped":{
+    "type":{
+      "matches":3,
+      "ngroups":1,
+      "groups":[{
+        "groupValue":"article",
+        "doclist":{
+          "numFound":3,
+          "start":0,
+          "numFoundExact":true,
+          "docs":[{
+            "id":"g1"
+          }]
+        }
+      }]
+    }
+  }
+}

@@ -68,6 +68,8 @@ class QueryBuilder {
 
     $params += $this->buildFacets($query, $index);
 
+    $params += $this->buildGrouping($query, $index);
+
     if ($highlighting) {
       $params += $this->buildHighlighting($query, $index);
     }
@@ -530,21 +532,114 @@ class QueryBuilder {
   }
 
   /**
+   * Builds the group.* params from the query's 'search_api_grouping' option
+   * (issue #290).
+   *
+   * The option's shape is search_api_solr's setGrouping() input (coverage/
+   * search_api_solr_4.4.0_source ... SearchApiSolrBackend::setGrouping,
+   * finding 130): ['use_grouping' => bool, 'fields' => <SA field ids to
+   * collapse on>, 'truncate' => bool, 'group_facet' => bool,
+   * 'group_limit' => int, 'group_offset' => int, 'group_sort' =>
+   * [<field id> => 'asc'|'desc']].
+   *
+   * Grouping only supports single-valued, non-fulltext fields -- both the
+   * module (setGrouping logs an error and skips) and the server
+   * (src/grouping.rs validate_group_field 400s) refuse anything else. To keep
+   * a misconfigured grouping from 400-ing the whole request, those fields are
+   * skipped here the same way setGrouping skips them, never reaching
+   * group.field. If every requested field is unsuitable, grouping is not
+   * activated (no group.* params emitted).
+   *
+   * group.ngroups is sent unconditionally ("we always want the number of
+   * groups returned so that we get pagers done right", finding 130).
+   * group.limit mirrors setGrouping: omitted at its default of 1 (so the wire
+   * never carries group.limit=1). group.truncate/group.facet are accepted for
+   * strict_params parity but the server treats them as a no-op until their
+   * group+facet interaction is fixture-backed (src/lib.rs SELECT_PARAMS).
+   *
+   * @return array<string, string|int|array<int, string>>
+   */
+  private function buildGrouping(QueryInterface $query, IndexInterface $index): array {
+    $grouping = $query->getOption('search_api_grouping');
+    if (!is_array($grouping) || empty($grouping['use_grouping'])) {
+      return [];
+    }
+
+    $groupFields = [];
+    foreach (($grouping['fields'] ?? []) as $fieldId) {
+      $field = is_string($fieldId) ? $index->getField($fieldId) : NULL;
+      if (!$field) {
+        continue;
+      }
+      // Grouping needs a fast, single-valued column (finding 130 /
+      // src/grouping.rs). Skip a fulltext or multi-valued field rather than
+      // emit a group.field the server would 400 on -- mirrors setGrouping's
+      // own "is not supported" skip.
+      if ($field->getType() === 'text' || $this->fieldMapper->isMultiValued($field)) {
+        continue;
+      }
+      $groupFields[] = $this->fieldMapper->sortFieldName($fieldId, $field->getType(), FALSE);
+    }
+
+    if ($groupFields === []) {
+      return [];
+    }
+
+    $params = [
+      'group' => 'true',
+      'group.ngroups' => 'true',
+      'group.field' => count($groupFields) === 1 ? $groupFields[0] : $groupFields,
+    ];
+
+    // setGrouping sends group.limit only when set and != 1 (its default).
+    if (!empty($grouping['group_limit']) && (int) $grouping['group_limit'] != 1) {
+      $params['group.limit'] = (int) $grouping['group_limit'];
+    }
+    if (isset($grouping['group_offset'])) {
+      $params['group.offset'] = (int) $grouping['group_offset'];
+    }
+    if (!empty($grouping['truncate'])) {
+      $params['group.truncate'] = 'true';
+    }
+    if (!empty($grouping['group_facet'])) {
+      $params['group.facet'] = 'true';
+    }
+    if (!empty($grouping['group_sort'])) {
+      $sorts = [];
+      foreach ($grouping['group_sort'] as $sortFieldId => $order) {
+        $sorts[] = $this->mapSortFieldId((string) $sortFieldId, $index) . ' ' . (strtolower((string) $order) === 'desc' ? 'desc' : 'asc');
+      }
+      $params['group.sort'] = implode(',', $sorts);
+    }
+
+    return $params;
+  }
+
+  /**
    * Builds Solr's comma-separated sort parameter.
    */
   private function buildSort(QueryInterface $query, IndexInterface $index): string {
     $sorts = [];
     foreach ($query->getSorts() as $fieldId => $direction) {
-      $fieldName = match ($fieldId) {
-        'search_api_relevance' => 'score',
-        'search_api_id' => 'id',
-        'search_api_datasource' => 'ss_search_api_datasource',
-        'search_api_language' => 'ss_search_api_language',
-        default => $this->sortFieldName($fieldId, $index),
-      };
-      $sorts[] = $fieldName . ' ' . (strtolower(trim((string) $direction)) === 'desc' ? 'desc' : 'asc');
+      $sorts[] = $this->mapSortFieldId((string) $fieldId, $index) . ' ' . (strtolower(trim((string) $direction)) === 'desc' ? 'desc' : 'asc');
     }
     return implode(',', $sorts);
+  }
+
+  /**
+   * Maps a Search API field id used for sorting (and group.sort) to its
+   * Wayfinder field name: the four search_api_* pseudo-fields resolve to
+   * their reserved columns, everything else to its fast sort column. Shared
+   * by `sort` and `group.sort` so both honour the same pseudo-fields.
+   */
+  private function mapSortFieldId(string $fieldId, IndexInterface $index): string {
+    return match ($fieldId) {
+      'search_api_relevance' => 'score',
+      'search_api_id' => 'id',
+      'search_api_datasource' => 'ss_search_api_datasource',
+      'search_api_language' => 'ss_search_api_language',
+      default => $this->sortFieldName($fieldId, $index),
+    };
   }
 
   /**

@@ -3047,3 +3047,90 @@ cap terms_limit_negative       'terms?terms=true&terms.fl=body&terms.limit=-1&om
 cap terms_limit_no_prefix      'terms?terms=true&terms.fl=body&terms.limit=2&omitHeader=true&wt=json'
 cap terms_limit_invalid        'terms?terms=true&terms.fl=body&terms.limit=abc&omitHeader=true&wt=json'
 cap terms_prefix_json_nl_map   'terms?terms=true&terms.fl=body&terms.prefix=d&json.nl=map&omitHeader=true&wt=json'
+
+# --- result grouping (issue #290, finding 130) ----------------------------
+# `search_api_solr`'s `setGrouping()` (`SearchApiSolrBackend.php:4575-4634`)
+# sends `group=true` plus six `group.*` params: `group.field` (repeatable),
+# `group.ngroups=true` (unconditional), `group.truncate`, `group.facet`,
+# `group.limit` (when set & != 1), `group.offset` (when set), and `group.sort`
+# (a single comma-joined string). `group.format`/`group.main` are NEVER sent
+# (finding 130), so they are out of scope and deliberately absent from
+# `SELECT_PARAMS` (they 400 under strict_params, as they should). The module
+# refuses to group on a fulltext or multiValued field -- and so does Solr
+# itself (`can not use FieldCache on multivalued field`), so the server side
+# only needs single-valued non-text fields.
+#
+# Own container, own port (wayfinder-solr-290, 8997), own core `grouping`,
+# per the stats/highlight precedent: the canonical `content` corpus has no
+# single-valued field with repeated values (`id` is unique, `category` is
+# multiValued), so meaningful multi-doc groups need their own schema+corpus.
+# Manifest-rows are core-qualified (`grouping/select?...`) like the stats rows.
+GROUPING_CONTAINER=wayfinder-solr-290
+GROUPING_SOLR=http://localhost:8997/solr
+GROUPING_CORE=grouping
+if ! docker ps --format '{{.Names}}' | grep -qx "$GROUPING_CONTAINER"; then
+  docker rm -f "$GROUPING_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$GROUPING_CONTAINER" -p 8997:8983 \
+    solr:9 solr-precreate "$GROUPING_CORE" >/dev/null
+fi
+echo -n "waiting for grouping solr"
+for _ in $(seq 60); do
+  if curl -sf "$GROUPING_SOLR/$GROUPING_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+  echo -n "."; sleep 1
+done
+curl -s "$GROUPING_SOLR/$GROUPING_CORE/schema" -H 'Content-Type: application/json' -d '{
+  "add-field": [
+    {"name":"body",       "type":"text_en", "indexed":true, "stored":true},
+    {"name":"type",       "type":"string",  "indexed":true, "stored":true, "docValues":true},
+    {"name":"category",   "type":"string",  "indexed":true, "stored":true, "docValues":true, "multiValued":true},
+    {"name":"popularity", "type":"pint",    "indexed":true, "stored":true, "docValues":true}
+  ]
+}' >/dev/null
+# Six docs chosen so `type` has two multi-doc groups plus a null group:
+# article={g1,g3,g4} (3), page={g2,g5} (2), null={g6} (1). ngroups=3, matches=6.
+# `category` is multiValued (for the multivalued-grouping 400), `popularity`
+# is single-valued numeric (for grouping on a numeric field), `body` backs
+# scored queries.
+curl -sf "$GROUPING_SOLR/$GROUPING_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+  {"id":"g1","type":"article","category":["news"],"body":"lazy dog brown","popularity":10},
+  {"id":"g2","type":"page","category":["news"],"body":"lazy garden afternoon","popularity":20},
+  {"id":"g3","type":"article","category":["blog"],"body":"quick thinking saves","popularity":30},
+  {"id":"g4","type":"article","category":["blog"],"body":"dogs cats together","popularity":5},
+  {"id":"g5","type":"page","body":"nothing here","popularity":40},
+  {"id":"g6","body":"orphan ungrouped","popularity":15}
+]' >/dev/null
+
+capg() {  # capg <name> <url-after-/solr/>, against $GROUPING_SOLR
+  local name=$1 suffix=$2
+  want "$name" || return 0
+  curl -sg "$GROUPING_SOLR/$suffix" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$suffix" "" "$GROUPING_SOLR" \
+    >> "$MANIFEST_ERRORS"
+  rm -f "$OUT/$name.status"
+}
+
+# Every happy path uses fl=id (no _version_/_root_), and q=*:* (every doc
+# scores 1.0, so there is no BM25 score-magnitude variance for the
+# differential harness to tolerate -- scored/relevance group ORDERING is
+# tested in tests/grouping.rs, not pinned by these fixtures).
+capg group_basic         'grouping/select?q=*:*&group=true&group.field=type&group.ngroups=true&fl=id&wt=json'
+capg group_ngroups_off   'grouping/select?q=*:*&group=true&group.field=type&fl=id&wt=json'
+capg group_limit         'grouping/select?q=*:*&group=true&group.field=type&group.limit=2&group.ngroups=true&fl=id&wt=json'
+capg group_offset        'grouping/select?q=*:*&group=true&group.field=type&group.offset=1&group.ngroups=true&fl=id&wt=json'
+capg group_rows_start    'grouping/select?q=*:*&group=true&group.field=type&rows=2&start=1&group.ngroups=true&fl=id&wt=json'
+capg group_sort          'grouping/select?q=*:*&group=true&group.field=type&group.sort=id+desc&group.limit=2&group.ngroups=true&fl=id&wt=json'
+capg group_multi_field   'grouping/select?q=*:*&group=true&group.field=type&group.field=id&group.ngroups=true&fl=id&wt=json'
+capg group_numeric       'grouping/select?q=*:*&group=true&group.field=popularity&group.ngroups=true&fl=id&wt=json'
+capg group_fq            'grouping/select?q=*:*&fq=type:article&group=true&group.field=type&group.ngroups=true&fl=id&wt=json'
+capg group_fl_score      'grouping/select?q=*:*&group=true&group.field=type&group.ngroups=true&fl=id,score&wt=json'
+capg group_zero          'grouping/select?q=zzznomatch&df=body&group=true&group.field=type&group.ngroups=true&fl=id&wt=json'
+
+# Error shapes (Solr 400s). The differential harness normalises error.msg and
+# error.metadata away, so only status 400 / error.code 400 is compared here;
+# tests/grouping.rs pins the message text.
+capg group_err_no_field      'grouping/select?q=*:*&group=true&fl=id&wt=json'
+capg group_err_unknown_field 'grouping/select?q=*:*&group=true&group.field=nosuchfield&fl=id&wt=json'
+capg group_err_multivalued   'grouping/select?q=*:*&group=true&group.field=category&fl=id&wt=json'
+
+release "$GROUPING_CONTAINER" "grouping core '$GROUPING_CORE'"

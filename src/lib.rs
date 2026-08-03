@@ -33,6 +33,7 @@ pub mod edismax;
 mod error;
 pub mod extract;
 mod facet;
+mod grouping;
 mod highlight;
 mod local_params;
 mod params;
@@ -203,6 +204,24 @@ const SELECT_PARAMS: &[&str] = &[
     // Solr accepts and echoes search_api_solr's `function=max(_version_)`
     // watermark shape; stats.field remains the sole aggregation key.
     "function",
+    // Result grouping (issue #290, finding 130): `setGrouping()` sends
+    // exactly these six `group.*` params plus `group` (from Solarium's
+    // component). `group.truncate` and `group.facet` are accepted for
+    // strict_params parity even though their facet-interaction semantics
+    // (computing facets over collapsed groups) are not yet fixture-backed —
+    // their defaults (false) leave Wayfinder's existing facet behaviour
+    // correct, so accepting them changes nothing until a request sets them
+    // true. `group.format` and `group.main` are deliberately absent: they are
+    // never sent (finding 130) and must 400 under strict_params rather than be
+    // silently accepted as an unimplemented param.
+    "group",
+    "group.field",
+    "group.ngroups",
+    "group.limit",
+    "group.offset",
+    "group.sort",
+    "group.truncate",
+    "group.facet",
     "sort",
     "hl",
     "hl.fl",
@@ -1061,12 +1080,24 @@ fn check_update_method(method: &Method) -> Result<(), WfError> {
 /// `select_sort_score_{all,asc,desc}` returning 200 and ranking by score, which
 /// an unresolvable field could not do.
 fn check_sort(state: &AppState, params: &Params) -> Result<Vec<SortClause>, WfError> {
-    let Some(sort) = params.get("sort") else {
-        return Ok(Vec::new());
-    };
+    match params.get("sort") {
+        None => Ok(Vec::new()),
+        Some(spec) => parse_sort_spec(&state.index.wf_schema, params, spec),
+    }
+}
 
+/// Parses a Solr sort spec string into clauses. Shared by `check_sort` (the
+/// `sort` param) and grouping's `group.sort` (issue #290) so both speak the
+/// same field-direction grammar — comma does not delimit the field token,
+/// direction is checked before the field resolves, and a dynamic-only match
+/// sorts on its catch-all fast column (findings 18/34/35, issue #66).
+pub(crate) fn parse_sort_spec(
+    schema: &crate::schema::WayfinderSchema,
+    params: &Params,
+    spec: &str,
+) -> Result<Vec<SortClause>, WfError> {
     // Rewritten clause grammar (finding 34/35, issue #32). Scanned with an
-    // absolute cursor into `sort` rather than `split(',')`: a comma does NOT
+    // absolute cursor into `spec` rather than `split(',')`: a comma does NOT
     // delimit the field token (`,id` is one token, which is exactly how the
     // leading/doubled-comma fixtures end up as *field* errors — the glued
     // token simply fails field resolution), and everything after the field
@@ -1080,28 +1111,28 @@ fn check_sort(state: &AppState, params: &Params) -> Result<Vec<SortClause>, WfEr
         // Skip whitespace between clauses. Also the mechanism for "no more
         // clauses": an empty or all-whitespace spec, or a trailing comma
         // followed only by whitespace/end, lands here with nothing left.
-        let ws = sort[pos..]
+        let ws = spec[pos..]
             .find(|c: char| !c.is_whitespace())
-            .unwrap_or(sort.len() - pos);
+            .unwrap_or(spec.len() - pos);
         pos += ws;
-        if pos >= sort.len() {
+        if pos >= spec.len() {
             break;
         }
 
         // FIELD: the next whitespace-delimited token, starting at `pos`. A
         // comma does not delimit it.
-        let field_len = sort[pos..]
+        let field_len = spec[pos..]
             .find(char::is_whitespace)
-            .unwrap_or(sort.len() - pos);
+            .unwrap_or(spec.len() - pos);
         let field_end = pos + field_len;
-        let field_name = &sort[pos..field_end];
+        let field_name = &spec[pos..field_end];
 
         // DIRECTION: from just past the field token to the next comma or end
         // of spec, trimmed, checked as one chunk against `asc`/`desc`.
         let dir_start = field_end;
-        let comma_rel = sort[dir_start..].find(',');
-        let dir_end = dir_start + comma_rel.unwrap_or(sort.len() - dir_start);
-        let direction_raw = &sort[dir_start..dir_end];
+        let comma_rel = spec[dir_start..].find(',');
+        let dir_end = dir_start + comma_rel.unwrap_or(spec.len() - dir_start);
+        let direction_raw = &spec[dir_start..dir_end];
 
         // Direction first, field second (finding 18/34).
         //
@@ -1121,7 +1152,7 @@ fn check_sort(state: &AppState, params: &Params) -> Result<Vec<SortClause>, WfEr
                 return Err(WfError::bad_request(
                     "wayfinder::BadSort",
                     format!(
-                        "Can't determine a Sort Order (asc or desc) in sort spec '{sort}', pos={dir_start}"
+                        "Can't determine a Sort Order (asc or desc) in sort spec '{spec}', pos={dir_start}"
                     ),
                 )
                 .with_params(params));
@@ -1138,7 +1169,7 @@ fn check_sort(state: &AppState, params: &Params) -> Result<Vec<SortClause>, WfEr
             // column it is actually indexed into (mirrors
             // `CoreIndex::rewrite_dynamic_fields`'s resolution for the query
             // path), not the bare field name.
-            match state.index.wf_schema.resolved_fast(field_name) {
+            match schema.resolved_fast(field_name) {
                 None => {
                     return Err(WfError::bad_request(
                         "wayfinder::BadSort",
@@ -1156,9 +1187,7 @@ fn check_sort(state: &AppState, params: &Params) -> Result<Vec<SortClause>, WfEr
                     .with_params(params));
                 }
                 Some(true) => {
-                    let column = state
-                        .index
-                        .wf_schema
+                    let column = schema
                         .resolved_fast_column(field_name)
                         .expect("resolved_fast confirmed this name resolves");
                     SortKey::Field(column)
@@ -1176,7 +1205,7 @@ fn check_sort(state: &AppState, params: &Params) -> Result<Vec<SortClause>, WfEr
         // `key`, since a dynamic column's own name carries no schema entry.
         let value_kind = match &key {
             SortKey::Score => None,
-            SortKey::Field(_) => state.index.wf_schema.resolved_value_kind(field_name),
+            SortKey::Field(_) => schema.resolved_value_kind(field_name),
         };
         clauses.push(SortClause::new(key, descending, value_kind));
 
@@ -2984,6 +3013,52 @@ async fn select(
         .and_then(|s| s.parse().ok())
         .unwrap_or(10)
         .min(state.config.query.rows_limit);
+
+    // Result grouping (issue #290, PRD §5 v3): `group=true` swaps the
+    // `response` doclist for a `grouped` envelope keyed by `group.field`. The
+    // collector buckets every match by the group field's fast value (a
+    // single-valued, non-text field — validated inside `grouping::grouping`,
+    // which 400s on undefined / non-fast / multiValued the way Solr does,
+    // finding 130). Branching here, before the ungrouped top-N search, means a
+    // grouped request never materialises the hits it would then discard.
+    //
+    // `fl`/`wants_score` are derived the same way the ungrouped path derives
+    // them below; duplicated locally so this early branch is self-contained
+    // and leaves that path byte-identical.
+    let fl_group: Option<Vec<String>> = params
+        .get("fl")
+        .map(|fl| fl.split(',').map(|s| s.trim().to_string()).collect());
+    let wants_score_group = fl_group
+        .as_deref()
+        .is_some_and(|fl| fl.iter().any(|f| f == "score"));
+    if let Some(grouped) = grouping::grouping(
+        &state.index,
+        &params,
+        parsed.as_ref().map(|(q, fqs)| (q.as_ref(), fqs.as_slice())),
+        &sort,
+        rows,
+        start,
+        fl_group.as_deref(),
+        wants_score_group,
+    )? {
+        // A grouped response keeps `responseHeader` (gated by `omitHeader`)
+        // and replaces `response` with `grouped` — no `facet_counts`/
+        // `stats`/`highlighting` block, matching the fixture shape (none of
+        // the `group_*` fixtures combine grouping with another component).
+        let mut response_header = Map::new();
+        response_header.insert("status".to_string(), json!(0));
+        response_header.insert("QTime".to_string(), json!(0));
+        response_header.insert("params".to_string(), json!(params.echo()));
+        let body = if params.omit_header() {
+            json!({ "grouped": grouped })
+        } else {
+            json!({
+                "responseHeader": response_header,
+                "grouped": grouped,
+            })
+        };
+        return Ok(axum::Json(body).into_response());
+    }
 
     // Fused faceting (issue #246): the `facet.field` terms aggregation runs
     // over exactly the doc set the hit list iterates (`q` AND every `fq`), so

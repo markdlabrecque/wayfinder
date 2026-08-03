@@ -803,6 +803,89 @@ async fn stats_app() -> (Router, TempDir) {
     (app, dir)
 }
 
+// --- duplicated schema/corpus for manifest-errors.tsv's `group_` rows -------
+// (issue #290). Same precedent as `STATS_SCHEMA_TOML` above: the canonical
+// `content` corpus has no single-valued field with repeated values (`id` is
+// unique, `category` is multiValued), so meaningful multi-doc groups need their
+// own schema+corpus. Core name `grouping` matches the manifest-errors row URL
+// (`grouping/select?...`), so the runner below routes those rows here unchanged.
+const GROUPING_SCHEMA_TOML: &str = r#"
+[core]
+name = "grouping"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "type"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "category"
+type = "string"
+stored = true
+fast = true
+multi_valued = true
+
+[[fields]]
+name = "popularity"
+type = "int"
+stored = true
+fast = true
+"#;
+
+/// The exact 6-doc corpus `solr-ref/capture.sh`'s issue-#290 block indexes:
+/// `type` article on g1/g3/g4, page on g2/g5, missing on g6 (the null group).
+fn grouping_corpus() -> Value {
+    json!([
+        {"id":"g1","type":"article","category":["news"],"body":"lazy dog brown","popularity":10},
+        {"id":"g2","type":"page","category":["news"],"body":"lazy garden afternoon","popularity":20},
+        {"id":"g3","type":"article","category":["blog"],"body":"quick thinking saves","popularity":30},
+        {"id":"g4","type":"article","category":["blog"],"body":"dogs cats together","popularity":5},
+        {"id":"g5","type":"page","body":"nothing here","popularity":40},
+        {"id":"g6","body":"orphan ungrouped","popularity":15}
+    ])
+}
+
+/// `POST /solr/grouping/update?commit=true` — cannot be `common::post_docs`,
+/// which is hardcoded to `common::CORE` ("content").
+async fn grouping_post_docs(app: &Router, docs: &Value) -> (StatusCode, Value) {
+    common::request_full(
+        app,
+        "POST",
+        "grouping/update?commit=true",
+        Some(&docs.to_string()),
+    )
+    .await
+}
+
+/// Builds a fresh `grouping`-schema app and indexes the full `g1..g6` corpus
+/// in one commit, matching `solr-ref/capture.sh`'s issue-#290 block.
+async fn grouping_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), GROUPING_SCHEMA_TOML).expect("app must build");
+    let (status, body) = grouping_post_docs(&app, &grouping_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the grouping corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
 /// The issue-#99 capture uses a dedicated three-document core. Its version
 /// values are deliberately time-seeded, so the manifest row is run here for
 /// its request/envelope shape while `tests/version_field.rs` verifies the
@@ -2082,6 +2165,7 @@ fn app_and_request_url<'a>(
     version99_app: &'a Router,
     fragsize_app: &'a Router,
     spellcheck_app: &'a Router,
+    grouping_app: &'a Router,
 ) -> (&'a Router, String) {
     match entry.url.split_once('/') {
         Some(("content", rest)) => (content_app, format!("content/{rest}")),
@@ -2094,6 +2178,7 @@ fn app_and_request_url<'a>(
         Some(("version99", _)) => (version99_app, entry.url.clone()),
         Some(("fragsize104", _)) => (fragsize_app, entry.url.clone()),
         Some(("spellcheck_223", _)) => (spellcheck_app, entry.url.clone()),
+        Some(("grouping", _)) => (grouping_app, entry.url.clone()),
         _ => (content_app, entry.url.clone()),
     }
 }
@@ -2132,6 +2217,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let (version99_app, _version99_dir) = version99_app().await;
     let (fragsize_app, _fragsize_dir) = fragsize_app().await;
     let (spellcheck_app, _spellcheck_dir) = spellcheck_223_app().await;
+    let (grouping_app, _grouping_dir) = grouping_app().await;
 
     let mut ran = 0usize;
     let mut diffed = 0usize;
@@ -2155,6 +2241,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
             &version99_app,
             &fragsize_app,
             &spellcheck_app,
+            &grouping_app,
         );
         // `update_select_commitwithin_visible` follows a `commitWithin=500`
         // row with no settle delay in this hermetic replay, unlike

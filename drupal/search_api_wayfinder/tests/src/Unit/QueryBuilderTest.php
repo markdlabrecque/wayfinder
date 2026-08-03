@@ -1162,4 +1162,130 @@ class QueryBuilderTest extends TestCase {
     $this->assertArrayNotHasKey('hl.fl', $params);
   }
 
+  /**
+   * Result grouping (issue #290): search_api_grouping.use_grouping activates
+   * the group.* component. The shape asserted here is search_api_solr's
+   * setGrouping() output (finding 130): group.ngroups is unconditional, and
+   * group.field is the single-valued fast field name. Ground truth for the
+   * server half is solr-ref/responses/group_basic.json.
+   *
+   * @covers ::buildGrouping
+   */
+  public function testGroupingOptionEmitsGroupParams(): void {
+    $index = $this->mockIndex([], [
+      'type' => $this->mockIndexField('type', 'string', FALSE),
+    ]);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], [
+      'search_api_grouping' => [
+        'use_grouping' => TRUE,
+        'fields' => ['type'],
+      ],
+    ]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('true', $params['group']);
+    $this->assertSame('true', $params['group.ngroups']);
+    $this->assertSame('ss_type', $params['group.field']);
+    // group.limit defaults to 1 and is omitted at its default (finding 130).
+    $this->assertArrayNotHasKey('group.limit', $params);
+  }
+
+  /**
+   * group.limit (when != 1), group.offset, group.sort, group.truncate and
+   * group.facet map straight from the option onto the wire.
+   *
+   * @covers ::buildGrouping
+   */
+  public function testGroupingLimitOffsetSortTruncateAndFacetAreEmitted(): void {
+    $index = $this->mockIndex([], [
+      'type' => $this->mockIndexField('type', 'string', FALSE),
+      'weight' => $this->mockIndexField('weight', 'integer', FALSE),
+    ]);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], [
+      'search_api_grouping' => [
+        'use_grouping' => TRUE,
+        'fields' => ['type'],
+        'group_limit' => 3,
+        'group_offset' => 1,
+        'group_sort' => ['search_api_id' => 'asc'],
+        'truncate' => TRUE,
+        'group_facet' => TRUE,
+      ],
+    ]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame(3, $params['group.limit']);
+    $this->assertSame(1, $params['group.offset']);
+    $this->assertSame('id asc', $params['group.sort']);
+    $this->assertSame('true', $params['group.truncate']);
+    $this->assertSame('true', $params['group.facet']);
+  }
+
+  /**
+   * Multiple group fields become a repeatable group.field array, in request
+   * order. Mirrors solr-ref/responses/group_multi_field.json.
+   *
+   * @covers ::buildGrouping
+   */
+  public function testGroupingMultipleFieldsBecomeAnArray(): void {
+    $index = $this->mockIndex([], [
+      'type' => $this->mockIndexField('type', 'string', FALSE),
+      'weight' => $this->mockIndexField('weight', 'integer', FALSE),
+    ]);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], [
+      'search_api_grouping' => [
+        'use_grouping' => TRUE,
+        'fields' => ['type', 'weight'],
+      ],
+    ]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame(['ss_type', 'its_weight'], $params['group.field']);
+  }
+
+  /**
+   * A fulltext or multi-valued group field is skipped, never emitted, so the
+   * request is not 400-ed by the server (finding 130 / src/grouping.rs
+   * validate_group_field). Every requested field unsuitable -> grouping not
+   * activated.
+   *
+   * @covers ::buildGrouping
+   */
+  public function testGroupingSkipsFulltextAndMultivaluedFields(): void {
+    $index = $this->mockIndex([], [
+      'body' => $this->mockIndexField('body', 'text', FALSE),
+      'tags' => $this->mockIndexField('tags', 'string', TRUE),
+    ]);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], [
+      'search_api_grouping' => [
+        'use_grouping' => TRUE,
+        'fields' => ['body', 'tags'],
+      ],
+    ]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertArrayNotHasKey('group', $params, 'no usable group field -> no group.* params');
+  }
+
+  /**
+   * Default: no search_api_grouping option -> no group.* params at all.
+   *
+   * @covers ::buildGrouping
+   */
+  public function testNoGroupingOptionProducesNoGroupParams(): void {
+    $index = $this->mockIndex([], [
+      'type' => $this->mockIndexField('type', 'string', FALSE),
+    ]);
+    $query = $this->mockQuery(NULL, NULL, $index);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertArrayNotHasKey('group', $params);
+    $this->assertArrayNotHasKey('group.field', $params);
+  }
+
 }

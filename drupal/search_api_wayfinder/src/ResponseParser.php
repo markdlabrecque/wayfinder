@@ -36,8 +36,8 @@ class ResponseParser {
   public function parse(array $response, QueryInterface $query): ResultSet {
     $resultSet = $query->getResults();
 
-    $body = $response['response'] ?? ['numFound' => 0, 'docs' => []];
-    $resultSet->setResultCount((int) ($body['numFound'] ?? 0));
+    [$docs, $count] = $this->extractResultDocs($response, $query);
+    $resultSet->setResultCount($count);
 
     $index = $query->getIndex();
     $indexId = $index->id();
@@ -53,7 +53,7 @@ class ResponseParser {
     $fieldIdByName = $highlighting === NULL ? [] : $this->fieldIdsByFieldName($index);
 
     $items = [];
-    foreach ($body['docs'] ?? [] as $doc) {
+    foreach ($docs as $doc) {
       $docId = (string) ($doc['id'] ?? '');
       $itemId = str_starts_with($docId, $prefix) ? substr($docId, strlen($prefix)) : $docId;
 
@@ -78,6 +78,78 @@ class ResponseParser {
     }
 
     return $resultSet;
+  }
+
+  /**
+   * Pulls the flat docs list and the result count out of the response.
+   *
+   * For a normal `/select` this is `response.docs` / `response.numFound`. For
+   * a grouped response (issue #290, `search_api_grouping.use_grouping`) the
+   * server returns a `grouped` block INSTEAD of `response` (src/lib.rs), so
+   * the docs are flattened out of each group's `doclist.docs` -- mirroring
+   * search_api_solr's extractResult half (coverage/
+   * search_api_solr_4.4.0_source ... SearchApiSolrBackend.php:2962-2987).
+   *
+   * `grouped` is keyed by the group.field value QueryBuilder emitted, i.e. the
+   * mapped fast field name, so the same FieldMapper mapping resolves the key
+   * here. The count is ngroups for the single-field case (the realistic one);
+   * multi-field grouping has no single group count, and search_api_solr falls
+   * back to count($block) (the block's key count) -- mirrored for parity.
+   *
+   * @return array{0: array<int, array>, 1: int}
+   *   [docs, resultCount].
+   */
+  private function extractResultDocs(array $response, QueryInterface $query): array {
+    $grouping = $query->getOption('search_api_grouping');
+    if (!is_array($grouping) || empty($grouping['use_grouping'])) {
+      $body = $response['response'] ?? ['numFound' => 0, 'docs' => []];
+      return [$body['docs'] ?? [], (int) ($body['numFound'] ?? 0)];
+    }
+
+    $index = $query->getIndex();
+    $fields = $grouping['fields'] ?? [];
+
+    // Map each requested field id once to the name that keys its grouped
+    // block, skipping anything not on the index (QueryBuilder skipped text /
+    // multi-valued before emitting group.field, so only resolvable fields are
+    // present on the wire, but the request may name a field the index lacks).
+    $fieldNames = [];
+    foreach ($fields as $fieldId) {
+      $field = is_string($fieldId) ? $index->getField($fieldId) : NULL;
+      if ($field) {
+        $fieldNames[$fieldId] = $this->fieldMapper->sortFieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
+      }
+    }
+
+    $docs = [];
+    $count = 0;
+    foreach ($fieldNames as $fieldName) {
+      $block = $response['grouped'][$fieldName] ?? NULL;
+      if (!is_array($block)) {
+        continue;
+      }
+      // count($block) matches search_api_solr's multi-field fall-back
+      // (matches/ngroups/groups key count); the single-field override below
+      // corrects it to ngroups.
+      $count = count($block);
+      foreach ($block['groups'] ?? [] as $group) {
+        foreach ($group['doclist']['docs'] ?? [] as $doc) {
+          $docs[] = $doc;
+        }
+      }
+    }
+
+    // Single-field grouping: the result count is the number of GROUPS
+    // (ngroups), not the number of documents -- so a paged view collapses
+    // many docs per group and still paginates by group.
+    if (count($fieldNames) === 1) {
+      $fieldName = reset($fieldNames);
+      if (isset($response['grouped'][$fieldName]['ngroups'])) {
+        $count = (int) $response['grouped'][$fieldName]['ngroups'];
+      }
+    }
+
+    return [$docs, $count];
   }
 
   /**

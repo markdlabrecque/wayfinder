@@ -1,0 +1,18 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0,
+    "params":{
+      "q":"*:*",
+      "fl":"id",
+      "wt":"json",
+      "group.field":"nosuchfield",
+      "group":"true"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"undefined field: \"nosuchfield\"",
+    "code":400
+  }
+}
