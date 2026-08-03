@@ -318,13 +318,14 @@ fn facet_queries(
 /// empty field name, which is the token the 400 then names, matching
 /// `facet_local_params_key_empty_remainder.json`'s `undefined field: ""`.
 ///
-/// ponytail: `key` is the only local param read; every other one is parsed and
-/// dropped. `tag`/`ex` need multi-select faceting and inline `facet.*` params
-/// inside the block are adjacent to issue #140's `f.<field>.facet.*`, neither
-/// of which is captured here — so a request using them is answered as if they
-/// were absent rather than refused. Capture before relying on that. A repeated
-/// `key` is first-wins, matching Solr's `{!key=a key=b}category` capture
-/// (finding 108).
+/// ponytail: this function reads only `key` (the label). `ex` is read
+/// separately in `plan_facet_fields`/`facet_queries` for #295's filter
+/// exclusion, and `key`/`ex` compose in either order (finding 138) because
+/// both come off the same parsed block. A `tag` on a `facet.field` value is
+/// meaningless (tags label `fq` clauses) and is dropped, as are inline
+/// `facet.*` params inside the block -- adjacent to issue #140's
+/// `f.<field>.facet.*`, which is still uncaptured. A repeated `key` is
+/// first-wins, matching Solr's `{!key=a key=b}category` capture (finding 108).
 ///
 fn split_facet_key(value: &str) -> (String, &str) {
     match local_params::parse_block(value) {
