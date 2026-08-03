@@ -113,7 +113,7 @@ docker exec wf80-drupal bash -lc "
   vendor/bin/drush site:install standard \
     --db-url=sqlite://sites/default/files/.ht.sqlite \
     --site-name='Wayfinder IT' --account-name=admin --account-pass=admin -y
-  vendor/bin/drush en search_api search_api_wayfinder node -y
+  vendor/bin/drush en search_api search_api_wayfinder node file -y
 "
 
 echo "--- module install / backend plugin discovery check ---"
@@ -123,14 +123,19 @@ docker exec wf80-drupal bash -lc "
   vendor/bin/drush php:eval \"print_r(array_keys(\\\\Drupal::service('plugin.manager.search_api.backend')->getDefinitions()));\"
 "
 
-echo "--- content, server, index ---"
+echo "--- server, index, content ---"
 docker cp create_content.php wf80-drupal:/opt/drupal/create_content.php
 docker cp setup_server_index.php wf80-drupal:/opt/drupal/setup_server_index.php
 docker cp run_queries.php wf80-drupal:/opt/drupal/run_queries.php
 docker exec wf80-drupal bash -lc "
   cd /opt/drupal
-  vendor/bin/drush php:script create_content.php
+  # Setup before content: setup_server_index.php creates the field_attachments
+  # file field (and the server/index). The attachment node created by
+  # create_content.php references that field, so the field must exist first --
+  # otherwise the file reference is silently dropped on save and the #262
+  # extraction slice has nothing to extract.
   vendor/bin/drush php:script setup_server_index.php
+  vendor/bin/drush php:script create_content.php
   vendor/bin/drush search-api:index wf80_index || vendor/bin/drush sapi-i wf80_index
 "
 

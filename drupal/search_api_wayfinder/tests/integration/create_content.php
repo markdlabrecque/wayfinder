@@ -10,6 +10,31 @@
 
 use Drupal\node\Entity\Node;
 
+// Issue #262 tracer: an attachment whose text exists NOWHERE else in the
+// corpus, so a fulltext hit for `wayfinderattachment262` can only come from
+// /update/extract having indexed the file's contents. file_save_data() writes
+// to the public stream wrapper and returns a managed File entity, which the
+// node's field_attachments (created in setup_server_index.php) references.
+$attachment_text = "This text lives only inside the attached file. "
+  . "The searchable token is wayfinderattachment262.";
+// Drupal 11 dropped the procedural file_save_data(); the file_system service
+// + a managed File entity is the version-stable way to produce the fixture.
+$uri = \Drupal::service('file_system')->saveData(
+  $attachment_text,
+  'public://wayfinder-attachment-262.txt',
+  \Drupal\Core\File\FileSystemInterface::EXISTS_REPLACE,
+);
+if ($uri === FALSE) {
+  throw new \RuntimeException('Failed to write the attachment fixture file.');
+}
+$file = \Drupal\file\Entity\File::create([
+  'uri' => $uri,
+  'status' => 1,
+  'uid' => 1,
+]);
+$file->save();
+echo "attachment file id: " . $file->id() . " (uri $uri)\n";
+
 $target = Node::create([
   'type' => 'article',
   'title' => 'The wayfinderroundtrip beacon guides lost travellers',
@@ -34,5 +59,23 @@ foreach ($fillers as $data) {
     'status' => 1,
   ])->save();
 }
+
+// The attachment node: its title/body deliberately do NOT contain the token,
+// so the only way the token can be found by search is through the extracted
+// file content. This is the end of the #262 vertical slice.
+$attached = Node::create([
+  'type' => 'article',
+  'title' => 'A report attached, nothing searchable in the title',
+  'body' => [
+    'value' => 'The body is innocuous prose. The searchable content is in the attachment only.',
+    'format' => 'basic_html',
+  ],
+  'field_attachments' => [
+    ['target_id' => $file->id()],
+  ],
+  'status' => 1,
+]);
+$attached->save();
+echo "attachment node id: " . $attached->id() . " (file id " . $file->id() . ")\n";
 
 echo "content created\n";

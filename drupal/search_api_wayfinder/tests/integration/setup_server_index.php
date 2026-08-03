@@ -29,6 +29,28 @@
 
 use Drupal\search_api\Entity\Server;
 use Drupal\search_api\Entity\Index;
+use Drupal\field\Entity\FieldStorageConfig;
+use Drupal\field\Entity\FieldConfig;
+
+// Issue #262 tracer: a file field on the article bundle. The
+// wayfinder_file_extraction processor discovers it (file-typed field on an
+// indexed datasource), declares a `saw_field_attachments` computed property,
+// and populates it from /update/extract. Creating it here, before the index
+// below, is what makes that property resolvable when the index field mapped
+// to it is validated on save. Plain `file` fields only this slice -- media /
+// entity:file are documented follow-ups, not this tracer.
+FieldStorageConfig::create([
+  'entity_type' => 'node',
+  'field_name' => 'field_attachments',
+  'type' => 'file',
+  'cardinality' => -1,
+])->save();
+FieldConfig::create([
+  'entity_type' => 'node',
+  'bundle' => 'article',
+  'field_name' => 'field_attachments',
+  'label' => 'Attachments',
+])->save();
 
 $server = Server::create([
   'id' => 'wf80_server',
@@ -79,10 +101,24 @@ $index = Index::create([
       'property_path' => 'body',
       'type' => 'text',
     ],
+    // Issue #262: the extracted attachment text lands in its OWN fulltext
+    // field with independent boost (decision 2), not appended to body. The
+    // property path is the processor's index-level computed property
+    // (datasource NULL), so no datasource_id here.
+    'file_content' => [
+      'label' => 'File content',
+      'property_path' => 'saw_field_attachments',
+      'type' => 'text',
+    ],
   ],
   'options' => [
     'index_directly' => TRUE,
     'cron_limit' => 50,
+  ],
+  // Enable the extraction processor alongside the index. No settings of its
+  // own in this tracer, so an empty config block.
+  'processor_settings' => [
+    'wayfinder_file_extraction' => [],
   ],
 ]);
 $index->save();
