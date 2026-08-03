@@ -7,6 +7,12 @@
 #   capture.sh --only <regex>   capture only fixtures whose name matches <regex>,
 #                               leaving every other fixture and manifest row untouched
 #
+# Env: SOLR_PORT (default 8983) -- the host port for the main `content` core's
+#      container, for when something else local already holds 8983.
+#      KEEP_CONTAINERS=1 -- leave every block's container running afterwards
+#      instead of releasing it (see `release` below; the default exists because
+#      twenty concurrent solr:9 containers exhaust Docker's memory).
+#
 # `--only` exists because a full run rewrites all 400+ fixtures, and the QTime /
 # _version_ / rid churn that produces dirties every concurrent branch's diff (see
 # CLAUDE.md, "Never re-capture existing fixtures as a side effect"). A new capture
@@ -18,7 +24,8 @@
 # block is wanted by guarding it with `want_any '^myprefix_'`. A filtered run
 # still walks the whole script, so it still starts the containers of blocks that
 # carry no such guard -- it takes minutes, and its guarantee is about what it
-# writes, not about how fast it is.
+# writes, not about how fast it is. It does not accumulate containers while
+# doing so: each block releases its own (see `release`).
 set -euo pipefail
 
 ONLY=""
@@ -28,7 +35,7 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "capture.sh: --only needs a regex" >&2; exit 2; }
       ONLY=$2; shift 2 ;;
     --only=*) ONLY=${1#--only=}; shift ;;
-    -h|--help) sed -n '2,21p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,24p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "capture.sh: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
@@ -36,7 +43,12 @@ done
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$HERE/responses"
 CORE=content
-SOLR=http://localhost:8983/solr
+# Overridable because 8983 is the port every other local Solr wants too -- a DDEV
+# router or a stray `docker-solr` holding it makes the `docker run` below fail
+# under `set -e` before anything is captured. Nothing port-dependent reaches the
+# committed data: `manifest.tsv` rows are core-relative and carry no host.
+SOLR_PORT=${SOLR_PORT:-8983}
+SOLR=http://localhost:$SOLR_PORT/solr
 CONTAINER=wayfinder-solr-ref
 
 # --- `--only` filtering ----------------------------------------------------
@@ -51,6 +63,26 @@ want() { [ -z "$ONLY" ] || [[ $1 =~ $ONLY ]]; }
 # Over-entering a block costs a container start; under-entering would silently
 # capture nothing, so the bias is toward entering.
 want_any() { [ -z "$ONLY" ] || [[ $ONLY =~ $1 ]] || [[ $1 =~ $ONLY ]]; }
+
+# --- releasing a block's own container --------------------------------------
+# Every block that stands up its own container used to leave it running, on the
+# theory that a later run could reuse it. Twenty of them at ~500 MiB each is
+# ~10 GiB, past what a default Docker Desktop gets (8.8 GiB here), so a full or
+# filtered run OOMs partway down the script -- the blocks after the one that
+# died capture nothing, silently, because each `cap*` helper's curl failure is
+# swallowed into a status file. Releasing each block's container at the end of
+# its block keeps the peak at the two reference containers plus one.
+#
+# KEEP_CONTAINERS=1 restores the old behaviour for interactive debugging, when
+# you want to poke at a block's core after the run.
+release() {  # release <container> <description>
+  if [ -n "${KEEP_CONTAINERS:-}" ]; then
+    echo "$2 left in place on '$1' (docker rm -f $1 to stop)"
+  else
+    docker rm -f "$1" >/dev/null 2>&1 || true
+    echo "$2 captured; released container '$1'"
+  fi
+}
 
 # Manifest paths are variables so that a filtered run can send its rows somewhere
 # else entirely. Every append site below writes to `$MANIFEST` or
@@ -114,7 +146,7 @@ fi
 # --- Solr up ---------------------------------------------------------------
 if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  docker run -d --name "$CONTAINER" -p 8983:8983 solr:9 solr-precreate "$CORE" >/dev/null
+  docker run -d --name "$CONTAINER" -p "$SOLR_PORT:8983" solr:9 solr-precreate "$CORE" >/dev/null
 fi
 
 echo -n "waiting for solr"
@@ -597,7 +629,7 @@ capk keyorder_facet_field_map \
 capk keyorder_facet_field_map_index \
   'select?q=*:*&rows=0&facet=true&facet.field=tag&facet.sort=index&json.nl=map&wt=json'
 
-echo "key-order core '$KEYORDER_CORE' left in place on '$KEYORDER_CONTAINER' (port 8986)"
+release "$KEYORDER_CONTAINER" "key-order core '$KEYORDER_CORE'"
 
 # The whole point of the issue: `views` has four distinct values but `q=id:r1`
 # matches one document. If Solr enumerates the numeric term dictionary the way
@@ -746,10 +778,8 @@ caps sort_mv_int_desc 'select?q=*:*&sort=nums+desc&fl=id,nums&wt=json'
 echo
 column -t -s $'\t' "$MANIFEST_ERRORS"
 echo
-echo "numeric/date facet.field core '$FACET_CORE' left in place on '$FACET_CONTAINER'"
-echo "  (docker rm -f $FACET_CONTAINER to stop)"
-echo "sort-debt core '$SORTDEBT_CORE' left in place on '$SORTDEBT_CONTAINER' (port 8987)"
-echo "  (docker rm -f $SORTDEBT_CONTAINER to stop)"
+release "$FACET_CONTAINER" "numeric/date facet.field core '$FACET_CORE'"
+release "$SORTDEBT_CONTAINER" "sort-debt core '$SORTDEBT_CORE'"
 
 # --- facet debt: float/date rendering, unpinned semantics, error precedence --
 # (issues #33 / #30.) Appended block; nothing above is edited.
@@ -862,8 +892,7 @@ capd facet_json_nl_arrmap "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.field
 # Solr use? (Wayfinder currently renders the empty string.)
 capd facet_json_nl_map_missing "$DEBT_CORE/select?q=*:*&rows=0&facet=true&facet.field=tag&facet.missing=true&json.nl=map&wt=json"
 
-echo "facet-debt core '$DEBT_CORE' left in place on '$DEBT_CONTAINER' (port 8988)"
-echo "  (docker rm -f $DEBT_CONTAINER to stop)"
+release "$DEBT_CONTAINER" "facet-debt core '$DEBT_CORE'"
 
 # --- ranked-relevance scores + fl order (issue #31) -------------------------
 # Appended block; nothing above is edited. Runs against the canonical
@@ -1125,8 +1154,7 @@ capu update_select_single_valued_array_one GET \
 capup update_delete_id_missing "$UPDATE9_CORE/update?commit=true&wt=json" \
   '{"delete":{"id":"nosuch"}}'
 
-echo "update-pipeline core '$UPDATE9_CORE' left in place on '$UPDATE9_CONTAINER' (port 8989)"
-echo "  (docker rm -f $UPDATE9_CONTAINER to stop)"
+release "$UPDATE9_CONTAINER" "update-pipeline core '$UPDATE9_CORE'"
 
 # --- pure-wildcard sub-clause (issue #39) ------------------------------------
 # `*:* AND lazy` / `lazy OR *:* / `*:* -lazy` panic pre-fix: `*:*` compiles to
@@ -1182,8 +1210,7 @@ capw() {  # capw <name> <path-with-query>, against $WILDCARD_SOLR/$WILDCARD_CORE
 capw select_wildcard_and_term   'select?q=*:*+AND+lazy&df=body&fl=id,body&wt=json'
 capw select_wildcard_or_term    'select?q=lazy+OR+*:*&df=body&fl=id,body&wt=json'
 capw select_wildcard_minus_term 'select?q=*:*+-lazy&df=body&fl=id,body&wt=json'
-echo "wildcard-panic core '$WILDCARD_CORE' left in place on '$WILDCARD_CONTAINER' (port 8990)"
-echo "  (docker rm -f $WILDCARD_CONTAINER to stop)"
+release "$WILDCARD_CONTAINER" "wildcard-panic core '$WILDCARD_CORE'"
 
 # --- stats component (issue #5) ---------------------------------------------
 # Appended block; nothing above is edited. Own container on its own port
@@ -1258,8 +1285,7 @@ caps stats_zero "$STATS_CORE/select?q=id:nosuchdoc&rows=0&stats=true&stats.field
 # a zero hit set produce the same stats shape.
 caps stats_zero_fq "$STATS_CORE/select?q=*:*&fq=id:nosuchdoc&rows=0&stats=true&stats.field=views&wt=json"
 
-echo "stats core '$STATS_CORE' left in place on '$STATS_CONTAINER' (port 8992)"
-echo "  (docker rm -f $STATS_CONTAINER to stop)"
+release "$STATS_CONTAINER" "stats core '$STATS_CORE'"
 
 # --- highlighting (issue #4, PRD Highlighting row: hl, hl.fl, hl.snippets, ---
 # hl.fragsize, hl.simple.pre/post, Tantivy SnippetGenerator) ------------------
@@ -1349,8 +1375,7 @@ caph hl_multi_field_space 'select?q=lazy&df=body&hl=true&hl.fl=body%20category&w
 # hl=true with no hl.fl at all -- capture Solr's default rather than guessing
 caph hl_default_fl        'select?q=lazy&df=body&hl=true&wt=json'
 
-echo "highlighting core '$HL_CORE' left in place on '$HL_CONTAINER' (port 8991)"
-echo "  (docker rm -f $HL_CONTAINER to stop)"
+release "$HL_CONTAINER" "highlighting core '$HL_CORE'"
 # --- query types beyond the stock parser (issue #8) ---------------------------
 # Appended block; nothing above is edited. Findings 56-59 (docs/solr-ref-findings.md).
 #
@@ -1610,8 +1635,7 @@ capm mlt_interesting_terms_details 'mlt?q=id:mlt1&mlt.fl=body&mlt.interestingTer
 capm mlt_no_interesting_terms  'mlt?q=id:mlt20&mlt.fl=body&wt=json'
 # a source doc that does not exist at all
 capm mlt_nonexistent_doc       'mlt?q=id:nosuchdoc&mlt.fl=body&wt=json'
-echo "mlt core '$MLT_CORE' left in place on '$MLT_CONTAINER' (port 8993)"
-echo "  (docker rm -f $MLT_CONTAINER to stop)"
+release "$MLT_CONTAINER" "mlt core '$MLT_CORE'"
 
 # --- edismax query parser (issue #7) ----------------------------------------
 # `defType=edismax` needs `qf`/`pf` to reward two *different analyzed fields*
@@ -1781,8 +1805,6 @@ cape edismax_mm_absent          'select?q=alpha+beta+gamma&defType=edismax&qf=bo
 # this gap; until then this fixture is corroborating, not independently
 # verified, evidence for anything past `numFound`.
 cape edismax_mm_empty_star      'select?q=*:*&defType=edismax&qf=body&mm=&fl=id&wt=json'
-echo "edismax core '$EDISMAX_CORE' left in place on '$EDISMAX_CONTAINER' (port 8994)"
-echo "  (docker rm -f $EDISMAX_CONTAINER to stop)"
 
 # --- admin system-info version handshake (issue #59) ------------------------
 # `search_api_solr`'s `SolrConnector::getSolrVersion()` (finding 78) reads
@@ -1834,8 +1856,7 @@ capv() {  # capv <name> <url-after-/solr/>
   rm -f "$OUT/$name.status"
 }
 capv stats_version_max "$VERSION_CORE/select?q=*:*&rows=0&stats=true&stats.field=_version_&function=max(_version_)&wt=json"
-echo "version-field core '$VERSION_CORE' left in place on '$VERSION_CONTAINER' (port 8999)"
-echo "  (docker rm -f $VERSION_CONTAINER to stop)"
+release "$VERSION_CONTAINER" "version-field core '$VERSION_CORE'"
 
 # --- hl.fragsize=0 whole-field highlighting (issue #104) --------------------
 # Appended block; own Solr 9 core and port. The shared corpus has no field
@@ -1875,8 +1896,7 @@ capf() {  # capf <name> <url-after-/solr/>
 capf hl_fragsize_zero_whole_field "$FRAGSIZE_CORE/select?q=body:quick&hl=true&hl.fl=body&hl.fragsize=0&wt=json"
 capf hl_fragsize_zero_whole_field_method_original "$FRAGSIZE_CORE/select?q=body:quick&hl=true&hl.fl=body&hl.method=original&hl.fragsize=0&wt=json"
 capf hl_fragsize_small_truncated "$FRAGSIZE_CORE/select?q=body:quick&hl=true&hl.fl=body&hl.method=original&hl.fragsize=40&wt=json"
-echo "fragsize core '$FRAGSIZE_CORE' left in place on '$FRAGSIZE_CONTAINER' (port 8995)"
-echo "  (docker rm -f $FRAGSIZE_CONTAINER to stop)"
+release "$FRAGSIZE_CONTAINER" "fragsize core '$FRAGSIZE_CORE'"
 
 # --- q=*:* with a bad qf (issue #112) ---------------------------------------
 # q=*:* with a bad qf: confirmed against real Solr (one-off container, same
@@ -2178,6 +2198,12 @@ cape edismax_unquoted_multitoken 'select?q=quick%2Brocket&defType=edismax&qf=tit
 # curl -sg 'http://localhost:8994/solr/content/select?q=(%7B!edismax+qf%3D%27title+body%27%7D%2B%22quick%22)&df=id&debugQuery=true&fl=id&sort=id+asc&wt=json' \
 #   -o solr-ref/responses/edismax_shape_b_debug_parsedquery_paren_terminated.json
 
+# Released here rather than at the end of the edismax block above: the issue
+# #147 section between them reuses this same container and core deliberately,
+# so an earlier release would leave `cape edismax_unquoted_multitoken`
+# capturing nothing.
+release "$EDISMAX_CONTAINER" "edismax core '$EDISMAX_CORE'"
+
 # --- edismax: `quick+rocket` is ONE clause, not two (issue #147, round 2) -----
 # Capture 1 above settles phrase-vs-OR by `numFound` alone, which leaves the step
 # *before* it -- "`quick+rocket` is one clause whose analysis yields two tokens",
@@ -2353,6 +2379,8 @@ if want extract_html_select; then
 fi
 cap_extract extract_corrupt_pdf 500 \
   'extractOnly=true&extractFormat=text&resource.name=broken.pdf&wt=json' broken.pdf
+
+release "$EXTRACT_CONTAINER" "extract core '$EXTRACT_CORE'"
 
 # --- hl.fl=* over a stored string field (issue #184) ------------------------
 # Captured 2026-08-01 against a clean one-off `solr:9` container on port 8999
@@ -2915,6 +2943,7 @@ curl -sSf "$EXTRACT274_SOLR/$EXTRACT274_CORE/config" -H 'Content-Type: applicati
 
 cap_extract274() { # cap_extract274 <name> <query-without-json.nl> <json.nl>
   local name=$1 base=$2 nl=$3 actual
+  want "$name" || return 0
   actual=$(curl -sS -X POST \
     "$EXTRACT274_SOLR/$EXTRACT274_CORE/update/extract?${base}&json.nl=${nl}" \
     -F "file=@$HERE/extract-inputs/sample.txt;type=application/octet-stream;filename=sample.txt" \
@@ -2931,3 +2960,90 @@ cap_extract274 extract_plain_text_json_nl_arrarr "$BASE274" arrarr
 cap_extract274 extract_plain_text_json_nl_arrmap "$BASE274" arrmap
 echo "captured issue #274 json.nl extractOnly fixtures from '$EXTRACT274_CONTAINER' (port 9040)"
 docker rm -f "$EXTRACT274_CONTAINER" >/dev/null
+
+# --- wave 1 capture prep: {!ex}/{!tag} facet exclusion (#295) ---------------
+# One shared block for the two wave-1 issues that need fixtures, so that two
+# branches do not each re-run the script and each append to this file. Both sets
+# are core-relative GETs against `content`, so both land in `manifest.tsv`.
+#
+# Corpus reminder (the POST near the top of this script): category counts are
+# animals 2 (doc1, doc4), classic 2 (doc1, doc3), garden 1 (doc2), misc 1 (doc3),
+# and doc5 has no category at all. `fq=category:animals` therefore narrows the
+# unfiltered {animals 2, classic 2, garden 1, misc 1} to {animals 2, classic 1},
+# which is what makes an exclusion observable: an excluded facet must still show
+# the wider set.
+#
+# `{!tag=x}` on an `fq` names that filter; `{!ex=x}` on a `facet.field` computes
+# that facet as if the named filter were absent. Wayfinder rejects both today
+# (`src/local_params.rs`), so every row here is an EXPECTED_DIVERGENCES entry in
+# `tests/differential.rs` until #295 lands.
+#
+# Local params are percent-encoded (`%7B%21tag%3Dcat%7D`, `%20` for the space
+# between two of them), matching the `facet_local_params_key` rows above: the
+# differential harness GETs each `manifest.tsv` path verbatim, so a raw brace in
+# a row would not survive the replay.
+
+# The pair that defines the feature: identical but for the tag/ex.
+cap facet_extag_baseline        'select?q=*:*&rows=0&fq=category:animals&facet=true&facet.field=category&wt=json'
+cap facet_extag_excluded        'select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:animals&facet=true&facet.field=%7B%21ex%3Dcat%7Dcategory&wt=json'
+
+# Half-applied: each of tag and ex alone must be a no-op on the counts.
+cap facet_extag_tag_no_ex       'select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:animals&facet=true&facet.field=category&wt=json'
+cap facet_extag_ex_no_tag       'select?q=*:*&rows=0&fq=category:animals&facet=true&facet.field=%7B%21ex%3Dcat%7Dcategory&wt=json'
+cap facet_extag_ex_unknown_tag  'select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:animals&facet=true&facet.field=%7B%21ex%3Dnosuch%7Dcategory&wt=json'
+
+# Which filters get excluded when there are several.
+cap facet_extag_two_fq_one_tagged 'select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:animals&fq=category:classic&facet=true&facet.field=%7B%21ex%3Dcat%7Dcategory&wt=json'
+cap facet_extag_ex_two_tags     'select?q=*:*&rows=0&fq=%7B%21tag%3Da%7Dcategory:animals&fq=%7B%21tag%3Db%7Dcategory:classic&facet=true&facet.field=%7B%21ex%3Da,b%7Dcategory&wt=json'
+cap facet_extag_ex_one_of_two   'select?q=*:*&rows=0&fq=%7B%21tag%3Da%7Dcategory:animals&fq=%7B%21tag%3Db%7Dcategory:classic&facet=true&facet.field=%7B%21ex%3Da%7Dcategory&wt=json'
+cap facet_extag_multi_tag       'select?q=*:*&rows=0&fq=%7B%21tag%3Da,b%7Dcategory:animals&facet=true&facet.field=%7B%21ex%3Db%7Dcategory&wt=json'
+
+# Interaction with `{!key}`, which Wayfinder already supports (#138). Both
+# orderings, because local-param order is not obviously irrelevant.
+cap facet_extag_ex_with_key     'select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:animals&facet=true&facet.field=%7B%21ex%3Dcat%20key%3Dunfiltered%7Dcategory&wt=json'
+cap facet_extag_key_before_ex   'select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:animals&facet=true&facet.field=%7B%21key%3Dunfiltered%20ex%3Dcat%7Dcategory&wt=json'
+
+# The #299 shape: two facets on one field, one filtered and one not, told apart
+# by their keys. This is the row that proves the OR-facet UI is reproducible.
+cap facet_extag_both_facets     'select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:animals&facet=true&facet.field=%7B%21key%3Dfiltered%7Dcategory&facet.field=%7B%21ex%3Dcat%20key%3Dunfiltered%7Dcategory&wt=json'
+
+# Does exclusion reach the other facet types, and interact with facet.* settings?
+cap facet_extag_facet_query_ex  'select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:animals&facet=true&facet.query=%7B%21ex%3Dcat%7Dcategory:classic&wt=json'
+cap facet_extag_mincount       'select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:animals&facet=true&facet.field=%7B%21ex%3Dcat%7Dcategory&facet.mincount=2&wt=json'
+cap facet_extag_missing        'select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:animals&facet=true&facet.field=%7B%21ex%3Dcat%7Dcategory&facet.missing=true&wt=json'
+
+# Degenerate forms: is a tag on `q` meaningful, and are empty names an error?
+cap facet_extag_tag_on_q       'select?q=%7B%21tag%3Dcat%7D*:*&rows=0&facet=true&facet.field=%7B%21ex%3Dcat%7Dcategory&wt=json'
+cap facet_extag_ex_empty       'select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcategory:animals&facet=true&facet.field=%7B%21ex%3D%7Dcategory&wt=json'
+cap facet_extag_tag_empty      'select?q=*:*&rows=0&fq=%7B%21tag%3D%7Dcategory:animals&facet=true&facet.field=%7B%21ex%3Dcat%7Dcategory&wt=json'
+
+# --- wave 1 capture prep: terms.prefix and terms.limit (#308) --------------
+# `search_api_autocomplete` sends `terms.fl` + `terms.prefix` + `terms.limit` on
+# every keystroke (finding 131). Only `terms.fl` is in `TERMS_PARAMS`, so these
+# rows are also EXPECTED_DIVERGENCES entries until #308 lands.
+#
+# `body` is text_en, so its index terms are stemmed and stopped: doc bodies
+# reduce to afternoon, all, brown, cat, dai, dog, fox, garden, jump, lazi, live,
+# much, noth, quick, save, think, togeth. That matters for choosing prefixes --
+# `terms.prefix=th` hits the stem `think`, not the surface form "thinking", and
+# `terms.prefix=a` hits `afternoon` and `all`, which both have count 1 and so pin
+# the count-sort tie-break. `category` is a string field with no analysis, for
+# the unanalyzed comparison.
+
+cap terms_prefix_body_multi    'terms?terms=true&terms.fl=body&terms.prefix=d&omitHeader=true&wt=json'
+cap terms_prefix_body_single   'terms?terms=true&terms.fl=body&terms.prefix=th&omitHeader=true&wt=json'
+cap terms_prefix_body_none     'terms?terms=true&terms.fl=body&terms.prefix=zzz&omitHeader=true&wt=json'
+cap terms_prefix_tie           'terms?terms=true&terms.fl=body&terms.prefix=a&omitHeader=true&wt=json'
+cap terms_prefix_string_field  'terms?terms=true&terms.fl=category&terms.prefix=c&omitHeader=true&wt=json'
+cap terms_prefix_empty         'terms?terms=true&terms.fl=body&terms.prefix=&omitHeader=true&wt=json'
+cap terms_prefix_case          'terms?terms=true&terms.fl=body&terms.prefix=D&omitHeader=true&wt=json'
+cap terms_prefix_two_fields    'terms?terms=true&terms.fl=body&terms.fl=category&terms.prefix=a&omitHeader=true&wt=json'
+cap terms_prefix_unknown_field 'terms?terms=true&terms.fl=nosuchfield&terms.prefix=a&omitHeader=true&wt=json'
+
+cap terms_limit_below          'terms?terms=true&terms.fl=body&terms.prefix=d&terms.limit=1&omitHeader=true&wt=json'
+cap terms_limit_above          'terms?terms=true&terms.fl=body&terms.prefix=d&terms.limit=99&omitHeader=true&wt=json'
+cap terms_limit_zero           'terms?terms=true&terms.fl=body&terms.prefix=d&terms.limit=0&omitHeader=true&wt=json'
+cap terms_limit_negative       'terms?terms=true&terms.fl=body&terms.limit=-1&omitHeader=true&wt=json'
+cap terms_limit_no_prefix      'terms?terms=true&terms.fl=body&terms.limit=2&omitHeader=true&wt=json'
+cap terms_limit_invalid        'terms?terms=true&terms.fl=body&terms.limit=abc&omitHeader=true&wt=json'
+cap terms_prefix_json_nl_map   'terms?terms=true&terms.fl=body&terms.prefix=d&json.nl=map&omitHeader=true&wt=json'
