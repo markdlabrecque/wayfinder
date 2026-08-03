@@ -15,8 +15,13 @@
 # `solr-ref/capture.sh`'s #171 and #258 blocks.
 #
 # `extract_html_index`/`extract_html_select` (the indexing-path captures) stay
-# out: they are out of scope for this issue (bare `responseHeader` /
-# companion select, not an extractOnly response).
+# out of this file: they are not extractOnly responses (bare `responseHeader` /
+# companion select), and the select is a two-step index→then→select flow this
+# single-request runner cannot express. Issue #259 covers them in
+# `tests/extract_index.rs` — the index response is matched there against
+# `extract_html_index.json`, and the select's `body`/`links` value divergence
+# (Wayfinder's own extraction, no fabricated `shape="rect"`) is asserted and
+# documented per PRD divergence 10.
 #
 # interpretation note (stage 1, issue #258): the task spec's acceptance
 # section says "all seven in-scope extract fixtures" for this file, in the

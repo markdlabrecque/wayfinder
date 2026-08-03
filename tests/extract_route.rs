@@ -15,8 +15,8 @@
 //! What the suite covers, in file order: the seven in-scope success fixtures
 //! plus the corrupt-PDF row (a recorded status divergence, not a match); the
 //! `EXTRACT_PARAMS` allowlist under `strict_params`, `check_core`, and a
-//! route-order guard that `/update` itself still works; the `extractOnly`
-//! gate; multipart intake errors; the resource budgets from the
+//! route-order guard that `/update` itself still works; multipart intake
+//! errors; the resource budgets from the
 //! `[extraction]` config section (`max_body_bytes` — including its exact
 //! boundary and the request-wide accounting across parts —
 //! `max_concurrency`, `max_output_bytes`, `deadline_secs`) and the
@@ -391,53 +391,12 @@ async fn plain_update_route_still_works_after_extract_route_exists() {
 }
 
 // --- extractOnly gating (spec item 3) ---------------------------------------
-
-/// `extractOnly` absent must 400 in the `NoParams` envelope (ratified
-/// divergence from Solr, which 200s and indexes — server-side indexing is
-/// out of scope for this issue).
-#[tokio::test]
-async fn extract_without_extract_only_is_a_400() {
-    let (app, _dir) = default_app().await;
-    let bytes = input_bytes("sample.txt");
-    let (status, body) = request_multipart(
-        &app,
-        &format!("{CORE}/update/extract?wt=json"),
-        "file",
-        "sample.txt",
-        "",
-        &bytes,
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "extractOnly absent must 400 (server-side indexing is out of scope), got {status}: {body}"
-    );
-    assert_eq!(body["error"]["code"].as_i64(), Some(400));
-}
-
-/// `extractOnly=false` must also 400 — the gate checks the resolved boolean,
-/// not merely the param's presence.
-#[tokio::test]
-async fn extract_with_extract_only_false_is_a_400() {
-    let (app, _dir) = default_app().await;
-    let bytes = input_bytes("sample.txt");
-    let (status, body) = request_multipart(
-        &app,
-        &format!("{CORE}/update/extract?extractOnly=false&wt=json"),
-        "file",
-        "sample.txt",
-        "",
-        &bytes,
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "extractOnly=false must 400, got {status}: {body}"
-    );
-    assert_eq!(body["error"]["code"].as_i64(), Some(400));
-}
+//
+// #258 required `extractOnly=true` and 400d otherwise (PRD divergence 10).
+// #259 retires that: `extractOnly` absent/false now takes the Solr-Cell
+// indexing path. The positive indexing behaviour and its documented
+// body/links divergence live in `tests/extract_index.rs`; the extractOnly
+// response itself is still covered by the fixture-derived tests above.
 
 // --- multipart intake errors (spec item 2; no fixture, per spec) -----------
 

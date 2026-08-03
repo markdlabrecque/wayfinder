@@ -174,6 +174,19 @@ pub struct Extracted {
     /// The same body rendered as `extractFormat=text` serializes it: text
     /// runs verbatim, one `\n` after every block-level element.
     pub body_text: String,
+    /// Captured attribute *values* per element name (lowercased), in document
+    /// order — issue #259's Solr Cell `captureAttr` + `fmap.<element>`
+    /// indexing path. Each pair is `(element_name, one_attribute_value)`;
+    /// the indexing pipeline groups these by element and renames via `fmap`
+    /// (e.g. `fmap.a=links`).
+    ///
+    /// Empty for non-HTML extractors and for HTML elements that carry no
+    /// attributes. Only the extractOnly response ignores it; the indexing
+    /// path is its sole consumer. Unlike `body_xhtml`'s narrow
+    /// `KEPT_ATTRIBUTES` allowlist, this collects every attribute value —
+    /// `captureAttr` captures all of them, and `uprefix`/`fmap` decide which
+    /// survive, mirroring Solr.
+    pub captured_attrs: Vec<(String, String)>,
 }
 
 /// Object-safe extraction trait. `dispatch()` hands back `&'static dyn
@@ -496,6 +509,9 @@ impl Extractor for PlainTextExtractor {
                 escape_xml_text(&budget.output_text()[start..])
             ),
             body_text: format!("{}\n", &budget.output_text()[start..]),
+            // Plain text has no markup, so there are no element attributes to
+            // capture for the indexing path's `captureAttr`.
+            captured_attrs: Vec::new(),
         })
     }
 }
@@ -864,6 +880,7 @@ impl Extractor for HtmlExtractor {
                 skip_depth: 0usize,
                 open: Vec::new(),
                 tokens: 0,
+                captured_attrs: Vec::new(),
                 error: None,
             }),
         };
@@ -901,6 +918,7 @@ impl Extractor for HtmlExtractor {
             text: body_text,
             title,
             author,
+            captured_attrs,
             error,
             ..
         } = tokenizer.sink.state.into_inner();
@@ -918,6 +936,7 @@ impl Extractor for HtmlExtractor {
             },
             body_xhtml: xhtml,
             body_text,
+            captured_attrs,
         })
     }
 }
@@ -958,6 +977,13 @@ struct SinkState<'a> {
     skip_depth: usize,
     open: Vec<String>,
     tokens: u64,
+    /// Captured attribute values for the indexing path (#259): each entry is
+    /// `(element_name_lowercased, attribute_value)`, appended in document
+    /// order as each start tag is seen. Collected unconditionally —
+    /// `captureAttr`/`fmap` filtering happens later, at request time — so a
+    /// document whose extraction runs under `extractOnly` pays only the cost
+    /// of building a Vec it then drops.
+    captured_attrs: Vec<(String, String)>,
     error: Option<ExtractError>,
 }
 
@@ -1002,6 +1028,21 @@ impl SinkState<'_> {
     fn start_tag(&mut self, tag: &Tag) -> Result<(), ExtractError> {
         let name = tag.name.as_ref().to_ascii_lowercase();
         let void = tag.self_closing || VOID_ELEMENTS.contains(&name.as_str());
+
+        // Capture every attribute value of every element, in document order,
+        // for the indexing path's `captureAttr` + `fmap.<element>` (#259).
+        // Collected unconditionally and filtered at request time: a `div`'s
+        // attributes matter only when some `fmap.div=` renames them, which the
+        // extractor cannot know. `extractOnly` requests pay only the build
+        // cost and drop the Vec. The values are charged against the output
+        // budget so a document with millions of attributes cannot exhaust
+        // memory, exactly as the text output is.
+        for attr in &tag.attrs {
+            let value = attr.value.to_string();
+            self.budget
+                .charge_output(value.chars().count(), value.len())?;
+            self.captured_attrs.push((name.clone(), value));
+        }
 
         if self.skip_depth > 0 {
             if !void {
@@ -1247,6 +1288,10 @@ pub struct ExtractedDocument {
     pub author: Option<String>,
     pub body_xhtml: String,
     pub body_text: String,
+    /// Captured attribute values per element name, in document order — see
+    /// `Extracted::captured_attrs`. Populated only by the HTML extractor;
+    /// the indexing path (#259) is the only consumer.
+    pub captured_attrs: Vec<(String, String)>,
 }
 
 /// `detect` -> `resolve_charset` -> `decode_text` -> `dispatch` -> extract.
@@ -1279,7 +1324,43 @@ pub fn extract_document(
         author: extracted.metadata.author,
         body_xhtml: extracted.body_xhtml,
         body_text: extracted.body_text,
+        captured_attrs: extracted.captured_attrs,
     })
+}
+
+impl ExtractedDocument {
+    /// The text/metadata source fields Solr Cell would derive from this
+    /// extraction *before* `lowernames`/`fmap`/`uprefix`/`literal.*` are
+    /// applied (issue #259): `content` (the extracted full text, under the
+    /// field name Solr's handler uses for it — `fmap.content=<field>` lands
+    /// it in a real schema field), and `title`/`author` when the extractor
+    /// recovered them.
+    ///
+    /// Captured element attributes (`captureAttr`) are deliberately NOT
+    /// included here: that family is gated by the `captureAttr` param, which
+    /// is a request-time decision the schema-free extractor cannot make, so
+    /// the pipeline groups `captured_attrs` itself and only when `captureAttr`
+    /// resolved true.
+    ///
+    /// ponytail: Wayfinder does not emit the long Tika metadata list
+    /// (`resourceName`, `Content-Type`, `stream_*`, `X-Parsed-By`, …) as
+    /// indexable source fields. They are response-envelope metadata in the
+    /// `extractOnly` path and would all be `uprefix`-dropped here anyway; the
+    /// captured select (`extract_html_select.json`) returns only `id`/
+    /// `body`/`links`, so emitting them changes nothing observable. Trigger:
+    /// a captured index whose `fmap.<tika-meta-key>` lands a value in a real
+    /// schema field.
+    pub fn solr_cell_source_fields(&self) -> Vec<(String, Vec<String>)> {
+        let mut fields: Vec<(String, Vec<String>)> = Vec::new();
+        fields.push(("content".to_string(), vec![self.body_text.clone()]));
+        if let Some(title) = self.title.clone() {
+            fields.push(("title".to_string(), vec![title]));
+        }
+        if let Some(author) = self.author.clone() {
+            fields.push(("author".to_string(), vec![author]));
+        }
+        fields
+    }
 }
 
 /// Everything outside the document itself that the response echoes back:
@@ -1850,16 +1931,24 @@ impl Budget {
     /// appended when either check fails, so the accumulated output never
     /// exceeds either limit even transiently.
     pub fn push_str(&mut self, s: &str) -> Result<(), ExtractError> {
-        let added_scalars = s.chars().count();
-        let added_bytes = s.len();
-        if self.output_scalars + added_scalars > self.limits.max_output_scalars {
+        self.charge_output(s.chars().count(), s.len())?;
+        self.output.push_str(s);
+        Ok(())
+    }
+
+    /// Charges `scalars`/`bytes` against the same output ceilings `push_str`
+    /// enforces, **without** appending to the accumulated text. The indexing
+    /// path's captured attribute values (#259) are a parallel output the
+    /// extractOnly text never sees, but they are still extracted content a
+    /// hostile upload could grow without bound, so they share the budget.
+    fn charge_output(&mut self, scalars: usize, bytes: usize) -> Result<(), ExtractError> {
+        if self.output_scalars + scalars > self.limits.max_output_scalars {
             return Err(ExtractError::OutputTooLarge(OutputLimitKind::Scalars));
         }
-        if self.output.len() + added_bytes > self.limits.max_output_bytes {
+        if self.output.len() + bytes > self.limits.max_output_bytes {
             return Err(ExtractError::OutputTooLarge(OutputLimitKind::Bytes));
         }
-        self.output.push_str(s);
-        self.output_scalars += added_scalars;
+        self.output_scalars += scalars;
         Ok(())
     }
 
