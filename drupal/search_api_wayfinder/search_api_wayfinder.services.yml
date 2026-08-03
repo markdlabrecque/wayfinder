@@ -1,0 +1,45 @@
+# Dependency wiring for search_api_wayfinder.
+#
+# Auto-discovered by Drupal (search_api_wayfinder.services.yml lives next to
+# the .info.yml). The unit tests construct these classes directly, so this file
+# only matters on a real site. The cache, the file->item map, and the
+# invalidator each get a keyvalue collection; the queue worker is a plugin
+# (src/Plugin/QueueWorker/ExtractorQueue.php) auto-discovered by its attribute,
+# and the 'wayfinder_extraction' queue is created on demand by core's queue
+# factory.
+services:
+  # Extraction cache: one keyvalue collection, content-hash keyed. See
+  # \Drupal\search_api_wayfinder\Cache\KeyValueExtractionCache.
+  search_api_wayfinder.extraction_cache:
+    class: Drupal\search_api_wayfinder\Cache\KeyValueExtractionCache
+    arguments: ['@search_api_wayfinder.kv.extraction']
+
+  # File->item reference map for invalidation (#263) and linked files (#265).
+  search_api_wayfinder.file_reference_map:
+    class: Drupal\search_api_wayfinder\FileReferenceMap
+    arguments: ['@search_api_wayfinder.kv.file_map']
+
+  # Marks referencing items for reindex on file change/delete. The
+  # search_api_wayfinder.module hooks forward to this.
+  search_api_wayfinder.extraction_invalidator:
+    class: Drupal\search_api_wayfinder\ExtractionInvalidator
+    arguments:
+      - '@search_api_wayfinder.file_reference_map'
+      - '@entity_type.manager'
+      - '@logger.channel.search_api_wayfinder'
+
+  logger.channel.search_api_wayfinder:
+    parent: logger.channel_base
+    arguments: ['search_api_wayfinder']
+
+  # Private keyvalue stores, resolved via the keyvalue factory.
+  search_api_wayfinder.kv.extraction:
+    class: Drupal\Core\KeyValueStore\KeyValueStoreInterface
+    factory: ['@keyvalue', 'get']
+    arguments: ['search_api_wayfinder.extraction']
+    public: false
+  search_api_wayfinder.kv.file_map:
+    class: Drupal\Core\KeyValueStore\KeyValueStoreInterface
+    factory: ['@keyvalue', 'get']
+    arguments: ['search_api_wayfinder.file_map']
+    public: false
