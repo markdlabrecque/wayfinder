@@ -4457,7 +4457,7 @@ mod tests {
     /// `extract_corrupt_pdf.json`. No new fixture lands on a budget-violation
     /// status (413/503/415/400), so the mapping below is unchanged. Recorded
     /// in `docs/reports/2026-08-03-pdf-extraction-corpus.md`.
-    const CAPTURED_EXTRACT_FIXTURES: [&str; 39] = [
+    const CAPTURED_EXTRACT_FIXTURES: [&str; 42] = [
         "extract_broken_docx.json",
         "extract_broken_odp.json",
         "extract_broken_ods.json",
@@ -4488,6 +4488,9 @@ mod tests {
         "extract_pdf_metadata_conflict.json",
         "extract_pdf_multicolumn.json",
         "extract_pdf_multipage.json",
+        "extract_plain_text_json_nl_arrarr.json",
+        "extract_plain_text_json_nl_arrmap.json",
+        "extract_plain_text_json_nl_map.json",
         "extract_plain_text_text.json",
         "extract_plain_text_xml.json",
         "extract_pptx_text.json",

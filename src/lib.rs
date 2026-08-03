@@ -2661,14 +2661,21 @@ async fn update_extract(
     };
     // Solr renders `file_metadata` as a flat NamedList: `[key, [values], ...]`,
     // which is what every captured extract shows and what `json.nl=flat`
-    // (the default) means for this writer.
-    let mut metadata: Vec<Value> = Vec::new();
-    for (key, values) in render.file_metadata() {
-        metadata.push(Value::String(key));
-        metadata.push(Value::Array(
-            values.into_iter().map(Value::String).collect(),
-        ));
-    }
+    // (the default) means for this writer. Issue #274 made the handler honour
+    // `json.nl` rather than allowlisting it and ignoring it: `file_metadata`
+    // is a plain (not `SimpleOrderedMap`) NamedList, so it reshapes per the
+    // param exactly as a facet bucket list does (finding 128).
+    let entries: Vec<(String, Value)> = render
+        .file_metadata()
+        .into_iter()
+        .map(|(key, values)| {
+            (
+                key,
+                Value::Array(values.into_iter().map(Value::String).collect()),
+            )
+        })
+        .collect();
+    let metadata = facet::render_named_list(&entries, facet::JsonNl::from_params(&params));
 
     let mut body = Map::new();
     if !params.omit_header() {
@@ -2678,7 +2685,7 @@ async fn update_extract(
         );
     }
     body.insert("file".to_string(), Value::String(file));
-    body.insert("file_metadata".to_string(), Value::Array(metadata));
+    body.insert("file_metadata".to_string(), metadata);
     Ok(axum::Json(Value::Object(body)).into_response())
 }
 

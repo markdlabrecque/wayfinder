@@ -2245,3 +2245,24 @@ Search-API-shaped `ExtractingRequestHandler` as the #171 block. Fixtures:
      out. So the RTF malformed fixture is the `\bin` form, not a structural
      break; Wayfinder's `rtf-parser` reaching the same input is expected to
      error into the `Parse` arm (500) the same way.
+
+128. **`json.nl` reshapes the extractOnly `file_metadata` NamedList but leaves
+     `responseHeader` and `file` untouched.** Captured for #274 against
+     `solr:9.10.1`: with the default (`flat`/omitted), `file_metadata` is the
+     alternating array `["key",[values],...]` already pinned by #171/#258;
+     `json.nl=map` makes it an object `{"key":[values],...}` (key order
+     preserved), `json.nl=arrarr` an array of two-element arrays
+     `[["key",[values]],...]`, and `json.nl=arrmap` an array of one-entry
+     objects `[{"key":[values]},...]`. `responseHeader` is a `SimpleOrderedMap`
+     and so stays an object in every shape, and `file` is a String value (not a
+     nested NamedList), so neither moves under any `json.nl` — confirmed
+     byte-identical across all four values. So `json.nl` on `/update/extract` is
+     *not* accepted-and-ignored (the #258 follow-up's worry): it is a real
+     feature the handler must implement, identical in model to the facet routes'
+     `JsonNl`. Fixtures: `extract_plain_text_json_nl_{map,arrarr,arrmap}.json`
+     (the `flat` baseline is `extract_plain_text_xml.json`). Side note: an
+     *invalid* value (`json.nl=garbage`) makes Solr's JSONWriter emit truncated,
+     invalid JSON (`"file_metadata"` with no value) while still answering HTTP
+     200 — actively-worse behaviour Wayfinder does not reproduce; unknown values
+     fall back to `flat` instead (PRD section 2 divergence, not captured as a
+     fixture because the malformed body is unparseable by the harness).

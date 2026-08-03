@@ -737,7 +737,44 @@ fn strip_shape_rect(file: &str) -> (String, bool) {
 
 /// Removes the `X-Parsed-By` key (and its value array) from a `file_metadata`
 /// alternating-array, reporting whether it was present.
-fn strip_x_parsed_by_metadata_key(arr: &[Value]) -> (Vec<Value>, bool) {
+/// Removes the `X-Parsed-By` entry from a `file_metadata` value rendered in
+/// any of Solr's `json.nl` shapes (flat / map / arrarr / arrmap), returning
+/// the rewritten value and whether the entry was present. `X-Parsed-By` names
+/// Java class names Wayfinder has no honest equivalent for (PRD divergence
+/// 10); it is stripped from both sides before the differential compare so the
+/// remaining keys compare exactly regardless of the rendered shape — issue
+/// #274 made the extract handler honour `json.nl`, so `file_metadata` is no
+/// longer guaranteed to be the flat array the prior normaliser assumed.
+fn strip_x_parsed_by_metadata(value: Value) -> (Value, bool) {
+    match value {
+        // `json.nl=map`: `{"key": [values], ...}`.
+        Value::Object(mut map) => {
+            let removed = map.remove("X-Parsed-By").is_some();
+            (Value::Object(map), removed)
+        }
+        Value::Array(arr) => {
+            // Distinguish the three array shapes by the first element:
+            //   flat   -> ["key", [values], ...]   (first element is a String)
+            //   arrarr -> [["key", [values]], ...] (first element is an Array)
+            //   arrmap -> [{"key": [values]}, ...] (first element is an Object)
+            match arr.first() {
+                Some(Value::String(_)) => strip_x_parsed_by_metadata_flat(arr),
+                Some(Value::Array(_)) => strip_x_parsed_by_metadata_arrarr(arr),
+                Some(Value::Object(_)) => strip_x_parsed_by_metadata_arrmap(arr),
+                // An empty array, or a leading element of an unexpected type,
+                // carries no X-Parsed-By entry to strip; return it untouched
+                // so a genuine shape difference still surfaces in the diff.
+                _ => (Value::Array(arr), false),
+            }
+        }
+        // Not a recognised file_metadata shape (e.g. an error body without
+        // one); leave it untouched.
+        other => (other, false),
+    }
+}
+
+/// `flat`: `["key", [values], ...]` — drop the `X-Parsed-By` key/value pair.
+fn strip_x_parsed_by_metadata_flat(arr: Vec<Value>) -> (Value, bool) {
     let mut out = Vec::with_capacity(arr.len());
     let mut removed = false;
     let mut i = 0;
@@ -757,7 +794,50 @@ fn strip_x_parsed_by_metadata_key(arr: &[Value]) -> (Vec<Value>, bool) {
     if i < arr.len() {
         out.push(arr[i].clone());
     }
-    (out, removed)
+    (Value::Array(out), removed)
+}
+
+/// `arrarr`: `[["key", [values]], ...]` — drop any pair whose key is
+/// `X-Parsed-By`.
+fn strip_x_parsed_by_metadata_arrarr(arr: Vec<Value>) -> (Value, bool) {
+    let mut removed = false;
+    let out: Vec<Value> = arr
+        .into_iter()
+        .filter(|pair| {
+            let is_xpb = pair
+                .as_array()
+                .and_then(|p| p.first())
+                .and_then(|k| k.as_str())
+                == Some("X-Parsed-By");
+            if is_xpb {
+                removed = true;
+            }
+            !is_xpb
+        })
+        .collect();
+    (Value::Array(out), removed)
+}
+
+/// `arrmap`: `[{"key": [values]}, ...]` — drop any one-entry object keyed
+/// `X-Parsed-By`. Only a genuine one-entry `{X-Parsed-By: [...]}` element is
+/// dropped; a multi-key element is a shape violation best left for the diff
+/// to surface rather than partially rewritten here.
+fn strip_x_parsed_by_metadata_arrmap(arr: Vec<Value>) -> (Value, bool) {
+    let mut removed = false;
+    let out: Vec<Value> = arr
+        .into_iter()
+        .filter(|obj| {
+            let is_xpb = obj
+                .as_object()
+                .map(|m| m.len() == 1 && m.contains_key("X-Parsed-By"))
+                .unwrap_or(false);
+            if is_xpb {
+                removed = true;
+            }
+            !is_xpb
+        })
+        .collect();
+    (Value::Array(out), removed)
 }
 
 /// The ratified `/update/extract` divergences. Two scopes, each handling a
@@ -842,11 +922,11 @@ pub fn normalize_extract(mut value: Value) -> Normalized {
             }
         }
 
-        if let Some(arr) = value.get("file_metadata").and_then(|m| m.as_array()) {
-            let (stripped, removed) = strip_x_parsed_by_metadata_key(arr);
+        if let Some(fm) = value.get("file_metadata").cloned() {
+            let (stripped, removed) = strip_x_parsed_by_metadata(fm);
             if removed {
                 touched.push("file_metadata (X-Parsed-By)".to_string());
-                value["file_metadata"] = Value::Array(stripped);
+                value["file_metadata"] = stripped;
             }
         }
     }
@@ -973,7 +1053,7 @@ fn keep_envelope_metadata_keys(arr: &[Value]) -> (Vec<Value>, usize) {
         i += 2;
     }
     // Preserve a malformed odd trailing element rather than silently dropping
-    // it, mirroring `strip_x_parsed_by_metadata_key`.
+    // it, mirroring `strip_x_parsed_by_metadata_flat`.
     if i < arr.len() {
         out.push(arr[i].clone());
     }
