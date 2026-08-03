@@ -66,6 +66,10 @@ use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE, WINDOWS_1252};
+// `euclid` is named directly (not via pdf-extract's private `use euclid::*`)
+// so the `Transform` values the PDF device builds are the same type the
+// `OutputDev` trait uses — see the `pdf-extract`/`euclid` Cargo notes.
+use euclid::{Transform2D, vec2};
 use html5ever::TokenizerResult;
 use html5ever::buffer_queue::BufferQueue;
 use html5ever::tendril::StrTendril;
@@ -458,14 +462,11 @@ pub fn dispatch(content_type: ContentType) -> Option<&'static dyn Extractor> {
         ContentType::Xlsx => Some(&XLSX_EXTRACTOR),
         ContentType::Ods => Some(&ODS_EXTRACTOR),
         ContentType::Rtf => Some(&RTF_EXTRACTOR),
+        ContentType::Pdf => Some(&PDF_EXTRACTOR),
         // Exhaustive on purpose rather than a `_ => None` arm: when a later
         // change adds the remaining extractors, this match is the place the
         // compiler points at.
-        ContentType::Xml
-        | ContentType::Zip
-        | ContentType::Pdf
-        | ContentType::LegacyOle
-        | ContentType::Unknown => None,
+        ContentType::Xml | ContentType::Zip | ContentType::LegacyOle | ContentType::Unknown => None,
     }
 }
 
@@ -2342,6 +2343,7 @@ fn render_cell(d: &calamine::Data) -> String {
 // --- RTF (rtf-parser lexer + own walk) --------------------------------
 
 static RTF_EXTRACTOR: RtfExtractor = RtfExtractor;
+static PDF_EXTRACTOR: PdfExtractor = PdfExtractor;
 
 /// RTF via `rtf-parser`'s lexer, driven by a Wayfinder-owned walk that tracks
 /// `\par` paragraph breaks and bold runs. The high-level `RtfDocument` API
@@ -2554,6 +2556,333 @@ impl<'a> RtfWalker<'a> {
     }
 }
 
+// --- PDF ---------------------------------------------------------------
+//
+// Issue #294, over the #261 GO decision. `pdf-extract` 0.12 (over `lopdf`
+// 0.42) is the parser; the cancellation contract it was chosen for is
+// implemented here as a custom `OutputDev` that charges the budget and checks
+// the deadline at the two seams the report proved cooperate: `begin_page`
+// (between pages) and `output_character` (within a page). The opaque phase
+// that has no checkpoint is `Document::load_mem` — bounded by `max_body_bytes`
+// (the whole document is resident by then anyway) and a structural parse, not
+// a recursive interpreter; see the #261 report's residual-risk note.
+//
+// `output_doc` walks the page tree once and drives the device page by page,
+// so the per-page work is O(pages), not O(pages^2) the naive
+// call-`output_doc_page`-per-page loop would be (each call re-walks the page
+// tree). The `begin_page` callback is the between-page checkpoint the
+// report's per-page loop performed explicitly; the cancellation contract is
+// identical.
+
+/// How many `output_character` calls the PDF device lets pass between two
+/// deadline checks. Mirrors `HTML_DEADLINE_CHECK_INTERVAL`: small enough that a
+/// runaway content stream is stopped promptly, large enough that the check is
+/// not the dominant cost. `output_character` fires once per glyph, so this is
+/// per-glyph granularity.
+const PDF_DEADLINE_CHECK_INTERVAL: u64 = 256;
+
+/// A sentinel `OutputError` the device returns to unwind `output_doc` once a
+/// budget guard has tripped. The real failure is preserved in `aborted`; this
+/// only exists because the `OutputDev` trait's signature returns
+/// `OutputError`, not `ExtractError`, and a budget violation is not any of
+/// pdf-extract's three error variants. Discarded whenever `aborted` is `Some`.
+fn pdf_abort_sentinel() -> pdf_extract::OutputError {
+    pdf_extract::OutputError::PdfError(pdf_extract::Error::PageNumberNotFound(0))
+}
+
+/// The cooperative-cancellation device: a `pdf_extract::OutputDev` that mirrors
+/// `PlainTextOutput`'s coordinate-based spacing (so the extracted words and
+/// reading order match what the #261 quality evaluation measured) while
+/// charging every emitted character against the [`Budget`] and checking the
+/// deadline between pages and within each page.
+///
+/// Text accumulates into `text` (the `body_text`) and, per page, `page_buf`
+/// (the XHTML `<p>` source). The budget's own output buffer is charged in lock
+/// step via `Budget::push_str`, so `finish_office`'s `text` slice and `text`
+/// agree exactly.
+struct PdfSink<'a> {
+    budget: &'a Budget,
+    text: String,
+    xhtml: String,
+    page_buf: String,
+    /// The first budget guard to trip; preserved verbatim so the extractor
+    /// can return the precise `ExtractError` (deadline vs page-count vs
+    /// output limit) the trait's `OutputError` return type would otherwise
+    /// erase. `get_or_insert` keeps the *first* failure.
+    aborted: Option<ExtractError>,
+    char_since_check: u64,
+    flip_ctm: pdf_extract::Transform,
+    last_end: f64,
+    last_y: f64,
+    first_char: bool,
+}
+
+impl<'a> PdfSink<'a> {
+    /// Charges `s` against the budget and mirrors it into `text` and the
+    /// current page buffer. The page buffer is trimmed before it becomes an
+    /// XHTML `<p>`, so leading page-break whitespace never reaches the body.
+    fn emit(&mut self, s: &str) -> Result<(), pdf_extract::OutputError> {
+        if let Err(e) = self.budget.push_str(s) {
+            self.aborted = Some(e);
+            return Err(pdf_abort_sentinel());
+        }
+        self.text.push_str(s);
+        self.page_buf.push_str(s);
+        Ok(())
+    }
+
+    /// Records a budget failure and returns the sentinel, the one shape every
+    /// guard site in the device shares.
+    fn abort(&mut self, err: ExtractError) -> pdf_extract::OutputError {
+        if self.aborted.is_none() {
+            self.aborted = Some(err);
+        }
+        pdf_abort_sentinel()
+    }
+}
+
+impl<'a> pdf_extract::OutputDev for PdfSink<'a> {
+    fn begin_page(
+        &mut self,
+        _page_num: u32,
+        media_box: &pdf_extract::MediaBox,
+        _: Option<(f64, f64, f64, f64)>,
+    ) -> Result<(), pdf_extract::OutputError> {
+        // The between-page cooperative checkpoint the #261 cancel-proof
+        // demonstrated: check the deadline, then the page-count guard, before
+        // any of this page's content-stream work runs.
+        if let Err(e) = self.budget.check_deadline() {
+            return Err(self.abort(e));
+        }
+        if let Err(e) = self.budget.count_pdf_page() {
+            return Err(self.abort(e));
+        }
+        // `pdf-extract` emits no separator of its own between pages, so without
+        // one a page's last word and the next page's first would merge
+        // (`...document.This is...`). Insert a newline on the boundary (only
+        // when the body does not already end in one) so the text renderer and
+        // the whitespace-insensitive differential comparison both see two
+        // distinct words. This is text-only: the XHTML separates pages with
+        // `<p>` elements.
+        if !self.text.is_empty() && !self.text.ends_with('\n') {
+            if let Err(e) = self.budget.push_str("\n") {
+                return Err(self.abort(e));
+            }
+            self.text.push('\n');
+        }
+        self.flip_ctm = Transform2D::<f64, pdf_extract::Space, pdf_extract::Space>::row_major(
+            1.,
+            0.,
+            0.,
+            -1.,
+            0.,
+            media_box.ury - media_box.lly,
+        );
+        // Reset the within-page coordinate state so a new page starts cleanly;
+        // the cross-page carry PlainTextOutput keeps is unnecessary here because
+        // pages are separated explicitly above.
+        self.last_end = 100_000.;
+        self.last_y = 0.;
+        self.first_char = false;
+        self.page_buf.clear();
+        Ok(())
+    }
+
+    fn end_page(&mut self) -> Result<(), pdf_extract::OutputError> {
+        let page = std::mem::take(&mut self.page_buf);
+        // Trim the page-break whitespace the coordinate logic emits at the top
+        // of a page; only non-empty pages become a `<p>`.
+        let page = page.trim();
+        if page.is_empty() {
+            return Ok(());
+        }
+        if push_bounded(&mut self.xhtml, "<p>", self.budget).is_err() {
+            return Err(self.abort(ExtractError::OutputTooLarge(OutputLimitKind::Bytes)));
+        }
+        if push_bounded(&mut self.xhtml, &escape_xml_text(page), self.budget).is_err() {
+            return Err(self.abort(ExtractError::OutputTooLarge(OutputLimitKind::Bytes)));
+        }
+        if push_bounded(&mut self.xhtml, "</p>\n", self.budget).is_err() {
+            return Err(self.abort(ExtractError::OutputTooLarge(OutputLimitKind::Bytes)));
+        }
+        Ok(())
+    }
+
+    fn output_character(
+        &mut self,
+        trm: &pdf_extract::Transform,
+        width: f64,
+        _spacing: f64,
+        font_size: f64,
+        char: &str,
+    ) -> Result<(), pdf_extract::OutputError> {
+        // Within-page cooperative checkpoint: check the deadline every N
+        // glyphs, the cadence the #261 cancel-proof showed aborting part-way
+        // through a page.
+        self.char_since_check = self.char_since_check.saturating_add(1);
+        if self.char_since_check >= PDF_DEADLINE_CHECK_INTERVAL {
+            self.char_since_check = 0;
+            if let Err(e) = self.budget.check_deadline() {
+                return Err(self.abort(e));
+            }
+        }
+        // The coordinate logic is `PlainTextOutput`'s verbatim: it reconstructs
+        // word and line breaks from glyph positions, which is what makes
+        // subset-font/ToUnicode/ligature text come back as the right words.
+        let position = trm.post_transform(&self.flip_ctm);
+        let transformed_font_size_vec = trm.transform_vector(vec2(font_size, font_size));
+        let transformed_font_size =
+            (transformed_font_size_vec.x * transformed_font_size_vec.y).sqrt();
+        let (x, y) = (position.m31, position.m32);
+        if self.first_char {
+            if (y - self.last_y).abs() > transformed_font_size * 1.5 {
+                self.emit("\n")?;
+            }
+            if x < self.last_end && (y - self.last_y).abs() > transformed_font_size * 0.5 {
+                self.emit("\n")?;
+            }
+            if x > self.last_end + transformed_font_size * 0.1 {
+                self.emit(" ")?;
+            }
+        }
+        self.emit(char)?;
+        self.first_char = false;
+        self.last_y = y;
+        self.last_end = x + width * transformed_font_size;
+        Ok(())
+    }
+
+    fn begin_word(&mut self) -> Result<(), pdf_extract::OutputError> {
+        self.first_char = true;
+        Ok(())
+    }
+
+    fn end_word(&mut self) -> Result<(), pdf_extract::OutputError> {
+        Ok(())
+    }
+
+    fn end_line(&mut self) -> Result<(), pdf_extract::OutputError> {
+        Ok(())
+    }
+}
+
+/// Decodes a PDF text string (Info-dictionary value) to Unicode. PDF text
+/// strings are UTF-16BE when prefixed with the BOM `FE FF`, and PDFDocEncoding
+/// otherwise — and PDFDocEncoding is Latin-1 for every byte the born-digital
+/// corpus exercises (ASCII titles/authors), so the lossy Latin-1 fallback is
+/// the honest decode for the metadata promise phase 0 made.
+fn decode_pdf_text_string(bytes: &[u8]) -> String {
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        let u16s: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&u16s)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+/// Reads `/Title` or `/Author` from the document `/Info` dictionary. Returns
+/// `None` when there is no Info dict, no such entry, or the entry is not a
+/// string. **Info-only, no XMP** — the #261 Q3 decision: captured Tika
+/// resolved every title/author field to the Info-dict value on conflict, and
+/// `pdf-extract` has no XMP reader, so the two are aligned for this case. The
+/// risk is one-directional (a future Tika/PDFBox change making XMP override
+/// Info would diverge Wayfinder); the differential harness guards it.
+fn pdf_info_string(doc: &pdf_extract::Document, key: &[u8]) -> Option<String> {
+    let info_ref = doc
+        .trailer
+        .get(b"Info")
+        .and_then(|o| o.as_reference())
+        .ok()?;
+    let dict = doc.get_dictionary(info_ref).ok()?;
+    match dict.get(key).ok()? {
+        pdf_extract::Object::String(bytes, _) => Some(decode_pdf_text_string(bytes)),
+        _ => None,
+    }
+}
+
+/// Maps a structural-parse failure (`Document::load_mem`) onto `Parse` -> 500.
+/// This is the arm `broken.pdf` reaches (valid `%PDF-` header, no xref), which
+/// is why the `extract_corrupt_pdf` status divergence retires once this
+/// extractor lands.
+fn pdf_load_error(e: pdf_extract::Error) -> ExtractError {
+    ExtractError::Parse(format!("loading pdf: {e}"))
+}
+
+/// Maps an empty-password decrypt failure onto `Parse` -> 500, matching
+/// captured Tika/PDFBox (`InvalidPasswordException`). The wire sends no
+/// password; an encrypted PDF the empty password cannot open is a parse error.
+fn pdf_decrypt_error(e: pdf_extract::Error) -> ExtractError {
+    ExtractError::Parse(format!("decrypting pdf: {e}"))
+}
+
+/// Maps an `output_doc` failure that was *not* a budget abort (those are
+/// preserved in `aborted` and returned first) onto `Parse` -> 500.
+fn pdf_output_error(e: pdf_extract::OutputError) -> ExtractError {
+    ExtractError::Parse(format!("extracting pdf: {e}"))
+}
+
+pub struct PdfExtractor;
+
+impl Extractor for PdfExtractor {
+    fn extract(
+        &self,
+        input: &ExtractInput<'_>,
+        budget: &Budget,
+    ) -> Result<Extracted, ExtractError> {
+        let start = budget.output_text().len();
+        // One structural parse. This is the opaque, un-checkpointed phase the
+        // #261 report named as the residual risk; it is bounded by
+        // `max_body_bytes` (the whole document is resident by here).
+        let mut doc = pdf_extract::Document::load_mem(input.bytes).map_err(pdf_load_error)?;
+        // The wire sends no password. Attempt the empty-password decrypt that
+        // pdf-extract's own `maybe_decrypt` does; a PDF the empty password
+        // cannot open surfaces as a `Parse` error rather than being fed
+        // encrypted bytes into the content-stream interpreter.
+        if doc.is_encrypted() {
+            doc.decrypt("").map_err(pdf_decrypt_error)?;
+        }
+        // Metadata from the Info dictionary only (see `pdf_info_string`).
+        let title = pdf_info_string(&doc, b"Title");
+        let author = pdf_info_string(&doc, b"Author");
+
+        let mut sink = PdfSink {
+            budget,
+            text: String::new(),
+            xhtml: String::new(),
+            page_buf: String::new(),
+            aborted: None,
+            char_since_check: 0,
+            flip_ctm: Transform2D::<f64, pdf_extract::Space, pdf_extract::Space>::identity(),
+            last_end: 100_000.,
+            last_y: 0.,
+            first_char: false,
+        };
+        let out_result = pdf_extract::output_doc(&doc, &mut sink);
+        // A budget abort unwound `output_doc` via the sentinel; the real
+        // `ExtractError` was preserved and takes precedence over both the
+        // sentinel `OutputError` and any genuine pdf error that followed it.
+        // Checked before `out_result` is mapped so a cooperative stop is never
+        // misreported as a parser failure.
+        if let Some(err) = sink.aborted.take() {
+            return Err(err);
+        }
+        out_result.map_err(pdf_output_error)?;
+        Ok(finish_office(
+            ContentType::Pdf,
+            input,
+            budget,
+            start,
+            sink.xhtml,
+            sink.text,
+            title,
+            author,
+        ))
+    }
+}
+
 /// Assembles the common `Extracted` for an office extractor: the budgeted
 /// text slice, the format's content type, the narrow metadata, and the two
 /// body renderings the caller built.
@@ -2730,6 +3059,7 @@ fn is_binary_content_type(content_type: ContentType) -> bool {
             | ContentType::Odp
             | ContentType::Ods
             | ContentType::Rtf
+            | ContentType::Pdf
     )
 }
 
@@ -3026,8 +3356,9 @@ pub struct ExtractLimits {
     /// exhaustion vector.
     pub max_rtf_group_depth: usize,
     /// 5000 PDF pages. Above essentially every real document and below the
-    /// page counts synthesised PDFs use to make per-page work explode. PDF
-    /// is phase 3; this counter exists now so that issue inherits it.
+    /// page counts synthesised PDFs use to make per-page work explode. Charged
+    /// by `PdfExtractor`'s `begin_page` checkpoint (issue #294); the counter
+    /// shipped in phase 0 (#257) ahead of the parser so this issue inherited it.
     pub max_pdf_pages: usize,
 }
 
@@ -4350,11 +4681,11 @@ impl From<ExtractError> for crate::error::WfError {
             // and which real Solr answers 200 with extracted content. That
             // population is the one this status has to be right for, and
             // 500ing it would contradict the client-caused/4xx rule stated
-            // above. Wayfinder happens to reach the corrupt-PDF *fixture*
-            // through this arm only because it has no PDF parser to fail
-            // inside; that is a status divergence on one row, recorded in
-            // `DIVERGENT_STATUS_MULTIPART` in `tests/differential.rs` and in
-            // the PRD, not evidence for this mapping.
+            // above. (Before issue #294 landed the PDF extractor, `broken.pdf`
+            // reached this arm because no parser existed to fail inside, and
+            // that one row was a recorded 415-vs-500 status divergence; the
+            // extractor has since retired it — `broken.pdf` now fails inside
+            // `lopdf` and answers 500, matching the capture.)
             ExtractError::UnsupportedFormat { .. } => (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "extraction-unsupported-format",
@@ -4457,6 +4788,19 @@ mod tests {
     /// `extract_corrupt_pdf.json`. No new fixture lands on a budget-violation
     /// status (413/503/415/400), so the mapping below is unchanged. Recorded
     /// in `docs/reports/2026-08-03-pdf-extraction-corpus.md`.
+    ///
+    /// Recheck #3 (issue #294, the PDF extractor landing): the eight #261 PDF
+    /// fixtures are now wired into `manifest-multipart.tsv` and exercised by
+    /// the differential runner. `broken.pdf` (`extract_corrupt_pdf`) now
+    /// reaches a parse failure inside `lopdf` and answers 500, matching the
+    /// capture — the former 415 status divergence is retired and deleted from
+    /// `DIVERGENT_STATUS_MULTIPART`. `extract_pdf_encrypted` answers 500
+    /// (`Parse`, the empty-password decrypt fails) matching the capture.
+    /// `extract_pdf_malformed_objects` answers **200** — `pdf-extract`
+    /// swallows the broken content stream as empty where Tika throws 500 — a
+    /// *new* status divergence recorded in `DIVERGENT_STATUS_MULTIPART`. The
+    /// six 200s match after `normalize_extract`'s PDF branch. Still no fixture
+    /// lands on a budget-violation status, so the mapping is unchanged.
     const CAPTURED_EXTRACT_FIXTURES: [&str; 42] = [
         "extract_broken_docx.json",
         "extract_broken_odp.json",

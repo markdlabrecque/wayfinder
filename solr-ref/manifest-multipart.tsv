@@ -44,6 +44,24 @@ extract_latin1_text	200	content/update/extract?extractOnly=true&extractFormat=te
 extract_utf8_bom_text	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=sample-utf8-bom.txt&wt=json	file	sample-utf8-bom.txt
 extract_declared_charset_text	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=sample-latin1.txt&wt=json	file	sample-latin1.txt	text/plain; charset=ISO-8859-1
 extract_corrupt_pdf	500	content/update/extract?extractOnly=true&extractFormat=text&resource.name=broken.pdf&wt=json	file	broken.pdf
+# --- issue #294: PDF extractOnly fixtures (extractFormat=text) ------------
+# Captured against solr:9.10.1 (see solr-ref/capture.sh's #261 block). The
+# eight born-digital corpus files from #261 (solr-ref/extract-inputs/pdf-*.pdf).
+# Six succeed (200), two error (500): pdf-encrypted (no password ->
+# InvalidPasswordException, Wayfinder's decrypt also fails -> 500, a match)
+# and pdf-malformed-objects (broken Flate stream: Tika 500, pdf-extract
+# swallows empty -> 200, a recorded status divergence; see
+# DIVERGENT_STATUS_MULTIPART). The bodies reconcile through
+# normalize_extract's PDF branch (whitespace-insensitive token compare +
+# six-envelope-key metadata filter); see ACCEPTED_DIVERGENCES_MULTIPART.
+extract_pdf_embedded_font	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=pdf-embedded-font.pdf&wt=json	file	pdf-embedded-font.pdf	application/pdf
+extract_pdf_ligatures	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=pdf-ligatures.pdf&wt=json	file	pdf-ligatures.pdf	application/pdf
+extract_pdf_multicolumn	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=pdf-multicolumn.pdf&wt=json	file	pdf-multicolumn.pdf	application/pdf
+extract_pdf_multipage	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=pdf-multipage.pdf&wt=json	file	pdf-multipage.pdf	application/pdf
+extract_pdf_metadata_conflict	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=pdf-metadata-conflict.pdf&wt=json	file	pdf-metadata-conflict.pdf	application/pdf
+extract_pdf_image_only	200	content/update/extract?extractOnly=true&extractFormat=text&resource.name=pdf-image-only.pdf&wt=json	file	pdf-image-only.pdf	application/pdf
+extract_pdf_encrypted	500	content/update/extract?extractOnly=true&extractFormat=text&resource.name=pdf-encrypted.pdf&wt=json	file	pdf-encrypted.pdf	application/pdf
+extract_pdf_malformed_objects	500	content/update/extract?extractOnly=true&extractFormat=text&resource.name=pdf-malformed-objects.pdf&wt=json	file	pdf-malformed-objects.pdf	application/pdf
 # --- issue #260: office/ODF/RTF extractOnly fixtures ----------------------
 # Captured against solr:9.10.1 (see solr-ref/capture.sh's #260 block).
 # Tiny documents from solr-ref/extract-inputs/_gen_office.py. Each format has

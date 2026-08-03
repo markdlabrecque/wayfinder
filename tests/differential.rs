@@ -210,6 +210,40 @@ const ACCEPTED_DIVERGENCES_MULTIPART: &[(&str, &str)] = &[
          file_metadata (json.nl=arrmap renders file_metadata as an array of \
          one-entry {key: values} objects)",
     ),
+    //
+    // Issue #294 — PDF extractOnly fixtures (extractFormat=text, the
+    // search_api_solr wire shape). Two ratified divergences per row,
+    // reconciled by `normalize_extract`'s PDF branch: (1) the text body's
+    // whitespace differs because pdf-extract's coordinate-based device is
+    // not Tika/PDFBox (#261: "match, whitespace divergence only"), so the
+    // body is compared by token; (2) Tika emits rich PDF metadata
+    // (pdf:*/access_permission:*/xmpTPg:NPages/...) Wayfinder does not
+    // reproduce, dropped to the six envelope keys. The runner proves the raw
+    // envelopes still genuinely differ before normalising.
+    (
+        "extract_pdf_embedded_font",
+        "issue #294: pdf-extract text whitespace + Tika PDF-specific metadata",
+    ),
+    (
+        "extract_pdf_ligatures",
+        "issue #294: pdf-extract text whitespace + Tika PDF-specific metadata",
+    ),
+    (
+        "extract_pdf_multicolumn",
+        "issue #294: pdf-extract text whitespace + Tika PDF-specific metadata",
+    ),
+    (
+        "extract_pdf_multipage",
+        "issue #294: pdf-extract text whitespace + Tika PDF-specific metadata",
+    ),
+    (
+        "extract_pdf_metadata_conflict",
+        "issue #294: pdf-extract text whitespace + Tika PDF-specific metadata",
+    ),
+    (
+        "extract_pdf_image_only",
+        "issue #294: pdf-extract text whitespace + Tika PDF-specific metadata",
+    ),
 ];
 
 /// Rows where Wayfinder's HTTP *status* itself diverges from the captured
@@ -224,14 +258,27 @@ const ACCEPTED_DIVERGENCES_MULTIPART: &[(&str, &str)] = &[
 /// Self-expiring: the runner asserts the captured status still differs from
 /// the listed one, so an entry that stops diverging fails and names itself
 /// for deletion.
+///
+/// Two shapes are supported:
+/// - `wayfinder_status >= 400` — Wayfinder answers an error envelope where
+///   the capture succeeded (or a different error code). The runner checks the
+///   body is Wayfinder's normal error envelope agreeing with the code.
+/// - `wayfinder_status < 400` (issue #294) — Wayfinder *succeeds* where the
+///   capture errored. No normaliser reconciles a 200 success body with a
+///   captured 500 error envelope, so the body is not diffed; the runner only
+///   asserts the status divergence is still live and Wayfinder's body is a
+///   success body (no `error` key), not a mislabelled error.
 const DIVERGENT_STATUS_MULTIPART: &[(&str, u16, &str)] = &[(
-    "extract_corrupt_pdf",
-    415,
-    "issue #258: Solr's Tika parses this malformed PDF and throws, which is a 500; \
-     Wayfinder has no PDF extractor at all, so it never reaches a parse attempt and \
-     answers 415 unsupported format. Retire this entry when the PDF extractor lands \
-     (PRD phase 2b) -- at that point Wayfinder can fail *inside* a parser and the \
-     captured 500 becomes reachable",
+    "extract_pdf_malformed_objects",
+    200,
+    "issue #294: a PDF whose content stream is malformed (valid xref/trailer, \
+     broken Flate stream inside) is swallowed by pdf-extract as empty output, \
+     where Tika/PDFBox throw DataFormatException and answer 500 (#261 Q1 \
+     divergence #1). pdf-extract cannot distinguish this from a legitimately \
+     empty image-only PDF, so Wayfinder emits the same 200-empty shape for \
+     both and records the divergence rather than guessing broken-vs-empty. \
+     Retire this entry only if pdf-extract (or a guard) starts surfacing the \
+     malformed-stream error as Tika does.",
 )];
 
 fn divergent_status_multipart(name: &str) -> Option<(u16, &'static str)> {
@@ -2929,19 +2976,37 @@ async fn extract_multipart_manifest_matches_captured_fixtures() {
                 ));
                 continue;
             }
-            let actual_n = normalize(actual.clone());
-            let code = actual_n.value["error"]["code"].as_u64();
-            let header = actual_n.value["responseHeader"]["status"].as_u64();
-            if code != Some(u64::from(expected_status))
-                || header != Some(u64::from(expected_status))
-            {
-                failures.push(format!(
-                    "{}: status-divergent row must still answer Wayfinder's normal error \
-                     envelope, got error.code={code:?} responseHeader.status={header:?} \
-                     in {actual}",
-                    entry.name
-                ));
-                continue;
+            if expected_status >= 400 {
+                let actual_n = normalize(actual.clone());
+                let code = actual_n.value["error"]["code"].as_u64();
+                let header = actual_n.value["responseHeader"]["status"].as_u64();
+                if code != Some(u64::from(expected_status))
+                    || header != Some(u64::from(expected_status))
+                {
+                    failures.push(format!(
+                        "{}: status-divergent row must still answer Wayfinder's normal error \
+                         envelope, got error.code={code:?} responseHeader.status={header:?} \
+                         in {actual}",
+                        entry.name
+                    ));
+                    continue;
+                }
+            } else {
+                // Wayfinder succeeds (e.g. pdf-extract swallows a malformed
+                // PDF's broken content stream as empty) where the capture
+                // errored. No normaliser reconciles a 200 success body with a
+                // captured 500 error envelope, so the body is not diffed —
+                // only the status divergence is asserted live, and the body
+                // must be a success body, not a mislabelled error.
+                let actual_n = normalize(actual.clone());
+                if actual_n.value.get("error").is_some() {
+                    failures.push(format!(
+                        "{}: recorded status divergence expects a {} success body, but the \
+                         response is an error envelope: {actual}",
+                        entry.name, expected_status
+                    ));
+                    continue;
+                }
             }
             ran += 1;
             continue;
