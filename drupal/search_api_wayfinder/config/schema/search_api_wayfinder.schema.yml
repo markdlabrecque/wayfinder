@@ -32,3 +32,56 @@ search_api.backend.wayfinder:
     highlight:
       type: boolean
       label: 'Retrieve result highlighting from the server'
+
+# Processor configuration for the two file-extraction processors (issue #266).
+# Both declare the same settings -- the indexability rules and extraction
+# limits from #264 plus the inline-vs-queue extraction mode -- so the two
+# mappings are identical and share the search_api default_processor_configuration
+# base (which covers the inherited `weights` key). An unschemad processor config
+# breaks config export/import validation, so every key in defaultConfiguration()
+# is declared here.
+plugin.plugin_configuration.search_api_processor.wayfinder_file_extraction:
+  type: search_api.default_processor_configuration
+  label: 'Wayfinder file extraction processor configuration'
+  mapping:
+    extraction_mode:
+      type: string
+      label: 'Extraction mode (inline or queue)'
+    excluded_extensions:
+      type: string
+      label: 'Space-separated excluded file extensions'
+    max_filesize:
+      type: string
+      label: 'Maximum file size byte string (0 for no limit)'
+    excluded_private:
+      type: boolean
+      label: 'Exclude private:// files'
+    number_indexed:
+      type: integer
+      label: 'Maximum files indexed per file field (0 for no limit)'
+    number_first_bytes:
+      type: string
+      label: 'Maximum extracted-text byte string (0 for no limit)'
+
+plugin.plugin_configuration.search_api_processor.wayfinder_linked_file_extraction:
+  type: search_api.default_processor_configuration
+  label: 'Wayfinder linked file extraction processor configuration'
+  mapping:
+    extraction_mode:
+      type: string
+      label: 'Extraction mode (inline or queue)'
+    excluded_extensions:
+      type: string
+      label: 'Space-separated excluded file extensions'
+    max_filesize:
+      type: string
+      label: 'Maximum file size byte string (0 for no limit)'
+    excluded_private:
+      type: boolean
+      label: 'Exclude private:// files'
+    number_indexed:
+      type: integer
+      label: 'Maximum files indexed per file field (0 for no limit)'
+    number_first_bytes:
+      type: string
+      label: 'Maximum extracted-text byte string (0 for no limit)'
