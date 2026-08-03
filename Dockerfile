@@ -36,8 +36,19 @@ COPY coverage ./coverage
 RUN cargo build --release --target "$(cat /tmp/rust_target)" \
     && cp "target/$(cat /tmp/rust_target)/release/wayfinder" /wayfinder-bin
 
+# An empty directory copied into the scratch final stage as /tmp. scratch has
+# no filesystem at all, and extraction (#257/#258) streams an uploaded file to
+# a tempfile under /tmp before parsing -- without this, /update/extract fails
+# in the release image with "No such file or directory ... /tmp/...". Surfaced
+# by the #262 end-to-end tracer, the first thing to exercise extraction against
+# the scratch image (the differential harness runs against a separate Solr
+# container, so this latent gap never surfaced there).
+RUN mkdir /scratch-tmp
+
 FROM scratch
 
 COPY --from=builder /wayfinder-bin /wayfinder
+# See the /scratch-tmp note above: provide the writable /tmp extraction needs.
+COPY --from=builder /scratch-tmp /tmp
 
 ENTRYPOINT ["/wayfinder"]

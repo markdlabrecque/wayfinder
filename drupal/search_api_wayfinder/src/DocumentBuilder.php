@@ -52,20 +52,29 @@ class DocumentBuilder {
         $values
       );
 
+      // An item field with no values is omitted entirely -- Solr never
+      // receives null/[] for an absent field, and Wayfinder rejects null for
+      // a typed field ("field ts_X expects a string value, got null"). This
+      // is what lets optional/computed fields -- e.g. the #262 file-extraction
+      // field on an item with no attachment -- index cleanly.
+      if ($formatted === []) {
+        continue;
+      }
+
       // Cardinality comes from the index's own property-path definition,
       // not from how many values this particular item happens to carry --
       // see FieldMapper::isMultiValued() for why.
       $multiValued = $this->fieldMapper->isMultiValued($field);
       $name = $this->fieldMapper->fieldName($field->getFieldIdentifier(), $type, $multiValued);
 
-      $doc[$name] = $multiValued ? array_values($formatted) : ($formatted[0] ?? NULL);
+      $doc[$name] = $multiValued ? array_values($formatted) : $formatted[0];
 
       if ($type === 'text') {
         // ponytail: multi-valued text sorts use the first Search API value.
         // Wayfinder has native min/max selection only for the actual mapped
         // fast field; a collation-aware multi-value text selector needs a
         // dedicated schema/type design before this can be broadened.
-        $doc[$this->fieldMapper->sortFieldName($field->getFieldIdentifier(), $type, $multiValued)] = $formatted[0] ?? NULL;
+        $doc[$this->fieldMapper->sortFieldName($field->getFieldIdentifier(), $type, $multiValued)] = $formatted[0];
       }
     }
 

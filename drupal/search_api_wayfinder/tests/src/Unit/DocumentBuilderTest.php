@@ -200,4 +200,29 @@ class DocumentBuilderTest extends TestCase {
     $this->assertSame(['First paragraph', 'Second paragraph'], $encoded['tm_field_body']);
   }
 
+  /**
+   * An item field with no values is omitted from the document entirely --
+   * Solr never receives null/[] for an absent field, and Wayfinder rejects
+   * null for a typed field ("field ts_X expects a string value, got null").
+   * Surfaced by the #262 file-extraction tracer, where the computed
+   * attachment field is empty on every item that has no attachment.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandOmitsFieldsWithNoValues(): void {
+    $item = $this->mockItem('node/8:en', 'entity:node', 'en', [
+      'title' => $this->mockField('title', 'text', [new TextValue('Has a value')]),
+      'field_optional' => $this->mockField('field_optional', 'string', [], FALSE),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    // The populated field is present ...
+    $this->assertSame('Has a value', $doc['ts_title']);
+    $this->assertArrayHasKey('sort_title', $doc);
+    // ... and the empty optional field is omitted entirely, not null/[], so
+    // it can never be rejected as a null for a typed field.
+    $this->assertArrayNotHasKey('ss_field_optional', $doc);
+  }
+
 }

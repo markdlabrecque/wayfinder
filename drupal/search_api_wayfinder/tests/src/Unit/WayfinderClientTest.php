@@ -328,4 +328,124 @@ class WayfinderClientTest extends TestCase {
     $this->assertSame('/solr/mycore/mlt', $history[0]['request']->getUri()->getPath());
   }
 
+  /**
+   * Multipart POST /update/extract (issue #262 tracer, blocked-by #258).
+   * Success envelope shape ({responseHeader, file, file_metadata}) is ground
+   * truth from solr-ref/responses/extract_plain_text_text.json: the extracted
+   * text lives under the multipart part name "file" (finding from #258: the
+   * part name, not resource.name, is the result key -- Wayfinder emits the
+   * raw key and the client reads it directly, with no Solarium aliasing).
+   *
+   * @covers ::extract
+   */
+  public function testExtractReturnsDecodedBodyOn200(): void {
+    $body = (string) file_get_contents(__DIR__ . '/../../../../../solr-ref/responses/extract_plain_text_text.json');
+    $client = $this->clientWithResponses([new Response(200, [], $body)]);
+
+    $filepath = __DIR__ . '/../../../../../solr-ref/extract-inputs/sample.txt';
+    $result = $client->extract($filepath);
+
+    $this->assertSame(0, $result['responseHeader']['status']);
+    // The leading/trailing newlines are part of the captured value, not trim
+    // targets (#258 finding 120).
+    $this->assertSame("\n\n\n\n\n\n\n\n\n\n\n\n\nHello plain text.\nSecond line.\n\n", $result['file']);
+  }
+
+  /**
+   * The wire shape is what #258's capture (capture.sh cap_extract) and the
+   * Solarium ExtractQuery both produce: a multipart POST carrying one file
+   * part named "file", with extractOnly=true + extractFormat=text +
+   * resource.name=<basename> + wt=json on the query string. Asserting the
+   * part name, filename, and carried bytes (not the random multipart
+   * boundary) is what locks the client to that contract.
+   *
+   * @covers ::extract
+   */
+  public function testExtractSendsMultipartPostToUpdateExtractWithExtractOnlyAndTextFormat(): void {
+    $history = [];
+    $mock = new MockHandler([new Response(200, [], '{"responseHeader":{"status":0},"file":"x"}')]);
+    $handlerStack = HandlerStack::create($mock);
+    $handlerStack->push(\GuzzleHttp\Middleware::history($history));
+    $client = new WayfinderClient(new Client(['handler' => $handlerStack]), 'http://localhost:8983/solr/mycore');
+
+    $filepath = __DIR__ . '/../../../../../solr-ref/extract-inputs/sample.txt';
+    $client->extract($filepath);
+
+    $request = $history[0]['request'];
+    $this->assertSame('POST', $request->getMethod());
+    $this->assertSame('/solr/mycore/update/extract', $request->getUri()->getPath());
+    $this->assertSame('extractOnly=true&extractFormat=text&resource.name=sample.txt&wt=json', $request->getUri()->getQuery());
+
+    // multipart/form-data with a generated boundary -- assert the prefix, not
+    // the random boundary value.
+    $this->assertStringStartsWith('multipart/form-data; boundary=', $request->getHeaderLine('Content-Type'));
+
+    $body = (string) $request->getBody();
+    $this->assertStringContainsString('name="file"', $body);
+    $this->assertStringContainsString('filename="sample.txt"', $body);
+    // The carried bytes are the file's actual contents, confirming the stream
+    // upload rather than an empty/placeholder part.
+    $this->assertStringContainsString('Hello plain text', $body);
+  }
+
+  /**
+   * @covers ::extract
+   */
+  public function testExtractThrowsSearchApiExceptionWithErrorMsgOnNon200(): void {
+    $body = (string) file_get_contents(__DIR__ . '/../../../../../solr-ref/responses/err_bad_sort.json');
+    $client = $this->clientWithResponses([new Response(400, [], $body)]);
+
+    $this->expectException(SearchApiException::class);
+    $this->expectExceptionMessage('can not sort on a field w/o docValues unless it is indexed=true uninvertible=true and the type supports Uninversion: body');
+
+    $client->extract(__DIR__ . '/../../../../../solr-ref/extract-inputs/sample.txt');
+  }
+
+  /**
+   * @covers ::extract
+   */
+  public function testExtractThrowsSearchApiExceptionOnConnectException(): void {
+    $mock = new MockHandler([
+      new \GuzzleHttp\Exception\ConnectException(
+        'Connection refused',
+        new \GuzzleHttp\Psr7\Request('POST', 'http://localhost:8983/solr/mycore/update/extract')
+      ),
+    ]);
+    $handlerStack = HandlerStack::create($mock);
+    $httpClient = new Client(['handler' => $handlerStack]);
+    $client = new WayfinderClient($httpClient, 'http://localhost:8983/solr/mycore');
+
+    $this->expectException(SearchApiException::class);
+    $client->extract(__DIR__ . '/../../../../../solr-ref/extract-inputs/sample.txt');
+  }
+
+  /**
+   * An unreadable file (missing, or not readable by the web user) surfaces as
+   * a SearchApiException before any HTTP attempt, so the processor's
+   * per-file catch turns it into a logged skip rather than a transport error.
+   *
+   * @covers ::extract
+   */
+  public function testExtractThrowsSearchApiExceptionWhenFileIsNotReadable(): void {
+    $client = $this->clientWithResponses([new Response(200, [], '{}')]);
+
+    $this->expectException(SearchApiException::class);
+    $client->extract('/definitely/does/not/exist-' . uniqid() . '.txt');
+  }
+
+  /**
+   * extract() goes through the same request() path as select()/update(), so
+   * configured credentials ride along on the multipart POST too.
+   *
+   * @covers ::extract
+   */
+  public function testExtractSendsBasicCredentialsWhenBothAreConfigured(): void {
+    $history = [];
+    $client = $this->clientWithHistory([new Response(200, [], '{"responseHeader":{"status":0},"file":"x"}')], $history, 'alice', 's3cr3t');
+
+    $client->extract(__DIR__ . '/../../../../../solr-ref/extract-inputs/sample.txt');
+
+    $this->assertSame('Basic ' . base64_encode('alice:s3cr3t'), $history[0]['request']->getHeaderLine('Authorization'));
+  }
+
 }

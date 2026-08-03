@@ -81,6 +81,36 @@ catch (\Throwable $e) {
   $exit_code = 1;
 }
 
+// Issue #262 tracer end-to-end check: a fulltext query for a token that
+// appears ONLY inside an attached file. The only way this returns the
+// attachment node is if the wayfinder_file_extraction processor extracted the
+// file's text via WayfinderBackend::extractContentFromFile() ->
+// WayfinderClient::extract() (multipart POST /update/extract?extractOnly=true)
+// during indexing, and that text is now searchable in the file_content field.
+try {
+  $query = $index->query();
+  $query->setParseMode($pmm->createInstance('terms'));
+  $query->keys('wayfinderattachment262');
+  $query->setFulltextFields(['file_content']);
+  $results = $query->execute();
+
+  $count = $results->getResultCount();
+  echo "fulltext_wayfinderattachment262 (file_content only): $count results\n";
+
+  if ($count < 1) {
+    echo "EXTRACT: FAIL - expected the attachment node for 'wayfinderattachment262' via file_content, got $count (extraction/indexing did not populate the field)\n";
+    $exit_code = 1;
+  }
+  else {
+    echo "EXTRACT: PASS - file attachment text was extracted via /update/extract and found by fulltext search\n";
+  }
+}
+catch (\Throwable $e) {
+  echo "EXTRACT: FAIL - " . get_class($e) . ": " . $e->getMessage() . "\n";
+  echo $e->getTraceAsString() . "\n";
+  $exit_code = 1;
+}
+
 if ($exit_code !== 0) {
   throw new \RuntimeException('Search API round trip failed.');
 }

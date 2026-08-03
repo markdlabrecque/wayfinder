@@ -118,6 +118,63 @@ class WayfinderClient {
   }
 
   /**
+   * POST {core}/update/extract -- multipart file upload, extractOnly=true.
+   *
+   * The tracer transport for issue #262's file-extraction slice (endpoint
+   * landed in #258). Mirrors the wire shape capture.sh's `cap_extract` and
+   * Solarium's ExtractQuery produce: a single multipart part named "file"
+   * carrying the upload, with `extractOnly=true`, `extractFormat=text`, and
+   * `resource.name=<basename>` on the query string. The default `extractFormat`
+   * is XHTML; we ask for plain text because the result is fulltext index
+   * content, not a rendered document.
+   *
+   * The returned array is the full decoded envelope; the extracted text lives
+   * under the "file" key (the part name), NOT `resource.name` -- #258 finding:
+   * Wayfinder emits the raw key and the client reads it directly, with no
+   * Solarium-style client-side aliasing. WayfinderBackend::extractContentFromFile()
+   * is where that key is pulled out.
+   *
+   * @param string $filepath
+   *   Real filesystem path to the file to upload. The file is streamed, not
+   *   buffered into memory.
+   *
+   * @return array
+   *   The decoded JSON response body (e.g. {responseHeader, file,
+   *   file_metadata}).
+   *
+   * @throws \Drupal\search_api\SearchApiException
+   *   On a non-200 error envelope, a transport failure, or an unreadable file.
+   */
+  public function extract(string $filepath): array {
+    $filename = basename($filepath);
+    // Stream the file rather than reading it into memory: attachments can be
+    // large, and #257's request-byte budget lives on the server side. fopen
+    // failure (missing/unreadable file) becomes a SearchApiException so the
+    // processor's per-file catch can log-and-continue instead of leaking a
+    // PHP warning.
+    $stream = @fopen($filepath, 'r');
+    if ($stream === FALSE) {
+      throw new SearchApiException(sprintf('Unable to read file for extraction: %s', $filepath));
+    }
+
+    return $this->request('POST', 'update/extract', [
+      'query' => $this->encodeQuery([
+        'extractOnly' => 'true',
+        'extractFormat' => 'text',
+        'resource.name' => $filename,
+        'wt' => 'json',
+      ]),
+      'multipart' => [
+        [
+          'name' => 'file',
+          'filename' => $filename,
+          'contents' => $stream,
+        ],
+      ],
+    ]);
+  }
+
+  /**
    * Encodes Solr query parameters without PHP's bracket notation for repeated
    * values. Guzzle's array encoder turns fq values into fq[0], fq[1], which
    * is not Solr-wire-compatible.
