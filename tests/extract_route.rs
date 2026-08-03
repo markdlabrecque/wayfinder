@@ -320,18 +320,22 @@ async fn extract_explicit_json_nl_flat_matches_the_flat_baseline_fixture() {
     .await;
 }
 
-/// The corrupt-PDF row is a **recorded status divergence**, not a fixture
-/// match. `extract_corrupt_pdf.json` is Solr's Tika parsing a malformed PDF
-/// and throwing, which is a 500. Wayfinder has no PDF extractor at all, so it
-/// never reaches a parse attempt: the document is an unimplemented format and
-/// the answer is 415. Recorded in `DIVERGENT_STATUS_MULTIPART` in
-/// `tests/differential.rs` and as PRD ratified divergence 10; both retire when
-/// a PDF extractor lands.
-///
-/// The captured 500 is still loaded here, so this test fails if the fixture's
-/// status ever stops being the thing Wayfinder diverges from.
+/// `broken.pdf` (a `%PDF-` header with no xref/trailer) now reaches a real
+/// parse: `lopdf::Document::load_mem` fails on the missing cross-reference
+/// table, surfacing as `ExtractError::Parse` -> HTTP 500. That **retires the
+/// former status divergence** (issue #294): when Wayfinder had no PDF
+/// extractor the request never reached a parse attempt and answered 415
+/// unsupported media type, but the captured `extract_corrupt_pdf.json` is a
+/// 500, so the row was a recorded status divergence (PRD divergence 10).
+/// Now Wayfinder can fail *inside* a PDF parser, the captured 500 is
+/// reachable, and the divergence entry in `DIVERGENT_STATUS_MULTIPART` is
+/// deleted rather than re-justified — exactly as the PRD predicted. The
+/// differential harness (`extract_multipart_manifest_matches_captured_fixtures`)
+/// diffs the full envelope; this route-level test pins the status and the
+/// `NoParams` envelope shape directly so a regression here names itself
+/// without reading the manifest.
 #[tokio::test]
-async fn extract_corrupt_pdf_is_a_recorded_status_divergence() {
+async fn broken_pdf_is_a_500_parse_failure_matching_the_capture() {
     let (app, _dir) = default_app().await;
     let bytes = input_bytes("broken.pdf");
     let (status, actual) = request_multipart(
@@ -348,21 +352,22 @@ async fn extract_corrupt_pdf_is_a_recorded_status_divergence() {
     assert_eq!(
         captured["error"]["code"].as_i64(),
         Some(500),
-        "the captured fixture must still be a 500, or this divergence entry is stale"
+        "the captured fixture must still be a 500"
     );
     assert_eq!(
         status,
-        StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        "a PDF must come back 415 (no PDF extractor exists), got {status}: {actual}"
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "broken.pdf must now reach a parse failure -> 500 (the PDF extractor \
+         landed; the former 415 divergence is retired), got {status}: {actual}"
     );
     assert_eq!(
         actual["error"]["code"].as_i64(),
-        Some(415),
+        Some(500),
         "body: {actual}"
     );
     assert_eq!(
         actual["responseHeader"]["status"].as_i64(),
-        Some(415),
+        Some(500),
         "the NoParams envelope still carries responseHeader, body: {actual}"
     );
     assert!(

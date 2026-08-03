@@ -907,6 +907,45 @@ pub fn normalize_extract(mut value: Value) -> Normalized {
                 value["file_metadata"] = Value::Array(stripped);
             }
         }
+    } else if is_pdf_content_type(&value) {
+        // PDF (issue #294). `pdf-extract`'s coordinate-based text device and
+        // Tika/PDFBox emit the same words in the same order but different
+        // whitespace (single vs double newline between columns, none vs
+        // `\n\n\n\n` between pages). The #261 GO report ratified this as
+        // "match (whitespace divergence only) ... a normalisation detail for
+        // the renderer, not an extraction defect", so the text body is
+        // compared by its non-whitespace token sequence. Tika's rich PDF
+        // metadata (`pdf:*`, `access_permission:*`, `xmpTPg:NPages`, ...) is
+        // dropped to the six envelope keys exactly as the office formats are.
+        if let Some(file) = value.get("file").and_then(|f| f.as_str()) {
+            // extractFormat=text bodies carry no `<head>` markup; only those
+            // are PDF text rows. Whitespace-run collapse trims and reduces
+            // every run to a single space, applied symmetrically to both
+            // sides, so it cannot hide a real content difference (a dropped
+            // word, a mojibake glyph, a reordered column still differ).
+            if !file.contains("<head>") {
+                let collapsed = file.split_whitespace().collect::<Vec<_>>().join(" ");
+                if collapsed != file {
+                    touched.push(
+                        "file (PDF body whitespace collapsed — pdf-extract's coordinate \
+                         spacing differs from Tika/PDFBox's; content compared by token, \
+                         per the #261 GO report)"
+                            .to_string(),
+                    );
+                    value["file"] = Value::String(collapsed);
+                }
+            }
+        }
+        if let Some(arr) = value.get("file_metadata").and_then(|m| m.as_array()) {
+            let (stripped, dropped) = keep_envelope_metadata_keys(arr);
+            if dropped > 0 {
+                touched.push(format!(
+                    "file_metadata (kept the six envelope keys, dropped {dropped} \
+                     Tika PDF-specific entries)"
+                ));
+                value["file_metadata"] = Value::Array(stripped);
+            }
+        }
     } else {
         if let Some(file) = value.get("file").and_then(|f| f.as_str()) {
             let (stripped, meta_touched) = strip_x_parsed_by_meta(file);
@@ -966,6 +1005,33 @@ fn is_office_content_type(value: &Value) -> bool {
                 if let Some(s) = v.as_str()
                     && OFFICE_CONTENT_TYPES.contains(&s)
                 {
+                    return true;
+                }
+            }
+        }
+        i += 2;
+    }
+    false
+}
+/// True when the envelope carries a PDF content type (issue #294), detected
+/// the same way as [`is_office_content_type`]. Used by `normalize_extract` to
+/// pick the PDF-scoped waiver: whitespace-run collapse on the text body (the
+/// #261 report's ratified divergence) plus the six-envelope-key metadata
+/// filter. Returns `false` for every non-PDF envelope and for any envelope
+/// without `file_metadata` (e.g. an error body — `extract_corrupt_pdf`'s 500
+/// carries none, and is compared as a plain error envelope, not normalised).
+fn is_pdf_content_type(value: &Value) -> bool {
+    let Some(arr) = value.get("file_metadata").and_then(|m| m.as_array()) else {
+        return false;
+    };
+    let mut i = 0;
+    while i + 1 < arr.len() {
+        let key = arr[i].as_str().unwrap_or_default();
+        if matches!(key, "Content-Type" | "stream_content_type")
+            && let Some(vals) = arr[i + 1].as_array()
+        {
+            for v in vals {
+                if v.as_str() == Some("application/pdf") {
                     return true;
                 }
             }
