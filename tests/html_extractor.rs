@@ -19,8 +19,10 @@
 //! `dispatch(ContentType::Html)`/`extract()` end to end and is genuinely red
 //! today, since `dispatch` has no HTML arm yet.
 
+use std::time::Instant;
 use wayfinder::extract::{
-    Budget, ExtractError, ExtractInput, ExtractLimits, OutputLimitKind, detect, extract,
+    Budget, ExtractError, ExtractInput, ExtractLimits, OutputLimitKind, StructuralLimitKind,
+    detect, extract,
 };
 
 fn budget() -> Budget {
@@ -155,14 +157,15 @@ fn absent_title_leaves_metadata_title_none() {
 /// extracted content a hostile upload could grow without bound — the one
 /// unbudgeted allocation path left in the HTML extractor (issue #272).
 ///
-/// A `<title>` long enough to exhaust a tiny `max_output_bytes`, with the
-/// overrun happening inside one long character run and no following tag
-/// token, also exercises the html5ever early-abort check (`||
-/// tokenizer.sink.state.borrow().error.is_some()`): a budget blown
-/// mid-character-run has no tag to carry `TokenSinkResult::Script`, so the
-/// per-chunk error probe is the only thing that stops the run. That check
-/// was the untested follow-up #4 from #258's tracer report; this test
-/// covers it too.
+/// This does *not* exercise the html5ever early-abort check (`||
+/// tokenizer.sink.state.borrow().error.is_some()`), despite this input's
+/// overrun landing mid-character-run: the document is small enough to fit in
+/// one decode chunk *and* has a following `</title>` tag, so `feed` returns
+/// `Script` off that tag before the per-chunk error probe is ever consulted
+/// (verified directly — deleting the check leaves this test green). The
+/// dedicated mutation test for that check is
+/// `budget_exhausted_mid_character_run_aborts_within_one_chunk` below
+/// (issue #275, follow-up #4 from #258's tracer report).
 #[test]
 fn title_accumulation_is_charged_against_the_output_budget() {
     let big_title = "x".repeat(1000);
@@ -190,5 +193,132 @@ fn title_accumulation_is_charged_against_the_output_budget() {
          OutputTooLarge(Bytes) — the documented 400 budget-violation status \
          (extraction-output-too-large) — rather than accumulating without \
          limit, got {result:?}"
+    );
+}
+
+/// Issue #275 — mutation test for the html5ever early-abort check
+/// (`|| tokenizer.sink.state.borrow().error.is_some()` in `HtmlExtractor::extract`,
+/// `src/extract.rs`).
+///
+/// The check is exactly the class of code the working agreement makes
+/// mutation-tested: "code whose whole value is failing correctly". It bounds
+/// the tokenizer overshoot to a single chunk when the budget is exhausted
+/// **mid-character-run with no following tag**. Every other HTML test has a
+/// following tag, so an abort there is carried by `TokenSinkResult::Script`
+/// on that tag whether or not this check exists — which is why reverting the
+/// check leaves the full suite green (#258 round-2 reviewer).
+///
+/// Why work is the *only* observable. `TokenSinkResult::Script` is reachable
+/// only from a tag token (html5ever's `process_token_and_continue` asserts
+/// `Continue` for every other kind), so a budget blown on a character token
+/// cannot signal until the next tag arrives. The sink's `error` guard then
+/// drops every subsequent token before `charge_token`/`push_text`, so the
+/// returned error and the accumulated output are byte-identical with or
+/// without the check, and `Tokenizer::end()` is a no-op on our sink. The
+/// sole difference is how many bytes html5ever's lexer runs over after the
+/// violation: one chunk (with the check) versus the whole remaining input
+/// (without). So this is a promptness test.
+///
+/// The assertion compares the extraction's wall time to the one piece of
+/// work unavoidable in *both* paths — the `String::from_utf8_lossy` copy
+/// `extract` performs up front — and requires the extraction to do little
+/// more than that copy. Measuring both on the same machine in the same run
+/// cancels runner speed to first order: the ratio is ~1.0 with the check and
+/// ~6.5 with the arm deleted (16 MiB run), so a 3.0x bound has ~3x headroom
+/// on the green side and still fails the mutation with ~2x to spare — it
+/// does not fight CI runner speed the way an absolute millisecond bound
+/// would. The `min` over several runs rejects scheduling spikes rather than
+/// hiding real work.
+///
+/// Mutation test (recorded): deleting the `|| ...error.is_some()` arm makes
+/// this test fail — the lexer runs over all 16 MiB instead of stopping one
+/// chunk past the violation, and `extract` time rises to ~6.5x the copy.
+#[test]
+fn budget_exhausted_mid_character_run_aborts_within_one_chunk() {
+    // A budget that blows on a character token: `<html>` and `<body>` are the
+    // only tags (tokens 1 and 2, both under the limit), and everything after
+    // is one unbroken character run with no following tag — so the only thing
+    // that can carry an abort (`Script`) never appears.
+    const MAX_XML_EVENTS: usize = 3;
+    // 16 MiB: large enough that "the whole remaining input" is a real,
+    // measurable amount of lexer work and small enough to keep the test light.
+    const RUN_MIB: usize = 16;
+    // The extraction may do at most this many times the unavoidable copy's
+    // work. ~1.0x with the check, ~6.5x without; 3.0 sits between (see above).
+    const EARLY_ABORT_MAX_COPY_MULTIPLES: f64 = 3.0;
+
+    let head = "<html><body>";
+    let run: String = "a".repeat(RUN_MIB * 1024 * 1024);
+    let html = format!("{head}{run}");
+    let bytes = html.as_bytes();
+
+    // Lock the premise first: the budget must actually be exhausted, on the
+    // structural event counter, and the input must have no following tag for
+    // `Script` to ride on.
+    let mut probe = Budget::new(ExtractLimits {
+        max_xml_events: MAX_XML_EVENTS,
+        ..ExtractLimits::default()
+    });
+    let input = ExtractInput {
+        declared_type: Some("text/html"),
+        resource_name: "sample.html",
+        bytes,
+    };
+    let result = extract(&input, &mut probe);
+    assert!(
+        matches!(
+            result,
+            Err(ExtractError::StructuralLimit(
+                StructuralLimitKind::XmlEvents
+            ))
+        ),
+        "the character run must exhaust the XML-event budget, got {result:?}"
+    );
+
+    // The unavoidable work both paths share: the lossy copy `extract` does
+    // internally. `min` over a few runs rejects scheduling spikes.
+    let copy_ns = (0..5)
+        .map(|_| {
+            let t = Instant::now();
+            let _ = String::from_utf8_lossy(bytes).into_owned();
+            t.elapsed().as_nanos() as u64
+        })
+        .min()
+        .expect("non-empty iterator");
+
+    let extract_ns = (0..5)
+        .map(|_| {
+            let mut b = Budget::new(ExtractLimits {
+                max_xml_events: MAX_XML_EVENTS,
+                ..ExtractLimits::default()
+            });
+            let t = Instant::now();
+            let r = extract(&input, &mut b);
+            let ns = t.elapsed().as_nanos() as u64;
+            assert!(
+                matches!(
+                    r,
+                    Err(ExtractError::StructuralLimit(
+                        StructuralLimitKind::XmlEvents
+                    ))
+                ),
+                "every run must exhaust the budget the same way, got {r:?}"
+            );
+            ns
+        })
+        .min()
+        .expect("non-empty iterator");
+
+    let ratio = extract_ns as f64 / copy_ns.max(1) as f64;
+    assert!(
+        ratio < EARLY_ABORT_MAX_COPY_MULTIPLES,
+        "the HTML extractor must stop one chunk past a mid-character-run \
+         budget violation instead of lexing the whole remaining input: \
+         extract was {ratio:.2}x the unavoidable lossy-copy cost (bound \
+         {EARLY_ABORT_MAX_COPY_MULTIPLES}). If this fired green-side, raise \
+         EARLY_ABORT_MAX_COPY_MULTIPLES only after confirming the \
+         early-abort check in `HtmlExtractor::extract` is still present; if \
+         it fired with the check deleted, that is the mutation this test \
+         exists to catch (issue #275)."
     );
 }
