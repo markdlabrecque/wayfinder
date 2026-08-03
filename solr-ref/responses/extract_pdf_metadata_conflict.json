@@ -1,0 +1,8 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":7
+  },
+  "file":"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nInfo Dict Title\n\n\nBody text for the metadata conflict document.\n\n\n",
+  "file_metadata":["resourceName",["pdf-metadata-conflict.pdf","pdf-metadata-conflict.pdf"],"Content-Type",["application/pdf","application/pdf"],"stream_name",["file","file"],"stream_source_info",["pdf-metadata-conflict.pdf","pdf-metadata-conflict.pdf"],"stream_size",["4867","4867"],"stream_content_type",["application/pdf","application/pdf"],"pdf:unmappedUnicodeCharsPerPage",["0"],"pdf:PDFVersion",["1.7"],"pdf:docinfo:title",["Info Dict Title"],"pdf:hasXFA",["false"],"access_permission:modify_annotations",["true"],"access_permission:can_print_degraded",["true"],"dc:creator",["Info Dict Author"],"dc:format",["application/pdf; version=1.7"],"title",["Info Dict Title"],"access_permission:fill_in_form",["true"],"pdf:encrypted",["false"],"dc:title",["Info Dict Title"],"pdf:hasMarkedContent",["false"],"pdf:docinfo:creator",["Info Dict Author"],"X-Parsed-By",["org.apache.tika.parser.DefaultParser","org.apache.tika.parser.pdf.PDFParser"],"creator",["Info Dict Author"],"meta:author",["Info Dict Author"],"access_permission:extract_for_accessibility",["true"],"access_permission:assemble_document",["true"],"xmpTPg:NPages",["1"],"pdf:hasXMP",["true"],"pdf:charsPerPage",["44"],"access_permission:extract_content",["true"],"access_permission:can_print",["true"],"Author",["Info Dict Author"],"producer",["pikepdf 10.11.0"],"access_permission:can_modify",["true"],"pdf:docinfo:producer",["pikepdf 10.11.0"]]
+}

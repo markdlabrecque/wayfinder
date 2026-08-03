@@ -2803,10 +2803,12 @@ impl std::error::Error for ExtractError {}
 /// succeed). This module's
 /// `budget_violation_statuses_have_no_captured_fixture_yet` test is the
 /// self-expiring note for that — it fails the moment anyone captures an
-/// extraction fixture beyond the ten that exist today, which is exactly when
-/// these mappings must be re-checked against real Solr. It has fired once
-/// already, for #258's five new captures; that recheck moved nothing, and its
-/// findings are recorded in the test's own doc comment.
+/// extraction fixture beyond the ones already registered, which is exactly
+/// when these mappings must be re-checked against real Solr. It has fired
+/// twice now — for #258's five new captures and #261's eight PDF-corpus
+/// captures — and neither recheck moved anything (both added only 200
+/// successes and 500 parser-failure fixtures; see the
+/// `CAPTURED_EXTRACT_FIXTURES` doc comment for the #261 detail).
 impl From<ExtractError> for crate::error::WfError {
     fn from(err: ExtractError) -> Self {
         use axum::http::StatusCode;
@@ -2913,7 +2915,17 @@ mod tests {
     /// that does not describe it. The corrupt-PDF row is instead a recorded
     /// status divergence (`DIVERGENT_STATUS_MULTIPART` in
     /// `tests/differential.rs`), which retires when a PDF extractor lands.
-    const CAPTURED_EXTRACT_FIXTURES: [&str; 10] = [
+    ///
+    /// Recheck #2 (issue #261, the PDF corpus exploration): the eight new
+    /// `extract_pdf_*.json` fixtures are six 200s and two 500s. The 200s are
+    /// successful extracts (no status to map); the two 500s
+    /// (`extract_pdf_encrypted.json` = `InvalidPasswordException`,
+    /// `extract_pdf_malformed_objects.json` = `DataFormatException`) are
+    /// parser failures, the same shape and `Parse` arm (500) as the existing
+    /// `extract_corrupt_pdf.json`. No new fixture lands on a budget-violation
+    /// status (413/503/415/400), so the mapping below is unchanged. Recorded
+    /// in `docs/reports/2026-08-03-pdf-extraction-corpus.md`.
+    const CAPTURED_EXTRACT_FIXTURES: [&str; 18] = [
         "extract_corrupt_pdf.json",
         "extract_declared_charset_text.json",
         "extract_html_index.json",
@@ -2921,6 +2933,14 @@ mod tests {
         "extract_html_only_xml.json",
         "extract_html_select.json",
         "extract_latin1_text.json",
+        "extract_pdf_embedded_font.json",
+        "extract_pdf_encrypted.json",
+        "extract_pdf_image_only.json",
+        "extract_pdf_ligatures.json",
+        "extract_pdf_malformed_objects.json",
+        "extract_pdf_metadata_conflict.json",
+        "extract_pdf_multicolumn.json",
+        "extract_pdf_multipage.json",
         "extract_plain_text_text.json",
         "extract_plain_text_xml.json",
         "extract_utf8_bom_text.json",
