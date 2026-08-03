@@ -186,6 +186,30 @@ const ACCEPTED_DIVERGENCES_MULTIPART: &[(&str, &str)] = &[
         "issue #260: office format-specific file_metadata keys plus \
          leading-newline run (finding 124)",
     ),
+    //
+    // Issue #274 -- json.nl named-list shapes on the plain-text extractOnly
+    // baseline (finding 128). Same X-Parsed-By waiver as the #258 plain-text
+    // rows: each carries X-Parsed-By in both the XHTML file's meta element
+    // and in file_metadata. `json.nl` only reshapes file_metadata (map /
+    // arrarr / arrmap), so `normalize_extract`'s shape-agnostic X-Parsed-By
+    // strip is what reconciles both sides; everything else compares exactly.
+    (
+        "extract_plain_text_json_nl_map",
+        "issue #274: X-Parsed-By in both the XHTML file's meta element and \
+         file_metadata (json.nl=map renders file_metadata as an object)",
+    ),
+    (
+        "extract_plain_text_json_nl_arrarr",
+        "issue #274: X-Parsed-By in both the XHTML file's meta element and \
+         file_metadata (json.nl=arrarr renders file_metadata as an array of \
+         [key, values] pairs)",
+    ),
+    (
+        "extract_plain_text_json_nl_arrmap",
+        "issue #274: X-Parsed-By in both the XHTML file's meta element and \
+         file_metadata (json.nl=arrmap renders file_metadata as an array of \
+         one-entry {key: values} objects)",
+    ),
 ];
 
 /// Rows where Wayfinder's HTTP *status* itself diverges from the captured
@@ -2601,6 +2625,104 @@ fn normalize_extract_does_not_hide_a_real_difference_in_file() {
 /// A fixture with neither `X-Parsed-By` nor `shape=\"rect\"` anywhere must
 /// come back with an empty `touched` list — the normaliser must not fire
 /// unconditionally.
+/// `X-Parsed-By` must be stripped from `file_metadata` no matter which
+/// `json.nl` shape Solr rendered it in (issue #274: the extract handler now
+/// honours `json.nl`, so `file_metadata` is map/arrarr/arrmap as often as
+/// flat). Each arm is a hand-built `Value` in the documented shape, with one
+/// unrelated key kept alongside `X-Parsed-By` so the test also proves the
+/// unrelated key survives in its original shape.
+#[test]
+fn normalize_extract_strips_x_parsed_by_from_every_json_nl_shape() {
+    // flat: ["k", [vals], ...]
+    let flat = normalize_extract(json!({
+        "file": "x",
+        "file_metadata": ["resourceName", ["a.txt"], "X-Parsed-By", ["c1", "c2"], "Content-Encoding", ["ISO-8859-1"]]
+    }));
+    let fm = flat.value["file_metadata"]
+        .as_array()
+        .expect("flat stays an array");
+    assert!(
+        !fm.iter().any(|v| v.as_str() == Some("X-Parsed-By")),
+        "flat: X-Parsed-By not stripped, got {fm:?}"
+    );
+    assert!(
+        fm.iter().any(|v| v.as_str() == Some("resourceName")),
+        "flat: unrelated key lost, got {fm:?}"
+    );
+
+    // map: {"k": [vals], ...}
+    let map = normalize_extract(json!({
+        "file": "x",
+        "file_metadata": {"resourceName": ["a.txt"], "X-Parsed-By": ["c1", "c2"], "Content-Encoding": ["ISO-8859-1"]}
+    }));
+    let fm = map.value["file_metadata"]
+        .as_object()
+        .expect("map stays an object");
+    assert!(
+        !fm.contains_key("X-Parsed-By"),
+        "map: X-Parsed-By not stripped, got {fm:?}"
+    );
+    assert!(
+        fm.contains_key("resourceName"),
+        "map: unrelated key lost, got {fm:?}"
+    );
+
+    // arrarr: [["k", [vals]], ...]
+    let arrarr = normalize_extract(json!({
+        "file": "x",
+        "file_metadata": [["resourceName", ["a.txt"]], ["X-Parsed-By", ["c1", "c2"]], ["Content-Encoding", ["ISO-8859-1"]]]
+    }));
+    let fm = arrarr.value["file_metadata"]
+        .as_array()
+        .expect("arrarr stays an array of pairs");
+    assert_eq!(
+        fm.len(),
+        2,
+        "arrarr: the X-Parsed-By pair must be dropped, got {fm:?}"
+    );
+    assert!(
+        !fm.iter()
+            .any(|pair| pair[0].as_str() == Some("X-Parsed-By")),
+        "arrarr: X-Parsed-By pair not stripped, got {fm:?}"
+    );
+
+    // arrmap: [{"k": [vals]}, ...]
+    let arrmap = normalize_extract(json!({
+        "file": "x",
+        "file_metadata": [{"resourceName": ["a.txt"]}, {"X-Parsed-By": ["c1", "c2"]}, {"Content-Encoding": ["ISO-8859-1"]}]
+    }));
+    let fm = arrmap.value["file_metadata"]
+        .as_array()
+        .expect("arrmap stays an array of one-entry objects");
+    assert_eq!(
+        fm.len(),
+        2,
+        "arrmap: the X-Parsed-By object must be dropped, got {fm:?}"
+    );
+    assert!(
+        !fm.iter().any(|o| o
+            .as_object()
+            .map(|m| m.contains_key("X-Parsed-By"))
+            .unwrap_or(false)),
+        "arrmap: X-Parsed-By object not stripped, got {fm:?}"
+    );
+
+    for (name, n) in [
+        ("flat", flat),
+        ("map", map),
+        ("arrarr", arrarr),
+        ("arrmap", arrmap),
+    ] {
+        assert!(
+            n.touched
+                .iter()
+                .any(|t| t.contains("file_metadata") && t.contains("X-Parsed-By")),
+            "{name}: touched must record the file_metadata strip, got {:?}",
+            n.touched
+        );
+    }
+}
+
 #[test]
 fn normalize_extract_touches_nothing_when_no_ratified_marker_is_present() {
     let v = json!({"file": "plain content, nothing special", "file_metadata": ["a", ["1", "1"]]});

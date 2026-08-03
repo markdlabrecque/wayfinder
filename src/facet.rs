@@ -95,8 +95,13 @@ pub type BaseClauses = Vec<(Occur, Box<dyn Query>)>;
 /// one-entry object per bucket (`facet_json_nl_arrmap.json`, finding 41c).
 /// Applies identically to `facet_fields.<name>` and
 /// `facet_ranges.<name>.counts`; `gap`/`start`/`end` are never affected.
+///
+/// The same enum renders the `/update/extract` `file_metadata` NamedList
+/// (issue #274, finding 128): that NamedList reshapes per `json.nl` exactly
+/// as a facet bucket list does, so the param is honoured there rather than
+/// merely allowlisted.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum JsonNl {
+pub(crate) enum JsonNl {
     Flat,
     Map,
     ArrArr,
@@ -104,7 +109,7 @@ enum JsonNl {
 }
 
 impl JsonNl {
-    fn from_params(params: &Params) -> JsonNl {
+    pub(crate) fn from_params(params: &Params) -> JsonNl {
         match params.get("json.nl") {
             Some("map") => JsonNl::Map,
             Some("arrarr") => JsonNl::ArrArr,
@@ -866,6 +871,58 @@ fn format_date(value: OffsetDateTime) -> Result<String> {
     value
         .format(&Rfc3339)
         .map_err(|e| anyhow!("could not render date bucket key: {e}"))
+}
+
+/// Renders a Solr `NamedList` (an ordered name→value sequence) as the JSON
+/// shape `json.nl` selects: `Flat`'s alternating `[name, value, ...]` array
+/// (the default), `Map`'s object, `ArrArr`'s `[name, value]` pairs, or
+/// `ArrMap`'s one-entry `{name: value}` objects. Each entry's `value` is
+/// already-rendered JSON, placed verbatim into the chosen shape.
+///
+/// Used by the extract route's `file_metadata` (issue #274, finding 128),
+/// whose NamedList is a plain one in Solr and so honours `json.nl` — unlike
+/// `responseHeader`, which is a `SimpleOrderedMap` and stays an object under
+/// every value. Keys here are always strings (extract `file_metadata` has no
+/// null-key analogue to facet's `facet.missing` bucket), so unlike
+/// [`render_buckets`] there is no null→`""`/`null` rendering to negotiate.
+pub(crate) fn render_named_list(entries: &[(String, Value)], nl: JsonNl) -> Value {
+    match nl {
+        JsonNl::Map => {
+            let mut map = Map::new();
+            for (name, value) in entries {
+                // Solr's NamedList permits duplicate names (last wins in the
+                // object render); no extract fixture has any — verified across
+                // every flat capture — so this is the documented fallback
+                // rather than a path exercised by a fixture.
+                map.insert(name.clone(), value.clone());
+            }
+            Value::Object(map)
+        }
+        JsonNl::ArrArr => Value::Array(
+            entries
+                .iter()
+                .map(|(name, value)| Value::Array(vec![Value::String(name.clone()), value.clone()]))
+                .collect(),
+        ),
+        JsonNl::ArrMap => Value::Array(
+            entries
+                .iter()
+                .map(|(name, value)| {
+                    let mut m = Map::new();
+                    m.insert(name.clone(), value.clone());
+                    Value::Object(m)
+                })
+                .collect(),
+        ),
+        JsonNl::Flat => {
+            let mut flat = Vec::with_capacity(entries.len() * 2);
+            for (name, value) in entries {
+                flat.push(Value::String(name.clone()));
+                flat.push(value.clone());
+            }
+            Value::Array(flat)
+        }
+    }
 }
 
 /// Renders a bucket list as Solr's `json.nl` shape (findings fact 1, finding
