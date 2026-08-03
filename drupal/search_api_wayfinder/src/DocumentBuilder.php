@@ -13,8 +13,11 @@ use Drupal\search_api\Item\ItemInterface;
  * section and locked decision 2 (docs/plans/57-search-api-wayfinder-backend.md).
  *
  * ponytail: document id deliberately omits search_api_solr's site-hash
- * component (single-site assumption for M1); reintroduce a hash component
- * if multi-site-one-core ever matters.
+ * component. Decided in issue #301: one core per site is the supported
+ * topology, not a temporary simplification. Several sites on one host are
+ * several Wayfinder processes with one core each -- the server already
+ * enforces single-core-per-process (docs/PRD.md open question 1). Nothing
+ * detects two sites pointed at the same core; see README "Not supported".
  *
  * `commitWithin` is deliberately NOT part of this command: Wayfinder's
  * `/update` parser (`parse_update_commands` in src/lib.rs) only ever reads
