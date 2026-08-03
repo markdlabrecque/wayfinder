@@ -11,8 +11,8 @@ before starting any branch in the batch, because several of the sequencing const
 below are invisible from inside a single issue.
 
 **Status:** waves 0 and 1 are complete (#306, #307, #310; #297, #299, #308, #295 merged).
-Wave 2 can start now, and all three of its branches are unblocked — #278 landing freed
-#294. #296 (H) is also startable, having been gated only on #295.
+Wave 2 is running, four branches wide: #289, #290, #294 (freed by #278) and **#298,
+promoted out of wave 4** now that #295 has removed its only blocker.
 
 ## Where parity actually stands
 
@@ -159,6 +159,7 @@ rule into wave 2**: G and C's successors land in the same two PHP test classes.
 | F | #289 function queries | new `src/function_query.rs`, `src/query.rs`, `src/edismax.rs`, the warning sites at `src/lib.rs:2880` |
 | G | #290 grouping | `src/collector.rs`, plus the Drupal half (`QueryBuilder`, `ResponseParser`, `WayfinderBackend`) |
 | B' | #294 PDF extraction | `src/extract.rs` — fully isolated; **#278 has landed, so this is free** |
+| K | #298 OR facets | `QueryBuilder::buildFacets()` and `getSupportedFeatures()` — **promoted from wave 4**, see below |
 
 Both F and G add to `SELECT_PARAMS`. **Do not prep-land the param names.** An
 accepted-but-unimplemented param is precisely the silent-wrong-answer shape #232 exists
@@ -166,11 +167,30 @@ to prevent, so each branch adds its own contiguous block in the same commit as i
 implementation, and the rebase order is **F -> G** (E has landed). Those conflicts are
 mechanical.
 
-A fourth slot is open: **H (#296)** was gated only on E and can run alongside F, G and
-B'. It contends with none of them — F and G own `SELECT_PARAMS` and `src/query.rs`, H
-owns the facet parser E just changed.
+**K (#298) takes the fourth slot, not H (#296).** Both were freed by E landing, and the
+plan previously ordered `E -> H -> K`. That ordering was file contention in
+`buildFacets()`, not a dependency: OR facets need *tagging*, which E shipped, not
+per-field settings. K is now PHP-only, needs no capture, and is the most user-visible
+bug left in the module — #298's own words, "the behaviour Drupal site builders most
+often report as *the facets are broken*". H is deferred behind it because its scope is
+in question (see wave 3).
 
-G's Drupal half touches the two files C owns, so C must have landed.
+Two constraints on K:
+
+- **The tag string is fixed by the facets module, not by us.** `search_api_solr` emits
+  `addExcludes(['facet:' . $info['field']])`
+  (`coverage/search_api_solr_4.4.0_source/src/Plugin/search_api/backend/SearchApiSolrBackend.php:3928-3935`),
+  so the tag is `facet:<search_api_field_name>` — built from the **Search API** field
+  name, not the mapped Solr field, and carrying a colon. `local_params::read_value`
+  takes a colon in a bare value, but K pins that with a hermetic test rather than
+  assuming it.
+- **K and G collide in `getSupportedFeatures()`** — a five-line array each adds one line
+  to (`WayfinderBackend.php:201-205`). Same shape as wave 1's `QueryBuilderTest.php`
+  collision, same remedy: agree the insertion point before both start.
+
+G's Drupal half touches the two files C owns, so C must have landed. It also touches
+`QueryBuilder.php`, which K edits in `buildFacets()` — different method, and the wave-1
+insertion-point discipline covers the shared test class.
 
 F is the batch's long pole (see the critical path below) — start it as soon as a slot
 frees.
@@ -183,18 +203,38 @@ targets are `sum`, a bare field reference (`boost_document`), and `payload_score
 
 | Branch | Issue | Note |
 |---|---|---|
-| H | #296 per-field `f.<field>.facet.*` | **E has landed — startable now**, and can be pulled into wave 2's fourth slot. Extends `FacetFieldPlan`; keeps mincount/missing post-exclusion |
+| H | #296 per-field `f.<field>.facet.*` | Unblocked by E, but **its scope is in question — settle the premise below before starting.** Extends `FacetFieldPlan`; keeps mincount/missing post-exclusion |
 | J | #300 non-default data types | `FieldMapper`, `supportsDataType()`, `presets/search-api.toml`. Ten closed types; `solr_text_custom*` is a named descope (finding 134) |
 | M1 | #301 site hash | `DocumentBuilder` only, no server work. **Fetch `search_api_solr`'s `Utility::getSiteHash()` first** — it is not in the three-file snapshot, and bug-compatibility means matching it exactly |
 
 J moves earlier than its original wave-3 slot only in that it now gates #291; the work
 itself is unchanged.
 
+**H's premise, to settle with fixtures before scoping it.** The client emits per-facet
+settings through Solarium as `f.<key>.facet.limit`, and `search_api_solr`'s key is the
+Solr field name. Since C (#299) landed, *our* module keys facets by the Search API
+delta. So it is an open question whether Solr resolves `f.<X>.facet.*` against the
+`{!key=}` label or against the underlying field name — and the answer decides H's scope:
+
+- If it resolves by **field name**, then `f.<field>.facet.*` alone does **not** fix the
+  case the README bullet actually describes (two facets on *one* field disagreeing on
+  limit), and the mechanism is instead facet settings carried as local params on
+  `facet.field` itself, which Solr also accepts.
+- If it resolves by **key**, #296 stands as written.
+
+#296 already requires a capture. Add rows for both shapes and let the fixtures decide,
+rather than discovering it at the green gate. This is the same shape as the #297 and
+#308 premise corrections — the third and fourth times a ticket's stated premise did not
+survive contact with a fixture.
+
+H is also **the only near-term branch that needs `capture.sh`**, so it can be scheduled
+purely on capture contention: keep it clear of L1, L2 and I, which each need their own
+configset and capture block.
+
 ## Wave 4
 
 | Branch | Issue | Note |
 |---|---|---|
-| K | #298 OR facets | E (server) has landed; still after H (client facet code) |
 | L | #292 spatial | **three server pieces, not two, plus the Drupal half** — see below |
 | M2 | #302 multi-valued text sort | `DocumentBuilder`, after M1. May close as a verified no-op |
 | I | #291 suggest / SuggestComponent | after J (#300) — `solr_text_suggester` is the field the suggester is built from. Its own configset and capture prep |
@@ -217,7 +257,9 @@ their own configset:
 - **Longest chain:** `F (#289) -> L2 -> L3 -> L4`. Spatial is the schedule, so
   starting #289 early matters more than its own size suggests. F is behind nothing now
   that 0b has landed.
-- **Second chain:** `H (#296) -> K (#298)` — two links left; E is done.
+- **Second chain: dissolved.** It was `E -> H -> K`; E landed, and K turned out not to
+  depend on H, so both are now single branches rather than a chain. Nothing behind
+  them.
 - **Third chain:** `J (#300) -> I (#291)`.
 - **Off the path entirely:** #301, #302, #294 (now unblocked). #308, #297 and #299 are
   done.
@@ -241,6 +283,9 @@ conflicts actually survive:
   `}` or a space in a delta would break out of the local-params block), and
   `ResponseParser::parseFacets()` registers **both** the delta and the field name as
   keys for every delta, so either shape resolves. Do not "simplify" that to one key.
+- **The OR-facet tag string is `facet:<search_api_field_name>`.** Not our choice — the
+  facets module defines it and `search_api_solr` reproduces it verbatim. Set by K
+  (#298), and the label L3 (#292's distance facets) must not collide with.
 - **The `{!tag}`/`{!ex}` exclusion machinery in `src/facet.rs` has one implementation.**
   Set by E (#295): `FacetFieldPlan.ex`, `FacetFieldsPlan.exclusion_active`,
   `excluded_base_clauses`. H, K and L3 extend it; none forks a second exclusion path,
