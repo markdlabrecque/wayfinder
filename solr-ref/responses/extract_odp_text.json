@@ -1,0 +1,8 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2
+  },
+  "file":"\n\n\n\n\n\n\n\n\n\n\n\nODP slide content.\n\n",
+  "file_metadata":["resourceName",["sample.odp","sample.odp"],"Content-Type",["application/vnd.oasis.opendocument.presentation","application/vnd.oasis.opendocument.presentation"],"stream_name",["file","file"],"stream_source_info",["sample.odp","sample.odp"],"stream_size",["1672","1672"],"stream_content_type",["application/vnd.oasis.opendocument.presentation","application/vnd.oasis.opendocument.presentation"],"X-Parsed-By",["org.apache.tika.parser.DefaultParser","org.apache.tika.parser.odf.OpenDocumentParser"],"generator",["ODFPY/1.4.1"]]
+}

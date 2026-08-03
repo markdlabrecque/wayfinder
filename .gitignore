@@ -12,3 +12,6 @@
 
 # Claude Code local state (worktrees, local settings)
 /.claude/
+
+# Python bytecode from the solr-ref input generators
+__pycache__/

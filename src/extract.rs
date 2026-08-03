@@ -82,22 +82,33 @@ use tempfile::NamedTempFile;
 /// Wire-visible content types phase 0 can name. A ZIP container's specific
 /// OOXML/ODF flavour cannot be told apart from magic bytes alone (only
 /// `[Content_Types].xml` / `mimetype` inside the archive can do that), so
-/// `Zip` is one variant rather than guessing `Docx`/`Pptx`/... at signature
-/// time.
-///
-/// ponytail: phase 2a splits `Zip` into `Ooxml`/`OpenDocument` variants (or a
-/// nested enum) once it can open the archive and read the manifest part.
-/// Phase 0 only ever produces `Zip` from `detect()`.
+/// signature detection produces `Zip` and a second pass (`refine_zip_kind`)
+/// opens the archive to resolve it to one of the office variants below — or
+/// leaves it `Zip` when the archive is not a recognised office package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ContentType {
     PlainText,
     Html,
     Xml,
+    /// A ZIP container whose office flavour is not yet resolved. Signature
+    /// detection (`PK\x03\x04`) produces this; `refine_zip_kind` turns it
+    /// into one of the office variants below, or leaves it when the archive
+    /// is something Wayfinder does not extract (an arbitrary `.zip`).
     Zip,
+    // OOXML family (issue #260): bounded zip + streaming xml.
+    Docx,
+    Pptx,
+    Xlsx,
+    // ODF family (issue #260): bounded zip + streaming xml.
+    Odt,
+    Odp,
+    Ods,
     Rtf,
     Pdf,
     /// Binary (OLE2/CFB) legacy DOC/PPT/XLS. Never routed to a ZIP/OOXML
-    /// path — always `ExtractError::UnsupportedFormat` in phase 0.
+    /// path — always `ExtractError::UnsupportedFormat`. (XLS, the legacy
+    /// spreadsheet, is the one calamine *can* read; it is left unsupported
+    /// in this issue pending its own decision, see `dispatch`.)
     LegacyOle,
     #[default]
     Unknown,
@@ -113,6 +124,12 @@ impl ContentType {
             ContentType::Html => "html",
             ContentType::Xml => "xml",
             ContentType::Zip => "zip container",
+            ContentType::Docx => "Office Open XML text document (docx)",
+            ContentType::Pptx => "Office Open XML presentation (pptx)",
+            ContentType::Xlsx => "Office Open XML spreadsheet (xlsx)",
+            ContentType::Odt => "OpenDocument text (odt)",
+            ContentType::Odp => "OpenDocument presentation (odp)",
+            ContentType::Ods => "OpenDocument spreadsheet (ods)",
             ContentType::Rtf => "rtf",
             ContentType::Pdf => "pdf",
             ContentType::LegacyOle => "legacy OLE2 binary office document",
@@ -409,12 +426,18 @@ pub fn dispatch(content_type: ContentType) -> Option<&'static dyn Extractor> {
     match content_type {
         ContentType::PlainText => Some(&PLAIN_TEXT_EXTRACTOR),
         ContentType::Html => Some(&HTML_EXTRACTOR),
+        ContentType::Docx => Some(&DOCX_EXTRACTOR),
+        ContentType::Pptx => Some(&PPTX_EXTRACTOR),
+        ContentType::Odt => Some(&ODT_EXTRACTOR),
+        ContentType::Odp => Some(&ODP_EXTRACTOR),
+        ContentType::Xlsx => Some(&XLSX_EXTRACTOR),
+        ContentType::Ods => Some(&ODS_EXTRACTOR),
+        ContentType::Rtf => Some(&RTF_EXTRACTOR),
         // Exhaustive on purpose rather than a `_ => None` arm: when a later
-        // phase adds the XML/ZIP/RTF/PDF extractors, this match is the place
-        // the compiler points at.
+        // change adds the remaining extractors, this match is the place the
+        // compiler points at.
         ContentType::Xml
         | ContentType::Zip
-        | ContentType::Rtf
         | ContentType::Pdf
         | ContentType::LegacyOle
         | ContentType::Unknown => None,
@@ -1274,6 +1297,1244 @@ fn escape_xml_attribute(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------
+// Issue #260 — office/ODF/RTF extractors
+// ---------------------------------------------------------------------
+//
+// Seven formats land here, in three families the dependency survey (#171)
+// chose crates for:
+//
+// - DOCX, PPTX: bounded `zip` + streaming `quick-xml` over allowlisted
+//   package parts (`word/document.xml`, `ppt/slides/slide*.xml`,
+//   `docProps/core.xml`).
+// - XLSX, ODS: `calamine` (shared strings / typed cells are more than a
+//   generic XML walk is worth).
+// - ODT, ODP: bounded `zip` + streaming `quick-xml` over `content.xml`
+//   (and `meta.xml` for the narrow title/author promise).
+// - RTF: `rtf-parser`'s lexer, driven by a Wayfinder-owned walk that tracks
+//   `\par` boundaries and bold runs. The high-level `RtfDocument` API merges
+//   runs by painter and drops `\par` paragraph breaks (verified against
+//   `sample.rtf`), so it cannot reproduce Tika's paragraph structure; the
+//   lexer is the crate surface that can, and using it for the walk is the
+//   same shape as the HTML extractor (html5ever's tokenizer, own sink).
+//
+// Every extractor runs under #257's budgets: the `ZipBudget` admits each
+// archive entry before any byte is decompressed and charges real
+// decompressed bytes as they are read (the zip-bomb guards), and the XML
+// walkers charge `count_xml_event` / `enter_xml_element` / `leave_xml_element`
+// against `max_xml_events` / `max_xml_depth`. RTF charges
+// `enter_rtf_group` against `max_rtf_group_depth`.
+//
+// Legacy binary DOC/PPT/XLS are *not* extracted: `detect` routes them to
+// `LegacyOle`, which has no extractor, so they reach the typed
+// `UnsupportedFormat` rather than being misparsed as OOXML. (calamine *can*
+// read legacy XLS; leaving it unsupported is a deliberate, separate decision,
+// not an oversight — see `dispatch`.)
+
+/// Reads a `Cursor` over the raw archive bytes. Returned so every caller
+/// goes through one construction path with one error mapping.
+fn open_zip(bytes: &[u8]) -> Result<zip::ZipArchive<std::io::Cursor<&[u8]>>, ExtractError> {
+    zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .map_err(|e| ExtractError::Parse(format!("opening zip archive: {e}")))
+}
+
+/// Maps a `zip` read error onto the parser-failure taxonomy. A truncated or
+/// malformed archive is a parser failure (500), matching the captured
+/// `extract_broken_*` envelopes; it is never a budget violation.
+fn zip_read_error(e: impl std::fmt::Display) -> ExtractError {
+    ExtractError::Parse(format!("reading zip archive: {e}"))
+}
+
+/// Decompression chunk size for the bounded zip-entry reader. Matches the
+/// phase-0 streaming-text chunk so deadline checks land at the same cadence.
+const ZIP_READ_CHUNK: usize = 8 * 1024;
+
+/// Single bounded pass over the archive: every entry is run through
+/// `ZipBudget::admit` (the entry-count, path, ratio, and cumulative declared
+/// guards see the *whole* archive, so a zip bomb is caught even when its
+/// malignant entries are not ones the caller wants), and the entries whose
+/// name `want` accepts are decompressed — bounded by `zip_max_entry_bytes`
+/// via `Take`, with real bytes charged to `charge_actual` as they arrive.
+///
+/// Returns `(name, bytes)` for each wanted entry, in archive order. The
+/// caller (an extractor) chooses its own allowlist and its own sort, so the
+/// bomb-guard pass and the format-specific selection stay separate concerns.
+///
+/// This is the documented `ZipBudget` call sequence in one place: one
+/// `admit()` per entry, then `charge_actual()` per chunk for the entries that
+/// are actually read. Non-wanted entries are admitted (guarded) but never
+/// read, so a thousand zero-declared expanding entries that the caller does
+/// not want never touch memory — only the two guards that *can* catch them
+/// (declared ratio, declared cumulative) run over their metadata.
+fn collect_zip_parts(
+    bytes: &[u8],
+    budget: &mut Budget,
+    want: &dyn Fn(&str) -> bool,
+) -> Result<Vec<(String, Vec<u8>)>, ExtractError> {
+    let limits = *budget.limits();
+    let mut zip = ZipBudget::new(limits);
+    let mut archive = open_zip(bytes)?;
+    let count = archive.len();
+    let mut out = Vec::new();
+    use std::io::Read;
+    for index in 0..count {
+        budget.check_deadline()?;
+        let (name, compressed, uncompressed) = {
+            let entry = archive.by_index(index).map_err(zip_read_error)?;
+            (
+                entry.name().to_string(),
+                entry.compressed_size(),
+                entry.size(),
+            )
+        };
+        let meta = ZipEntryMeta {
+            name: &name,
+            compressed_size: compressed,
+            uncompressed_size: uncompressed,
+        };
+        // `admit` resets the per-entry actual total to this entry, so the
+        // `charge_actual` calls below always land against the right entry.
+        zip.admit(&meta)?;
+        if !want(&name) {
+            continue;
+        }
+        let mut entry = archive.by_index(index).map_err(zip_read_error)?;
+        // `.take` bounds a single entry's decompression in memory *between*
+        // two `charge_actual` calls; without it a single `read_to_end` could
+        // materialise `zip_max_entry_bytes` before the first charge.
+        let mut limited = (&mut entry).take(limits.zip_max_entry_bytes);
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; ZIP_READ_CHUNK];
+        loop {
+            let n = limited.read(&mut chunk).map_err(zip_read_error)?;
+            if n == 0 {
+                break;
+            }
+            zip.charge_actual(n as u64)?;
+            buf.extend_from_slice(&chunk[..n]);
+            budget.check_deadline()?;
+        }
+        out.push((name, buf));
+    }
+    Ok(out)
+}
+
+/// Resolves a `Zip` content type to a specific office variant by reading the
+/// archive's manifest parts, or leaves it `Zip` when the archive is not a
+/// recognised office package. Runs under its own bounded pass so a malformed
+/// or oversized archive is rejected here, before an extractor is even
+/// selected.
+///
+/// Detection is content-based, not name-based: an ODF package stores its MIME
+/// type verbatim in a stored `mimetype` entry; an OOXML package declares its
+/// per-part content types in `[Content_Types].xml`. Both are read off the
+/// archive's own manifest, so a renamed `.docx` or a wrong declared MIME type
+/// does not misroute the document.
+fn refine_zip_kind(bytes: &[u8], budget: &mut Budget) -> Result<ContentType, ExtractError> {
+    let parts = collect_zip_parts(bytes, budget, &|name| {
+        name == "mimetype" || name == "[Content_Types].xml"
+    })?;
+    for (name, data) in parts {
+        if name == "mimetype" {
+            // ODF: the stored `mimetype` entry is exactly the package MIME.
+            let mime = String::from_utf8_lossy(&data);
+            return Ok(match mime.trim() {
+                "application/vnd.oasis.opendocument.text" => ContentType::Odt,
+                "application/vnd.oasis.opendocument.presentation" => ContentType::Odp,
+                "application/vnd.oasis.opendocument.spreadsheet" => ContentType::Ods,
+                _ => continue,
+            });
+        }
+        if name == "[Content_Types].xml" {
+            // OOXML: the part content types declare the document flavour.
+            // A substring match is sufficient and robust against the
+            // namespace/attribute churn real producers emit.
+            let body = String::from_utf8_lossy(&data);
+            return Ok(if body.contains("wordprocessingml") {
+                ContentType::Docx
+            } else if body.contains("presentationml") {
+                ContentType::Pptx
+            } else if body.contains("spreadsheetml") {
+                ContentType::Xlsx
+            } else {
+                ContentType::Zip
+            });
+        }
+    }
+    Ok(ContentType::Zip)
+}
+
+/// `quick-xml` namespace handling is off by default, so element identity is
+/// the raw qualified name. Office XML uses stable prefixes (`w:`, `a:`, `dc:`
+/// ...), and the producers that matter (Word/PowerPoint/LibreOffice and the
+/// python-docx/odfpy generators the fixtures use) all emit them, so matching
+/// the local name (after the colon) is both robust and unambiguous here.
+fn local_name(qname: &[u8]) -> &[u8] {
+    match qname.iter().rposition(|&b| b == b':') {
+        Some(i) => &qname[i + 1..],
+        None => qname,
+    }
+}
+
+/// The narrow office metadata promise (PRD, finding 125): `dc:title` and the
+/// author (`dc:creator` for OOXML, `dc:initial-creator` for ODF). Walks an
+/// already-decompressed properties part with `quick-xml`, charging one XML
+/// event per token against `max_xml_events`.
+fn office_core_properties(
+    xml: &str,
+    budget: &mut Budget,
+) -> Result<(Option<String>, Option<String>), ExtractError> {
+    let mut reader = quick_xml::Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut title: Option<String> = None;
+    let mut author: Option<String> = None;
+    let mut capture: Option<&str> = None;
+    loop {
+        budget.count_xml_event()?;
+        use quick_xml::events::Event;
+        let event = reader.read_event_into(&mut buf).map_err(xml_read_error)?;
+        match event {
+            Event::Start(e) => match local_name(e.name().as_ref()) {
+                b"title" if title.is_none() => capture = Some("title"),
+                b"creator" | b"initial-creator" if author.is_none() => capture = Some("author"),
+                _ => capture = None,
+            },
+            Event::End(_) => capture = None,
+            Event::Text(t) => {
+                if let Some(kind) = capture {
+                    let text = t.unescape().map_err(xml_read_error)?.into_owned();
+                    match kind {
+                        "title" => title.get_or_insert(text),
+                        _ => author.get_or_insert(text),
+                    };
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok((title, author))
+}
+
+fn xml_read_error(e: impl std::fmt::Display) -> ExtractError {
+    ExtractError::Parse(format!("parsing office xml: {e}"))
+}
+
+/// Reads `docProps/core.xml` out of an already-collected parts list, if the
+/// archive has one, and returns the narrow `(title, author)` promise.
+fn ooxml_core_from_parts(
+    parts: &[(String, Vec<u8>)],
+    budget: &mut Budget,
+) -> Result<(Option<String>, Option<String>), ExtractError> {
+    for (name, data) in parts {
+        if name == "docProps/core.xml" {
+            return office_core_properties(&String::from_utf8_lossy(data), budget);
+        }
+    }
+    Ok((None, None))
+}
+
+/// Charges `s` to the output budget **and** appends it to the plain-text
+/// rendering, keeping the two (which end up as `Extracted.text` and
+/// `Extracted.body_text`) in lockstep. Block boundaries are the caller's job;
+/// this is for inline runs and the block text itself.
+fn push_text(budget: &mut Budget, text: &mut String, s: &str) -> Result<(), ExtractError> {
+    budget.push_str(s)?;
+    text.push_str(s);
+    Ok(())
+}
+
+/// Appends `s` to `out`, enforcing the output byte budget on the second
+/// buffer (the XHTML body) the same way `Budget::push_str` enforces it on
+/// the primary output. Used wherever an extractor keeps a parallel XHTML
+/// string beside the budgeted text.
+fn push_bounded(out: &mut String, s: &str, budget: &Budget) -> Result<(), ExtractError> {
+    if out.len().saturating_add(s.len()) > budget.limits().max_output_bytes {
+        return Err(ExtractError::OutputTooLarge(OutputLimitKind::Bytes));
+    }
+    out.push_str(s);
+    Ok(())
+}
+
+// --- DOCX --------------------------------------------------------------
+
+static DOCX_EXTRACTOR: DocxExtractor = DocxExtractor;
+
+/// DOCX via `word/document.xml` + `docProps/core.xml`. Each `<w:p>` is a
+/// block; a `<w:pStyle w:val="HeadingN"/>` (1..=6) makes it an `<hN>`, every
+/// other paragraph is a `<p>`. Text comes from `<w:t>` runs concatenated.
+pub struct DocxExtractor;
+
+impl Extractor for DocxExtractor {
+    fn extract(
+        &self,
+        input: &ExtractInput<'_>,
+        budget: &mut Budget,
+    ) -> Result<Extracted, ExtractError> {
+        let start = budget.output_text().len();
+        let parts = collect_zip_parts(input.bytes, budget, &|name| {
+            name == "word/document.xml" || name == "docProps/core.xml"
+        })?;
+        let (title, author) = ooxml_core_from_parts(&parts, budget)?;
+        let mut xhtml = String::new();
+        let mut text = String::new();
+        for (name, data) in &parts {
+            if name != "word/document.xml" {
+                continue;
+            }
+            walk_docx_body(
+                &String::from_utf8_lossy(data),
+                budget,
+                &mut xhtml,
+                &mut text,
+            )?;
+        }
+        Ok(finish_office(
+            ContentType::Docx,
+            input,
+            budget,
+            start,
+            xhtml,
+            text,
+            title,
+            author,
+        ))
+    }
+}
+
+/// Walks `word/document.xml`, emitting one block per `<w:p>`. Depth is held
+/// by `enter_xml_element`/`leave_xml_element`; a `w:pStyle` with val
+/// `Heading1..=6` flags the current paragraph as a heading.
+fn walk_docx_body(
+    xml: &str,
+    budget: &mut Budget,
+    xhtml: &mut String,
+    text: &mut String,
+) -> Result<(), ExtractError> {
+    let mut reader = quick_xml::Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut depth_in_p = false;
+    let mut heading: Option<u8> = None;
+    let mut para = String::new();
+    loop {
+        budget.count_xml_event()?;
+        budget.check_deadline()?;
+        use quick_xml::events::Event;
+        let event = reader.read_event_into(&mut buf).map_err(xml_read_error)?;
+        match event {
+            Event::Start(e) => match local_name(e.name().as_ref()) {
+                b"p" => {
+                    budget.enter_xml_element()?;
+                    depth_in_p = true;
+                    heading = None;
+                    para.clear();
+                }
+                _ => budget.enter_xml_element()?,
+            },
+            Event::Empty(e) => {
+                if depth_in_p
+                    && local_name(e.name().as_ref()) == b"pStyle"
+                    && let Some(val) = attr(e.attributes(), b"val")
+                {
+                    heading = heading_level(&val);
+                }
+            }
+            Event::End(e) => {
+                let name = e.name().as_ref().to_vec();
+                let local = local_name(&name);
+                if local == b"p" && depth_in_p {
+                    budget.leave_xml_element();
+                    depth_in_p = false;
+                    emit_block(heading, &para, budget, xhtml, text)?;
+                } else {
+                    budget.leave_xml_element();
+                }
+            }
+            Event::Text(t) if depth_in_p => {
+                para.push_str(&t.unescape().map_err(xml_read_error)?);
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(())
+}
+
+/// Emits one finished block (a heading `<hN>` or a `<p>`) in both the XHTML
+/// and the plain-text renderings, matching Tika's block-at-a-time output:
+/// each block ends with exactly one newline in the text form.
+fn emit_block(
+    heading: Option<u8>,
+    para: &str,
+    budget: &mut Budget,
+    xhtml: &mut String,
+    text: &mut String,
+) -> Result<(), ExtractError> {
+    let tag = heading
+        .map(|n| format!("h{n}"))
+        .unwrap_or_else(|| "p".to_string());
+    push_bounded(xhtml, &format!("<{tag}>"), budget)?;
+    push_bounded(xhtml, &escape_xml_text(para), budget)?;
+    push_bounded(xhtml, &format!("</{tag}>\n"), budget)?;
+    // The plain-text rendering: block text then one newline, in both the
+    // budget output and the parallel text string.
+    push_text(budget, text, para)?;
+    push_text(budget, text, "\n")?;
+    Ok(())
+}
+
+/// `Heading1..=6` -> `1..=6`. Word styles beyond `Heading6` (`Heading7..9`,
+/// `Title`) are not mapped to an XHTML heading by Tika and fall back to `<p>`.
+fn heading_level(val: &str) -> Option<u8> {
+    val.strip_prefix("Heading")
+        .and_then(|n| n.parse::<u8>().ok())
+        .filter(|n| (1..=6).contains(n))
+}
+
+/// The first value of the named attribute, unescaped. Attribute names match
+/// on local name for the same reason element names do.
+fn attr<'a>(attrs: quick_xml::events::attributes::Attributes<'a>, key: &[u8]) -> Option<String> {
+    for attr in attrs.flatten() {
+        if local_name(attr.key.as_ref()) == key {
+            return Some(attr.unescape_value().ok()?.into_owned());
+        }
+    }
+    None
+}
+
+// --- PPTX --------------------------------------------------------------
+
+static PPTX_EXTRACTOR: PptxExtractor = PptxExtractor;
+
+/// PPTX via `ppt/slides/slide*.xml` (one `<div class="slide-content">` per
+/// slide, in numeric order) + `docProps/core.xml`. Each `<a:t>` run in a
+/// slide becomes a `<p>`; Tika follows every slide with an empty
+/// `<div class="slide-master-content" />`.
+pub struct PptxExtractor;
+
+impl Extractor for PptxExtractor {
+    fn extract(
+        &self,
+        input: &ExtractInput<'_>,
+        budget: &mut Budget,
+    ) -> Result<Extracted, ExtractError> {
+        let start = budget.output_text().len();
+        let parts = collect_zip_parts(input.bytes, budget, &|name| {
+            name == "docProps/core.xml"
+                || (name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
+        })?;
+        let (title, author) = ooxml_core_from_parts(&parts, budget)?;
+        // Numeric sort: `slide10.xml` must follow `slide9.xml`, not `slide1`.
+        // `slideN.xml` lives exactly two directories deep, which rules out
+        // `_rels/slide1.xml.rels`-shaped siblings the prefix would otherwise catch.
+        let mut slides: Vec<(u64, &Vec<u8>)> = Vec::new();
+        for (name, data) in &parts {
+            if name.matches('/').count() != 2 {
+                continue;
+            }
+            if let Some(n) = name
+                .strip_prefix("ppt/slides/slide")
+                .and_then(|s| s.strip_suffix(".xml"))
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                slides.push((n, data));
+            }
+        }
+        slides.sort_by_key(|(n, _)| *n);
+        let mut xhtml = String::new();
+        let mut text = String::new();
+        for (_, data) in &slides {
+            let runs = walk_pptx_slide(&String::from_utf8_lossy(data), budget)?;
+            push_bounded(&mut xhtml, "<div class=\"slide-content\">", budget)?;
+            for run in &runs {
+                push_bounded(&mut xhtml, "<p>", budget)?;
+                push_bounded(&mut xhtml, &escape_xml_text(run), budget)?;
+                push_bounded(&mut xhtml, "</p>\n", budget)?;
+                // One `<a:t>` run is one `<p>`; both renderings get `run\n`.
+                push_text(budget, &mut text, run)?;
+                push_text(budget, &mut text, "\n")?;
+            }
+            push_bounded(
+                &mut xhtml,
+                "</div>\n<div class=\"slide-master-content\" />\n",
+                budget,
+            )?;
+            // The two trailing block closes (slide-content, slide-master) each
+            // contribute a newline in the text rendering, matching the fixture's
+            // per-slide `\n\n` tail.
+            push_text(budget, &mut text, "\n")?;
+            push_text(budget, &mut text, "\n")?;
+        }
+        Ok(finish_office(
+            ContentType::Pptx,
+            input,
+            budget,
+            start,
+            xhtml,
+            text,
+            title,
+            author,
+        ))
+    }
+}
+
+/// Collects the text of every `<a:t>` in one slide, in document order. Each
+/// `<a:t>` is one `<p>` in Tika's output (a title is simply the first run).
+fn walk_pptx_slide(xml: &str, budget: &mut Budget) -> Result<Vec<String>, ExtractError> {
+    let mut reader = quick_xml::Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut runs = Vec::new();
+    let mut in_t = false;
+    let mut current = String::new();
+    loop {
+        budget.count_xml_event()?;
+        budget.check_deadline()?;
+        use quick_xml::events::Event;
+        let event = reader.read_event_into(&mut buf).map_err(xml_read_error)?;
+        match event {
+            Event::Start(e) => {
+                budget.enter_xml_element()?;
+                if local_name(e.name().as_ref()) == b"t" {
+                    in_t = true;
+                    current.clear();
+                }
+            }
+            Event::End(e) => {
+                budget.leave_xml_element();
+                if local_name(e.name().as_ref()) == b"t" && in_t {
+                    in_t = false;
+                    if !current.is_empty() {
+                        runs.push(std::mem::take(&mut current));
+                    }
+                }
+            }
+            Event::Text(t) if in_t => {
+                current.push_str(&t.unescape().map_err(xml_read_error)?);
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(runs)
+}
+
+// --- ODT (ODF text) ----------------------------------------------------
+
+static ODT_EXTRACTOR: OdtExtractor = OdtExtractor;
+
+/// ODT via `content.xml` (`text:h` headings, `text:p` paragraphs) and
+/// `meta.xml` (narrow title/author). Tika's ODF body handler emits blocks
+/// *without* the inter-block newline the OOXML handler adds (finding 126):
+/// the text rendering runs a heading straight into the following paragraph,
+/// and only consecutive paragraphs pick up a separator. That asymmetry is
+/// reproduced exactly, not normalised away.
+pub struct OdtExtractor;
+
+impl Extractor for OdtExtractor {
+    fn extract(
+        &self,
+        input: &ExtractInput<'_>,
+        budget: &mut Budget,
+    ) -> Result<Extracted, ExtractError> {
+        let start = budget.output_text().len();
+        let parts = collect_zip_parts(input.bytes, budget, &|name| {
+            name == "content.xml" || name == "meta.xml"
+        })?;
+        let (title, author) = odf_meta_from_parts(&parts, budget)?;
+        let mut xhtml = String::new();
+        let mut text = String::new();
+        for (name, data) in &parts {
+            if name == "content.xml" {
+                walk_odt_body(
+                    &String::from_utf8_lossy(data),
+                    budget,
+                    &mut xhtml,
+                    &mut text,
+                )?;
+            }
+        }
+        Ok(finish_office(
+            ContentType::Odt,
+            input,
+            budget,
+            start,
+            xhtml,
+            text,
+            title,
+            author,
+        ))
+    }
+}
+
+/// Walks `content.xml`'s `office:body` for `text:h`/`text:p`. Only elements
+/// inside the body are emitted; the `office:automatic-styles` / form / settings
+/// branches carry no extractable text.
+fn walk_odt_body(
+    xml: &str,
+    budget: &mut Budget,
+    xhtml: &mut String,
+    text: &mut String,
+) -> Result<(), ExtractError> {
+    let mut reader = quick_xml::Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut in_body = false;
+    let mut current_kind: Option<OdtBlock> = None;
+    let mut run = String::new();
+    loop {
+        budget.count_xml_event()?;
+        budget.check_deadline()?;
+        use quick_xml::events::Event;
+        let event = reader.read_event_into(&mut buf).map_err(xml_read_error)?;
+        match event {
+            Event::Start(e) => {
+                let local = local_name(e.name().as_ref()).to_vec();
+                budget.enter_xml_element()?;
+                if local.as_slice() == b"body" {
+                    in_body = true;
+                } else if in_body {
+                    match local.as_slice() {
+                        b"h" => {
+                            current_kind =
+                                Some(OdtBlock::Heading(heading_level_attr(e.attributes())))
+                        }
+                        b"p" => current_kind = Some(OdtBlock::Paragraph),
+                        _ => {}
+                    }
+                    if current_kind.is_some() {
+                        run.clear();
+                    }
+                }
+            }
+            Event::End(e) => {
+                let local = local_name(e.name().as_ref()).to_vec();
+                budget.leave_xml_element();
+                if local.as_slice() == b"body" {
+                    in_body = false;
+                } else if in_body && current_kind.is_some() {
+                    match current_kind {
+                        Some(OdtBlock::Heading(level)) => {
+                            let tag = level
+                                .map(|n| format!("h{n}"))
+                                .unwrap_or_else(|| "p".to_string());
+                            push_bounded(xhtml, &format!("<{tag}>"), budget)?;
+                            push_bounded(xhtml, &escape_xml_text(&run), budget)?;
+                            push_bounded(xhtml, &format!("</{tag}>"), budget)?;
+                            // Headings contribute their text with no trailing
+                            // newline, and no separator before the next block
+                            // (finding 126).
+                            push_text(budget, text, &run)?;
+                        }
+                        Some(OdtBlock::Paragraph) => {
+                            push_bounded(xhtml, "<p>", budget)?;
+                            push_bounded(xhtml, &escape_xml_text(&run), budget)?;
+                            // Paragraphs carry the trailing `\n` themselves
+                            // (Tika's ODF serialiser), which is also the only
+                            // separator between consecutive paragraphs.
+                            push_bounded(xhtml, "</p>\n", budget)?;
+                            push_text(budget, text, &run)?;
+                            push_text(budget, text, "\n")?;
+                        }
+                        None => {}
+                    }
+                    current_kind = None;
+                }
+            }
+            Event::Text(t) if in_body && current_kind.is_some() => {
+                run.push_str(&t.unescape().map_err(xml_read_error)?);
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum OdtBlock {
+    Heading(Option<u8>),
+    Paragraph,
+}
+
+/// `text:outline-level="N"` -> `1..=6`, else `None` (falls back to `<p>`).
+fn heading_level_attr(attrs: quick_xml::events::attributes::Attributes<'_>) -> Option<u8> {
+    attr(attrs, b"outline-level")
+        .and_then(|s| s.parse::<u8>().ok())
+        .filter(|n| (1..=6).contains(n))
+}
+
+/// `meta.xml` carries the ODF narrow metadata: `dc:title` and
+/// `dc:initial-creator` (the author). Same walker as the OOXML core
+/// properties, which already accepts `initial-creator`.
+fn odf_meta_from_parts(
+    parts: &[(String, Vec<u8>)],
+    budget: &mut Budget,
+) -> Result<(Option<String>, Option<String>), ExtractError> {
+    for (name, data) in parts {
+        if name == "meta.xml" {
+            return office_core_properties(&String::from_utf8_lossy(data), budget);
+        }
+    }
+    Ok((None, None))
+}
+
+// --- ODP (ODF presentation) -------------------------------------------
+
+static ODP_EXTRACTOR: OdpExtractor = OdpExtractor;
+
+/// ODP via `content.xml`: each `draw:page` is a `<div>`, each `text:p` in it
+/// a `<p>`. `meta.xml` supplies the narrow title/author.
+pub struct OdpExtractor;
+
+impl Extractor for OdpExtractor {
+    fn extract(
+        &self,
+        input: &ExtractInput<'_>,
+        budget: &mut Budget,
+    ) -> Result<Extracted, ExtractError> {
+        let start = budget.output_text().len();
+        let parts = collect_zip_parts(input.bytes, budget, &|name| {
+            name == "content.xml" || name == "meta.xml"
+        })?;
+        let (title, author) = odf_meta_from_parts(&parts, budget)?;
+        let mut xhtml = String::new();
+        let mut text = String::new();
+        for (name, data) in &parts {
+            if name == "content.xml" {
+                walk_odp_body(
+                    &String::from_utf8_lossy(data),
+                    budget,
+                    &mut xhtml,
+                    &mut text,
+                )?;
+            }
+        }
+        Ok(finish_office(
+            ContentType::Odp,
+            input,
+            budget,
+            start,
+            xhtml,
+            text,
+            title,
+            author,
+        ))
+    }
+}
+
+/// Walks `content.xml`, collecting each `draw:page`'s `text:p` runs as one
+/// slide. Frames, shapes, and master pages are walked for depth only.
+fn walk_odp_body(
+    xml: &str,
+    budget: &mut Budget,
+    xhtml: &mut String,
+    text: &mut String,
+) -> Result<(), ExtractError> {
+    let mut reader = quick_xml::Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut in_page = false;
+    let mut in_p = false;
+    let mut run = String::new();
+    loop {
+        budget.count_xml_event()?;
+        budget.check_deadline()?;
+        use quick_xml::events::Event;
+        let event = reader.read_event_into(&mut buf).map_err(xml_read_error)?;
+        match event {
+            Event::Start(e) => {
+                budget.enter_xml_element()?;
+                let local = local_name(e.name().as_ref()).to_vec();
+                match local.as_slice() {
+                    b"page" => {
+                        in_page = true;
+                        push_bounded(xhtml, "<div>", budget)?;
+                    }
+                    b"p" if in_page => {
+                        in_p = true;
+                        run.clear();
+                    }
+                    _ => {}
+                }
+            }
+            Event::End(e) => {
+                budget.leave_xml_element();
+                let local = local_name(e.name().as_ref()).to_vec();
+                match local.as_slice() {
+                    b"p" if in_p => {
+                        in_p = false;
+                        push_bounded(xhtml, "<p>", budget)?;
+                        push_bounded(xhtml, &escape_xml_text(&run), budget)?;
+                        push_bounded(xhtml, "</p>\n", budget)?;
+                        push_text(budget, text, &run)?;
+                        push_text(budget, text, "\n")?;
+                    }
+                    b"page" if in_page => {
+                        in_page = false;
+                        push_bounded(xhtml, "</div>\n", budget)?;
+                        // The page close contributes one trailing newline in
+                        // the text rendering; the paragraph's own `\n` is the
+                        // other half of the per-slide pair (finding 126).
+                        push_text(budget, text, "\n")?;
+                    }
+                    _ => {}
+                }
+            }
+            Event::Text(t) if in_p => {
+                run.push_str(&t.unescape().map_err(xml_read_error)?);
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(())
+}
+
+// --- XLSX / ODS (calamine) --------------------------------------------
+
+static XLSX_EXTRACTOR: XlsxExtractor = XlsxExtractor;
+static ODS_EXTRACTOR: OdsExtractor = OdsExtractor;
+
+/// XLSX via `calamine`. Each sheet is a `<div><h1>Name</h1>` wrapping a
+/// `<table><tbody>`; each row is a `<tr>` of tab-prefixed `<td>` cells. Cells
+/// are typed (`calamine::Data`): integers render bare (`1`), strings as-is.
+pub struct XlsxExtractor;
+
+impl Extractor for XlsxExtractor {
+    fn extract(
+        &self,
+        input: &ExtractInput<'_>,
+        budget: &mut Budget,
+    ) -> Result<Extracted, ExtractError> {
+        use calamine::Reader;
+        let start = budget.output_text().len();
+        let mut workbook = calamine::Xlsx::new(std::io::Cursor::new(input.bytes))
+            .map_err(|e| ExtractError::Parse(format!("opening spreadsheet: {e}")))?;
+        // `calamine` reads cells, not the core-properties part; read it
+        // separately for the narrow title/author promise (finding 125).
+        let meta = collect_zip_parts(input.bytes, budget, &|n| n == "docProps/core.xml")?;
+        let (title, author) = ooxml_core_from_parts(&meta, budget)?;
+        render_spreadsheet(
+            ContentType::Xlsx,
+            workbook.worksheets(),
+            input,
+            budget,
+            start,
+            SpreadsheetFlavour::Ooxml,
+            title,
+            author,
+        )
+    }
+}
+
+/// ODS via `calamine`. Same cell model as XLSX, but Tika's ODF table serialiser
+/// wraps each cell's text in `<p>` and omits both the sheet-name heading and
+/// the `<tbody>` (finding 126).
+pub struct OdsExtractor;
+
+impl Extractor for OdsExtractor {
+    fn extract(
+        &self,
+        input: &ExtractInput<'_>,
+        budget: &mut Budget,
+    ) -> Result<Extracted, ExtractError> {
+        use calamine::Reader;
+        let start = budget.output_text().len();
+        let mut workbook = calamine::Ods::new(std::io::Cursor::new(input.bytes))
+            .map_err(|e| ExtractError::Parse(format!("opening spreadsheet: {e}")))?;
+        let meta = collect_zip_parts(input.bytes, budget, &|n| n == "meta.xml")?;
+        let (title, author) = odf_meta_from_parts(&meta, budget)?;
+        render_spreadsheet(
+            ContentType::Ods,
+            workbook.worksheets(),
+            input,
+            budget,
+            start,
+            SpreadsheetFlavour::Odf,
+            title,
+            author,
+        )
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpreadsheetFlavour {
+    Ooxml,
+    Odf,
+}
+
+/// Renders already-read spreadsheet sheets as the OOXML/ODF table XHTML and
+/// the tab-separated text form. `calamine` materialises a whole sheet into a
+/// `Range` before the caller hands it in, so the cell budget bounds *output*,
+/// not `calamine`'s internal read — the documented residual risk for an opaque
+/// parser (the phase-0 contract). Sheet and cell counts are still enforced
+/// incrementally. Non-generic over the reader: the caller reads the sheets,
+/// sidestepping the `Reader<Cursor<&[u8]>>` lifetime that does not survive
+/// being threaded through a generic.
+#[allow(clippy::too_many_arguments)]
+fn render_spreadsheet(
+    content_type: ContentType,
+    sheets: Vec<(String, calamine::Range<calamine::Data>)>,
+    input: &ExtractInput<'_>,
+    budget: &mut Budget,
+    start: usize,
+    flavour: SpreadsheetFlavour,
+    title: Option<String>,
+    author: Option<String>,
+) -> Result<Extracted, ExtractError> {
+    use calamine::Data;
+    let mut xhtml = String::new();
+    let mut text = String::new();
+    for (name, range) in &sheets {
+        budget.check_deadline()?;
+        budget.count_sheet()?;
+        let rows: Vec<&[Data]> = range.rows().collect();
+        match flavour {
+            SpreadsheetFlavour::Ooxml => {
+                push_bounded(&mut xhtml, "<div><h1>", budget)?;
+                push_bounded(&mut xhtml, &escape_xml_text(name), budget)?;
+                push_bounded(&mut xhtml, "</h1>\n<table><tbody>", budget)?;
+                push_text(budget, &mut text, name)?;
+                push_text(budget, &mut text, "\n")?;
+                for row in &rows {
+                    push_bounded(&mut xhtml, "<tr>", budget)?;
+                    let mut cells_out = String::new();
+                    for cell in *row {
+                        budget.count_cell()?;
+                        let rendered = render_cell(cell);
+                        push_bounded(&mut xhtml, "\t<td>", budget)?;
+                        push_bounded(&mut xhtml, &escape_xml_text(&rendered), budget)?;
+                        push_bounded(&mut xhtml, "</td>", budget)?;
+                        if !cells_out.is_empty() {
+                            cells_out.push('\t');
+                        }
+                        cells_out.push_str(&rendered);
+                    }
+                    push_bounded(&mut xhtml, "</tr>\n", budget)?;
+                    push_text(budget, &mut text, "\t")?;
+                    push_text(budget, &mut text, &cells_out)?;
+                    push_text(budget, &mut text, "\n")?;
+                }
+                push_bounded(&mut xhtml, "</tbody></table>\n</div>\n", budget)?;
+                push_text(budget, &mut text, "\n")?;
+                push_text(budget, &mut text, "\n")?;
+            }
+            SpreadsheetFlavour::Odf => {
+                push_bounded(&mut xhtml, "<table>", budget)?;
+                for row in &rows {
+                    push_bounded(&mut xhtml, "<tr>", budget)?;
+                    let mut cells_out = String::new();
+                    for cell in *row {
+                        budget.count_cell()?;
+                        let rendered = render_cell(cell);
+                        push_bounded(&mut xhtml, "\t<td><p>", budget)?;
+                        push_bounded(&mut xhtml, &escape_xml_text(&rendered), budget)?;
+                        push_bounded(&mut xhtml, "</p>\n</td>", budget)?;
+                        if !cells_out.is_empty() {
+                            cells_out.push('\t');
+                        }
+                        cells_out.push_str(&rendered);
+                    }
+                    push_bounded(&mut xhtml, "</tr>\n", budget)?;
+                    push_text(budget, &mut text, "\t")?;
+                    push_text(budget, &mut text, &cells_out)?;
+                    push_text(budget, &mut text, "\n")?;
+                }
+                push_bounded(&mut xhtml, "</table>\n", budget)?;
+                push_text(budget, &mut text, "\n")?;
+                push_text(budget, &mut text, "\n")?;
+            }
+        }
+    }
+    Ok(finish_office(
+        content_type,
+        input,
+        budget,
+        start,
+        xhtml,
+        text,
+        title,
+        author,
+    ))
+}
+
+/// Renders one `calamine::Data` cell the way Tika serialises a spreadsheet
+/// cell: strings verbatim, integers in decimal, empty cells as the empty
+/// string. Floats render without a trailing `.0` when they are integral, to
+/// match how Tika emits a whole-number cell.
+fn render_cell(d: &calamine::Data) -> String {
+    use calamine::Data;
+    match d {
+        Data::Empty => String::new(),
+        Data::String(s) => s.clone(),
+        Data::Int(i) => i.to_string(),
+        Data::Float(f) => {
+            if f.is_finite() && f.fract() == 0.0 {
+                format!("{}", *f as i64)
+            } else {
+                format!("{f}")
+            }
+        }
+        Data::Bool(b) => b.to_string(),
+        Data::DateTimeIso(s) | Data::DurationIso(s) => s.clone(),
+        Data::DateTime(_) => String::new(),
+        Data::Error(e) => format!("{e:?}"),
+    }
+}
+
+// --- RTF (rtf-parser lexer + own walk) --------------------------------
+
+static RTF_EXTRACTOR: RtfExtractor = RtfExtractor;
+
+/// RTF via `rtf-parser`'s lexer, driven by a Wayfinder-owned walk that tracks
+/// `\par` paragraph breaks and bold runs. The high-level `RtfDocument` API
+/// merges runs by painter and discards `\par` boundaries (verified against
+/// `sample.rtf`), so it cannot reproduce Tika's per-paragraph `<p>`/`<b>`
+/// structure; the lexer is the crate surface that can. Using it for the walk
+/// is the same shape as the HTML extractor: a third-party tokenizer, an
+/// owned budgeted sink.
+///
+/// ponytail: RTF's own codepage (`\ansi`, `\fcharset`, `\ucN\\uN`) is not
+/// honoured here — the bytes are interpreted as a UTF-8/ASCII string the way
+/// `rtf-parser`'s own `RtfDocument::try_from` does, so non-ASCII text in a
+/// non-UTF-8 codepage decodes lossily. Trigger: the first captured RTF whose
+/// text is not representable as UTF-8.
+pub struct RtfExtractor;
+
+impl Extractor for RtfExtractor {
+    fn extract(
+        &self,
+        input: &ExtractInput<'_>,
+        budget: &mut Budget,
+    ) -> Result<Extracted, ExtractError> {
+        let start = budget.output_text().len();
+        // RTF control words are ASCII; the bytes are scanned as a UTF-8/ASCII
+        // string the way `rtf-parser`'s own `RtfDocument::try_from` does. See
+        // the ponytail on the type for the codepage limitation.
+        let src = String::from_utf8_lossy(input.bytes);
+        let tokens = rtf_parser::lexer::Lexer::scan(&src)
+            .map_err(|e| ExtractError::Parse(format!("lexing rtf: {e}")))?;
+        let mut walker = RtfWalker {
+            budget,
+            bold_stack: vec![false],
+            skip_stack: vec![false],
+            span_bold: None,
+            span: String::new(),
+            para_xhtml: String::new(),
+            para_text: String::new(),
+            saw_body: false,
+            finished: Vec::new(),
+        };
+        for token in tokens {
+            walker.handle(token)?;
+        }
+        walker.finish_paragraph()?;
+        let finished = walker.finished;
+        let mut xhtml = String::new();
+        let mut text = String::new();
+        for (para_xhtml, para_text) in &finished {
+            push_bounded(&mut xhtml, "<p>", budget)?;
+            push_bounded(&mut xhtml, para_xhtml, budget)?;
+            push_bounded(&mut xhtml, "</p>\n", budget)?;
+            text.push_str(para_text);
+            text.push('\n');
+        }
+        Ok(finish_office(
+            ContentType::Rtf,
+            input,
+            budget,
+            start,
+            xhtml,
+            text,
+            None,
+            None,
+        ))
+    }
+}
+
+/// One RTF walk: tracks group-scoped bold, skips header destinations
+/// (font/color/style tables, `\*` ignorable destinations), and emits one
+/// `<p>` per `\par`-delimited paragraph with inline `<b>` around bold runs.
+///
+/// Finished paragraphs accumulate in `finished`; the caller drains them into
+/// the document buffers. The walker borrows only the `Budget` (charging text
+/// as spans flush), so it never holds a second `&mut` alongside it.
+struct RtfWalker<'a> {
+    budget: &'a mut Budget,
+    /// Bold state per group nesting level; `len() == depth + 1`.
+    bold_stack: Vec<bool>,
+    /// Whether each group nesting level is a skipped destination.
+    skip_stack: Vec<bool>,
+    /// Bold state of the span accumulating in `span` (`None` = no span yet).
+    span_bold: Option<bool>,
+    span: String,
+    /// Inner XHTML of the current paragraph (spans with `<b>`).
+    para_xhtml: String,
+    /// Raw text of the current paragraph (for the plain-text rendering).
+    para_text: String,
+    saw_body: bool,
+    /// `(para_xhtml, para_text)` per finished paragraph, in order.
+    finished: Vec<(String, String)>,
+}
+
+impl<'a> RtfWalker<'a> {
+    fn current_bold(&self) -> bool {
+        *self.bold_stack.last().unwrap_or(&false)
+    }
+
+    fn skipping(&self) -> bool {
+        self.skip_stack.iter().any(|s| *s)
+    }
+
+    fn handle(&mut self, token: rtf_parser::tokens::Token<'_>) -> Result<(), ExtractError> {
+        use rtf_parser::tokens::Token;
+        match token {
+            Token::OpeningBracket => {
+                self.budget.enter_rtf_group()?;
+                self.bold_stack.push(self.current_bold());
+                self.skip_stack.push(false);
+            }
+            Token::ClosingBracket => {
+                self.budget.leave_rtf_group();
+                if self.bold_stack.len() > 1 {
+                    self.bold_stack.pop();
+                }
+                if self.skip_stack.len() > 1 {
+                    self.skip_stack.pop();
+                }
+            }
+            Token::ControlSymbol((word, property)) => self.control_word(word, property)?,
+            Token::PlainText(s) if !self.skipping() => self.push_run(s, self.current_bold())?,
+            Token::PlainText(_) | Token::CRLF | Token::IgnorableDestination | Token::Empty => {}
+        }
+        Ok(())
+    }
+
+    fn control_word(
+        &mut self,
+        word: rtf_parser::tokens::ControlWord<'_>,
+        property: rtf_parser::tokens::Property,
+    ) -> Result<(), ExtractError> {
+        use rtf_parser::tokens::ControlWord;
+        match word {
+            ControlWord::Par => self.finish_paragraph()?,
+            ControlWord::Plain => {
+                if let Some(b) = self.bold_stack.last_mut() {
+                    *b = false;
+                }
+            }
+            ControlWord::Bold => {
+                if let Some(b) = self.bold_stack.last_mut() {
+                    *b = property.as_bool();
+                }
+            }
+            // Header destinations: their content is metadata, not body text.
+            // Mark the current group skipped until it closes.
+            ControlWord::FontTable
+            | ControlWord::ColorTable
+            | ControlWord::FileTable
+            | ControlWord::StyleSheet => {
+                if let Some(s) = self.skip_stack.last_mut() {
+                    *s = true;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Accumulates one text run into the current span, flushing the previous
+    /// span into the paragraph whenever the bold state changes.
+    fn push_run(&mut self, s: &str, bold: bool) -> Result<(), ExtractError> {
+        if s.is_empty() {
+            return Ok(());
+        }
+        self.saw_body = true;
+        if self.span_bold != Some(bold) && !self.span.is_empty() {
+            self.flush_span()?;
+        }
+        self.span_bold = Some(bold);
+        self.span.push_str(s);
+        Ok(())
+    }
+
+    fn flush_span(&mut self) -> Result<(), ExtractError> {
+        if self.span.is_empty() {
+            return Ok(());
+        }
+        let inner = std::mem::take(&mut self.span);
+        // Charge the budget for the raw text now; the plain-text rendering
+        // (`para_text`) is kept byte-identical to what the budget saw.
+        self.budget.push_str(&inner)?;
+        self.para_text.push_str(&inner);
+        if self.span_bold == Some(true) {
+            push_bounded(&mut self.para_xhtml, "<b>", self.budget)?;
+            push_bounded(&mut self.para_xhtml, &escape_xml_text(&inner), self.budget)?;
+            push_bounded(&mut self.para_xhtml, "</b>", self.budget)?;
+        } else {
+            push_bounded(&mut self.para_xhtml, &escape_xml_text(&inner), self.budget)?;
+        }
+        self.span_bold = None;
+        Ok(())
+    }
+
+    /// Seals the current paragraph: charges the trailing newline to the
+    /// budget, records `(para_xhtml, para_text)` in `finished`, and resets.
+    /// Empty paragraphs (no body text) are dropped. Called on `\par` and at
+    /// end-of-input.
+    fn finish_paragraph(&mut self) -> Result<(), ExtractError> {
+        self.flush_span()?;
+        if self.saw_body && !self.para_text.is_empty() {
+            self.budget.push_str("\n")?;
+            let para_xhtml = std::mem::take(&mut self.para_xhtml);
+            let para_text = std::mem::take(&mut self.para_text);
+            self.finished.push((para_xhtml, para_text));
+        } else {
+            self.para_xhtml.clear();
+        }
+        self.saw_body = false;
+        Ok(())
+    }
+}
+
+/// Assembles the common `Extracted` for an office extractor: the budgeted
+/// text slice, the format's content type, the narrow metadata, and the two
+/// body renderings the caller built.
+#[allow(clippy::too_many_arguments)]
+fn finish_office(
+    content_type: ContentType,
+    input: &ExtractInput<'_>,
+    budget: &Budget,
+    start: usize,
+    xhtml: String,
+    text: String,
+    title: Option<String>,
+    author: Option<String>,
+) -> Extracted {
+    Extracted {
+        text: budget.output_text()[start..].to_string(),
+        metadata: ExtractMetadata {
+            resource_name: input.resource_name.to_string(),
+            content_type,
+            title,
+            author,
+        },
+        body_xhtml: xhtml,
+        body_text: text,
+        // Office formats carry no HTML-style element attributes, so there is
+        // nothing for the indexing path's `captureAttr` to capture (#259).
+        captured_attrs: Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------
 // Issue #258 — one extraction, and the two `extractFormat` renderings of it
 // ---------------------------------------------------------------------
 
@@ -1282,7 +2543,11 @@ fn escape_xml_attribute(s: &str) -> String {
 #[derive(Debug, Clone)]
 pub struct ExtractedDocument {
     pub content_type: ContentType,
-    pub charset_label: String,
+    /// `Some` for the text formats that carry a charset on the wire
+    /// (plain text, HTML); `None` for binary formats (office/ODF/RTF/ZIP),
+    /// whose `Content-Type` carries no `charset=` and whose envelope has no
+    /// `Content-Encoding` key at all. See finding 125.
+    pub charset_label: Option<String>,
     pub charset_source: CharsetSource,
     pub title: Option<String>,
     pub author: Option<String>,
@@ -1294,11 +2559,22 @@ pub struct ExtractedDocument {
     pub captured_attrs: Vec<(String, String)>,
 }
 
-/// `detect` -> `resolve_charset` -> `decode_text` -> `dispatch` -> extract.
+/// `detect` -> (for ZIP) `refine_zip_kind` -> `dispatch` -> extract.
+///
+/// Text formats (plain text, HTML) get their byte stream decoded to UTF-8
+/// once, above `dispatch`, exactly as #258 established. Binary formats
+/// (the office/ODF/RTF family, and any unrecognised ZIP) take the **raw**
+/// bytes — a ZIP archive or an RTF control-word stream is not a charset
+/// problem, and feeding it through `decode_text` would mojibake the magic
+/// bytes the format parsers key off of. The extractor owns its own decoding
+/// (office XML is UTF-8 inside the archive; RTF carries its codepage in
+/// control words).
 ///
 /// Detection runs on the **raw** bytes (signatures are byte patterns, and a
 /// BOM-prefixed or Latin-1 document must still be recognised as a PDF or an
-/// XHTML file), and only then is the stream decoded once, above `dispatch`.
+/// XHTML file). A signature-detected `Zip` is refined to its office variant
+/// by opening the archive, so a `.docx` whose declared type or extension is
+/// wrong still routes to the DOCX extractor.
 pub fn extract_document(
     declared_type: Option<&str>,
     resource_name: &str,
@@ -1306,8 +2582,36 @@ pub fn extract_document(
     budget: &mut Budget,
 ) -> Result<ExtractedDocument, ExtractError> {
     let content_type = detect(declared_type, resource_name, bytes);
+    // A signature-detected ZIP may be an office package; open the archive to
+    // find out. This is a bounded pass, so a malformed or bomb archive is
+    // rejected here before an extractor is selected.
+    let content_type = if content_type == ContentType::Zip {
+        refine_zip_kind(bytes, budget)?
+    } else {
+        content_type
+    };
     let extractor =
         dispatch(content_type).ok_or(ExtractError::UnsupportedFormat { content_type })?;
+
+    if is_binary_content_type(content_type) {
+        let input = ExtractInput {
+            declared_type,
+            resource_name,
+            bytes,
+        };
+        let extracted = extractor.extract(&input, budget)?;
+        return Ok(ExtractedDocument {
+            content_type,
+            charset_label: None,
+            charset_source: CharsetSource::Detected,
+            title: extracted.metadata.title,
+            author: extracted.metadata.author,
+            body_xhtml: extracted.body_xhtml,
+            body_text: extracted.body_text,
+            captured_attrs: extracted.captured_attrs,
+        });
+    }
+
     let charset = resolve_charset(declared_type, bytes);
     let decoded = decode_text(&bytes[charset.bom_len..], charset.encoding, budget)?;
     let input = ExtractInput {
@@ -1318,7 +2622,7 @@ pub fn extract_document(
     let extracted = extractor.extract(&input, budget)?;
     Ok(ExtractedDocument {
         content_type,
-        charset_label: charset.label,
+        charset_label: Some(charset.label),
         charset_source: charset.source,
         title: extracted.metadata.title,
         author: extracted.metadata.author,
@@ -1363,6 +2667,22 @@ impl ExtractedDocument {
     }
 }
 
+/// The formats whose bytes are a binary container, not a charset-decodable
+/// text stream. Their extractors take the raw bytes and own their decoding.
+fn is_binary_content_type(content_type: ContentType) -> bool {
+    matches!(
+        content_type,
+        ContentType::Zip
+            | ContentType::Docx
+            | ContentType::Pptx
+            | ContentType::Xlsx
+            | ContentType::Odt
+            | ContentType::Odp
+            | ContentType::Ods
+            | ContentType::Rtf
+    )
+}
+
 /// Everything outside the document itself that the response echoes back:
 /// the multipart part's name and filename, its declared type, and how many
 /// bytes were actually streamed.
@@ -1402,6 +2722,18 @@ impl ExtractRender<'_> {
             ContentType::Xml => "application/xml",
             ContentType::Pdf => "application/pdf",
             ContentType::Rtf => "application/rtf",
+            ContentType::Docx => {
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            }
+            ContentType::Pptx => {
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            }
+            ContentType::Xlsx => {
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            }
+            ContentType::Odt => "application/vnd.oasis.opendocument.text",
+            ContentType::Odp => "application/vnd.oasis.opendocument.presentation",
+            ContentType::Ods => "application/vnd.oasis.opendocument.spreadsheet",
             ContentType::Zip => "application/zip",
             ContentType::LegacyOle => "application/x-tika-msoffice",
             ContentType::PlainText | ContentType::Unknown => "text/plain",
@@ -1409,11 +2741,12 @@ impl ExtractRender<'_> {
     }
 
     fn resolved_content_type(&self) -> String {
-        format!(
-            "{}; charset={}",
-            self.detected_essence(),
-            self.doc.charset_label
-        )
+        match &self.doc.charset_label {
+            // Binary formats (office/ODF/RTF/ZIP): the captured envelope's
+            // `Content-Type` carries the office MIME with no `charset=`.
+            None => self.detected_essence().to_string(),
+            Some(label) => format!("{}; charset={}", self.detected_essence(), label),
+        }
     }
 
     /// The `file_metadata` alternating array: `[key, [values], ...]`, keys in
@@ -1457,12 +2790,17 @@ impl ExtractRender<'_> {
         if let Some(author) = self.doc.author.as_deref() {
             entries.push(("author".to_string(), vec![author.to_string()]));
         }
-        let encoding = if self.doc.charset_source == CharsetSource::Declared {
-            twice(&self.doc.charset_label)
-        } else {
-            vec![self.doc.charset_label.clone()]
-        };
-        entries.push(("Content-Encoding".to_string(), encoding));
+        // `Content-Encoding` is a text-format key: the office captures carry
+        // none, so it is omitted entirely for binary formats rather than
+        // emitted empty.
+        if let Some(label) = self.doc.charset_label.as_deref() {
+            let encoding = if self.doc.charset_source == CharsetSource::Declared {
+                twice(label)
+            } else {
+                vec![label.to_string()]
+            };
+            entries.push(("Content-Encoding".to_string(), encoding));
+        }
         if let Some(title) = self.doc.title.as_deref() {
             entries.push(("title".to_string(), vec![title.to_string()]));
         }
@@ -1495,7 +2833,9 @@ impl ExtractRender<'_> {
         if let Some(author) = self.doc.author.as_deref() {
             meta("author", author);
         }
-        meta("Content-Encoding", &self.doc.charset_label);
+        if let Some(label) = self.doc.charset_label.as_deref() {
+            meta("Content-Encoding", label);
+        }
         meta("resourceName", self.resource_name);
         meta("Content-Type", &self.resolved_content_type());
         out.push_str(&format!(
@@ -2992,6 +4332,20 @@ mod tests {
     /// | 503 `DeadlineExceeded` | none | reasoned choice stands |
     /// | 400 `OutputTooLarge`/`ZipBudget`/`StructuralLimit` | none | reasoned choice stands |
     ///
+    /// Recheck performed when #260's captures landed (21 fixtures: 14 office
+    /// success captures across DOCX/PPTX/XLSX/ODS/ODT/ODP/RTF in xml+text,
+    /// plus seven `extract_broken_*` 500s):
+    ///
+    /// | mapping | new evidence? | outcome |
+    /// |---|---|---|
+    /// | 500 `Parse` | seven `extract_broken_*` parser-failure 500s | still matched |
+    /// | 415/413/503/400 | none — all 14 successes are 200 | reasoned choice stands |
+    ///
+    /// None of #260's captures is a budget violation, so the reasoned-choice
+    /// statuses stand unchanged. The seven broken-input 500s reach the `Parse`
+    /// arm in Wayfinder (a truncated archive / a choking RTF reader is a
+    /// parser failure, not a budget violation), which is already 500.
+    ///
     /// `UnsupportedFormat` is the one worth spelling out, because it looks
     /// like it gained evidence and did not. Wayfinder answers
     /// `extract_corrupt_pdf`'s upload through that arm, and the fixture is a
@@ -3014,14 +4368,29 @@ mod tests {
     /// `extract_corrupt_pdf.json`. No new fixture lands on a budget-violation
     /// status (413/503/415/400), so the mapping below is unchanged. Recorded
     /// in `docs/reports/2026-08-03-pdf-extraction-corpus.md`.
-    const CAPTURED_EXTRACT_FIXTURES: [&str; 18] = [
+    const CAPTURED_EXTRACT_FIXTURES: [&str; 39] = [
+        "extract_broken_docx.json",
+        "extract_broken_odp.json",
+        "extract_broken_ods.json",
+        "extract_broken_odt.json",
+        "extract_broken_pptx.json",
+        "extract_broken_rtf.json",
+        "extract_broken_xlsx.json",
         "extract_corrupt_pdf.json",
         "extract_declared_charset_text.json",
+        "extract_docx_text.json",
+        "extract_docx_xml.json",
         "extract_html_index.json",
         "extract_html_only_text.json",
         "extract_html_only_xml.json",
         "extract_html_select.json",
         "extract_latin1_text.json",
+        "extract_odp_text.json",
+        "extract_odp_xml.json",
+        "extract_ods_text.json",
+        "extract_ods_xml.json",
+        "extract_odt_text.json",
+        "extract_odt_xml.json",
         "extract_pdf_embedded_font.json",
         "extract_pdf_encrypted.json",
         "extract_pdf_image_only.json",
@@ -3032,7 +4401,13 @@ mod tests {
         "extract_pdf_multipage.json",
         "extract_plain_text_text.json",
         "extract_plain_text_xml.json",
+        "extract_pptx_text.json",
+        "extract_pptx_xml.json",
+        "extract_rtf_text.json",
+        "extract_rtf_xml.json",
         "extract_utf8_bom_text.json",
+        "extract_xlsx_text.json",
+        "extract_xlsx_xml.json",
     ];
 
     /// Self-expiring note for the uncaptured budget-violation statuses in

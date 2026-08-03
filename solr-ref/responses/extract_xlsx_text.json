@@ -1,0 +1,8 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":10
+  },
+  "file":"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nOffice Capture Title\n\nSheet One\n\tName\tValue\n\tAlpha\t1\n\tBeta\t2\n\n\nSheet Two\n\tSecond sheet cell.\n\n\n",
+  "file_metadata":["resourceName",["sample.xlsx","sample.xlsx"],"Content-Type",["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],"stream_name",["file","file"],"stream_source_info",["sample.xlsx","sample.xlsx"],"stream_size",["5396","5396"],"stream_content_type",["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],"date",["2026-08-03T02:21:43Z"],"extended-properties:AppVersion",["3.1"],"dc:creator",["Ada Example"],"dcterms:created",["2024-03-14T09:26:05Z"],"dcterms:modified",["2026-08-03T02:21:43Z"],"Last-Modified",["2026-08-03T02:21:43Z"],"title",["Office Capture Title"],"Last-Save-Date",["2026-08-03T02:21:43Z"],"protected",["false"],"meta:save-date",["2026-08-03T02:21:43Z"],"dc:title",["Office Capture Title"],"Application-Name",["Microsoft Excel Compatible / Openpyxl 3.1.5"],"modified",["2026-08-03T02:21:43Z"],"X-Parsed-By",["org.apache.tika.parser.DefaultParser","org.apache.tika.parser.microsoft.ooxml.OOXMLParser"],"creator",["Ada Example"],"meta:author",["Ada Example"],"meta:creation-date",["2024-03-14T09:26:05Z"],"extended-properties:Application",["Microsoft Excel Compatible / Openpyxl 3.1.5"],"Creation-Date",["2024-03-14T09:26:05Z"],"Application-Version",["3.1"],"extended-properties:DocSecurityString",["None"],"Author",["Ada Example"]]
+}

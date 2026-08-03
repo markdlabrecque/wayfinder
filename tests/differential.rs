@@ -106,6 +106,86 @@ const ACCEPTED_DIVERGENCES_MULTIPART: &[(&str, &str)] = &[
         "extract_declared_charset_text",
         "issue #258: X-Parsed-By in file_metadata only",
     ),
+    //
+    // Issue #260 — office formats (DOCX/PPTX/XLSX/ODT/ODP/ODS/RTF). Tika
+    // emits a rich set of format-specific metadata (document properties, page
+    // counts, parser provenance, ...) that Wayfinder deliberately does not
+    // reproduce. `normalize_extract` keeps only the six envelope keys both
+    // sides agree on, strips every `<meta>` from the XHTML head, and collapses
+    // the leading-newline run of text-format bodies (finding 124). The body
+    // text/XHTML and envelope values are compared exactly after that.
+    (
+        "extract_docx_xml",
+        "issue #260: office format-specific head <meta> elements and \
+         file_metadata keys (dc:title/author/creator, page counts, parser \
+         provenance, ...) Tika emits and Wayfinder does not reproduce",
+    ),
+    (
+        "extract_docx_text",
+        "issue #260: office format-specific file_metadata keys plus \
+         leading-newline run (finding 124: Tika's count is a function of its \
+         meta count, which Wayfinder cannot reproduce with narrow metadata)",
+    ),
+    (
+        "extract_pptx_xml",
+        "issue #260: office format-specific head <meta> elements and \
+         file_metadata keys",
+    ),
+    (
+        "extract_pptx_text",
+        "issue #260: office format-specific file_metadata keys plus \
+         leading-newline run (finding 124)",
+    ),
+    (
+        "extract_xlsx_xml",
+        "issue #260: office format-specific head <meta> elements and \
+         file_metadata keys",
+    ),
+    (
+        "extract_xlsx_text",
+        "issue #260: office format-specific file_metadata keys plus \
+         leading-newline run (finding 124)",
+    ),
+    (
+        "extract_odt_xml",
+        "issue #260: office format-specific head <meta> elements and \
+         file_metadata keys",
+    ),
+    (
+        "extract_odt_text",
+        "issue #260: office format-specific file_metadata keys plus \
+         leading-newline run (finding 124)",
+    ),
+    (
+        "extract_odp_xml",
+        "issue #260: office format-specific head <meta> elements and \
+         file_metadata keys",
+    ),
+    (
+        "extract_odp_text",
+        "issue #260: office format-specific file_metadata keys plus \
+         leading-newline run (finding 124)",
+    ),
+    (
+        "extract_ods_xml",
+        "issue #260: office format-specific head <meta> elements and \
+         file_metadata keys",
+    ),
+    (
+        "extract_ods_text",
+        "issue #260: office format-specific file_metadata keys plus \
+         leading-newline run (finding 124)",
+    ),
+    (
+        "extract_rtf_xml",
+        "issue #260: office format-specific head <meta> elements and \
+         file_metadata keys",
+    ),
+    (
+        "extract_rtf_text",
+        "issue #260: office format-specific file_metadata keys plus \
+         leading-newline run (finding 124)",
+    ),
 ];
 
 /// Rows where Wayfinder's HTTP *status* itself diverges from the captured
@@ -2528,6 +2608,141 @@ fn normalize_extract_touches_nothing_when_no_ratified_marker_is_present() {
     assert!(
         n.touched.is_empty(),
         "normalize_extract must not touch anything when no ratified marker is present, got {:?}",
+        n.touched
+    );
+}
+
+/// Office XHTML envelope: `normalize_extract` strips every `<meta>` from
+/// the `<head>` (keeping `<title>` and `<body>`), keeps only the six envelope
+/// keys in `file_metadata`, and records both. Pinned against a hand-built
+/// office `Value` so it tests the normaliser in isolation from any capture.
+#[test]
+fn normalize_extract_office_strips_head_metas_keeps_title_and_envelope_metadata() {
+    let v = json!({
+        "file": "<?xml version=\"1.0\"?>\n<html><head>\n<meta name=\"dc:title\" content=\"X\" />\n<meta name=\"X-Parsed-By\" content=\"org.apache.tika.parser.DefaultParser\" />\n<meta name=\"Content-Type\" content=\"application/vnd.oasis.opendocument.text\" />\n<title>X</title>\n</head>\n<body><p>hello</p>\n</body></html>",
+        "file_metadata": [
+            "resourceName", ["s.odt", "s.odt"],
+            "Content-Type", ["application/vnd.oasis.opendocument.text", "application/vnd.oasis.opendocument.text"],
+            "dc:title", ["X"],
+            "X-Parsed-By", ["org.apache.tika.parser.DefaultParser"],
+            "stream_name", ["file", "file"]
+        ]
+    });
+
+    let n = normalize_extract(v);
+
+    let file = n.value["file"].as_str().expect("file must stay a string");
+    assert!(
+        !file.contains("<meta "),
+        "every head <meta> must be stripped, got {file:?}"
+    );
+    assert!(
+        file.contains("<title>X</title>"),
+        "<title> must survive, got {file:?}"
+    );
+    assert!(
+        file.contains("<body><p>hello</p>\n</body>"),
+        "the body must survive untouched, got {file:?}"
+    );
+
+    let metadata = n.value["file_metadata"]
+        .as_array()
+        .expect("metadata stays an array");
+    assert!(
+        metadata.iter().any(|v| v.as_str() == Some("resourceName")),
+        "envelope keys survive"
+    );
+    assert!(
+        metadata.iter().any(|v| v.as_str() == Some("stream_name")),
+        "envelope keys survive"
+    );
+    assert!(
+        !metadata.iter().any(|v| v.as_str() == Some("dc:title")),
+        "dc:title must drop"
+    );
+    assert!(
+        !metadata.iter().any(|v| v.as_str() == Some("X-Parsed-By")),
+        "X-Parsed-By must drop"
+    );
+
+    assert!(
+        n.touched.iter().any(|t| t.contains("<meta>")),
+        "touched must record the head <meta> strip, got {:?}",
+        n.touched
+    );
+    assert!(
+        n.touched.iter().any(|t| t.contains("file_metadata")),
+        "touched must record the file_metadata envelope-keep, got {:?}",
+        n.touched
+    );
+}
+
+/// Office text-format body: the leading-newline run is collapsed (finding
+/// 124) while the body itself is left intact, and non-envelope metadata
+/// still drops.
+#[test]
+fn normalize_extract_office_collapses_text_leading_newlines() {
+    let v = json!({
+        "file": "\n\n\n\n\n\n\n\n\n\n\n\nhello body",
+        "file_metadata": [
+            "Content-Type", ["application/rtf", "application/rtf"],
+            "X-Parsed-By", ["org.apache.tika.parser.rtf.RTFParser"]
+        ]
+    });
+
+    let n = normalize_extract(v);
+    assert_eq!(n.value["file"].as_str(), Some("hello body"));
+    assert!(
+        n.touched.iter().any(|t| t.contains("leading newlines")),
+        "touched must record the leading-newline collapse, got {:?}",
+        n.touched
+    );
+    assert_eq!(
+        n.value["file_metadata"].as_array().unwrap().len(),
+        2,
+        "only the Content-Type envelope key/value pair must remain"
+    );
+}
+
+/// The office over-normalisation guard: a real difference in the body must
+/// still be visible to `diff()` after `normalize_extract`, proving the office
+/// scope does not swallow body content — only ratified Tika metadata.
+#[test]
+fn normalize_extract_office_does_not_hide_a_real_body_difference() {
+    let head = "<?xml version=\"1.0\"?>\n<html><head>\n<meta name=\"Content-Type\" content=\"application/rtf\" />\n<title></title>\n</head>\n<body>";
+    let expected = json!({
+        "file": format!("{head}<p>hello</p>\n</body></html>"),
+        "file_metadata": ["Content-Type", ["application/rtf", "application/rtf"]]
+    });
+    let actual = json!({
+        "file": format!("{head}<p>goodbye</p>\n</body></html>"),
+        "file_metadata": ["Content-Type", ["application/rtf", "application/rtf"]]
+    });
+
+    let expected_n = normalize_extract(expected);
+    let actual_n = normalize_extract(actual);
+    let report = diff(&expected_n.value, &actual_n.value);
+    assert!(
+        !report.diffs.is_empty(),
+        "a real body content difference in an office row must survive normalize_extract, \
+         not be swallowed with the ratified metadata"
+    );
+}
+
+/// An office envelope that is already free of head metas, already has only
+/// envelope metadata keys, and has no leading newlines must come back with an
+/// empty `touched` list — the office scope must not fire unconditionally on
+/// content type alone.
+#[test]
+fn normalize_extract_office_touches_nothing_when_already_normal() {
+    let v = json!({
+        "file": "<html><head></head>\n<body><p>x</p>\n</body></html>",
+        "file_metadata": ["Content-Type", ["application/rtf", "application/rtf"], "stream_name", ["file", "file"]]
+    });
+    let n = normalize_extract(v);
+    assert!(
+        n.touched.is_empty(),
+        "an already-normal office envelope must not be touched, got {:?}",
         n.touched
     );
 }

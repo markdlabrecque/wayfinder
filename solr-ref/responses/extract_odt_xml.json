@@ -1,0 +1,8 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2
+  },
+  "file":"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\">\n<head>\n<meta name=\"stream_size\" content=\"1559\" />\n<meta name=\"X-Parsed-By\" content=\"org.apache.tika.parser.DefaultParser\" />\n<meta name=\"X-Parsed-By\" content=\"org.apache.tika.parser.odf.OpenDocumentParser\" />\n<meta name=\"stream_content_type\" content=\"application/vnd.oasis.opendocument.text\" />\n<meta name=\"stream_name\" content=\"file\" />\n<meta name=\"stream_source_info\" content=\"sample.odt\" />\n<meta name=\"resourceName\" content=\"sample.odt\" />\n<meta name=\"Content-Type\" content=\"application/vnd.oasis.opendocument.text\" />\n<title></title>\n</head>\n<body><h1>ODT Heading</h1><p>First ODT paragraph.</p>\n<p>Second ODT paragraph.</p>\n</body></html>",
+  "file_metadata":["resourceName",["sample.odt","sample.odt"],"Content-Type",["application/vnd.oasis.opendocument.text","application/vnd.oasis.opendocument.text"],"stream_name",["file","file"],"stream_source_info",["sample.odt","sample.odt"],"stream_size",["1559","1559"],"stream_content_type",["application/vnd.oasis.opendocument.text","application/vnd.oasis.opendocument.text"],"X-Parsed-By",["org.apache.tika.parser.DefaultParser","org.apache.tika.parser.odf.OpenDocumentParser"],"generator",["ODFPY/1.4.1"]]
+}

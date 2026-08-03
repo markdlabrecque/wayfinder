@@ -1,0 +1,8 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":22
+  },
+  "file":"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\">\n<head>\n<meta name=\"stream_size\" content=\"132\" />\n<meta name=\"X-Parsed-By\" content=\"org.apache.tika.parser.DefaultParser\" />\n<meta name=\"X-Parsed-By\" content=\"org.apache.tika.parser.rtf.RTFParser\" />\n<meta name=\"stream_content_type\" content=\"application/rtf\" />\n<meta name=\"stream_name\" content=\"file\" />\n<meta name=\"stream_source_info\" content=\"sample.rtf\" />\n<meta name=\"resourceName\" content=\"sample.rtf\" />\n<meta name=\"Content-Type\" content=\"application/rtf\" />\n<title></title>\n</head>\n<body><p>First RTF paragraph.</p>\n<p><b>Bold RTF run.</b></p>\n<p>Second RTF paragraph.</p>\n</body></html>",
+  "file_metadata":["resourceName",["sample.rtf","sample.rtf"],"Content-Type",["application/rtf","application/rtf"],"stream_name",["file","file"],"stream_source_info",["sample.rtf","sample.rtf"],"stream_size",["132","132"],"stream_content_type",["application/rtf","application/rtf"],"X-Parsed-By",["org.apache.tika.parser.DefaultParser","org.apache.tika.parser.rtf.RTFParser"]]
+}

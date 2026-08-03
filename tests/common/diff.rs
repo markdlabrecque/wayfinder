@@ -760,45 +760,222 @@ fn strip_x_parsed_by_metadata_key(arr: &[Value]) -> (Vec<Value>, bool) {
     (out, removed)
 }
 
-/// The two permanent, ratified `/update/extract` divergences named in the
-/// issue #258 spec — see the PRD's ratified-divergence entry and
-/// `docs/solr-ref-findings.md` findings 120-123:
+/// The ratified `/update/extract` divergences. Two scopes, each handling a
+/// distinct, documented class of Tika-specific content Wayfinder deliberately
+/// does not reproduce — see the PRD's ratified-divergence entry and
+/// `docs/solr-ref-findings.md` findings 120-127:
 ///
-/// - `X-Parsed-By` names Java Tika/PDFBox/etc. class names that Wayfinder has
-///   no honest equivalent for, in both the XHTML `file` value's `<meta>`
-///   elements and the `file_metadata` array.
-/// - `shape="rect"` is an attribute Tika's own HTML parser injects onto every
-///   `<a>` element; Wayfinder's HTML extractor has no reason to add it.
+/// **Plain formats (issue #258) — text/HTML/etc.**: `X-Parsed-By` names Java
+/// Tika/PDFBox/etc. class names Wayfinder has no honest equivalent for, in
+/// both the XHTML `file` value's `<meta>` elements and the `file_metadata`
+/// array; `shape="rect"` is an attribute Tika's own HTML parser injects onto
+/// every `<a>` element. Only those two markers are stripped.
+///
+/// **Office formats (issue #260) — DOCX/PPTX/XLSX/ODT/ODP/ODS/RTF**: Tika
+/// emits a rich set of format-specific metadata (document properties, page
+/// counts, parser provenance, etc.) — dozens of `<meta>` elements and
+/// `file_metadata` keys per capture — that Wayfinder does not reproduce. The
+/// office scope keeps only the six envelope keys both sides agree on
+/// (`resourceName`, `Content-Type`, `stream_name`, `stream_source_info`,
+/// `stream_size`, `stream_content_type`), strips every `<meta>` from the
+/// XHTML `<head>` (leaving `<title>` and `<body>` to compare), and collapses
+/// the leading-newline run of text-format bodies (finding 124: Tika's count
+/// is a function of its meta count, which Wayfinder cannot reproduce with
+/// narrow metadata).
 ///
 /// Nothing else in the extract envelope is touched: per CLAUDE.md's
-/// compatibility contract, a third real difference must still be reported by
+/// compatibility contract, a real difference must still be reported by
 /// `diff()`, and `normalize_extract` deliberately does not widen to hide one
 /// (see the `normalize_extract_*` tests in `tests/differential.rs`, which
-/// prove exactly that).
+/// prove exactly that — including for office rows).
 pub fn normalize_extract(mut value: Value) -> Normalized {
     let mut touched = Vec::new();
 
-    if let Some(file) = value.get("file").and_then(|f| f.as_str()) {
-        let (stripped, meta_touched) = strip_x_parsed_by_meta(file);
-        let (stripped, shape_touched) = strip_shape_rect(&stripped);
-        if meta_touched {
-            touched.push("file (X-Parsed-By meta elements)".to_string());
+    if is_office_content_type(&value) {
+        if let Some(file) = value.get("file").and_then(|f| f.as_str()) {
+            if file.contains("<head>") {
+                let (stripped, did) = strip_all_head_metas(file);
+                if did {
+                    touched.push(
+                        "file (<head> <meta> elements — office formats emit Tika \
+                         format-specific metadata Wayfinder does not reproduce)"
+                            .to_string(),
+                    );
+                    value["file"] = Value::String(stripped);
+                }
+            } else {
+                // extractFormat=text: a plain-text body with no markup. The
+                // leading-newline run is collapsed (finding 124).
+                let stripped = file.trim_start_matches('\n');
+                if stripped.len() != file.len() {
+                    touched.push(
+                        "file (leading newlines collapsed — count is a function of \
+                         Tika meta count, finding 124)"
+                            .to_string(),
+                    );
+                    value["file"] = Value::String(stripped.to_string());
+                }
+            }
         }
-        if shape_touched {
-            touched.push("file (shape=\"rect\" attributes)".to_string());
+        if let Some(arr) = value.get("file_metadata").and_then(|m| m.as_array()) {
+            let (stripped, dropped) = keep_envelope_metadata_keys(arr);
+            if dropped > 0 {
+                touched.push(format!(
+                    "file_metadata (kept the six envelope keys, dropped {dropped} \
+                     Tika format-specific entries)"
+                ));
+                value["file_metadata"] = Value::Array(stripped);
+            }
         }
-        if meta_touched || shape_touched {
-            value["file"] = Value::String(stripped);
+    } else {
+        if let Some(file) = value.get("file").and_then(|f| f.as_str()) {
+            let (stripped, meta_touched) = strip_x_parsed_by_meta(file);
+            let (stripped, shape_touched) = strip_shape_rect(&stripped);
+            if meta_touched {
+                touched.push("file (X-Parsed-By meta elements)".to_string());
+            }
+            if shape_touched {
+                touched.push("file (shape=\"rect\" attributes)".to_string());
+            }
+            if meta_touched || shape_touched {
+                value["file"] = Value::String(stripped);
+            }
         }
-    }
 
-    if let Some(arr) = value.get("file_metadata").and_then(|m| m.as_array()) {
-        let (stripped, removed) = strip_x_parsed_by_metadata_key(arr);
-        if removed {
-            touched.push("file_metadata (X-Parsed-By)".to_string());
-            value["file_metadata"] = Value::Array(stripped);
+        if let Some(arr) = value.get("file_metadata").and_then(|m| m.as_array()) {
+            let (stripped, removed) = strip_x_parsed_by_metadata_key(arr);
+            if removed {
+                touched.push("file_metadata (X-Parsed-By)".to_string());
+                value["file_metadata"] = Value::Array(stripped);
+            }
         }
     }
 
     Normalized { value, touched }
+}
+
+/// The seven office MIME types issue #260 adds extractors for. Used by
+/// `normalize_extract` to pick the office-scoped waiver. Checked against the
+/// `Content-Type` / `stream_content_type` envelope values (declared and
+/// resolved) in `file_metadata`.
+const OFFICE_CONTENT_TYPES: &[&str] = &[
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.oasis.opendocument.text",
+    "application/vnd.oasis.opendocument.presentation",
+    "application/vnd.oasis.opendocument.spreadsheet",
+    "application/rtf",
+];
+
+/// True when the envelope carries an office content type (issue #260),
+/// detected from the `file_metadata` `Content-Type` / `stream_content_type`
+/// values. Returns `false` for plain text/HTML/etc. envelopes and for any
+/// envelope without `file_metadata` (e.g. an error body).
+fn is_office_content_type(value: &Value) -> bool {
+    let Some(arr) = value.get("file_metadata").and_then(|m| m.as_array()) else {
+        return false;
+    };
+    let mut i = 0;
+    while i + 1 < arr.len() {
+        let key = arr[i].as_str().unwrap_or_default();
+        if matches!(key, "Content-Type" | "stream_content_type")
+            && let Some(vals) = arr[i + 1].as_array()
+        {
+            for v in vals {
+                if let Some(s) = v.as_str()
+                    && OFFICE_CONTENT_TYPES.contains(&s)
+                {
+                    return true;
+                }
+            }
+        }
+        i += 2;
+    }
+    false
+}
+
+/// Strips every `<meta ... />` element (plus its trailing newline) from an
+/// XHTML `file` value's `<head>`, leaving `<title>` and `<body>` untouched.
+/// Office captures carry dozens of format-specific `<meta>` elements;
+/// Wayfinder emits none beyond the envelope, so the whole head metadata set
+/// is ratified-divergence rather than any one named key.
+fn strip_all_head_metas(file: &str) -> (String, bool) {
+    // Only touch the `<head>...</head>` region so a `<meta>` that legitimately
+    // appears inside a body run (never in these fixtures, but defensively) is
+    // left alone.
+    let Some(head_start) = file.find("<head>") else {
+        return (file.to_string(), false);
+    };
+    let Some(head_end_rel) = file[head_start..].find("</head>") else {
+        return (file.to_string(), false);
+    };
+    let head_end = head_start + head_end_rel;
+    let head = &file[head_start..head_end];
+    if !head.contains("<meta ") {
+        return (file.to_string(), false);
+    }
+    let mut stripped_head = String::new();
+    let mut rest = head;
+    loop {
+        match rest.find("<meta ") {
+            None => {
+                stripped_head.push_str(rest);
+                break;
+            }
+            Some(idx) => {
+                stripped_head.push_str(&rest[..idx]);
+                let after = &rest[idx..];
+                let mut consumed = after.find("/>").map(|i| i + 2).unwrap_or(after.len());
+                // Eat one trailing newline so removal leaves no blank line.
+                if after[consumed..].starts_with('\n') {
+                    consumed += 1;
+                }
+                rest = &after[consumed..];
+            }
+        }
+    }
+    let mut out = String::with_capacity(file.len());
+    out.push_str(&file[..head_start]);
+    out.push_str(&stripped_head);
+    out.push_str(&file[head_end..]);
+    (out, true)
+}
+
+/// The six `file_metadata` keys that are part of the wire envelope both Solr
+/// and Wayfinder always emit identically (in this order): everything else in
+/// an office capture is Tika format-specific metadata.
+const ENVELOPE_METADATA_KEYS: &[&str] = &[
+    "resourceName",
+    "Content-Type",
+    "stream_name",
+    "stream_source_info",
+    "stream_size",
+    "stream_content_type",
+];
+
+/// Keeps only the six envelope key/value pairs from a `file_metadata`
+/// alternating array, preserving their captured order and dropping every
+/// Tika format-specific entry. Returns the filtered array and a count of how
+/// many entries were dropped.
+fn keep_envelope_metadata_keys(arr: &[Value]) -> (Vec<Value>, usize) {
+    let mut out = Vec::with_capacity(arr.len());
+    let mut dropped = 0;
+    let mut i = 0;
+    while i + 1 < arr.len() {
+        let key = arr[i].as_str().unwrap_or_default();
+        if ENVELOPE_METADATA_KEYS.contains(&key) {
+            out.push(arr[i].clone());
+            out.push(arr[i + 1].clone());
+        } else {
+            dropped += 1;
+        }
+        i += 2;
+    }
+    // Preserve a malformed odd trailing element rather than silently dropping
+    // it, mirroring `strip_x_parsed_by_metadata_key`.
+    if i < arr.len() {
+        out.push(arr[i].clone());
+    }
+    (out, dropped)
 }

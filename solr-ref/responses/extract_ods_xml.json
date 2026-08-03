@@ -1,0 +1,8 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":6
+  },
+  "file":"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\">\n<head>\n<meta name=\"stream_size\" content=\"1509\" />\n<meta name=\"X-Parsed-By\" content=\"org.apache.tika.parser.DefaultParser\" />\n<meta name=\"X-Parsed-By\" content=\"org.apache.tika.parser.odf.OpenDocumentParser\" />\n<meta name=\"stream_content_type\" content=\"application/vnd.oasis.opendocument.spreadsheet\" />\n<meta name=\"stream_name\" content=\"file\" />\n<meta name=\"stream_source_info\" content=\"sample.ods\" />\n<meta name=\"resourceName\" content=\"sample.ods\" />\n<meta name=\"Content-Type\" content=\"application/vnd.oasis.opendocument.spreadsheet\" />\n<title></title>\n</head>\n<body><table><tr>\t<td><p>ODS cell text.</p>\n</td></tr>\n</table>\n</body></html>",
+  "file_metadata":["resourceName",["sample.ods","sample.ods"],"Content-Type",["application/vnd.oasis.opendocument.spreadsheet","application/vnd.oasis.opendocument.spreadsheet"],"stream_name",["file","file"],"stream_source_info",["sample.ods","sample.ods"],"stream_size",["1509","1509"],"stream_content_type",["application/vnd.oasis.opendocument.spreadsheet","application/vnd.oasis.opendocument.spreadsheet"],"X-Parsed-By",["org.apache.tika.parser.DefaultParser","org.apache.tika.parser.odf.OpenDocumentParser"],"generator",["ODFPY/1.4.1"]]
+}
