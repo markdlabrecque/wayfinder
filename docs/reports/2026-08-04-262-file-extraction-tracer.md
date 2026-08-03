@@ -79,12 +79,20 @@ support its own extraction feature.
 ## Scope deliberately deferred (documented follow-ups, not gaps)
 
 Each is called out in the processor's class doc, not left implicit:
+- **Wiring `ExtractFileValidator` (#264, landed during this PR's review).** #264
+  shipped `isFileIndexable()` / `limitToAllowedNumber()` / `limitBytes()` as a
+  standalone, config-decoupled class whose report explicitly says "#262's
+  processor wires it." The immediate follow-up is to call it from
+  `addFieldValues()` (owning the `file_exists()` / `isPermanent()` preconditions
+  #264 left to the processor) once #266 lands the settings form that feeds it.
+  Until then this tracer extracts every referenced file — including private
+  ones — so production use should wait for that wiring, which carries #264's
+  default exclude-private safety decision.
 - Media (`entity_reference` → media → file) and the `entity:file` datasource
   case. Only plain `file`-typed fields are discovered in this slice.
 - Extraction-result caching. Every reindex re-extracts; the Wayfinder server's
   own budgets bound the work, but a persistent cache is the obvious next slice.
-- `excluded_extensions` / `max_filesize` / `number_indexed` configuration, and
-  a fallback queue for transient failures.
+- A fallback queue for transient extraction failures.
 
 ## Test coverage
 
