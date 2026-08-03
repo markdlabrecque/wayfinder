@@ -693,6 +693,60 @@ async fn fnq_app() -> (Router, TempDir) {
     (app, dir)
 }
 
+// --- per-field facet.sort corpus for manifest-errors.tsv's `pf296` rows
+// (issue #296). The `content` corpus cannot pin `facet.sort` at all: its
+// category values are animals 2, classic 2, garden 1, misc 1, so count order
+// and index order are the same list. This 4-doc corpus breaks the tie --
+// `topic` is zebra 3, mango 2, apple 1, so count order is zebra, mango, apple
+// and index order is apple, mango, zebra, and a limit of 1 tells them apart.
+// Like `fnq`/`facets33`, the schema names its core `content`, so `pf296/...`
+// rows are rewritten to `content/...` in `app_and_request_url` below. The
+// corpus is byte-for-byte the one `capture.sh`'s pf296 block indexes into the
+// live `solr:9` container the fixtures came from; `s4` carries no `topic` so
+// `facet.missing` has a bucket if a later row wants one.
+const PF296_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "topic"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "topic"
+type = "string"
+stored = true
+fast = true
+multi_valued = true
+"#;
+
+/// The 4-doc corpus `capture.sh`'s pf296 block indexes into the `pf296` core.
+fn pf296_corpus() -> Value {
+    json!([
+        {"id":"s1","topic":["zebra"]},
+        {"id":"s2","topic":["zebra","mango"]},
+        {"id":"s3","topic":["zebra","mango","apple"]},
+        {"id":"s4"}
+    ])
+}
+
+async fn pf296_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), PF296_SCHEMA_TOML).expect("pf296 app must build");
+    let (status, body) = post_docs(&app, &pf296_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the pf296 corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
 // --- duplicated schema/corpus for manifest-errors.tsv's `update9` rows
 // (issue #9). Mirrors `tests/update_pipeline.rs::UPDATE9_SCHEMA_TOML` /
 // `update9_corpus` exactly — same duplication precedent as `sortdebt`/
@@ -1228,6 +1282,26 @@ const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[
         "issue #99: Solr `_version_` values are update-log/time-derived and Wayfinder deliberately \
          seeds per-core values from Unix-epoch milliseconds, so exact metrics cannot be fixture-stable; \
          tests/version_field.rs checks this row's envelope and the actual fast-field maximum",
+    ),
+    (
+        "pf296_sort_field",
+        "issue #296 (finding 147): `f.topic.facet.sort=index` reorders that field's buckets to apple, mango, zebra. Wayfinder ignores per-field settings other than `facet.missing` and returns count order",
+    ),
+    (
+        "pf296_sort_field_wins",
+        "issue #296 (finding 147): a per-field `facet.sort=index` must beat a global `facet.sort=count`; with `facet.limit=1` that is `apple` rather than `zebra`",
+    ),
+    (
+        "pf296_sort_key_by_field",
+        "issue #296 (finding 147): with `{!key=k}topic`, `f.topic.facet.sort` (the field name) is honoured. Its twin `pf296_sort_key_by_key` (`f.k.facet.sort`) is not listed because Solr ignores the key address too, so both sides already agree",
+    ),
+    (
+        "pf296_sort_lp",
+        "issue #296 (finding 148): `facet.sort` carried as a local param on `facet.field`",
+    ),
+    (
+        "pf296_sort_two_lp",
+        "issue #296 (finding 149): two facets on one field, one ordered by count and one by index, each with its own limit -- expressible only as local params",
     ),
 ];
 
@@ -1858,6 +1932,68 @@ const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[
          timestamps, real filesystem paths on the capture host) — same permanent category as \
          `admin_info_system` in EXPECTED_DIVERGENCES_MANIFEST_ERRORS above and `ping`'s `rid`",
     ),
+    (
+        "facet_perfield_limit",
+        "issue #296: Solr resolves `f.<field>.facet.limit` against the field name and applies it to that field only (`id`'s buckets are untouched here). Wayfinder implements exactly one per-field setting -- `f.<field>.facet.missing`, issue #140 -- and `f.category.facet.limit` is ignored, so the full 4-bucket list comes back",
+    ),
+    (
+        "facet_perfield_mincount",
+        "issue #296: same as `facet_perfield_limit` for `f.<field>.facet.mincount` -- Solr drops garden/misc from `category` and leaves `id` alone; Wayfinder ignores the override",
+    ),
+    (
+        "facet_perfield_overrides_global",
+        "issue #296: `f.category.facet.limit=-1` must beat a global `facet.limit=1` for `category` while `id` still honours the global. Wayfinder applies the global to both",
+    ),
+    (
+        "facet_perfield_key_by_field",
+        "issue #296 (finding 147): with `{!key=cat}category`, Solr honours `f.category.facet.limit` -- the *field* name, not the key. Wayfinder ignores it. Its twin `facet_perfield_key_by_key` (`f.cat.facet.limit`) is not listed because Solr ignores that address too, so both sides already agree",
+    ),
+    (
+        "facet_perfield_lp_limit",
+        "issue #296 (finding 148): `facet.limit` carried as a local param on `facet.field` (`{!key=cat facet.limit=1}category`) is honoured by Solr -- SimpleFacets wraps the local params over the request params. Wayfinder parses `key`/`ex` and ignores any other local param",
+    ),
+    (
+        "facet_perfield_lp_mincount",
+        "issue #296 (finding 148): `facet.mincount` as a local param on `facet.field`, same mechanism as `facet_perfield_lp_limit`",
+    ),
+    (
+        "facet_perfield_lp_missing",
+        "issue #296 (finding 148): `facet.missing` as a local param on `facet.field`. The `f.<field>.` form of this one setting Wayfinder does support (issue #140); the local-param form it does not",
+    ),
+    (
+        "facet_perfield_lp_no_key",
+        "issue #296 (finding 148): a local param with no `key` at all (`{!facet.limit=1}category`) still sets the limit in Solr, and the facet keeps its field name as its label",
+    ),
+    (
+        "facet_perfield_two_lp",
+        "issue #296 (finding 149): the row the feature exists for -- two facets on ONE field with different limits, told apart by `{!key}`, each carrying its own `facet.limit` local param. `f.<field>.facet.*` cannot express this (it addresses the field, which both share), so this row is the proof that local params are the mechanism, not per-field params. Its twin `facet_perfield_two_by_key` is not listed: Solr ignores `f.<key>.facet.limit` there, so both sides already agree",
+    ),
+    (
+        "facet_perfield_ex_limit",
+        "issue #296 (finding 150): `f.<field>.facet.limit` against an `{!ex=}` facet -- Solr applies the limit to the post-exclusion list. Wayfinder honours the exclusion (issue #295) but ignores the limit",
+    ),
+    (
+        "facet_perfield_ex_lp_limit",
+        "issue #296 (finding 150): the local-param form of `facet_perfield_ex_limit`",
+    ),
+    (
+        "facet_perfield_ex_limit_rank",
+        "issue #296 (finding 150): the decisive ordering row -- with `fq=category:garden`, ranking the *filtered* counts would put `garden` first and ranking the *excluded* counts puts `animals` first. Solr returns `animals`, so facet.limit is applied after the exclusion, not before",
+    ),
+    (
+        "facet_perfield_ex_lp_limit_rank",
+        "issue #296 (finding 150): the local-param form of `facet_perfield_ex_limit_rank`",
+    ),
+    (
+        "facet_perfield_ex_two_facets",
+        "issue #296: the full `search_api_solr` OR-facet shape -- the filtered facet and the excluded one told apart by key, with a limit on the excluded one only. Wayfinder gets the exclusion right and the limit wrong",
+    ),
+    (
+        "facet_perfield_err_bad_limit",
+        "issue #296: Solr 400s on a non-numeric per-field limit (`f.category.facet.limit=abc`); \
+         Wayfinder ignores the whole `f.<field>.facet.limit` param and returns 200, so this row \
+         also pins that the validation lands with the feature rather than after it",
+    ),
 ];
 
 /// The `EXPECTED_DIVERGENCES` reason for `name`, or `None` if `name` is not
@@ -2241,6 +2377,7 @@ fn app_and_request_url<'a>(
     spellcheck_app: &'a Router,
     grouping_app: &'a Router,
     fnq_app: &'a Router,
+    pf296_app: &'a Router,
 ) -> (&'a Router, String) {
     match entry.url.split_once('/') {
         Some(("content", rest)) => (content_app, format!("content/{rest}")),
@@ -2248,6 +2385,7 @@ fn app_and_request_url<'a>(
         Some(("keyorder", rest)) => (keyorder_app, format!("content/{rest}")),
         Some(("facets33", rest)) => (facets33_app, format!("content/{rest}")),
         Some(("fnq", rest)) => (fnq_app, format!("content/{rest}")),
+        Some(("pf296", rest)) => (pf296_app, format!("content/{rest}")),
         Some(("sortdebt", _)) => (sortdebt_app, entry.url.clone()),
         Some(("update9", _)) => (update9_app, entry.url.clone()),
         Some(("stats", _)) => (stats_app, entry.url.clone()),
@@ -2295,6 +2433,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let (spellcheck_app, _spellcheck_dir) = spellcheck_223_app().await;
     let (grouping_app, _grouping_dir) = grouping_app().await;
     let (fnq_app, _fnq_dir) = fnq_app().await;
+    let (pf296_app, _pf296_dir) = pf296_app().await;
 
     let mut ran = 0usize;
     let mut diffed = 0usize;
@@ -2320,6 +2459,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
             &spellcheck_app,
             &grouping_app,
             &fnq_app,
+            &pf296_app,
         );
         // `update_select_commitwithin_visible` follows a `commitWithin=500`
         // row with no settle delay in this hermetic replay, unlike

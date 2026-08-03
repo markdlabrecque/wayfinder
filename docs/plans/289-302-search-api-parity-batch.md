@@ -247,17 +247,28 @@ a supported-topology statement, not a deferred task.
 
 ### H (#296) — requirements, updated after #298 landed
 
-**1. Settle the premise with fixtures before writing the parser.** The client emits
-per-facet settings through Solarium as `f.<key>.facet.limit`, and `search_api_solr`'s
-key is the Solr field name. Since C (#299), *our* module keys facets by the Search API
-delta. So it is an open question whether Solr resolves `f.<X>.facet.*` against the
-`{!key=}` label or against the underlying field name — and the answer decides the scope:
+**1. The premise is settled — captured, and it went the other way.** 26 fixtures
+(`facet_perfield_*` on `content`, `pf296_sort_*` on a dedicated core), findings 147-150:
 
-- If it resolves by **field name**, `f.<field>.facet.*` alone does **not** fix the case
-  the README bullet describes (two facets on *one* field disagreeing on limit), and the
-  mechanism is instead facet settings carried as local params on `facet.field` itself,
-  which Solr also accepts.
-- If it resolves by **key**, #296 stands as written.
+- `f.<X>.facet.*` resolves `X` against the **field name**, never against the `{!key=}`
+  label. `{!key=cat}category` + `f.category.facet.limit=1` limits; `f.cat.facet.limit=1`
+  does nothing (finding 147). So `f.<field>.facet.*` alone does **not** fix the case the
+  README bullet describes.
+- The mechanism that does is **facet settings carried as local params on `facet.field`**:
+  `{!key=cat facet.limit=1}category`, and likewise for `mincount`/`missing`/`sort`, with
+  or without a `key` (finding 148). Two facets on one field with different settings are
+  expressible this way and no other (finding 149).
+- `facet.limit` joins `mincount`/`missing` as post-exclusion (finding 150), so an OR
+  facet's limit truncates the wider list, not the filtered one.
+- Wayfinder already implements one per-field setting — `f.<field>.facet.missing`
+  (issue #140) — keyed by field name, which is the same resolution rule. The real gap is
+  `limit`/`mincount`/`sort`, plus the whole local-param form.
+
+So #296 is **two** pieces of work, not one: `f.<field>.facet.{limit,mincount,sort}` on
+the server, and local-param facet settings on `facet.field` — and it is the second that
+the module actually needs, because #299 keys facets by the delta. The README bullet at
+`drupal/search_api_wayfinder/README.md` still claims there is no `f.<field>.facet.*`
+override at all; correct it when this lands.
 
 This is the same shape as the #297 and #308 premise corrections — the third and fourth
 times a ticket's stated premise did not survive contact with a fixture.
