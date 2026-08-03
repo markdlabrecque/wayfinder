@@ -37,7 +37,9 @@ use tantivy::{
     Term,
 };
 
-use crate::collector::{AllScoredHits, SortClause, TopOutcome, TopScoredHits};
+use crate::collector::{
+    AllScoredHits, GroupingCollector, GroupingFruit, SortClause, TopOutcome, TopScoredHits,
+};
 use crate::config::ServerConfig;
 use crate::edismax;
 use crate::local_params;
@@ -2245,6 +2247,33 @@ impl CoreIndex {
         match compose_filtered(query, filter_queries) {
             None => Ok(searcher.search(query, &collectors)?),
             Some(composed) => Ok(searcher.search(&composed, &collectors)?),
+        }
+    }
+
+    /// Result grouping (issue #290, PRD §5 v3): buckets every matching doc by
+    /// `group_clause`'s fast-field value and returns each group with its
+    /// within-group-sorted doc list. `main_clauses` is the request's `sort`
+    /// (drives group order); `within_clauses` is `group.sort` (or a clone of
+    /// `main_clauses` when the request omits it). Filter queries are composed
+    /// into the main query the same way [`search_top`](Self::search_top)
+    /// composes them, so the grouped set is exactly `q` AND every `fq`.
+    ///
+    /// The caller (`src/grouping.rs`) validates that `group_clause`'s field is
+    /// single-valued and fast, and applies `group.limit`/`group.offset`/
+    /// `rows`/`start` to the fruit.
+    pub fn search_grouping(
+        &self,
+        query: &dyn Query,
+        filter_queries: &[Box<dyn Query>],
+        main_clauses: Vec<SortClause>,
+        within_clauses: Vec<SortClause>,
+        group_clause: SortClause,
+    ) -> Result<GroupingFruit> {
+        let searcher = self.reader.searcher();
+        let collector = GroupingCollector::new(main_clauses, within_clauses, group_clause);
+        match compose_filtered(query, filter_queries) {
+            None => Ok(searcher.search(query, &collector)?),
+            Some(composed) => Ok(searcher.search(&composed, &collector)?),
         }
     }
 

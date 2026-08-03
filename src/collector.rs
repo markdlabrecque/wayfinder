@@ -75,7 +75,7 @@ impl SortClause {
 /// A materialised sort key value. Dates collapse into `I64` (their UTC
 /// timestamp) because that is the order Lucene sorts them in too.
 #[derive(Clone, Debug, PartialEq)]
-enum SortValue {
+pub(crate) enum SortValue {
     Str(String),
     I64(i64),
     F64(f64),
@@ -536,5 +536,300 @@ impl SegmentCollector for TopScoredHitsSegmentCollector {
             count: self.count,
             max_score: self.max_score,
         }
+    }
+}
+
+/// Result grouping (issue #290, PRD §5 v3). Tantivy has no native grouping
+/// collector, so this buckets each matching document by its fast-field group
+/// value and keeps the within-group-sorted doc list per bucket.
+///
+/// Two orderings are in play, and they are NOT the same param:
+/// - **Group order** (the order `groups[]` is emitted in) is the relevance of
+///   each group's top document under the *main* `sort` param. The collector
+///   therefore sorts every match by `main_clauses` first; the first time a
+///   group value is seen in that order is its rank.
+/// - **Within-group order** is `group.sort` (defaulting to the main `sort`).
+///   Each bucket is sorted by `within_clauses` independently.
+///
+/// `group.limit`/`group.offset` (paging *within* a group) and `rows`/`start`
+/// (paging the *groups* list) are applied by the envelope builder in
+/// `src/grouping.rs`, not here: the collector hands back every group with its
+/// full within-group-sorted doc list, so the builder can re-paginate without
+/// re-collecting. ponytail: that materialises the whole match set, same
+/// ceiling `AllScoredHits` already carries ("fine for a corpus that fits a
+/// single `Vec`").
+///
+/// Only single-valued non-text fields are groupable -- the caller validates
+/// that and constructs `group_clause` (a `SortClause` over the group field's
+/// fast column) so this collector can read each doc's value through the same
+/// `SegmentSortColumn` machinery sorting already uses. A doc with no value
+/// for the field lands in the `None` (null) group, exactly as Solr emits a
+/// `groupValue: null` group.
+pub struct GroupingCollector {
+    main_clauses: Vec<SortClause>,
+    within_clauses: Vec<SortClause>,
+    group_clause: SortClause,
+    /// `true` when `within_clauses` is identical to `main_clauses` (the common
+    /// case: `group.sort` absent). Lets `collect` reuse the already-materialised
+    /// main keys for within-group ordering instead of reading the same columns
+    /// twice per document.
+    within_is_main: bool,
+}
+
+impl GroupingCollector {
+    /// `main_clauses` is the request's `sort` (default `score desc`).
+    /// `within_clauses` is `group.sort`, or a clone of `main_clauses` when the
+    /// request omits `group.sort`. `group_clause` reads the group field's value.
+    ///
+    /// An empty `main_clauses`/`within_clauses` becomes the implicit
+    /// `score desc`, exactly as [`AllScoredHits::new`] and
+    /// [`TopScoredHits::new`] do — so an unsorted grouped request ranks groups
+    /// by their top doc's relevance, not by document address.
+    pub fn new(
+        mut main_clauses: Vec<SortClause>,
+        mut within_clauses: Vec<SortClause>,
+        group_clause: SortClause,
+    ) -> GroupingCollector {
+        if main_clauses.is_empty() {
+            main_clauses.push(SortClause::new(SortKey::Score, true, None));
+        }
+        if within_clauses.is_empty() {
+            within_clauses.push(SortClause::new(SortKey::Score, true, None));
+        }
+        let within_is_main = within_clauses == main_clauses;
+        GroupingCollector {
+            main_clauses,
+            within_clauses,
+            group_clause,
+            within_is_main,
+        }
+    }
+}
+
+/// One collected match for grouping: where it lives, its score, its group
+/// value, and the sort keys for both orderings.
+pub struct GroupRecord {
+    addr: DocAddress,
+    score: Score,
+    /// The group field's value for this doc, `None` for the null group.
+    group: Option<SortValue>,
+    /// Sort keys under the main `sort` (drives group ranking).
+    main_keys: Vec<Option<SortValue>>,
+    /// Sort keys under `group.sort`. Empty when `within_is_main` (use
+    /// `main_keys`).
+    within_keys: Vec<Option<SortValue>>,
+}
+
+/// A groupable bucket key. `f64` is not `Eq`/`Hash`, so floating group values
+/// key on their bit pattern (a NaN group is vanishingly unlikely for a
+/// single-valued docValues field, and two distinct NaN patterns collapsing to
+/// one bucket is no worse than `f64`'s own NaN-equality).
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum GroupKey {
+    None,
+    Str(String),
+    I64(i64),
+    F64Bits(u64),
+}
+
+impl GroupKey {
+    fn from_value(value: &Option<SortValue>) -> GroupKey {
+        match value {
+            None => GroupKey::None,
+            Some(SortValue::Str(s)) => GroupKey::Str(s.clone()),
+            Some(SortValue::I64(i)) => GroupKey::I64(*i),
+            Some(SortValue::F64(f)) => GroupKey::F64Bits(f.to_bits()),
+        }
+    }
+}
+
+/// The structured grouping result, before pagination/rendering. Every group
+/// appears in group-rank order with its full within-group-sorted doc list;
+/// `src/grouping.rs` applies `group.limit`/`group.offset`/`rows`/`start` and
+/// renders the docs.
+pub struct GroupingFruit {
+    /// Total documents matching `q` AND every `fq` -- `grouped.<field>.matches`.
+    pub matches: usize,
+    /// Groups in group-rank order (main sort of each group's top doc).
+    pub groups: Vec<RankedGroup>,
+}
+
+/// One group: its value, its full size, and its docs ordered by `group.sort`.
+pub struct RankedGroup {
+    /// The group field value, or `None` for the null group (docs missing the
+    /// field). Kept as the first-seen `SortValue` so the envelope can render
+    /// the original typed value (string vs number) without re-reading it.
+    pub value: Option<SortValue>,
+    /// Docs in the group, regardless of `group.limit` -- the full count.
+    pub num_found: usize,
+    /// The group's docs in within-group order (`group.sort`, default main
+    /// sort). Not yet limited/offset.
+    pub docs: Vec<(Score, DocAddress)>,
+}
+
+impl Collector for GroupingCollector {
+    type Fruit = GroupingFruit;
+    type Child = GroupingSegmentCollector;
+
+    fn for_segment(
+        &self,
+        segment_ord: SegmentOrdinal,
+        segment: &SegmentReader,
+    ) -> tantivy::Result<Self::Child> {
+        let main_columns = self
+            .main_clauses
+            .iter()
+            .map(|c| SegmentSortColumn::open(segment, c).map(|col| (col, c.descending)))
+            .collect::<tantivy::Result<Vec<_>>>()?;
+        let within_columns = if self.within_is_main {
+            Vec::new()
+        } else {
+            self.within_clauses
+                .iter()
+                .map(|c| SegmentSortColumn::open(segment, c).map(|col| (col, c.descending)))
+                .collect::<tantivy::Result<Vec<_>>>()?
+        };
+        let group_column = SegmentSortColumn::open(segment, &self.group_clause)?;
+        Ok(GroupingSegmentCollector {
+            segment_ord,
+            main_columns,
+            within_columns,
+            group_column,
+            within_is_main: self.within_is_main,
+            records: Vec::new(),
+            scratch: String::new(),
+        })
+    }
+
+    fn requires_scoring(&self) -> bool {
+        // Scores are carried for `doclist.maxScore` and for the default
+        // `score desc` ordering, exactly as the other collectors do.
+        true
+    }
+
+    fn merge_fruits(&self, segment_fruits: Vec<Vec<GroupRecord>>) -> tantivy::Result<Self::Fruit> {
+        let mut all: Vec<GroupRecord> = segment_fruits.into_iter().flatten().collect();
+        let matches = all.len();
+
+        // Group rank = first-seen order in main-sort order. Sorting the whole
+        // match set by `main_clauses` (then DocAddress, via `compare_hits`)
+        // makes each group's first occurrence its top document under the main
+        // sort, which is exactly Solr's group-ordering rule.
+        let main_clauses = self.main_clauses.clone();
+        all.sort_by(|a, b| {
+            let ha = Hit {
+                addr: a.addr,
+                score: a.score,
+                keys: a.main_keys.clone(),
+            };
+            let hb = Hit {
+                addr: b.addr,
+                score: b.score,
+                keys: b.main_keys.clone(),
+            };
+            compare_hits(&main_clauses, &ha, &hb)
+        });
+
+        // Bucket preserving first-seen order.
+        let mut order: Vec<GroupKey> = Vec::new();
+        let mut index: std::collections::HashMap<GroupKey, usize> =
+            std::collections::HashMap::new();
+        let mut buckets: Vec<Vec<GroupRecord>> = Vec::new();
+        for rec in all {
+            let key = GroupKey::from_value(&rec.group);
+            let idx = match index.get(&key) {
+                Some(&i) => i,
+                None => {
+                    let i = order.len();
+                    index.insert(key, i);
+                    order.push(GroupKey::None); // placeholder, fixed below
+                    buckets.push(Vec::new());
+                    i
+                }
+            };
+            buckets[idx].push(rec);
+        }
+
+        let within_clauses = self.within_clauses.clone();
+        let within_is_main = self.within_is_main;
+        let groups = buckets
+            .into_iter()
+            .map(|mut bucket| {
+                let value = bucket.first().and_then(|r| r.group.clone());
+                let num_found = bucket.len();
+                if !within_is_main {
+                    let wc = within_clauses.clone();
+                    bucket.sort_by(|a, b| {
+                        let ha = Hit {
+                            addr: a.addr,
+                            score: a.score,
+                            keys: a.within_keys.clone(),
+                        };
+                        let hb = Hit {
+                            addr: b.addr,
+                            score: b.score,
+                            keys: b.within_keys.clone(),
+                        };
+                        compare_hits(&wc, &ha, &hb)
+                    });
+                }
+                // When within == main, the bucket is already in main-sort
+                // order from the global sort above, which is the correct
+                // within-group order too.
+                let docs = bucket.into_iter().map(|r| (r.score, r.addr)).collect();
+                RankedGroup {
+                    value,
+                    num_found,
+                    docs,
+                }
+            })
+            .collect();
+        Ok(GroupingFruit { matches, groups })
+    }
+}
+
+pub struct GroupingSegmentCollector {
+    segment_ord: SegmentOrdinal,
+    main_columns: Vec<(SegmentSortColumn, bool)>,
+    within_columns: Vec<(SegmentSortColumn, bool)>,
+    group_column: SegmentSortColumn,
+    within_is_main: bool,
+    records: Vec<GroupRecord>,
+    scratch: String,
+}
+
+impl SegmentCollector for GroupingSegmentCollector {
+    type Fruit = Vec<GroupRecord>;
+
+    fn collect(&mut self, doc: DocId, score: Score) {
+        let mut scratch = std::mem::take(&mut self.scratch);
+        let main_keys: Vec<Option<SortValue>> = self
+            .main_columns
+            .iter()
+            .map(|(col, desc)| col.value(doc, score, *desc, &mut scratch))
+            .collect();
+        // The group value: `descending` is irrelevant for a single-valued
+        // field (min == max), so `false` is a no-op selector.
+        let group = self.group_column.value(doc, score, false, &mut scratch);
+        let within_keys = if self.within_is_main {
+            Vec::new()
+        } else {
+            self.within_columns
+                .iter()
+                .map(|(col, desc)| col.value(doc, score, *desc, &mut scratch))
+                .collect()
+        };
+        self.scratch = scratch;
+        self.records.push(GroupRecord {
+            addr: DocAddress::new(self.segment_ord, doc),
+            score,
+            group,
+            main_keys,
+            within_keys,
+        });
+    }
+
+    fn harvest(self) -> Self::Fruit {
+        self.records
     }
 }
