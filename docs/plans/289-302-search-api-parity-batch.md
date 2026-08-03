@@ -2,14 +2,17 @@
 
 **Date:** 2026-08-03. Covers the fourteen issues opened after the parity review of
 2026-08-03: #289-#297 (server) and #298-#302 (the `search_api_wayfinder` module),
-plus #308, split out of #291 by the wave 0b sweep.
+plus #308, split out of #291 by the wave 0b sweep. **Updated 2026-08-03** for the
+completion of wave 1.
 
 This document is the batch's execution order, not its scope — each issue body carries
 its own scope and evidence requirements, and this plan does not restate them. Read it
 before starting any branch in the batch, because several of the sequencing constraints
 below are invisible from inside a single issue.
 
-**Status:** wave 0 is complete (#306, #307 merged). Wave 1 can start now.
+**Status:** waves 0 and 1 are complete (#306, #307, #310; #297, #299, #308, #295 merged).
+Wave 2 can start now, and all three of its branches are unblocked — #278 landing freed
+#294. #296 (H) is also startable, having been gated only on #295.
 
 ## Where parity actually stands
 
@@ -18,10 +21,13 @@ below are invisible from inside a single issue.
 response field in the capture. A stock Search API site indexes, queries, facets,
 highlights, runs MoreLikeThis, and extracts attached and linked files today.
 
-**With one exception the coverage claim does not catch** — see #308 below. The
-contract is a floor over what the capture *recorded*, not over what the client can
-send, and the capture session never typed a partial word into an autocomplete box.
-Worth assuming other components have the same blind spot.
+**One exception the coverage claim did not catch has been fixed** — #308, autocomplete's
+`terms.prefix`/`terms.limit`. The lesson stands and is the reason to keep reading the
+client rather than the capture: the contract is a floor over what the capture
+*recorded*, not over what the client can *send*, and the capture session never typed a
+partial word into an autocomplete box. Assume other components have the same blind
+spot; the 0b sweep is the tool that finds them (findings 129-135 came from client
+source, not from a capture).
 
 Otherwise these issues are the delta between the wire-contract claim and
 feature-completeness — PRD §5's v3 and v4 lines, plus the module-side descopes
@@ -30,7 +36,8 @@ missing server capability.
 
 ## Findings that reshaped the order
 
-**#299 is not blocked by #295.** The server already uses the `{!key=...}` local-params
+**#299 is not blocked by #295** — confirmed by execution: #299 landed first, and its
+green suite needed no server change. The server already uses the `{!key=...}` local-params
 prefix as the facet response label (#138, `tests/facet_local_params_key.rs`);
 `ResponseParser::parseFacets()` simply maps buckets back to deltas by *field name*
 (`drupal/search_api_wayfinder/src/ResponseParser.php:107-142`). Emitting
@@ -85,43 +92,83 @@ what `{!boost}` actually emits (#289), the six `group.*` params (#290), the term
 (#291/#308), `facet.heatmap` and `setSpatial()` (#292), `max(_version_)` (#293), the
 twelve data types (#300), and the site-hash contract (#301).
 
-## In flight, and what it gates
+## No longer in flight
 
-- **#278** (`&mut Budget` encapsulation) is in flight and touches `src/extract.rs`.
-  **#294 (PDF extraction) must wait for it** — same file, and #294 is a large rewrite
-  in it. #294 therefore moves out of wave 1 into wave 2, where it is still contended
-  with nothing else.
-- **#274** (bound total resident upload memory) is in flight and shares the capture
-  machinery `--only` (#306) now provides. Nothing in this batch depends on it.
+Both items that gated this batch have landed. **#278** (`&mut Budget` encapsulation,
+`a0b808a`) was the blocker on **#294**; #294 now has `src/extract.rs` to itself and is
+free to start in wave 2. **#274** (`json.nl` on `/update/extract`) is closed and gated
+nothing here.
 
-## Wave 1 — four branches, no shared decisions
+## Wave 1 — done
 
-| Branch | Issue | Owns |
-|---|---|---|
-| A | #297 `/mlt` accepts `fq` | the `MLT_PARAMS` block in `src/lib.rs`, the mlt path in `src/core_index.rs` |
-| B | #308 `terms.prefix` / `terms.limit` | `TERMS_PARAMS`, `TERMS_DEFAULT_LIMIT`, the `/terms` handler — touched by nothing else in the batch |
-| C | #299 duplicate facets collapse | `QueryBuilder::buildFacets()`, `ResponseParser::parseFacets()` |
-| E | #295 `{!tag}` on `fq`, `{!ex}` on `facet.field` | `src/facet.rs`, `src/local_params.rs` |
+All four ran concurrently as planned and merged in this order. Reports are linked, not
+restated; each carries its own premise verification and gate evidence.
 
-**#308 first if you only start one.** It is the only item in the batch that is broken
-in a stock configuration today rather than merely absent, and it is small.
+| Branch | Issue | Merged | Report |
+|---|---|---|---|
+| A | #297 `/mlt` scoped to the index | `648ba63` (#311) | `docs/reports/2026-08-03-297-mlt-index-scope.md` |
+| C | #299 duplicate facets collapse | `8d36fc1` | `docs/reports/2026-08-03-duplicate-facets.md` |
+| B | #308 `terms.prefix` / `terms.limit` | `0841712` | `docs/reports/2026-08-03-terms-prefix-limit.md` |
+| E | #295 `{!tag}` on `fq`, `{!ex}` on `facet.field`/`facet.query` | `96f03d9` (#314) | `docs/reports/2026-08-03-295-facet-tag-ex.md` |
 
-E is promoted into wave 1: #293 vacated its slot, E heads the four-deep facet chain
-(`E -> H -> K`), and its files do not overlap A, B or C.
+All 31 wave-1 `EXPECTED_DIVERGENCES` entries from the #310 capture prep are deleted;
+`tests/differential.rs` wire-matches all 34 fixtures. Two of the README's eight
+descope bullets are gone (MLT scope, duplicate facets); six remain.
 
-## Wave 2 — contended on `src/lib.rs`
+**What wave 1 leaves for the branches behind it:**
+
+- **The exclusion machinery is now the facet chain's shared surface.**
+  `FacetFieldPlan.ex`, `FacetFieldsPlan.exclusion_active`, and
+  `excluded_base_clauses` in `src/facet.rs` are what H (#296) and K (#298) extend
+  rather than reimplement. Two ordering facts are load-bearing and fixture-backed
+  (finding 140): `facet.mincount`/`facet.missing` run **post-exclusion**, and
+  `excluded_base_clauses` assumes `base[0]` is the non-excludable `q` with `base[1..]`
+  aligned 1:1 to `fq_tag_lists(params)`. H adds per-field settings *inside* that
+  ordering; it does not reorder it.
+- **`{!ex=…}` disables the #246 fused aggregation for the whole request.** A named
+  ceiling, not a bug (`exclusion_active`'s doc comment). H and K inherit it: a
+  per-field or OR-facet request that carries an exclusion takes the unfused path.
+- **Type-less local-params blocks are now inert prefixes, not errors.** A block whose
+  params are all in `{tag, ex, key}` is stripped by `extract_nested_queries` instead of
+  400ing. Typed blocks are unchanged. This is the mechanism L3 (#292's distance facets)
+  needs for `{!key=…}{!frange l= u=}geodist()` — but L3 chains an inert block *and* a
+  typed one, which no wave-1 fixture exercises. **Verify chained blocks before building
+  L3 on the assumption.**
+- **`/terms` grew the error-sibling pattern.** `ErrorExtra::terms` + `WfError::with_terms`,
+  the analogue of `with_response`, rendering a block next to `error` only when set.
+  I (#291) is in the same handler family; extend that pattern rather than hand-building
+  an envelope.
+- **Two `/terms` premises inverted, and the guard that hid them is gone.** An undefined
+  `terms.fl` now answers 200 with an empty list (it was a 400 inferred with no fixture);
+  the defined-but-non-text 400 is unchanged. `check_terms_json_nl` was deleted in favour
+  of real `json.nl` rendering. Four tests were inverted rather than dropped.
+- **`QueryBuilder::indexScopeFilter()` exists** — one helper, both call sites (`build()`
+  and `buildMlt()`). G (#290) and L4 (#292) use it rather than open-coding the scope.
+
+The predicted collision points all held: `src/lib.rs` (#308's terms handler vs #295's
+`fq` path), the `EXPECTED_DIVERGENCES` block, `README.md`'s bullets, and
+`QueryBuilder.php`'s two methods each merged mechanically.
+`QueryBuilderTest.php` — the one genuine collision — was avoided by insertion-point
+discipline (facet tests beside facet tests, MLT tests beside MLT tests). **Carry that
+rule into wave 2**: G and C's successors land in the same two PHP test classes.
+
+## Wave 2 — next, contended on `src/lib.rs`
 
 | Branch | Issue | Owns |
 |---|---|---|
 | F | #289 function queries | new `src/function_query.rs`, `src/query.rs`, `src/edismax.rs`, the warning sites at `src/lib.rs:2880` |
 | G | #290 grouping | `src/collector.rs`, plus the Drupal half (`QueryBuilder`, `ResponseParser`, `WayfinderBackend`) |
-| B' | #294 PDF extraction | `src/extract.rs` — fully isolated, but **only after #278 lands** |
+| B' | #294 PDF extraction | `src/extract.rs` — fully isolated; **#278 has landed, so this is free** |
 
 Both F and G add to `SELECT_PARAMS`. **Do not prep-land the param names.** An
 accepted-but-unimplemented param is precisely the silent-wrong-answer shape #232 exists
 to prevent, so each branch adds its own contiguous block in the same commit as its
-implementation, and the rebase order is fixed **E -> F -> G**. Those conflicts are
+implementation, and the rebase order is **F -> G** (E has landed). Those conflicts are
 mechanical.
+
+A fourth slot is open: **H (#296)** was gated only on E and can run alongside F, G and
+B'. It contends with none of them — F and G own `SELECT_PARAMS` and `src/query.rs`, H
+owns the facet parser E just changed.
 
 G's Drupal half touches the two files C owns, so C must have landed.
 
@@ -136,7 +183,7 @@ targets are `sum`, a bare field reference (`boost_document`), and `payload_score
 
 | Branch | Issue | Note |
 |---|---|---|
-| H | #296 per-field `f.<field>.facet.*` | **Strictly after E** — same parser, same tests, not parallelisable with it |
+| H | #296 per-field `f.<field>.facet.*` | **E has landed — startable now**, and can be pulled into wave 2's fourth slot. Extends `FacetFieldPlan`; keeps mincount/missing post-exclusion |
 | J | #300 non-default data types | `FieldMapper`, `supportsDataType()`, `presets/search-api.toml`. Ten closed types; `solr_text_custom*` is a named descope (finding 134) |
 | M1 | #301 site hash | `DocumentBuilder` only, no server work. **Fetch `search_api_solr`'s `Utility::getSiteHash()` first** — it is not in the three-file snapshot, and bug-compatibility means matching it exactly |
 
@@ -147,7 +194,7 @@ itself is unchanged.
 
 | Branch | Issue | Note |
 |---|---|---|
-| K | #298 OR facets | after E (server) and H (client facet code) |
+| K | #298 OR facets | E (server) has landed; still after H (client facet code) |
 | L | #292 spatial | **three server pieces, not two, plus the Drupal half** — see below |
 | M2 | #302 multi-valued text sort | `DocumentBuilder`, after M1. May close as a verified no-op |
 | I | #291 suggest / SuggestComponent | after J (#300) — `solr_text_suggester` is the field the suggester is built from. Its own configset and capture prep |
@@ -170,10 +217,10 @@ their own configset:
 - **Longest chain:** `F (#289) -> L2 -> L3 -> L4`. Spatial is the schedule, so
   starting #289 early matters more than its own size suggests. F is behind nothing now
   that 0b has landed.
-- **Second chain:** `E (#295) -> H (#296) -> K (#298)` — three serial waves, all
-  facets, all the same parser. E starts in wave 1 for this reason.
+- **Second chain:** `H (#296) -> K (#298)` — two links left; E is done.
 - **Third chain:** `J (#300) -> I (#291)`.
-- **Off the path entirely:** #308, #297, #299, #301, #302, #294 (once #278 lands).
+- **Off the path entirely:** #301, #302, #294 (now unblocked). #308, #297 and #299 are
+  done.
 
 ## Concurrency bound
 
@@ -187,8 +234,23 @@ Decisions the siblings would otherwise each invent, which is where cross-branch
 conflicts actually survive:
 
 - **Facet response labels are always the Search API delta id, never the field name.**
-  Set by C (#299), consumed by H (#296), K (#298) and L3 (#292's distance facets, whose
-  `{!key=spatial-...}` label carries the min and max).
+  Set by C (#299) — now landed, so this is code, not a proposal — and consumed by
+  H (#296), K (#298) and L3 (#292's distance facets, whose `{!key=spatial-...}` label
+  carries the min and max). Two details C settled that its consumers must preserve:
+  a delta failing `[A-Za-z0-9_:-]+` **falls back to the bare mapped field name** (a
+  `}` or a space in a delta would break out of the local-params block), and
+  `ResponseParser::parseFacets()` registers **both** the delta and the field name as
+  keys for every delta, so either shape resolves. Do not "simplify" that to one key.
+- **The `{!tag}`/`{!ex}` exclusion machinery in `src/facet.rs` has one implementation.**
+  Set by E (#295): `FacetFieldPlan.ex`, `FacetFieldsPlan.exclusion_active`,
+  `excluded_base_clauses`. H, K and L3 extend it; none forks a second exclusion path,
+  and none reorders mincount/missing out of post-exclusion (finding 140).
+- **Index scoping in the Drupal module goes through
+  `QueryBuilder::indexScopeFilter()`.** Set by A (#297) so `build()` and `buildMlt()`
+  cannot drift; G (#290) and L4 (#292) use it rather than re-emitting `index_id:"..."`.
+- **An error carrying a response block next to `error` uses the `ErrorExtra` sibling
+  pattern** — `with_response` (#35), now `with_terms` (#308). I (#291) extends it;
+  nothing hand-assembles an envelope.
 - **The function-query AST lives in `src/function_query.rs`, and F (#289) owns its
   public signature.** L2 (#292) calls it for `geodist()`; it does not fork a second
   evaluator.
