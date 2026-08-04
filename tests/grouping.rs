@@ -1338,6 +1338,303 @@ async fn grouping_group_facet_combined_with_truncate_matches_truncate_only_count
     );
 }
 
+// --- section 4: {!ex=...} multi-select faceting + group.facet (#338, ------
+// finding 163) --------------------------------------------------------------
+//
+// `fq={!tag=t}category:news` filters the grouped hit list down to {g1, g2}
+// (article, page), but `facet.field={!ex=t}category` / `facet.query=
+// {!ex=t}category:blog` are excluded from that filter and must count against
+// the FULL, unfiltered `*:*` set -- documents g3/g4 (`category:blog`, both
+// `type:article`) never appear in the grouped result at all. The unexcluded
+// `facet.field=type` stays on the filtered set throughout.
+
+/// Baseline document counts (no `group.facet`): the excluded
+/// `facet.field=category` is `blog=2, news=2` (full corpus), the excluded
+/// `facet.query=category:blog` is 2, and the unexcluded `facet.field=type`
+/// stays on the filtered {g1, g2} set at `article=1, page=1`. `g338_ex_facet`.
+#[tokio::test]
+async fn grouping_excluded_facet_counts_documents_against_the_unfiltered_set() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true\
+         &fq=%7B%21tag%3Dt%7Dcategory:news\
+         &facet=true&facet.field=%7B%21ex%3Dt%7Dcategory&facet.field=type\
+         &facet.query=%7B%21ex%3Dt%7Dcategory:blog&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_ex_facet");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["blog", 2, "news", 2])),
+        "the excluded facet.field must count the full, unfiltered corpus, \
+         got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "the unexcluded facet.field must stay on the filtered {{g1,g2}} set, \
+         got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_queries/{!ex=t}category:blog"),
+        Some(&json!(2)),
+        "the excluded facet.query must count the full, unfiltered corpus, \
+         got {body}"
+    );
+    assert_eq!(
+        body.pointer("/grouped/type/matches")
+            .and_then(Value::as_u64),
+        Some(2),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/grouped/type/ngroups")
+            .and_then(Value::as_u64),
+        Some(2),
+        "got {body}"
+    );
+}
+
+/// `group.facet=true` on top: the excluded `category` facet must count
+/// GROUPS over the unfiltered set -- g3/g4 (`blog`) are both `type:article`,
+/// so `blog` becomes 1 distinct group even though NEITHER document is in the
+/// grouped/filtered result at all. `news` stays 2 (g1/article, g2/page, two
+/// distinct groups). The excluded `facet.query=category:blog` follows the
+/// same regrouping, 2 -> 1. The unexcluded `facet.field=type` is unaffected
+/// (`article=1, page=1`), because it is on the group field itself.
+/// `g338_ex_groupfacet`.
+///
+/// This is the defect finding 163 names: `GroupFacet::distinct_groups` looks
+/// each excluded-facet document up in a `doc_group` map built only from
+/// documents the grouping pass actually bucketed (the filtered set), so g3/g4
+/// are silently absent from the map and dropped from the count instead of
+/// contributing their `type` group.
+#[tokio::test]
+async fn grouping_excluded_facet_group_counts_span_the_unfiltered_set() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true\
+         &group.facet=true\
+         &fq=%7B%21tag%3Dt%7Dcategory:news\
+         &facet=true&facet.field=%7B%21ex%3Dt%7Dcategory&facet.field=type\
+         &facet.query=%7B%21ex%3Dt%7Dcategory:blog&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_ex_groupfacet");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 2, "blog", 1])),
+        "blog (g3,g4, both article, filtered OUT of the grouped result \
+         entirely) must still count as 1 distinct group under the excluded \
+         facet, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "the unexcluded facet.field=type must stay on the filtered set, \
+         got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_queries/{!ex=t}category:blog"),
+        Some(&json!(1)),
+        "the excluded facet.query must also regroup to 1 distinct group over \
+         the unfiltered set, got {body}"
+    );
+}
+
+/// `group.truncate=true` (no `group.facet`) with an excluded facet: the
+/// grouped/filtered set collapses to {g1, g2} (unchanged, since both were
+/// already singleton groups), and the excluded `category` facet counts the
+/// collapsed set as `news=2, blog=0` -- g3/g4 were never in the filtered set
+/// to begin with, truncate or not. `g338_ex_truncate`.
+#[tokio::test]
+async fn grouping_excluded_facet_with_truncate_collapses_the_filtered_set() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true\
+         &group.truncate=true\
+         &fq=%7B%21tag%3Dt%7Dcategory:news\
+         &facet=true&facet.field=%7B%21ex%3Dt%7Dcategory&facet.field=type\
+         &facet.query=%7B%21ex%3Dt%7Dcategory:blog&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_ex_truncate");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 2, "blog", 0])),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_queries/{!ex=t}category:blog"),
+        Some(&json!(0)),
+        "got {body}"
+    );
+}
+
+/// `group.truncate=true` AND `group.facet=true` together with an excluded
+/// facet: identical to truncate alone -- every collapsed document is its own
+/// group, so group-counting on top of the truncated set changes nothing.
+/// `g338_ex_both`.
+#[tokio::test]
+async fn grouping_excluded_facet_with_truncate_and_group_facet_matches_truncate_only() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true\
+         &group.truncate=true&group.facet=true\
+         &fq=%7B%21tag%3Dt%7Dcategory:news\
+         &facet=true&facet.field=%7B%21ex%3Dt%7Dcategory&facet.field=type\
+         &facet.query=%7B%21ex%3Dt%7Dcategory:blog&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_ex_both");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 2, "blog", 0])),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_queries/{!ex=t}category:blog"),
+        Some(&json!(0)),
+        "got {body}"
+    );
+}
+
+// --- section 5: stale doc addresses across a multi-segment index (#338, ----
+// defect 2) -------------------------------------------------------------------
+//
+// `DocSetQuery` (used for `group.truncate`) and `GroupFacet::doc_group` key
+// documents by raw `DocAddress`/`(segment_ord, doc_id)` pairs. Every g338
+// fixture above is indexed in one commit, so the corpus lives in exactly one
+// segment and a stale or unguarded segment ordinal can never surface. This
+// section indexes the SAME grouping corpus across multiple commits with
+// `merge_policy = "no_merge"`, so the index is genuinely multi-segment, and
+// checks that `group.truncate`/`group.facet` still produce the single-segment
+// fixtures' numbers (`g338_truncate`, `g338_groupfacet`) -- segment layout
+// must not change the answer.
+
+/// Builds an app on `GROUPING_SCHEMA_TOML` with `merge_policy = "no_merge"`,
+/// indexing `grouping_corpus()` split across three separate `post_docs` calls
+/// (three commits) so tantivy cannot coalesce them into one segment.
+async fn multi_segment_grouping_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let schema_path = dir.path().join("schema.toml");
+    std::fs::write(&schema_path, GROUPING_SCHEMA_TOML).expect("write schema.toml");
+    let config_path = dir.path().join("wayfinder.toml");
+    std::fs::write(&config_path, "[indexing]\nmerge_policy = \"no_merge\"\n")
+        .expect("write wayfinder.toml");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    let app =
+        wayfinder::app_with_config(&schema_path, &data_dir, &config_path).expect("app must build");
+
+    let corpus = grouping_corpus();
+    let docs = corpus.as_array().expect("grouping_corpus is an array");
+    for doc in docs {
+        let (status, body) = post_docs(&app, &json!([doc])).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "indexing one doc of the grouping corpus must succeed, got {body}"
+        );
+    }
+    (app, dir)
+}
+
+/// Self-checking multi-segment precondition: `admin/luke`'s `index.segmentCount`
+/// must be strictly greater than 1, or the test below would pass vacuously on
+/// a single segment and catch nothing.
+#[tokio::test]
+async fn multi_segment_grouping_app_is_genuinely_multi_segment() {
+    let (app, _dir) = multi_segment_grouping_app().await;
+    let (status, body) = get(&app, "admin/luke?wt=json&json.nl=flat").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET admin/luke must succeed: {body}"
+    );
+    let segment_count = body
+        .pointer("/index/segmentCount")
+        .and_then(Value::as_u64)
+        .expect("index.segmentCount must be present");
+    assert!(
+        segment_count > 1,
+        "six docs committed one at a time under merge_policy = \"no_merge\" \
+         must leave more than one searchable segment, or this precondition \
+         is not testing what it claims to; got segmentCount={segment_count}"
+    );
+}
+
+/// `group.truncate=true` over the multi-segment index must produce exactly
+/// the same facet numbers as the single-segment `g338_truncate` fixture:
+/// `type` article=1/page=1, `category` news=2/blog=0.
+#[tokio::test]
+async fn multi_segment_group_truncate_matches_the_single_segment_fixture() {
+    let (app, _dir) = multi_segment_grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.truncate=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_truncate");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "a multi-segment index must not change group.truncate's facet \
+         counts, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 2, "blog", 0])),
+        "got {body}"
+    );
+}
+
+/// `group.facet=true` over the multi-segment index must produce exactly the
+/// same group counts as the single-segment `g338_groupfacet` fixture:
+/// `type` article=1/page=1, `category` news=2/blog=1.
+#[tokio::test]
+async fn multi_segment_group_facet_matches_the_single_segment_fixture() {
+    let (app, _dir) = multi_segment_grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.facet=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_groupfacet");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "a multi-segment index must not change group.facet's group counts, \
+         got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 2, "blog", 1])),
+        "blog (g3,g4, both article) must still count as 1 distinct group \
+         across segment boundaries, got {body}"
+    );
+}
+
 // --- required extras: facet flags don't turn faceting on; hl union ---------
 
 /// `group.facet=true` and `group.truncate=true` do not themselves turn
