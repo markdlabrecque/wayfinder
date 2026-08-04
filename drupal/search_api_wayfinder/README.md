@@ -60,8 +60,10 @@ To upgrade, for each Search API server using the **Wayfinder** backend:
 1. Go to **Configuration → Search and metadata → Search API**, edit the server.
 2. Change **Base path** from `/solr` to `/wayfinder`.
 3. Save, then confirm the server's *View* page still reports the Wayfinder
-   version (it reads `{core}/admin/system`, so a wrong base path shows an
-   error there).
+   version. A wrong base path does not error on that read — `viewSettings()`
+   swallows the failure and simply omits the version row; what reports the
+   server as unreachable is Search API's own availability check, which pings
+   `{core}/admin/ping`.
 
 Sites that export configuration should update `path` in the server's exported
 `search_api.server.*.yml` too.

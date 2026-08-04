@@ -218,8 +218,9 @@ chosen. Nothing may be added here without the same two things.
    - `lucene.solr-spec-version`/`-impl-version`. The *value* is a config choice, default
      `"9.0.0"` (resolves open question 2 above); the *key* was renamed to
      `wayfinder-spec-version`/`wayfinder-impl-version` by issue #325, which removed the literal
-     `solr` token from Wayfinder's own response keys. The impl version additionally carries a
-     build hash and date that are unreproducible.
+     `solr` token from Wayfinder's own response keys. Solr's *impl* version additionally
+     carries a build hash and date that are unreproducible; Wayfinder emits a plain
+     `"<version> wayfinder"`.
    - `jvm.*`/`system.*` — real host JVM/OS stats with no Wayfinder equivalent to introspect.
    - `core.host`/`core.now`/`core.start`/`core.directory.*` on `/admin/system` — hostname,
      timestamps, and real filesystem paths on the capture host.
@@ -808,7 +809,7 @@ site did not configure an attachments integration. This is still a real client e
 but it weights the initial wire scope toward `extractOnly` rather than Solr Cell's much broader
 server-side indexing surface.
 
-The retained tracer bullet is therefore a multipart `POST /solr/{core}/update/extract` for plain
+The retained tracer bullet is therefore a multipart `POST /wayfinder/{core}/update/extract` for plain
 text and HTML, returning the captured `extractOnly=true` envelope. A following slice may apply
 `literal.<field>` and `fmap.<from>` and feed the existing update pipeline; those params are not
 required by the evidenced client path. The proposed format order is:
@@ -1054,10 +1055,10 @@ iterated on, not a spike. No Drupal in it.
 (`string`, `fast`, `multi_valued`).
 
 1. TOML schema file → Tantivy schema.
-2. `POST /solr/<core>/update` — JSON add, `commit`.
-3. `GET /solr/<core>/select` — `q`, `fq`, `fl`, `rows`, `start`, one `facet.field`, correct
+2. `POST /wayfinder/<core>/update` — JSON add, `commit`.
+3. `GET /wayfinder/<core>/select` — `q`, `fq`, `fl`, `rows`, `start`, one `facet.field`, correct
    `numFound`, correct Solr JSON envelope.
-4. `GET /solr/<core>/admin/ping`.
+4. `GET /wayfinder/<core>/admin/ping`.
 
 **Done when:** `curl` a document in, `curl` a query out, and the response matches Solr's for
 the same corpus and query, modulo `QTime`.
