@@ -2814,3 +2814,73 @@ which is what closes the issue's decision point and descopes `/suggest`.
       with no `location` point matches neither — confirmed by the
       `exists`-gated scorer (`tests/spatial.rs`), since a missing point would
       otherwise read back as the origin.
+## Findings from the #334 heatmap-facet capture (`facet.heatmap`, `location_rpt`)
+
+Captured 2026-08-10 against a real `solr:9` on a dedicated `heatmap` core
+(an `rpts_geo` field of the configset's `location_rpt` type, 10 lat,lon docs),
+via `capture.sh --only '^heatmap_'`. Rows are in `manifest-errors.tsv` (own
+core, not `manifest.tsv`). This pins the wire shape and the prefix-tree grid
+math the implementation must reproduce; it does not depend on how the point is
+*stored* (the #334 sizing chose two `f64` columns — the prefix tree survives
+as *grid math*, not storage).
+
+159. **`facet.heatmap` over a `location_rpt` field returns a geohash-prefix-tree
+     grid, and the grid is pure arithmetic once four rules are known.** The
+     configset's `location_rpt` (`solr.SpatialRecursivePrefixTreeFieldType`,
+     `geo=true`, no explicit `prefixTree`) resolves to a **geohash** prefix
+     tree, and `gridLevel` is the **geohash character count** (each char = 5
+     interleaved lon/lat bits, longitude first). Verified across three explicit
+     levels: `gridLevel=1 -> columns=8 rows=4`, `=2 -> 32x32`, `=3 -> 256x128`.
+     The closed form is **`columns = 2^ceil(5L/2)`, `rows = 2^floor(5L/2)`**
+     (longitude carries the odd bits, so it gets the extra bit at odd levels).
+     World bounds are `[-180,180] x [-90,90]`; `cellW = 360/columns`,
+     `cellH = 180/rows`. The response object under
+     `facet_counts.facet_heatmaps.<field>` carries `gridLevel, columns, rows,
+     minX, maxX, minY, maxY, counts_ints2D`.
+
+     Cell assignment (the part the sizing flagged as needing fixtures):
+     - **`col = ceil((lon - minX) / cellW) - 1`** (0 = west). Longitude cells are
+       *(left, right]* — a point exactly on a lon edge belongs to the cell whose
+       *right* edge it is (the lower column). So a point at `lon=45` (a level-2
+       edge) lands in column 19, not 20.
+     - **`row = floor((maxY - lat) / cellH)`** (0 = **north**/top — image-order,
+       not south). Latitude cells are *(bottom, top]* — a point on a lat edge
+       belongs to the row whose *top* edge it is.
+     - `counts_ints2D[row][col]` is the count. A row whose counts are all zero is
+       emitted as JSON `null`; when *every* cell is zero (e.g. an empty hit set,
+       `heatmap_empty`) the whole `counts_ints2D` is a single `null`, not an
+       array.
+
+     A bounded `facet.heatmap.geom` does **not** use the raw geom bounds: the
+     grid is the subset of *world* cells overlapping the geom bbox, **snapped
+     out** to cell edges, so `minX/maxX/minY/maxY` are cell-aligned. E.g.
+     geom `["-90 -45" TO "90 45"]` at `gridLevel=1` (45° cells) reports
+     `columns=5 rows=3 X[-135,90] Y[-90,45]` — `maxX=90` because the rightmost
+     overlapping cell runs to 135, `minY=-90` because the bottom cell runs to
+     -90. The in-grid column/row of a point is its world column/row minus the
+     grid's first column/row.
+
+     Level selection: an explicit `gridLevel` is used directly (clamped to the
+     tree's `maxLevels`). With no `gridLevel`, the level is **distErrPct-derived
+     and depends on geom size** (`facet.heatmap.distErrPct` defaults to `0.1`,
+     *not* the field type's `0.025`): whole world -> level 2, the 20°x10° box
+     above -> level 2 here too (`heatmap_default_bounded`). **`maxCells` is a
+     ceiling guard, not a level selector**: it never raises or lowers the level.
+     If `columns*rows > maxCells` (default `100000`) Solr returns 400
+     `Too many cells (C x R) for level L shape Rect(...)` — confirmed both for an
+     explicit `gridLevel=4` (1024x1024) under the default `maxCells`
+     (`heatmap_gridlevel_exceeds_maxcells`) and for `gridLevel=2` under
+     `maxCells=10` (`heatmap_maxcells_guard`, which 400s *instead of* dropping
+     to level 1).
+
+     Edge shapes captured: `facet.heatmap=nosuchfield` -> 400
+     `undefined field`; `facet.heatmap=id` (a non-spatial field) -> 400
+     `heatmap field needs to be of type ...SpatialRecursivePrefixTreeF...`;
+     `facet.heatmap` without `facet=true` -> no `facet_counts` at all (silently
+     omitted); `facet.heatmap.format=ints2D` -> 200 (the default, made explicit).
+     `format=png` is *also* a 200 in Solr, but it emits base64 `counts_png` and
+     **stringifies** the numeric fields (`"gridLevel":"1"`) — binary,
+     non-deterministic, and never sent by the client (finding 133); not captured,
+     a descope with a guard. The `<field>:<geom>` `fq` is a rectangle-containment
+     filter over the point (`heatmap_fq_rect`): it restricts the doc set, and the
+     heatmap then counts only surviving docs.

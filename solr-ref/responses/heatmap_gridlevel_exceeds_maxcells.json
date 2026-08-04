@@ -1,0 +1,25 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0,
+    "params":{
+      "facet.heatmap.gridLevel":"4",
+      "q":"*:*",
+      "facet.heatmap":"rpts_geo",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":10,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","java.lang.IllegalArgumentException"],
+    "msg":"java.lang.IllegalArgumentException: Too many cells (1024 x 1024) for level 4 shape Rect(minX=-180.0,maxX=180.0,minY=-90.0,maxY=90.0)",
+    "code":400
+  }
+}
