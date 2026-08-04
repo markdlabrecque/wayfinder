@@ -3905,6 +3905,22 @@ capg338 g338_truncate_multi  "select?q=*:*&group=true&group.field=type&group.fie
 capg338 g338_groupfacet_stats "select?q=*:*&$G338_GRP&group.facet=true&stats=true&stats.field=popularity&$G338_TAIL"
 capg338 g338_groupfacet_multi "select?q=*:*&group=true&group.field=type&group.field=popularity&group.ngroups=true&group.facet=true&$G338_FF&$G338_TAIL"
 
+# `{!ex=...}` multi-select faceting (#295) crossed with `group.facet`/
+# `group.truncate` (#338). An excluded facet counts against a REDUCED filter
+# set -- a superset of the documents the grouping pass bucketed -- so the two
+# features interact and nothing captured pins the result. `fq={!tag=t}` is
+# `category:news` (g1/article, g2/page), and the excluded facets count over the
+# full `*:*` set instead: `category` news is g1+g2 = 2 groups, blog is g3+g4,
+# both `article` = 1 group, and `facet.query=category:blog` is likewise 2
+# documents but 1 group. The unexcluded `type` facet still counts against the
+# filtered set. Percent-encoded `{`/`}`/`!` like every other local-param row.
+G338_EX_FQ='fq=%7B%21tag%3Dt%7Dcategory%3Anews'
+G338_EX_F='facet=true&facet.field=%7B%21ex%3Dt%7Dcategory&facet.field=type&facet.query=%7B%21ex%3Dt%7Dcategory%3Ablog'
+capg338 g338_ex_facet      "select?q=*:*&$G338_GRP&$G338_EX_FQ&$G338_EX_F&$G338_TAIL"
+capg338 g338_ex_groupfacet "select?q=*:*&$G338_GRP&group.facet=true&$G338_EX_FQ&$G338_EX_F&$G338_TAIL"
+capg338 g338_ex_truncate   "select?q=*:*&$G338_GRP&group.truncate=true&$G338_EX_FQ&$G338_EX_F&$G338_TAIL"
+capg338 g338_ex_both       "select?q=*:*&$G338_GRP&group.facet=true&group.truncate=true&$G338_EX_FQ&$G338_EX_F&$G338_TAIL"
+
 if want_any '^g338_'; then
   release "$G338_CONTAINER" "g338 core '$G338_CORE'"
 fi

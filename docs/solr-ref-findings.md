@@ -2967,3 +2967,25 @@ as *grid math*, not storage).
       (every document has a `category`). `group.truncate=true` on the same corpus
       collapses to {h1, h3, h4} under `sort=id asc` -> `news=3, blog=0`
       (`g338n_truncate`).
+
+163. **`{!ex=...}` multi-select faceting and `group.facet` compose: the excluded
+      facet counts GROUPS over the reduced filter set, which is a superset of the
+      documents the grouping pass bucketed.** Captured (#338, the `g338_ex_*`
+      rows). With `fq={!tag=t}category:news` the grouped result holds 2 documents
+      in 2 groups (article/g1, page/g2), and the excluded facets count over the
+      full `*:*` set instead: `facet.field={!ex=t}category` is `blog=2, news=2`
+      by document count and `news=2, blog=1` under `group.facet=true` -- `blog`
+      is g3+g4, both `article`, so 1 group, even though neither document is in
+      the filtered result at all. `facet.query={!ex=t}category:blog` behaves the
+      same, 2 -> 1. The unexcluded `facet.field=type` still counts against the
+      filtered set (`article=1, page=1`) under both. `g338_ex_facet` vs
+      `g338_ex_groupfacet`. The consequence for an implementation: a doc ->
+      group map built from the grouping pass cannot answer an excluded facet,
+      because the documents it must count were filtered out before grouping ran;
+      the group value has to be read for whatever document set the reduced base
+      produces.
+
+      `group.truncate=true` with an excluded facet keeps the collapse: the
+      `{!ex=t}category` facet is `news=2, blog=0` and the excluded `facet.query`
+      is 0 (`g338_ex_truncate`), and adding `group.facet=true` on top changes
+      nothing (`g338_ex_both`) -- each collapsed document is its own group.
