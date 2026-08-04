@@ -849,7 +849,7 @@ a new client whose capture shows real usage, the same bar every descope above al
 
 | Solr 9.x feature | Note |
 |---|---|
-| JSON Request API / JSON Facet API | The module speaks classic `facet.*` params exclusively; `json.facet` appears nowhere in its source. |
+| JSON Request API / JSON Facet API | The module uses classic `facet.*` params for search; Solarium's JSON Facet API (`createJsonFacetAggregation`, e.g. `max(_version_)`) appears only on admin diagnostics screens (finding 132), never on a search path. So JSON faceting has client evidence, just non-search evidence — which is why it is deferred (see the v3 `_version_` subsection), not listed here as zero-evidence. |
 | `facet.pivot`, `facet.interval` | Only field, query, and heatmap faceting is emitted. `facet.range` is equally unemitted, but v1 already shipped it — kept as surplus, not unshipped. |
 | Collapse & Expand (`fq={!collapse}`, `expand=true`) | The module's "collapse" identifiers drive Solr grouping (`group=true`), which stays in v3. |
 | Query Elevation (`/elevate`) | Relevance tweaks travel as `bq`/`boost` function queries; no elevation params. |
@@ -942,24 +942,43 @@ against the real client the same way v2's `terms`/`admin/luke`/`admin/mbeans` cl
 evidence does not support building most of that.**
 
 `search_api_solr` 4.4.0 (`SearchApiSolrBackend.php`) writes exclusively through Solarium's
-`addDocument(s)` — always whole documents, never Solr's atomic-update JSON. It references
-`_version_` exactly once, read-only: `stats.field=_version_&function=max(_version_)`, to compute an
-incremental-indexing watermark for its own admin UI. No `versions=true`, no conflict handling. The
-coverage contract (`coverage/search_api_coverage_contract.json`) confirms zero hits for
-`set`/`inc`/`add-distinct`/`versions`. This is a real feature described in the Phases table only
-because it's a Solr concept, the same premise gap the capture is supposed to close (§5's "coverage
-instrument" note).
+`addDocument(s)` — always whole documents, never Solr's atomic-update JSON. It never supplies a
+`_version_` on write and never sends `versions=true`; the coverage contract
+(`coverage/search_api_coverage_contract.json`) confirms zero hits for
+`set`/`inc`/`add-distinct`/`versions`, and none of the 28 captured search traces carries `_version_`
+on the request side. This is a real feature described in the Phases table only because it's a Solr
+concept, the same premise gap the capture is supposed to close (§5's "coverage instrument" note).
 
-**In scope (v1 of this item):**
+**What the client actually does with `_version_` (finding 132, #307; premise corrected in #293).**
+The client reads `_version_` only through a **JSON facet aggregation**: Solarium's
+`createJsonFacetAggregation` with `function: 'max(_version_)'` (PHP 4938-4940, 5052-5092),
+optionally nested under `terms` facets on `hash`, `index_id`, and `ss_search_api_datasource`.
+These are the server-status "max document `_version_`" admin diagnostics screens; the PHP comment
+at 4934 says the field was picked only because it is "the only field we can be 99% sure exists in
+any index" — a cheap always-present probe for a facet, not a version.
 
-- **A real `_version_` field**, `i64`, `fast` (docValues), auto-populated per document — not
-  user-schema-defined, not user-visible in `schema.toml`, the same kind of internal pseudo-field
-  `_root_` already is in the response envelope (§2 envelope fact 8). Monotonic per core (a simple
-  counter is sufficient; Solr's own `_version_` has no semantic meaning beyond "increases on every
-  write" — see below).
-- **`stats.field=_version_`** (and `function=max(_version_)`, Solr's equivalent phrasing for the same
-  aggregate) working against it via the stats component that already exists (`src/stats.rs`, issue
-  #5) — `_version_` just needs to be a real, statable, fast numeric field; no new aggregation code.
+An earlier draft of this section wrongly described `_version_` as read through
+`stats.field`; finding 132 is the correction. `stats.field` remains a valid capability of the
+delivered field (see below), not a path any captured request takes.
+
+**Delivered in v1 (#99/#102), and kept as-is.** A real `_version_` field: `i64`, `fast` (docValues),
+auto-populated per document from a per-core `AtomicI64` seeded at process start (so a restart begins
+later than pre-restart writes without persisting write-side version semantics), not user-schema-
+defined, not user-visible in `schema.toml`, and stripped from `/response/docs` exactly as `_root_`
+is (§2 envelope fact 8). The field is also statable — `stats.field=_version_` (and the
+`function=max(_version_)` phrasing) works through the existing stats component (`src/stats.rs`,
+#5) via `check_statable`'s deliberate `_version_` exception. That is a correct general capability
+of the field; it is not what the diagnostics screens use (they use the JSON facet above), but both
+stay because they are the right shape for whenever the real dependency below lands. The execution
+record lives in `tests/version_field.rs` and `docs/reports/` (see #293's report).
+
+**The real dependency, deferred (and rescoped to its own future item).** The only path that touches
+`_version_` is **JSON faceting with aggregation functions and nesting** (`json.facet`, `type: terms`
+nesting, `max()`). That is a considerably larger and differently shaped feature than a version
+counter, and its only client is an admin diagnostics screen — nothing a site *searches* depends on
+`_version_`. It is not v1 work; track it under JSON faceting, not here. The delivered field is
+exactly what that feature will aggregate over, so landing it later costs nothing extra at this
+layer.
 
 **Out of scope, explicitly** (each needs its own evidence before it's worth building):
 
@@ -972,26 +991,14 @@ instrument" note).
   `_version_` on write or checks for a conflict response. Revisit only if a client that does
   surfaces.
 - Any ordering/semantic guarantee on `_version_` values beyond monotonic increase (Solr's own is an
-  opaque `long` tied to its update log; clients that need `max(_version_)` as a watermark only need
-  "bigger means newer," which a simple counter already gives).
+  opaque `long` tied to its update log; a `max(_version_)` watermark only needs "bigger means
+  newer," which the per-core counter already gives).
 
-**Architecture.** Add `_version_` at the same layer `_root_` is added today (`core_index.rs`, where
-Solr's pseudo-fields are appended to the response — see the comment at line ~1540) — but as a real
-schema field this time, not just an envelope-shape addition, since it has to be `fast` for
-`stats.field` to aggregate on it. A per-core atomic counter (`AtomicI64`, bumped on every
-`add_documents` call) is enough; no persistence of the counter's last value across restarts is
-needed for a "bigger means newer" watermark, though restart behavior should be a documented,
-deliberate choice (reset to a value that can't collide with pre-restart versions, e.g. seed from
-current Unix-epoch millis) rather than an accident.
-
-**Tracer bullet.** One field, one path: index a document, confirm `_version_` is present and
-`fast`, then confirm `stats.field=_version_&function=max(_version_)`-shaped requests (both spellings
-if they differ in practice — verify against a captured Solr fixture) return the right max. No
-atomic-update work, no optimistic concurrency, in this slice or after it unless new evidence appears.
-
-**Testing.** Hermetic — no live Solr needed beyond what already exists for `stats.field`. Extend
-`src/stats.rs`'s existing fixture-backed test style (`solr-ref/responses/stats_*.json`) with a
-`_version_`-specific case if the real Solr capture doesn't already have one; capture one if not.
+**Guard.** `tests/version_descope_guard.rs` is a self-deleting guard over both evidence channels
+(the 28 traces and the frozen 4.4.0 source): it fails the day a captured request sends `_version_`,
+`versions=true`, or `json.facet`, or the source stops reading `_version_` through a JSON facet
+aggregation. When it goes red, revisit this decision (#293) with the new evidence — do not weaken
+the guard.
 
 ---
 
