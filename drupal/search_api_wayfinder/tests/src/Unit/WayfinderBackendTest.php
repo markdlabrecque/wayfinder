@@ -269,6 +269,59 @@ class WayfinderBackendTest extends TestCase {
   }
 
   /**
+   * issue #300: supportsDataType() accepts the six default Search API types
+   * plus the five search_api_solr non-default types that round-trip through
+   * FieldMapper + presets/search-api.toml on Wayfinder's existing schema
+   * types, plus solr_text_suggester (fixed sink field 'twm_suggest'). The
+   * still-descoped types return FALSE so Search API surfaces them as
+   * unsupported at config time rather than dropping them silently -- the
+   * exact silent-loss bug #300 exists to fix.
+   *
+   * The accepted/rejected split is itself the spec: anything accepted must
+   * have a FieldMapper prefix mapping AND a preset dynamic/static field, or
+   * Drupal would accept the field at config time and fail at index time
+   * (worse than refusing). See README "Not supported" for the per-type
+   * descope reasons.
+   *
+   * @covers ::supportsDataType
+   * @dataProvider supportsDataTypeProvider
+   */
+  public function testSupportsDataType(string $type, bool $expected): void {
+    $backend = new WayfinderBackend([], 'wayfinder', []);
+
+    $this->assertSame($expected, $backend->supportsDataType($type));
+  }
+
+  public static function supportsDataTypeProvider(): array {
+    return [
+      // Six defaults.
+      'text' => ['text', TRUE],
+      'string' => ['string', TRUE],
+      'integer' => ['integer', TRUE],
+      'decimal' => ['decimal', TRUE],
+      'date' => ['date', TRUE],
+      'boolean' => ['boolean', TRUE],
+      // issue #300: newly supported search_api_solr types.
+      'solr_string_storage' => ['solr_string_storage', TRUE],
+      'solr_string_docvalues' => ['solr_string_docvalues', TRUE],
+      'solr_text_unstemmed' => ['solr_text_unstemmed', TRUE],
+      'solr_text_omit_norms' => ['solr_text_omit_norms', TRUE],
+      'solr_text_wstoken' => ['solr_text_wstoken', TRUE],
+      'solr_text_suggester' => ['solr_text_suggester', TRUE],
+      // Descoped types: refused, with a README reason.
+      'solr_date_range needs a server-side range type' => ['solr_date_range', FALSE],
+      'solr_text_spellcheck needs language-aware naming' => ['solr_text_spellcheck', FALSE],
+      'solr_text_custom is a site escape hatch' => ['solr_text_custom', FALSE],
+      'solr_text_custom_omit_norms is a site escape hatch' => ['solr_text_custom_omit_norms', FALSE],
+      // Spatial types belong to #292, not here.
+      'location is spatial (#292)' => ['location', FALSE],
+      'rpt is spatial (#292)' => ['rpt', FALSE],
+      // An unknown type is refused (no fallback to accepting everything).
+      'unknown type' => ['totally_made_up', FALSE],
+    ];
+  }
+
+  /**
    * Plan doc line 170-171: the "search_api_mlt" query option routes to
    * GET /mlt instead of /select.
    *

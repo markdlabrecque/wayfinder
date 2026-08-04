@@ -63,6 +63,46 @@ class FieldMapperTest extends TestCase {
       // its 'string' type server-side, but the field *name* prefix stays 'b').
       'boolean single' => ['status', 'boolean', FALSE, 'bs_status'],
       'boolean multi' => ['status', 'boolean', TRUE, 'bm_status'],
+      // --- issue #300: the search_api_solr non-default data types -------
+      // Prefixes are ground truth from search_api_solr 4.4.0's
+      // Utility::getDataTypeInfo() (the six defaults) and the
+      // search_api_data_type_info_alter hook in src/Hook/SearchApiSolrHooks.php
+      // (the solr_* types): solr_string_storage=>'z',
+      // solr_string_docvalues=>'zdv', solr_text_unstemmed=>'tu',
+      // solr_text_omit_norms=>'to', solr_text_wstoken=>'tw'. Each prefix +
+      // s|m infix + '_' + field id, exactly like the six defaults.
+      // solr_string_storage -> zs_ / zm_ (Solr: string, indexed=false,
+      // stored=true; Wayfinder has no unindexed field so the preset maps it
+      // to 'string' and the indexability divergence is recorded in README).
+      'solr_string_storage single' => ['field_notes', 'solr_string_storage', FALSE, 'zs_field_notes'],
+      'solr_string_storage multi' => ['field_notes', 'solr_string_storage', TRUE, 'zm_field_notes'],
+      // solr_string_docvalues -> zdvs_ / zdvm_ (Solr: string, indexed=false,
+      // stored=true, docValues=true; maps to Wayfinder 'string' + fast).
+      'solr_string_docvalues single' => ['field_uuid', 'solr_string_docvalues', FALSE, 'zdvs_field_uuid'],
+      'solr_string_docvalues multi' => ['field_uuid', 'solr_string_docvalues', TRUE, 'zdvm_field_uuid'],
+      // solr_text_unstemmed -> tus_ / tum_ (Solr text_unstemmed_en; Wayfinder
+      // text_general is unstemmed too, so this is the faithful mapping).
+      'solr_text_unstemmed single' => ['title', 'solr_text_unstemmed', FALSE, 'tus_title'],
+      'solr_text_unstemmed multi' => ['title', 'solr_text_unstemmed', TRUE, 'tum_title'],
+      // solr_text_omit_norms -> tos_ / tom_ (Solr text_en/text_und with
+      // omitNorms=true; Wayfinder keeps length norms on -- documented
+      // divergence, the field still round-trips and is queryable).
+      'solr_text_omit_norms single' => ['title', 'solr_text_omit_norms', FALSE, 'tos_title'],
+      'solr_text_omit_norms multi' => ['title', 'solr_text_omit_norms', TRUE, 'tom_title'],
+      // solr_text_wstoken -> tws_ / twm_ (Solr text_ws: whitespace tokenizer,
+      // omitNorms; Wayfinder text_general -- documented tokenizer+norms
+      // divergence).
+      'solr_text_wstoken single' => ['title', 'solr_text_wstoken', FALSE, 'tws_title'],
+      'solr_text_wstoken multi' => ['title', 'solr_text_wstoken', TRUE, 'twm_title'],
+      // solr_text_suggester -> the FIXED sink field 'twm_suggest', regardless
+      // of field id or cardinality. search_api_solr special-cases this type
+      // before its generic prefix logic (SearchApiSolrBackend.php:2433-2437):
+      // every solr_text_suggester field indexes into the one field the
+      // SuggestComponent reads. The SuggestComponent query itself is #291;
+      // #300 lands only the field type so the field stops being dropped at
+      // config time.
+      'solr_text_suggester single' => ['field_suggest', 'solr_text_suggester', FALSE, 'twm_suggest'],
+      'solr_text_suggester multi' => ['field_suggest', 'solr_text_suggester', TRUE, 'twm_suggest'],
     ];
   }
 
@@ -267,6 +307,15 @@ class FieldMapperTest extends TestCase {
       // Numerics: bare, no quoting/formatting.
       'integer bare' => ['integer', 42, 42],
       'decimal bare' => ['decimal', 3.14, 3.14],
+      // issue #300: the solr_text_* variants format values exactly like plain
+      // 'text' -- search_api_solr normalises any 'solr_text_*' to 'text'
+      // before formatting (SearchApiSolrBackend.php:2706-2708), and
+      // FieldMapper::isTextType() mirrors that. A plain-string solr_text_*
+      // value therefore passes through unchanged.
+      'solr_text_unstemmed as-is' => ['solr_text_unstemmed', 'Some fulltext body', 'Some fulltext body'],
+      // solr_string_* variants format like 'string': passthrough.
+      'solr_string_storage as-is' => ['solr_string_storage', 'Stored only', 'Stored only'],
+      'solr_string_docvalues as-is' => ['solr_string_docvalues', 'DocValues', 'DocValues'],
     ];
   }
 
@@ -319,6 +368,71 @@ class FieldMapperTest extends TestCase {
     $result = $mapper->formatValue($value, 'text');
 
     $this->assertSame('mutated text', $result);
+  }
+
+  /**
+   * issue #300: a solr_text_* variant must hit the SAME text branch as plain
+   * 'text', so a TextValue object is cast to a plain string -- not left as
+   * an object. Without isTextType() covering the solr_text_* class, a
+   * solr_text_unstemmed TextValue falls through formatValue()'s default
+   * branch untouched and json_encode() serialises it to '{}', the exact
+   * malformed-body regression #83 fixed for plain 'text'.
+   *
+   * @covers ::formatValue
+   * @dataProvider solrTextTypeProvider
+   */
+  public function testFormatValueCastsTextValueObjectForSolrTextVariants(string $type): void {
+    $mapper = new FieldMapper();
+    $value = new TextValue('Some fulltext body');
+
+    $result = $mapper->formatValue($value, $type);
+
+    $this->assertIsString($result, "formatValue() must return a plain string for {$type} TextValue input.");
+    $this->assertSame('Some fulltext body', $result);
+    $this->assertNotSame('{}', $result);
+  }
+
+  public static function solrTextTypeProvider(): array {
+    return [
+      'solr_text_unstemmed' => ['solr_text_unstemmed'],
+      'solr_text_omit_norms' => ['solr_text_omit_norms'],
+      'solr_text_wstoken' => ['solr_text_wstoken'],
+      'solr_text_suggester' => ['solr_text_suggester'],
+    ];
+  }
+
+  /**
+   * @covers ::filterValue
+   * @dataProvider filterValueProvider
+   */
+  public function testFilterValue(string $type, $value, string $expected): void {
+    $mapper = new FieldMapper();
+    $this->assertSame($expected, $mapper->filterValue($value, $type));
+  }
+
+  public static function filterValueProvider(): array {
+    return [
+      // Text/string/boolean are phrase-quoted; inside the phrase only a
+      // literal backslash or double quote is escaped.
+      'text quoted' => ['text', 'foo', '"foo"'],
+      'text escapes quote' => ['text', 'a"b', '"a\\"b"'],
+      'text escapes backslash' => ['text', 'a\\b', '"a\\\\b"'],
+      'string quoted' => ['string', 'foo bar', '"foo bar"'],
+      'boolean quoted' => ['boolean', TRUE, '"true"'],
+      // Numeric/date stay bare after their normal formatting.
+      'integer bare' => ['integer', 42, '42'],
+      'decimal bare' => ['decimal', 3.14, '3.14'],
+      'date bare' => ['date', 0, '1970-01-01T00:00:00Z'],
+      // issue #300: solr_text_* variants phrase-quote exactly like plain
+      // 'text' (isTextType() covers the whole class). A solr_text_* filter
+      // value that skipped the phrase branch would be emitted bare,
+      // breaking Lucene phrase semantics for these fields.
+      'solr_text_unstemmed quoted' => ['solr_text_unstemmed', 'foo', '"foo"'],
+      'solr_text_suggester quoted' => ['solr_text_suggester', 'foo', '"foo"'],
+      // solr_string_* variants phrase-quote like 'string'.
+      'solr_string_storage quoted' => ['solr_string_storage', 'foo bar', '"foo bar"'],
+      'solr_string_docvalues quoted' => ['solr_string_docvalues', 'foo', '"foo"'],
+    ];
   }
 
 }

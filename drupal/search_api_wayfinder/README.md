@@ -63,10 +63,37 @@ Deliberate descopes, each with its reason. (Each is also marked with a
   and item ids coincide overwrite each other silently, with no error on either
   side. The module cannot detect it; keep the topology correct by
   configuration.
-- **Only the six default Search API data types** — `text`, `string`,
-  `integer`, `decimal`, `date`, `boolean` (`FieldMapper`,
-  `WayfinderBackend::supportsDataType()`). `solr_*` and location/spatial types
-  are out of scope.
+- **Search API data types** (`FieldMapper`, `WayfinderBackend::supportsDataType()`).
+  The six defaults (`text`, `string`, `integer`, `decimal`, `date`, `boolean`)
+  plus the `search_api_solr` non-default types that round-trip on Wayfinder's
+  existing schema types are supported (issue #300):
+  `solr_string_storage`, `solr_string_docvalues`, `solr_text_unstemmed`,
+  `solr_text_omit_norms`, `solr_text_wstoken`, and `solr_text_suggester` (which
+  indexes into the fixed sink field `twm_suggest` that `#291`'s SuggestComponent
+  reads).
+
+  Two indexability divergences on the newly-supported types are accepted and
+  documented at their `ponytail:` sites, not silently papered over:
+  - `solr_string_storage` / `solr_string_docvalues` are *storage/docValues-only*
+    in Solr (`indexed=false`). Wayfinder has no unindexed field, so they are
+    indexed (and therefore queryable) here — a superset of their Solr
+    capability. A field deliberately kept out of search by typing it
+    storage-only **becomes searchable** on Wayfinder.
+  - The `solr_text_*` variants all collapse onto `text_general`, so their Solr
+    analyzer-chain distinctions (unstemmed vs. omit-norms vs. whitespace-
+    tokenized) are not preserved — a scoring-quality divergence, not a data-
+    integrity one.
+
+  Still **not** supported, each with its reason rather than a silent omission:
+  - `solr_date_range` — Wayfinder's `date` type holds a single instant, not a
+    `[start TO end]` range; needs a new server-side date-range type.
+  - `solr_text_spellcheck` — indexes into the language-specific fixed sink
+    `spellcheck_<lang>`; the `FieldMapper` has no language-aware naming yet.
+    Lands with the spellcheck work.
+  - `solr_text_custom` / `solr_text_custom_omit_norms` — `search_api_solr`'s
+    escape hatch for site-defined analyzer chains (`SolrFieldType` entities);
+    the preset has no equivalent.
+  - `location` / `rpt` — spatial types, scope of #292.
 - **Multi-valued text sorting uses the first value** (`DocumentBuilder`) — a
   collation-aware multi-value text selector needs a dedicated schema/type
   design first. Non-text types sort natively with Wayfinder's multi-value
