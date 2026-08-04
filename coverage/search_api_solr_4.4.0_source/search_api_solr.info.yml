@@ -1,0 +1,8 @@
+type: module
+name: 'Search API Solr'
+description: 'Offers an implementation of the Search API that uses an Apache Solr server for indexing content.'
+core_version_requirement: ^11.3
+package: Search
+dependencies:
+  - drupal:language
+  - search_api:search_api

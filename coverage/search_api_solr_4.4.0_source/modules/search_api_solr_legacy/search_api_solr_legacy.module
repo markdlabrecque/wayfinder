@@ -1,0 +1,6 @@
+<?php
+
+/**
+ * @file
+ * Support for legacy Solr versions.
+ */

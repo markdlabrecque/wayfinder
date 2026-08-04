@@ -1,0 +1,4 @@
+solr_field_analysis:
+  css:
+    layout:
+      css/solr_field_analysis.css: {}
