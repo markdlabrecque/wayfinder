@@ -820,6 +820,153 @@ async fn pf296_app() -> (Router, TempDir) {
     (app, dir)
 }
 
+// --- issue #334: `facet.heatmap` over a static `location_rpt` field.
+// Mirrors the captured Solr corpus exactly (10 points, finding 159): h9 is the
+// origin boundary, h10 a quadrant boundary. `rpts_geo` is a *declared static*
+// field so it gets the synthetic `__lat`/`__lon` fast columns the heatmap reads;
+// a dynamic `rpts_*` rule (presets/search-api.toml) would have no columns and
+// is a documented ceiling.
+const HEATMAP_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "id"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "rpts_geo"
+type = "location_rpt"
+"#;
+
+fn heatmap_corpus() -> Value {
+    json!([
+        {"id":"h1", "rpts_geo":"10,20"},
+        {"id":"h2", "rpts_geo":"10,22"},
+        {"id":"h3", "rpts_geo":"12,20"},
+        {"id":"h4", "rpts_geo":"-20,-100"},
+        {"id":"h5", "rpts_geo":"60,140"},
+        {"id":"h6", "rpts_geo":"-70,30"},
+        {"id":"h7", "rpts_geo":"35,-75"},
+        {"id":"h8", "rpts_geo":"5,130"},
+        {"id":"h9", "rpts_geo":"0,0"},
+        {"id":"h10","rpts_geo":"45,45"}
+    ])
+}
+
+async fn heatmap_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app =
+        common::app_with_schema(dir.path(), HEATMAP_SCHEMA_TOML).expect("heatmap app must build");
+    let (status, body) = post_docs(&app, &heatmap_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the heatmap corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
+/// Fetches `select?<qs>` against `app` and asserts the `facet_heatmaps` block
+/// equals the named fixture's, byte-for-byte (QTime/_version_ live outside
+/// `facet_counts`, so no normalisation is needed here).
+async fn assert_heatmap_block(app: &Router, name: &str, qs: &str) {
+    let (status, body) = get(app, qs).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{name}: expected 200, got {status}: {body}"
+    );
+    let expected = fixture(name)
+        .pointer("/facet_counts/facet_heatmaps")
+        .cloned()
+        .unwrap_or_else(|| panic!("{name}: fixture has no facet_heatmaps block"));
+    let actual = body
+        .pointer("/facet_counts/facet_heatmaps")
+        .cloned()
+        .unwrap_or_else(|| panic!("{name}: response has no facet_heatmaps block: {body}"));
+    assert_eq!(actual, expected, "{name}: facet_heatmaps block mismatch");
+}
+
+/// #334: every 200-status `facet.heatmap` fixture reproduces its captured
+/// `facet_heatmaps` block exactly. The grid math is unit-tested in
+/// `src/heatmap.rs`; this is the end-to-end collector + rendering path. The
+/// four 400 fixtures run through the manifest-errors runner; the
+/// `<field>:<geom>` `fq` rectangle is asserted in its own test below.
+#[tokio::test]
+async fn heatmap_grid_outputs_match_captured_fixtures() {
+    let (app, _dir) = heatmap_app().await;
+    // The bounded fixtures carry `facet.heatmap.geom=["-90 -45" TO "90 45"]`,
+    // percent-encoded for the URI (the server decodes it back before parsing).
+    let geom = "%5B%22-90%20-45%22%20TO%20%2290%2045%22%5D";
+    let cases: Vec<(&str, String)> = vec![
+        ("heatmap_l1_world", "select?q=*:*&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=1&rows=0&wt=json".into()),
+        ("heatmap_l2_world", "select?q=*:*&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=2&rows=0&wt=json".into()),
+        ("heatmap_l3_world", "select?q=*:*&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=3&rows=0&wt=json".into()),
+        ("heatmap_default_world", "select?q=*:*&facet=true&facet.heatmap=rpts_geo&rows=0&wt=json".into()),
+        ("heatmap_default_bounded", format!("select?q=*:*&facet=true&facet.heatmap=rpts_geo&facet.heatmap.geom={geom}&rows=0&wt=json")),
+        ("heatmap_l1_bounded", format!("select?q=*:*&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=1&facet.heatmap.geom={geom}&rows=0&wt=json")),
+        ("heatmap_l2_bounded", format!("select?q=*:*&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=2&facet.heatmap.geom={geom}&rows=0&wt=json")),
+        ("heatmap_empty", "select?q=zzznomatch&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=2&rows=0&wt=json".into()),
+        ("heatmap_format_ints2d", "select?q=*:*&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=2&facet.heatmap.format=ints2D&rows=0&wt=json".into()),
+        // The `<field>:<geom>` rectangle `fq` filters docs to the box before
+        // the heatmap counts them (6 of 10 land in lon[-90,90] lat[-45,45]).
+        (
+            "heatmap_fq_rect",
+            "select?q=*:*&fq=rpts_geo:%5B%22-90%20-45%22%20TO%20%2290%2045%22%5D&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=2&rows=0&wt=json".into(),
+        ),
+    ];
+    for (name, qs) in &cases {
+        assert_heatmap_block(&app, name, qs).await;
+    }
+
+    // `facet.heatmap` without `facet=true` is a no-op: no `facet_counts` at
+    // all (heatmap_no_facet_true).
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=2&rows=0&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.get("facet_counts").is_none(),
+        "facet.heatmap without facet=true must not emit facet_counts: {body}"
+    );
+}
+
+/// #334: a present-but-non-numeric `facet.heatmap.maxCells`/`distErrPct` is a
+/// 400 (the malformed-param guard), not a silent fallback to the default that
+/// would mask the typo. Heatmap errors are post-query, so the 400 carries the
+/// `response` block like Solr's own heatmap error fixtures.
+#[tokio::test]
+async fn heatmap_malformed_numeric_params_are_400_not_silent_defaults() {
+    let (app, _dir) = heatmap_app().await;
+    for qs in [
+        "select?q=*:*&facet=true&facet.heatmap=rpts_geo&facet.heatmap.maxCells=abc&rows=0&wt=json",
+        "select?q=*:*&facet=true&facet.heatmap=rpts_geo&facet.heatmap.distErrPct=xyz&rows=0&wt=json",
+    ] {
+        let (status, body) = get(&app, qs).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a malformed heatmap numeric param must 400, got {status}: {body}"
+        );
+        assert!(
+            body.pointer("/response").is_some(),
+            "a heatmap 400 must carry the response block (post-query error): {body}"
+        );
+        assert!(
+            body.get("error").is_some(),
+            "a heatmap 400 must carry an error block: {body}"
+        );
+    }
+}
+
 // --- duplicated schema/corpus for manifest-errors.tsv's `update9` rows
 // (issue #9). Mirrors `tests/update_pipeline.rs::UPDATE9_SCHEMA_TOML` /
 // `update9_corpus` exactly — same duplication precedent as `sortdebt`/
@@ -2427,6 +2574,7 @@ fn app_and_request_url<'a>(
     fnq_app: &'a Router,
     pf296_app: &'a Router,
     geo_app: &'a Router,
+    heatmap_app: &'a Router,
 ) -> (&'a Router, String) {
     match entry.url.split_once('/') {
         Some(("content", rest)) => (content_app, format!("content/{rest}")),
@@ -2441,6 +2589,7 @@ fn app_and_request_url<'a>(
         Some(("frange", rest)) => (fnq_app, format!("content/{rest}")),
         Some(("pf296", rest)) => (pf296_app, format!("content/{rest}")),
         Some(("geo", rest)) => (geo_app, format!("content/{rest}")),
+        Some(("heatmap", rest)) => (heatmap_app, format!("content/{rest}")),
         Some(("sortdebt", _)) => (sortdebt_app, entry.url.clone()),
         Some(("update9", _)) => (update9_app, entry.url.clone()),
         Some(("stats", _)) => (stats_app, entry.url.clone()),
@@ -2490,6 +2639,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let (fnq_app, _fnq_dir) = fnq_app().await;
     let (pf296_app, _pf296_dir) = pf296_app().await;
     let (geo_app, _geo_dir) = geo_app().await;
+    let (heatmap_app, _heatmap_dir) = heatmap_app().await;
 
     let mut ran = 0usize;
     let mut diffed = 0usize;
@@ -2517,6 +2667,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
             &fnq_app,
             &pf296_app,
             &geo_app,
+            &heatmap_app,
         );
         // `update_select_commitwithin_visible` follows a `commitWithin=500`
         // row with no settle delay in this hermetic replay, unlike

@@ -77,11 +77,15 @@ const NON_LANGUAGE_BUILTIN_TYPES: &[&str] = &[
     "float",
     "double",
     "date",
-    // A `location` is a lat/lon point stored as two synthetic f64 fast
-    // columns (`<field>__lat`/`__lon`, see `parse`); `geodist()` reads them
-    // (#331). Listed here so a custom [[field_types]] chain named `location`
-    // is rejected like every other built-in (#170).
+    // `location` and `location_rpt` are lat/lon points stored as two synthetic
+    // f64 fast columns (`<field>__lat`/`__lon`, see `parse`). Listed here so a
+    // custom [[field_types]] chain named either is rejected like every other
+    // built-in (#170). `location` is Solr's LatLonPointSpatialField (geodist,
+    // #331); `location_rpt` is SpatialRecursivePrefixTreeFieldType (heatmap
+    // facets, #334). #331 owns the shared encoding; #334 resolves `location_rpt`
+    // to the same `ValueKind::Location` rather than forking it.
     "location",
+    "location_rpt",
 ];
 
 /// Every built-in field type `resolve_type` accepts: the non-language types
@@ -212,10 +216,10 @@ pub enum ValueKind {
     I64,
     F64,
     Date,
-    /// A `location` point: indexed as two synthetic f64 fast columns
-    /// (`<field>__lat`/`__lon`) rather than one Tantivy field, so its values
-    /// do not flow through `add_values`' single-field path the way the other
-    /// kinds do (#331).
+    /// A lat/lon point: indexed as two synthetic f64 fast columns
+    /// (`<field>__lat`/`__lon`) rather than one Tantivy field, so its values do
+    /// not flow through `add_values`' single-field path the way the other
+    /// kinds do (#331 owns the encoding; #334 reuses it for `location_rpt`).
     Location,
 }
 
@@ -231,11 +235,11 @@ pub struct WayfinderSchema {
     pub field_types: Vec<FieldTypeConfig>,
     pub tokenizers: TokenizerManager,
     field_handles: HashMap<String, Field>,
-    /// Static `location` fields' two synthetic f64 columns, keyed by the
-    /// user-facing field name: `(lat_field, lon_field)`. Kept out of
-    /// `field_handles` (like `VERSION_FIELD`) so the synthetic `__lat`/`__lon`
-    /// columns never leak into the name-based resolver paths and are reachable
-    /// only through [`Self::location_fields`] (#331).
+    /// Static `location`/`location_rpt` fields' two synthetic f64 columns,
+    /// keyed by the user-facing field name: `(lat_field, lon_field)`. Kept out
+    /// of `field_handles` (like `VERSION_FIELD`) so the synthetic `__lat`/`__lon`
+    /// columns never leak into name-based resolver paths and are reachable
+    /// only through [`Self::location_fields`] (#331; #334's heatmap reads them).
     location_fields: HashMap<String, (Field, Field)>,
 }
 
@@ -257,12 +261,12 @@ impl WayfinderSchema {
         self.field_handles.get(name).copied()
     }
 
-    /// The two synthetic f64 columns (`__lat`, `__lon`) backing a static
-    /// `location` field, or `None` if `name` is not a declared `location`
-    /// field. Dynamic `locs_*`-rule fields resolve to `Location` too but have
+    /// The two synthetic f64 columns (`__lat`, `__lon`) backing a declared
+    /// static `location`/`location_rpt` field, or `None` if `name` is not one.
+    /// Dynamic `locs_*`/`rpts_*`-rule fields resolve to `Location` too but have
     /// no synthetic columns (the name is unknown at build time), so they are
-    /// `None` here -- `geodist()` on a dynamic `sfield` is a documented
-    /// ceiling of this tracer, not a supported path (#331).
+    /// `None` here -- `geodist()` (#331) and `facet.heatmap` (#334) on a dynamic
+    /// field are a documented ceiling, not a supported path.
     pub fn location_fields(&self, name: &str) -> Option<(Field, Field)> {
         self.location_fields.get(name).copied()
     }
@@ -416,10 +420,10 @@ enum ResolvedType {
     I64,
     F64,
     Date,
-    /// A lat/lon point backed by two synthetic f64 fast columns. The build
-    /// path creates `<field>__lat`/`<field>__lon` for it (see `parse`); it is
-    /// never a single Tantivy field, which is why `Location` has no arm in
-    /// the `field = match resolved { ... }` block below.
+    /// A lat/lon point backed by two synthetic f64 fast columns. The build path
+    /// creates `<field>__lat`/`<field>__lon` for it (see `parse`); it is never a
+    /// single Tantivy field, which is why `Location` has no arm in the
+    /// `field = match resolved { ... }` block below.
     Location,
 }
 
@@ -440,9 +444,12 @@ fn resolve_type(type_: &str, custom: &[FieldTypeConfig]) -> Result<ResolvedType>
         "int" | "long" => ResolvedType::I64,
         "float" | "double" => ResolvedType::F64,
         "date" => ResolvedType::Date,
-        // Solr's `LatLonPointSpatialField`: a point stored as two synthetic f64
-        // fast columns, addressable by `geodist()` (#331, #292 sizing report).
-        "location" => ResolvedType::Location,
+        // Solr's `LatLonPointSpatialField` (`location`, geodist #331) and
+        // `SpatialRecursivePrefixTreeFieldType` (`location_rpt`, heatmap #334):
+        // a point stored as two synthetic f64 fast columns. Both resolve to the
+        // same encoding; #292 sizing deferred the `location_rpt` choice to #334,
+        // which keeps the shared two-column storage (finding 158).
+        "location" | "location_rpt" => ResolvedType::Location,
         other => {
             let code = other.strip_prefix("text_").filter(|code| {
                 LANGUAGES
@@ -855,13 +862,15 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     for fc in &parsed.fields {
         let resolved = resolve_type(&fc.type_, &parsed.field_types)
             .with_context(|| format!("on field `{}`", fc.name))?;
-        // A `location` field is not one Tantivy field but two synthetic f64
-        // fast columns (`<name>__lat`/`<name>__lon`), so it bypasses the
-        // single-field match and `field_handles` entirely: the columns are
-        // reachable only via `location_fields`, and the user-facing name never
-        // becomes a Tantivy field (#331, #292 sizing report). The columns are
-        // fast (column readers for `geodist()`) and not stored (the virtual
-        // `loc` field is not reconstructed into `fl` in this tracer).
+        // A `location`/`location_rpt` field is not one Tantivy field but two
+        // synthetic f64 fast columns (`<name>__lat`/`<name>__lon`), so it
+        // bypasses the single-field match and `field_handles` entirely: the
+        // columns are reachable only via `location_fields`, and the user-facing
+        // name never becomes a Tantivy field (#331; #334's heatmap reads them).
+        // Dynamic `rpts_*`/`locs_*`-rule fields resolve to `Location` too but
+        // have no synthetic columns (name unknown at build time), so the heatmap
+        // (and `geodist()`) require a declared static field -- a documented
+        // ceiling, not a bug.
         if matches!(resolved, ResolvedType::Location) {
             let lat_name = format!("{}__lat", fc.name);
             let lon_name = format!("{}__lon", fc.name);

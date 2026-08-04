@@ -3665,7 +3665,7 @@ fi
 # cell, four widely-spread interior points (h4-h8) to populate separate cells,
 # and two boundary points -- h9 "0,0" (origin) and h10 "45,45" -- to pin Solr's
 # cell-boundary convention (longitude cells are right-closed, latitude cells
-# are top-closed under north-indexed rows; see finding 158). Values are written
+# are top-closed under north-indexed rows; see finding 159). Values are written
 # in the client's "lat,lon" comma form (search_api_solr's rpt format).
 HEATMAP_CONTAINER=wayfinder-solr-334
 HEATMAP_SOLR=http://localhost:9334/solr
@@ -3717,7 +3717,7 @@ caph334() {  # caph334 <name> <url-after-/solr/>
 
 # Grid math over the whole world at three explicit levels. The columns/rows
 # here pin the geohash tree's subdivision: columns=2^ceil(5L/2), rows=2^floor
-# (5L/2) -- L=1 -> 8x4, L=2 -> 32x32, L=3 -> 256x128 (finding 158). counts_ints2D
+# (5L/2) -- L=1 -> 8x4, L=2 -> 32x32, L=3 -> 256x128 (finding 159). counts_ints2D
 # is rows-indexed-from-NORTH, columns-from-WEST; all-zero rows are null.
 caph334 heatmap_l1_world "$HEATMAP_CORE/select?q=*:*&rows=0&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=1&wt=json"
 caph334 heatmap_l2_world "$HEATMAP_CORE/select?q=*:*&rows=0&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=2&wt=json"

@@ -207,3 +207,12 @@ geo_geofilt	200	GET	geo/select?q=*:*&fq=%7B%21geofilt%7D&sfield=loc&pt=40,-74&d=
 geo_bbox	200	GET	geo/select?q=*:*&fq=%7B%21bbox%7D&sfield=loc&pt=40,-74&d=130&fl=id&sort=id%20asc&wt=json		http://localhost:9073/solr
 geo_geofilt_tight	200	GET	geo/select?q=*:*&fq=%7B%21geofilt%7D&sfield=loc&pt=40,-74&d=70&fl=id&sort=id%20asc&wt=json		http://localhost:9073/solr
 geo_geodist_sort	200	GET	geo/select?q=*:*&sfield=loc&pt=40,-74&fl=id,dist:geodist%28%29&sort=geodist%28%29%20asc&wt=json		http://localhost:9073/solr
+# issue #334: facet.heatmap error cases (find the field app via the
+# `heatmap/` leading segment -> heatmap_app). The differential normaliser
+# strips error.msg + error.metadata (tests/common/diff.rs), so only the 400
+# status + error.code are compared -- the Java-class-name messages Solr emits
+# for the non-spatial/maxCells cases are inherently unreproducible.
+heatmap_unknown_field	400	GET	heatmap/select?q=*:*&facet=true&facet.heatmap=nosuchfield&facet.heatmap.gridLevel=2&rows=0&wt=json	
+heatmap_nonspatial_field	400	GET	heatmap/select?q=*:*&facet=true&facet.heatmap=id&facet.heatmap.gridLevel=2&rows=0&wt=json	
+heatmap_maxcells_guard	400	GET	heatmap/select?q=*:*&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=2&facet.heatmap.maxCells=10&rows=0&wt=json	
+heatmap_gridlevel_exceeds_maxcells	400	GET	heatmap/select?q=*:*&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=4&rows=0&wt=json	

@@ -371,3 +371,24 @@ pattern = "geom_*"
 type = "location"
 stored = true
 multi_valued = true
+# --- issue #334: spatial RPT (heatmap) dynamic fields -----------------------
+# `rpts_*`/`rptm_*` are search_api_solr's SpatialRecursivePrefixTreeFieldType
+# fields (configset schema.xml:240-241), the ones `facet.heatmap` runs over.
+# They resolve to `location_rpt` -> `ValueKind::Location`. A dynamic rule has
+# no name at build time, so a dynamic `rpts_*` field is stored as its `lat,lon`
+# string in the catch-all JSON (matching Solr's returned form) and has no
+# synthetic `__lat`/`__lon` fast columns. `facet.heatmap` needs those columns,
+# so it requires a *declared static* `location_rpt` field (a documented v1
+# ceiling on the dynamic form, consistent with `geodist()` on a dynamic
+# `location` field, #331). `stored = true` mirrors Solr; no `fast` -- there is
+# no docValues column for a dynamic point.
+[[dynamic_fields]]
+pattern = "rpts_*"
+type = "location_rpt"
+stored = true
+
+[[dynamic_fields]]
+pattern = "rptm_*"
+type = "location_rpt"
+multi_valued = true
+stored = true
