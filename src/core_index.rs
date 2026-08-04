@@ -1210,6 +1210,21 @@ impl CoreIndex {
         if query_str.trim() == "*:*" {
             return Ok(Box::new(AllQuery));
         }
+        // A position-0 `{!func}`/`{!boost b=}`/`{!frange l=.. u=..}` block is a
+        // query parser in its own right (issues #289, #333). Recognised here
+        // — not just in `select`'s explicit `parse_function_query_q` call for
+        // `q` — so `fq` and `facet.query`, which both route through
+        // `parse_query`, handle them too: `{!frange}` as an `fq` and as a
+        // `facet.query` is the #333 wire surface. `parse_function_query_q`
+        // returns `Ok(None)` for anything else, leaving the plain grammar
+        // path below unchanged. (This also makes `{!func}`/`{!boost}` usable
+        // as `fq`/`facet.query`, correct Solr parity that came for free.)
+        if let Some(func_q) = self
+            .parse_function_query_q(query_str, default_field_name)
+            .map_err(anyhow::Error::from)?
+        {
+            return Ok(func_q);
+        }
         let default_field = self
             .wf_schema
             .field(default_field_name)
@@ -1278,6 +1293,34 @@ impl CoreIndex {
         .map_err(anyhow::Error::from)
     }
 
+    /// Parses one `{!frange}` bound (`l`/`u`): `None` for an absent bound
+    /// (open range), else the `f64`. Solr 500s on a non-numeric bound (a leaky
+    /// `NumberFormatException`); Wayfinder returns the correct 400 instead —
+    /// not client-exercised (the distance rewrite sends numeric bounds), so
+    /// it carries no fixture and no divergence entry.
+    fn frange_bound(v: Option<&str>) -> Result<Option<f64>, QueryError> {
+        match v {
+            None => Ok(None),
+            Some(s) => s
+                .parse::<f64>()
+                .map(Some)
+                .map_err(|_| QueryError::Syntax(format!("`{{!frange}}` bound not a number: {s}"))),
+        }
+    }
+
+    /// Parses one `{!frange}` inclusivity flag (`incl`/`incu`), defaulting to
+    /// `default` when absent (Solr's default `true` for both). A non-boolean
+    /// value is a 400 (`frange_err_bad_bool`), matching Solr's
+    /// `invalid boolean value`.
+    fn frange_bool(v: Option<&str>, default: bool) -> Result<bool, QueryError> {
+        match v {
+            None => Ok(default),
+            Some(s) => s
+                .parse::<bool>()
+                .map_err(|_| QueryError::Syntax(format!("invalid boolean value: {s}"))),
+        }
+    }
+
     /// Builds the query when `q` begins with a function-query local-params
     /// block (`{!func}<expr>` or `{!boost b=<func>}<wrapped>`), the document-
     /// boost path `search_api_solr` emits inline in `q` (finding 129). Returns
@@ -1329,6 +1372,32 @@ impl CoreIndex {
                 Ok(Some(Box::new(
                     function_query::FunctionScoreQuery::multiply(child, func),
                 )))
+            }
+            // `{!frange l=.. u=.. [incl=..] [incu=..]}<func>` (issue #333):
+            // Solr's `FunctionRangeQuery` over `ValueSourceRangeFilter` — a
+            // *general* range filter over a function, not a geo construct.
+            // `incl`/`incu` default to including the bound; a non-boolean
+            // value is a 400 (`frange_err_bad_bool`), matching Solr's
+            // `invalid boolean value`. The body is a function expression
+            // validated exactly like `{!func}`'s, so `{!frange}geodist()`
+            // composes once #332 adds the `GeoDist` variant with no change
+            // here.
+            Some("frange") => {
+                let lower = Self::frange_bound(local.get("l"))?;
+                let upper = Self::frange_bound(local.get("u"))?;
+                let include_lower = Self::frange_bool(local.get("incl"), true)?;
+                let include_upper = Self::frange_bool(local.get("incu"), true)?;
+                let func =
+                    function_query::parse(rest).map_err(|e| QueryError::Syntax(e.to_string()))?;
+                function_query::validate_fields(&func, resolve)
+                    .map_err(|e| QueryError::Syntax(e.to_string()))?;
+                Ok(Some(Box::new(function_query::FunctionRangeQuery::new(
+                    func,
+                    lower,
+                    upper,
+                    include_lower,
+                    include_upper,
+                ))))
             }
             _ => Ok(None),
         }

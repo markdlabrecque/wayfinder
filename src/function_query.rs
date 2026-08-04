@@ -44,7 +44,7 @@ use std::sync::Arc;
 use tantivy::columnar::Column;
 use tantivy::fastfield::AliveBitSet;
 use tantivy::query::{EnableScoring, Explanation, Query, Scorer, Weight};
-use tantivy::{COLLECT_BLOCK_BUFFER_LEN, DocId, DocSet, Score, SegmentReader, Term};
+use tantivy::{COLLECT_BLOCK_BUFFER_LEN, DocId, DocSet, Score, SegmentReader, TERMINATED, Term};
 
 /// One parsed function query. Plain data so it is cheap to share behind an
 /// `Arc` across per-segment scorers and to extend with new variants without
@@ -133,6 +133,35 @@ impl FuncQuery {
                 let av = a.eval(field_value);
                 let bv = b.eval(field_value);
                 av / (mv * xv + bv)
+            }
+        }
+    }
+
+    /// Whether the function *exists* for a document — Solr's `exists()` over
+    /// a `ValueSource`. A constant always exists; a field reference exists
+    /// iff the document has a value for it; a compound function exists iff
+    /// every argument exists (`MultiFunction`'s all-exist rule). This is the
+    /// load-bearing difference between `{!func}` and `{!frange}` (#333):
+    /// `{!func}` *scores* every document (a missing field resolves to `0.0`
+    /// via `eval`), but `{!frange}` *filters*, and `ValueSourceRangeFilter`
+    /// excludes any document whose function does not exist — so a doc with a
+    /// missing field is dropped from `{!frange l=0 u=100}field` even though
+    /// its evaluated `0.0` would fall in range (`frange_missing_excluded`).
+    /// `field_exists` reports whether the document has a value for a field
+    /// name (the caller resolves it from the segment's fast-field columns).
+    fn exists(&self, field_exists: &impl Fn(&str) -> bool) -> bool {
+        match self {
+            FuncQuery::Constant(_) => true,
+            FuncQuery::Field(name) => field_exists(name),
+            FuncQuery::Sum(args)
+            | FuncQuery::Product(args)
+            | FuncQuery::Max(args)
+            | FuncQuery::Min(args) => args.iter().all(|a| a.exists(field_exists)),
+            FuncQuery::Recip(x, m, a, b) => {
+                x.exists(field_exists)
+                    && m.exists(field_exists)
+                    && a.exists(field_exists)
+                    && b.exists(field_exists)
             }
         }
     }
@@ -507,6 +536,25 @@ impl FieldColumns {
         }
         0.0
     }
+
+    /// Whether the document has a value for the field — the per-document
+    /// `exists()` backing [`FuncQuery::exists`] for `{!frange}` (#333). A
+    /// `Missing` column (field declared but no numeric fast column for this
+    /// segment) has no value for any document, so every doc is `false` there;
+    /// `{!frange}` therefore matches nothing on such a field, while
+    /// `{!func}` still scores every doc `0.0`.
+    fn exists(&self, name: &str, doc: DocId) -> bool {
+        for (n, col) in &self.cols {
+            if n == name {
+                return match col {
+                    NumColumn::I64(c) => c.values_for_doc(doc).next().is_some(),
+                    NumColumn::F64(c) => c.values_for_doc(doc).next().is_some(),
+                    NumColumn::Missing => false,
+                };
+            }
+        }
+        false
+    }
 }
 
 struct FunctionScoreScorer {
@@ -562,6 +610,258 @@ impl Scorer for FunctionScoreScorer {
             ScoreOp::Multiply => base * value,
             ScoreOp::Add => base + value,
         }
+    }
+}
+
+// --- per-document range filtering (#333) -------------------------------------
+
+/// Whether a function value that may or may not exist falls in a
+/// `{!frange}` range. Pure so the boundary logic is unit-testable and
+/// mutation-testable without a Tantivy index. `exists` is the
+/// [`FuncQuery::exists`] verdict for the document; when it is false the doc
+/// never matches, regardless of the evaluated value — the `exists()` filter
+/// that distinguishes `{!frange}` from `{!func}` (`frange_missing_excluded`).
+fn frange_matches(
+    value: f64,
+    exists: bool,
+    lower: Option<f64>,
+    upper: Option<f64>,
+    include_lower: bool,
+    include_upper: bool,
+) -> bool {
+    if !exists {
+        return false;
+    }
+    if let Some(l) = lower
+        && (value < l || (!include_lower && value == l))
+    {
+        return false;
+    }
+    if let Some(u) = upper
+        && (value > u || (!include_upper && value == u))
+    {
+        return false;
+    }
+    true
+}
+
+/// A Tantivy [`Query`] matching exactly the documents whose function value
+/// exists and falls in a `{!frange l=.. u=..}` range — Solr's
+/// `FunctionRangeQuery` over `ValueSourceRangeFilter`. Constant-score `1.0`,
+/// matching Solr's `ConstantScoreScorer` for a parsed frange (`frange_on_q`
+/// captures `score=1.0`). The matched set is independent of any child query:
+/// the scorer enumerates every alive document (via [`tantivy::query::AllQuery`]
+/// as the driver, exactly as [`FunctionScoreQuery::all`] does) and keeps those
+/// `frange_matches` accepts.
+///
+/// This is the filter dual of [`FunctionScoreQuery`]: that query *scores* the
+/// child's doc set by the function (missing → `0.0`), this one *selects* a doc
+/// set by the function range (missing → excluded). `{!frange}` is deliberately
+/// general — `geodist()` is just one function the client routes through it —
+/// so it composes with the `GeoDist` variant #332 will add with no change here.
+pub struct FunctionRangeQuery {
+    func: Arc<FuncQuery>,
+    lower: Option<f64>,
+    upper: Option<f64>,
+    include_lower: bool,
+    include_upper: bool,
+}
+
+impl FunctionRangeQuery {
+    /// `{!frange l=.. u=.. [incl=..] [incu=..]}<func>`: a range filter over
+    /// `func`. `lower`/`upper` of `None` mean an open bound (absent `l`/`u`);
+    /// `include_lower`/`include_upper` default to `true`, Solr's `incl`/`incu`
+    /// defaults.
+    pub fn new(
+        func: FuncQuery,
+        lower: Option<f64>,
+        upper: Option<f64>,
+        include_lower: bool,
+        include_upper: bool,
+    ) -> FunctionRangeQuery {
+        FunctionRangeQuery {
+            func: Arc::new(func),
+            lower,
+            upper,
+            include_lower,
+            include_upper,
+        }
+    }
+}
+
+impl Clone for FunctionRangeQuery {
+    fn clone(&self) -> Self {
+        FunctionRangeQuery {
+            func: Arc::clone(&self.func),
+            lower: self.lower,
+            upper: self.upper,
+            include_lower: self.include_lower,
+            include_upper: self.include_upper,
+        }
+    }
+}
+
+impl fmt::Debug for FunctionRangeQuery {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("FunctionRangeQuery")
+            .field("func", &self.func)
+            .field("lower", &self.lower)
+            .field("upper", &self.upper)
+            .field("include_lower", &self.include_lower)
+            .field("include_upper", &self.include_upper)
+            .finish()
+    }
+}
+
+impl Query for FunctionRangeQuery {
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+        // `AllQuery` enumerates every alive document; the range predicate
+        // narrows it. `enable_scoring` is ignored: frange is constant-score.
+        let child = tantivy::query::AllQuery.weight(enable_scoring)?;
+        Ok(Box::new(FunctionRangeWeight {
+            child,
+            func: Arc::clone(&self.func),
+            lower: self.lower,
+            upper: self.upper,
+            include_lower: self.include_lower,
+            include_upper: self.include_upper,
+        }))
+    }
+
+    fn query_terms<'a>(&'a self, _visitor: &mut dyn FnMut(&'a Term, bool)) {
+        // A range over fast-field columns contributes no term dictionary
+        // clauses; membership is decided by scanning columns, like AllQuery.
+    }
+}
+
+struct FunctionRangeWeight {
+    child: Box<dyn Weight>,
+    func: Arc<FuncQuery>,
+    lower: Option<f64>,
+    upper: Option<f64>,
+    include_lower: bool,
+    include_upper: bool,
+}
+
+impl Weight for FunctionRangeWeight {
+    fn scorer(&self, reader: &SegmentReader, boost: Score) -> tantivy::Result<Box<dyn Scorer>> {
+        let child = self.child.scorer(reader, boost)?;
+        let columns = FieldColumns::open(reader, &self.func.fields())?;
+        let mut scorer = FunctionRangeScorer {
+            child,
+            columns,
+            func: Arc::clone(&self.func),
+            lower: self.lower,
+            upper: self.upper,
+            include_lower: self.include_lower,
+            include_upper: self.include_upper,
+        };
+        // Tantivy's `DocSet` iteration is `doc()`-first (`fill_buffer`, `seek`,
+        // the default `for_each` all read `doc()` before `advance()`), so a
+        // fresh scorer must be positioned AT its first match, not before it.
+        // `AllQuery`'s scorer is pre-advanced to the first alive doc; walk
+        // forward from there to the first doc the range accepts (or TERMINATED).
+        scorer.position_at_first_match();
+        Ok(Box::new(scorer))
+    }
+
+    fn explain(&self, reader: &SegmentReader, doc: DocId) -> tantivy::Result<Explanation> {
+        let columns = FieldColumns::open(reader, &self.func.fields())?;
+        let value = self.func.eval(&|name| columns.value(name, doc));
+        let exists = self.func.exists(&|name| columns.exists(name, doc));
+        let matches = frange_matches(
+            value,
+            exists,
+            self.lower,
+            self.upper,
+            self.include_lower,
+            self.include_upper,
+        );
+        let mut explanation =
+            Explanation::new_with_string("frange".to_string(), if matches { 1.0 } else { 0.0 });
+        explanation.add_detail(Explanation::new_with_string(
+            format!("value={value} exists={exists}"),
+            value as Score,
+        ));
+        Ok(explanation)
+    }
+
+    fn count(&self, reader: &SegmentReader) -> tantivy::Result<u32> {
+        // The matched set is a subset of AllQuery's, so the child's count is
+        // only an upper bound; fall back to scanning the scorer for an exact
+        // count (filters are not on a hot path that needs the cheaper bound).
+        let mut scorer = self.scorer(reader, 1.0)?;
+        let mut n = 0u32;
+        while scorer.advance() != TERMINATED {
+            n += 1;
+        }
+        Ok(n)
+    }
+}
+
+struct FunctionRangeScorer {
+    child: Box<dyn Scorer>,
+    columns: FieldColumns,
+    func: Arc<FuncQuery>,
+    lower: Option<f64>,
+    upper: Option<f64>,
+    include_lower: bool,
+    include_upper: bool,
+}
+
+impl FunctionRangeScorer {
+    fn matches_at(&self, doc: DocId) -> bool {
+        let value = self.func.eval(&|name| self.columns.value(name, doc));
+        let exists = self.func.exists(&|name| self.columns.exists(name, doc));
+        frange_matches(
+            value,
+            exists,
+            self.lower,
+            self.upper,
+            self.include_lower,
+            self.include_upper,
+        )
+    }
+
+    /// Advance the child forward from its current position until it sits on a
+    /// document the range accepts (or is exhausted). Used once at construction
+    /// so the `doc()`-first `DocSet` contract holds from the first read.
+    fn position_at_first_match(&mut self) {
+        while self.child.doc() != TERMINATED && !self.matches_at(self.child.doc()) {
+            self.child.advance();
+        }
+    }
+}
+
+impl DocSet for FunctionRangeScorer {
+    fn advance(&mut self) -> DocId {
+        loop {
+            let doc = self.child.advance();
+            if doc == TERMINATED {
+                return TERMINATED;
+            }
+            if self.matches_at(doc) {
+                return doc;
+            }
+        }
+    }
+    fn doc(&self) -> DocId {
+        // The child is always positioned on a match (or TERMINATED): by
+        // `position_at_first_match` at construction, and by the filtering
+        // `advance` thereafter. So forwarding is correct, matching
+        // `FunctionScoreScorer`'s relationship to its child.
+        self.child.doc()
+    }
+    fn size_hint(&self) -> u32 {
+        self.child.size_hint()
+    }
+}
+
+impl Scorer for FunctionRangeScorer {
+    fn score(&mut self) -> Score {
+        // Constant-score 1.0, matching Solr's ConstantScoreScorer for a
+        // parsed frange (the boost a `Query` defaults to).
+        1.0
     }
 }
 
@@ -651,5 +951,62 @@ mod tests {
             f.fields(),
             vec!["boost_document".to_string(), "rating".to_string()]
         );
+    }
+
+    #[test]
+    fn exists_is_field_gated_and_compound_is_all_exist() {
+        // The `{!func}` vs `{!frange}` distinction (#333): a constant always
+        // exists; a field exists iff the doc has a value; a compound function
+        // exists iff every argument does (Solr MultiFunction all-exist).
+        assert!(parse("2").unwrap().exists(&|_| false));
+        assert!(parse("rating").unwrap().exists(&|n| n == "rating"));
+        assert!(!parse("rating").unwrap().exists(&|_| false));
+        // sum(rating,price): exists only when BOTH fields exist.
+        let f = parse("sum(rating,price)").unwrap();
+        assert!(f.exists(&|n| n == "rating" || n == "price"));
+        assert!(!f.exists(&|n| n == "rating"));
+        assert!(!f.exists(&|n| n == "price"));
+        // A missing field in a compound drops exists even though eval would
+        // yield a value in range (the `frange_compound_missing` case: d4 has
+        // no `price`, so sum(price,1) does not exist for it).
+        assert!(!f.exists(&|n| n == "rating"));
+        // recip's args are all-or-nothing too.
+        let r = parse("recip(rating,1,1,1)").unwrap();
+        assert!(r.exists(&|n| n == "rating"));
+        assert!(!r.exists(&|_| false));
+    }
+
+    #[test]
+    fn frange_range_predicate_handles_bounds_inclusivity_and_exists() {
+        // `[2,6]` inclusive both.
+        let (l, u, il, iu) = (Some(2.0), Some(6.0), true, true);
+        assert!(frange_matches(2.0, true, l, u, il, iu));
+        assert!(frange_matches(6.0, true, l, u, il, iu));
+        assert!(frange_matches(4.0, true, l, u, il, iu));
+        assert!(!frange_matches(1.9, true, l, u, il, iu));
+        assert!(!frange_matches(6.1, true, l, u, il, iu));
+        // incl=false -> lower-exclusive: 2.0 drops, 6.0 stays.
+        let (l, u, il, iu) = (Some(2.0), Some(6.0), false, true);
+        assert!(!frange_matches(2.0, true, l, u, il, iu));
+        assert!(frange_matches(6.0, true, l, u, il, iu));
+        // incu=false -> upper-exclusive: 6.0 drops, 2.0 stays.
+        let (l, u, il, iu) = (Some(2.0), Some(6.0), true, false);
+        assert!(frange_matches(2.0, true, l, u, il, iu));
+        assert!(!frange_matches(6.0, true, l, u, il, iu));
+        // Open bounds: lower-only, upper-only, neither.
+        assert!(frange_matches(100.0, true, Some(4.0), None, true, true));
+        assert!(!frange_matches(3.0, true, Some(4.0), None, true, true));
+        assert!(frange_matches(-5.0, true, None, Some(2.0), true, true));
+        assert!(frange_matches(0.0, true, None, None, true, true));
+        // exists=false never matches, even when the value would be in range
+        // (the load-bearing `{!frange}` rule, frange_missing_excluded).
+        assert!(!frange_matches(
+            0.0,
+            false,
+            Some(0.0),
+            Some(100.0),
+            true,
+            true
+        ));
     }
 }

@@ -1,0 +1,28 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":7,
+    "params":{
+      "q":"{!frange l=4 u=6}rating",
+      "fl":"id,score",
+      "sort":"id asc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":3,
+    "start":0,
+    "maxScore":1.0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"d2",
+      "score":1.0
+    },{
+      "id":"d3",
+      "score":1.0
+    },{
+      "id":"d5",
+      "score":1.0
+    }]
+  }
+}

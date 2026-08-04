@@ -2324,6 +2324,11 @@ fn app_and_request_url<'a>(
         Some(("keyorder", rest)) => (keyorder_app, format!("content/{rest}")),
         Some(("facets33", rest)) => (facets33_app, format!("content/{rest}")),
         Some(("fnq", rest)) => (fnq_app, format!("content/{rest}")),
+        // #333's `{!frange}` fixtures share the fnq (#289) corpus byte-for-byte
+        // (same 5 docs, same numeric `docValues` fields; no frange fixture
+        // queries `body`, so the text analyzer is irrelevant), so they reuse
+        // the fnq app rather than duplicating its schema/corpus.
+        Some(("frange", rest)) => (fnq_app, format!("content/{rest}")),
         Some(("pf296", rest)) => (pf296_app, format!("content/{rest}")),
         Some(("sortdebt", _)) => (sortdebt_app, entry.url.clone()),
         Some(("update9", _)) => (update9_app, entry.url.clone()),
