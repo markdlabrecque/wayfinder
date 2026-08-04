@@ -101,17 +101,30 @@ them again.
 Which languages a *query* uses: any `search_api_language` condition on the
 query (`=`/`IN`, including nested groups), otherwise every enabled site
 language, otherwise `und`. Full-text field lists (`qf`, `hl.fl`, `mlt.fl`,
-`terms.fl`) carry every variant; *positive* conditions OR the variants together
-while *negated* ones (`<>`, `NOT IN`, `NOT BETWEEN`) AND them — a document
-carries only the variant it was indexed in, so OR-ing negations would match
-every document and turn an exclusion filter into a no-op (`:3455-3459`); sorts
-and `group.sort` use the first resolved language; facets always use `und`
-(`:2582-2585`).
+`terms.fl`) carry every variant; sorts and `group.sort` use the first resolved
+language; facets always use `und` (`:2582-2585`).
+
+How a *condition* combines its variants is decided by one question, asked of
+the clause the condition emits, never by the operator's name: **does a document
+lacking that language variant satisfy the clause?** If yes the variants are
+`AND`ed, if no they are `OR`ed. A document carries only the variant it was
+indexed in, so getting this backwards makes the condition match every document.
+`= NULL`, `<>`, `NOT BETWEEN`, `NOT IN` without a NULL member, and `IN` *with*
+one (its missing-field alternative is true for every absent variant) all `AND`;
+`=`, `BETWEEN`, plain `IN`, `<> NULL`, and `NOT IN` with a NULL member (which
+keeps a field-exists requirement) all `OR`. `search_api_solr` states the same
+rule for its own NULL case at `:3450-3459`.
 
 A text field's **sort copy is written for every enabled site language plus
 `und`**, all carrying the same first value (`:1469-1481`, "To allow sorted
 multilingual searches we need to fill *all* language-specific sort fields!"),
-so a German document is still sortable by a query resolved to English.
+so a German document is still sortable by a query resolved to English. Follow-up
+worth knowing before sizing an index: with N enabled languages every text field
+therefore carries N+1 identical sort copies (a 5-language site stores each
+sortable text value six times). That is `search_api_solr`'s behaviour exactly,
+not a Wayfinder amplification, and narrowing it would need upstream's
+per-index `use_universal_collation` / language-narrowing config, which
+Wayfinder has no counterpart for.
 
 ## Not supported
 
