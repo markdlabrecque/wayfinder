@@ -1,0 +1,23 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0,
+    "params":{
+      "json.facet":"{\"x\":{\"type\":\"terms\",\"field\":\"no_such_field\"}}",
+      "q":"*:*",
+      "rows":"0",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":6,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"undefined field: \"no_such_field\"",
+    "code":400
+  }
+}

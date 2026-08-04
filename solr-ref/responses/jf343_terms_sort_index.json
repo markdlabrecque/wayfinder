@@ -1,0 +1,33 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":6,
+    "params":{
+      "json.facet":"{\"siteHashes\":{\"limit\":-1,\"field\":\"index_id\",\"type\":\"terms\",\"sort\":\"index asc\"}}",
+      "q":"*:*",
+      "rows":"0",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":6,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facets":{
+    "count":6,
+    "siteHashes":{
+      "buckets":[{
+        "val":"index_a",
+        "count":3
+      },{
+        "val":"index_b",
+        "count":1
+      },{
+        "val":"index_c",
+        "count":1
+      }]
+    }
+  }
+}

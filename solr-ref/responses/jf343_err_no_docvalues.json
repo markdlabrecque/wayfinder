@@ -1,0 +1,24 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "json.facet":"{\"x\":{\"type\":\"terms\",\"field\":\"body\"}}",
+      "q":"*:*",
+      "rows":"0",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":6,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facets":{
+    "count":6,
+    "x":{
+      "buckets":[ ]
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0,
+    "params":{
+      "json.facet":"{\"siteHashes\":{\"type\":\"nosuchtype\",\"field\":\"hash\"}}",
+      "q":"*:*",
+      "rows":"0",
+      "wt":"json"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"Unknown facet or stat. key=siteHashes type=nosuchtype args={type=nosuchtype, field=hash} , path=/facet",
+    "code":400
+  }
+}

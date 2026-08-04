@@ -1,0 +1,45 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":3,
+    "params":{
+      "json.facet":"{\"siteHashes\":{\"limit\":-1,\"field\":\"hash\",\"type\":\"terms\",\"facet\":{\"numDocsPerIndex\":{\"limit\":-1,\"field\":\"index_id\",\"type\":\"terms\"}}}}",
+      "q":"*:*",
+      "rows":"0",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":6,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facets":{
+    "count":6,
+    "siteHashes":{
+      "buckets":[{
+        "val":"siteA",
+        "count":4,
+        "numDocsPerIndex":{
+          "buckets":[{
+            "val":"index_a",
+            "count":3
+          },{
+            "val":"index_b",
+            "count":1
+          }]
+        }
+      },{
+        "val":"siteB",
+        "count":1,
+        "numDocsPerIndex":{
+          "buckets":[{
+            "val":"index_c",
+            "count":1
+          }]
+        }
+      }]
+    }
+  }
+}

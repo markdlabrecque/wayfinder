@@ -1,0 +1,30 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":6,
+    "params":{
+      "json.facet":"{\"siteHashes\":{\"limit\":-1,\"field\":\"hash\",\"type\":\"terms\"}}",
+      "q":"*:*",
+      "rows":"0",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":6,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facets":{
+    "count":6,
+    "siteHashes":{
+      "buckets":[{
+        "val":"siteA",
+        "count":4
+      },{
+        "val":"siteB",
+        "count":1
+      }]
+    }
+  }
+}

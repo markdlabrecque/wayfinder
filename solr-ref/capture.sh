@@ -4263,3 +4263,155 @@ capplsz plsz_dup_average "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%2
 if want_any '^plsz_'; then
   release "$PLSZ_CONTAINER" "payload-free core '$PLSZ_CORE'"
 fi
+
+# --- json.facet / JSON Facet API (issue #343) -------------------------------
+# Appended block; own Solr 9 core and port. Captures the JSON Facet API shapes
+# `search_api_solr` 4.4.0 actually sends on its admin diagnostics screens
+# (finding 132): a bare aggregation string, a `type: terms` facet, and terms
+# nesting via the `facet` key, up to the four-level
+# `doGetMaxDocumentVersions()` shape.
+#
+# Two deliberate parallel captures for every aggregation:
+#   * `max(_version_)` -- the client's real probe. Its VALUES are Solr's opaque
+#     update-log versions and differ on every capture, so these fixtures are
+#     ground truth for the response SHAPE only.
+#   * `max(popularity)` -- the same shapes over a deterministic pint field, so
+#     the aggregation's VALUES are assertable ground truth too. Without this
+#     pair a test could only check that a number appeared, not that it was the
+#     right number.
+#
+# `json.facet` values are JSON objects, so every capture goes through
+# `curl -G --data-urlencode` and records `%{url_effective}`'s query -- writing
+# raw braces and quotes into a manifest row would not survive a verbatim GET.
+# Rows land in `manifest-errors.tsv` because this is not the `content` core.
+JF343_CONTAINER=wayfinder-solr-343
+JF343_SOLR=http://localhost:9081/solr
+JF343_CORE=jsonfacet343
+if want_any '^jf343_'; then
+  if ! docker ps --format '{{.Names}}' | grep -qx "$JF343_CONTAINER"; then
+    docker rm -f "$JF343_CONTAINER" >/dev/null 2>&1 || true
+    docker run -d --name "$JF343_CONTAINER" -p 9081:8983 \
+      solr:9 solr-precreate "$JF343_CORE" >/dev/null
+  fi
+  echo -n "waiting for json-facet solr"
+  for _ in $(seq 60); do
+    if curl -sf "$JF343_SOLR/$JF343_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n "."; sleep 1
+  done
+  # `_version_` comes from Solr's default schema and is not configured here.
+  # The three string fields are the exact ones the client facets on.
+  curl -s "$JF343_SOLR/$JF343_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field": [
+      {"name":"hash",                     "type":"string", "indexed":true, "stored":true, "docValues":true},
+      {"name":"index_id",                 "type":"string", "indexed":true, "stored":true, "docValues":true},
+      {"name":"ss_search_api_datasource", "type":"string", "indexed":true, "stored":true, "docValues":true},
+      {"name":"popularity",               "type":"pint",   "indexed":true, "stored":true, "docValues":true},
+      {"name":"body",                     "type":"text_en","indexed":true, "stored":true}
+    ]
+  }' >/dev/null
+  # Corpus shaped so every nesting level has distinguishable counts and a
+  # distinguishable max: siteA has two indexes, index_a has two datasources,
+  # and `entity:node` under index_a has two docs whose popularity max (30) is
+  # neither the global max (60) nor its own bucket's first value (10).
+  # `jf6` carries no `hash`/`index_id` at all, so it is the doc the client's
+  # `fq=+hash:* +index_id:*` excludes and the doc that makes a terms facet's
+  # default `mincount: 1` observable (no empty bucket for it).
+  curl -sf "$JF343_SOLR/$JF343_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"jf1","hash":"siteA","index_id":"index_a","ss_search_api_datasource":"entity:node","popularity":10,"body":"alpha"},
+    {"id":"jf2","hash":"siteA","index_id":"index_a","ss_search_api_datasource":"entity:node","popularity":30,"body":"beta"},
+    {"id":"jf3","hash":"siteA","index_id":"index_a","ss_search_api_datasource":"entity:user","popularity":20,"body":"gamma"},
+    {"id":"jf4","hash":"siteA","index_id":"index_b","ss_search_api_datasource":"entity:node","popularity":40,"body":"delta"},
+    {"id":"jf5","hash":"siteB","index_id":"index_c","ss_search_api_datasource":"entity:node","popularity":50,"body":"epsilon"},
+    {"id":"jf6","popularity":60,"body":"zeta orphan"}
+  ]' >/dev/null
+fi
+
+capjf343() {  # capjf343 <name> <json.facet value> [extra raw query params]
+  local name=$1 jf=$2 extra=${3:-}
+  want "$name" || return 0
+  local url
+  url=$(curl -sg -G "$JF343_SOLR/$JF343_CORE/select" \
+    --data-urlencode "json.facet=$jf" \
+    ${extra:+--data "$extra"} \
+    -o "$OUT/$name.json" -w '%{http_code}\t%{url_effective}')
+  local status=${url%%$'\t'*} effective=${url#*$'\t'}
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$status" GET "$JF343_CORE/select?${effective#*\?}" "" "$JF343_SOLR" \
+    >> "$MANIFEST_ERRORS"
+}
+
+JF343_TAIL='q=*:*&rows=0&wt=json'
+# The client's own filter query, verbatim from SearchApiSolrBackend.php:4900-4903.
+# Pre-encoded: `--data` with `-G` appends the string to the query verbatim, so
+# the braces, the `+` required-clause operators and the space must already be
+# escaped or Jetty rejects the line.
+JF343_FQ='q=*:*&rows=1&fl=id&wt=json&fq=%7B!key%3Dsearch_api%7D%2Bhash%3A*%20%2Bindex_id%3A*'
+
+# 1. Aggregation only, deterministic field: pins the implicit top-level `count`
+#    (which the client reads unguarded) plus a bare-string aggregation.
+capjf343 jf343_agg_max            '{"maxPopularity":"max(popularity)"}'                     "$JF343_TAIL"
+# 2. The client's literal fallback shape: rows=1 and omitHeader=false (the
+#    SOLR-13509 workaround at PHP 4943-4950). Shape-only ground truth.
+capjf343 jf343_agg_max_version    '{"maxVersion":"max(_version_)"}'                         'q=*:*&rows=1&wt=json&omitHeader=false'
+# 3. Single terms facet, `limit: -1` exactly as the client sends it. Proves
+#    unlimited buckets and that `jf6` produces no bucket (default mincount 1).
+capjf343 jf343_terms              '{"siteHashes":{"limit":-1,"field":"hash","type":"terms"}}' "$JF343_TAIL"
+# 4. `limit: 2` -- the truncation the client never asks for but the parser must
+#    honour, and the control proving `-1` above is really unlimited.
+capjf343 jf343_terms_limit        '{"siteHashes":{"limit":2,"field":"index_id","type":"terms"}}' "$JF343_TAIL"
+# 5. doDocumentCounts()'s Drupal shape (PHP 4914-4926): two-level terms nesting
+#    under the `facet` key, sub-buckets inline in each parent bucket.
+capjf343 jf343_terms_nested       '{"siteHashes":{"limit":-1,"field":"hash","type":"terms","facet":{"numDocsPerIndex":{"limit":-1,"field":"index_id","type":"terms"}}}}' "$JF343_TAIL"
+# 6. The deepest shape the client ever sends (doGetMaxDocumentVersions(), PHP
+#    5052-5082): top-level aggregation + three terms levels + a leaf
+#    aggregation. `_version_` variant is shape-only ground truth.
+capjf343 jf343_deep_version       '{"maxVersion":"max(_version_)","siteHashes":{"limit":-1,"field":"hash","type":"terms","facet":{"indexes":{"limit":-1,"field":"index_id","type":"terms","facet":{"dataSources":{"limit":-1,"field":"ss_search_api_datasource","type":"terms","facet":{"maxVersionPerDataSource":"max(_version_)"}}}}}}}' "$JF343_FQ"
+# 7. Same topology over `popularity`, so every bucket's aggregate value is
+#    assertable: entity:node under index_a must be 30, not 10 and not 60.
+capjf343 jf343_deep_max           '{"maxPopularity":"max(popularity)","siteHashes":{"limit":-1,"field":"hash","type":"terms","facet":{"indexes":{"limit":-1,"field":"index_id","type":"terms","facet":{"dataSources":{"limit":-1,"field":"ss_search_api_datasource","type":"terms","facet":{"maxPopularityPerDataSource":"max(popularity)"}}}}}}}' "$JF343_TAIL"
+# 8. The client's `fq` applied to a terms facet: `jf6` is excluded, so this is
+#    the evidence that json facets count the filtered set, not the whole index.
+capjf343 jf343_terms_fq           '{"siteHashes":{"limit":-1,"field":"hash","type":"terms"}}' "$JF343_FQ"
+# 9. A restricting `q` rather than an `fq`, same purpose for the main query.
+capjf343 jf343_terms_q            '{"siteHashes":{"limit":-1,"field":"hash","type":"terms"}}' 'q=body%3Aalpha%20OR%20body%3Abeta%20OR%20body%3Azeta&rows=0&wt=json&df=body'
+# 10. json.facet ALONGSIDE classic faceting: pins whether `facets` and
+#     `facet_counts` coexist and their top-level envelope order, which decides
+#     where the new block is inserted in the response map.
+capjf343 jf343_with_classic       '{"maxPopularity":"max(popularity)"}'                     'q=*:*&rows=0&wt=json&facet=true&facet.field=hash'
+# 11. Mincount made explicit: `mincount: 0` is unevidenced client-side but is
+#     the control that proves the default really is 1 in capture 3.
+capjf343 jf343_terms_mincount0    '{"siteHashes":{"limit":-1,"field":"hash","type":"terms","mincount":0}}' "$JF343_TAIL"
+
+# Error shapes: what Solr does with a json.facet Wayfinder must also reject.
+# 12. Malformed JSON in the param value.
+capjf343 jf343_err_bad_json       '{"siteHashes":{"field":'                                 "$JF343_TAIL"
+# 13. Unknown facet type.
+capjf343 jf343_err_bad_type       '{"siteHashes":{"type":"nosuchtype","field":"hash"}}'     "$JF343_TAIL"
+# 14. Unknown aggregation function.
+capjf343 jf343_err_bad_func       '{"x":"nosuchfunc(popularity)"}'                          "$JF343_TAIL"
+# 15. Terms facet on an undefined field.
+capjf343 jf343_err_unknown_field  '{"x":{"type":"terms","field":"no_such_field"}}'           "$JF343_TAIL"
+# 16. Terms facet naming a field with no docValues (`body` is text_en, indexed
+#     and stored but not docValues) -- the JSON-facet analogue of finding 105's
+#     classic-facet 400.
+capjf343 jf343_err_no_docvalues   '{"x":{"type":"terms","field":"body"}}'                    "$JF343_TAIL"
+# 17. Aggregation over a text field.
+capjf343 jf343_err_agg_text       '{"x":"max(body)"}'                                        "$JF343_TAIL"
+
+# 18. `facets` alongside BOTH classic faceting and `stats`: pins the full
+#     top-level envelope order. Capture 10 established `facet_counts` before
+#     `facets`; this settles where `stats` falls, which is the last unknown for
+#     the response-assembly insert point.
+capjf343 jf343_with_classic_stats '{"maxPopularity":"max(popularity)"}'                      'q=*:*&rows=0&wt=json&facet=true&facet.field=hash&stats=true&stats.field=popularity'
+# 19. An empty JSON facet object: does the implicit `count` still appear, and is
+#     `facets` emitted at all? The parser needs a defined answer for the
+#     degenerate input.
+capjf343 jf343_empty_object       '{}'                                                       "$JF343_TAIL"
+# 20. `sort` inside the JSON object. Unevidenced client-side, but capture 3's
+#     count-desc bucket order is otherwise indistinguishable from insertion
+#     order on this corpus; this is the control that names the default.
+capjf343 jf343_terms_sort_index    '{"siteHashes":{"limit":-1,"field":"index_id","type":"terms","sort":"index asc"}}' "$JF343_TAIL"
+
+if want_any '^jf343_'; then
+  release "$JF343_CONTAINER" "json-facet core '$JF343_CORE'"
+fi

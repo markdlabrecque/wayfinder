@@ -1,0 +1,32 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "json.facet":"{\"maxVersion\":\"max(_version_)\"}",
+      "q":"*:*",
+      "omitHeader":"false",
+      "rows":"1",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":6,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"jf1",
+      "hash":"siteA",
+      "index_id":"index_a",
+      "ss_search_api_datasource":"entity:node",
+      "popularity":10,
+      "body":"alpha",
+      "_version_":1872604773956452352,
+      "_root_":"jf1"
+    }]
+  },
+  "facets":{
+    "count":6,
+    "maxVersion":1872604773983715328
+  }
+}

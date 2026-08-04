@@ -1,0 +1,34 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "json.facet":"{\"siteHashes\":{\"limit\":-1,\"field\":\"hash\",\"type\":\"terms\"}}",
+      "q":"*:*",
+      "fl":"id",
+      "fq":"{!key=search_api}+hash:* +index_id:*",
+      "rows":"1",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"jf1"
+    }]
+  },
+  "facets":{
+    "count":5,
+    "siteHashes":{
+      "buckets":[{
+        "val":"siteA",
+        "count":4
+      },{
+        "val":"siteB",
+        "count":1
+      }]
+    }
+  }
+}

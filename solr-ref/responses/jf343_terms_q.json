@@ -1,0 +1,28 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":11,
+    "params":{
+      "json.facet":"{\"siteHashes\":{\"limit\":-1,\"field\":\"hash\",\"type\":\"terms\"}}",
+      "q":"body:alpha OR body:beta OR body:zeta",
+      "df":"body",
+      "rows":"0",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":3,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facets":{
+    "count":3,
+    "siteHashes":{
+      "buckets":[{
+        "val":"siteA",
+        "count":2
+      }]
+    }
+  }
+}
