@@ -81,6 +81,16 @@ class FieldMapper {
   private const SUGGESTER_SINK_FIELD = 'twm_suggest';
 
   /**
+   * The fixed prefix of each language's spellcheck sink field ('spellcheck').
+   *
+   * Used only to EXCLUDE the sink from sort-copy eligibility: like
+   * SUGGESTER_SINK_FIELD, the mapped name ('spellcheck_<lang>') begins with
+   * 's' but must not get a sort copy. Mirrors the upstream name exclusion at
+   * SearchApiSolrBackend.php:1452-1454.
+   */
+  private const SPELLCHECK_SINK_PREFIX = 'spellcheck';
+
+  /**
    * The language separator search_api_solr puts between a text field's infix
    * and its language id, before encoding:
    * SolrBackendInterface::SEARCH_API_SOLR_LANGUAGE_SEPARATOR is ';', which
@@ -309,22 +319,71 @@ class FieldMapper {
   }
 
   /**
+   * Whether an already-mapped Solr field gets a language-specific sort_* copy,
+   * mirroring the gate in SearchApiSolrBackend::addIndexField()
+   * (SearchApiSolrBackend.php:1448-1454): a mapped name beginning with 't'
+   * (the text family) or 's' (string) qualifies, EXCEPT the two fixed sinks
+   * 'twm_suggest' and 'spellcheck_*', which upstream excludes by name even
+   * though they too begin with 't'/'s'.
+   *
+   * The test is on the MAPPED name, not the Search API type, exactly as
+   * upstream writes it (strpos($field_names[$name], 't') === 0 || ... 's').
+   * That covers text and every solr_text_* variant (all 't'-prefixed), plain
+   * string ('s'), and correctly leaves out solr_string_storage/docvalues
+   * ('z'/'zdv'), integer ('it'), decimal ('ft'), date ('d') and boolean ('b').
+   *
+   * Issue #358: this is the gate DocumentBuilder uses to decide whether to
+   * write a sort copy. It replaced the old `$type === 'text'` check, which
+   * missed string fields entirely -- a divergence from captured solr:9
+   * (solr-ref/search-api/trace/00001.json indexes `ss_field_sku` with a
+   * `sort_X3b_en_field_sku` copy).
+   */
+  public function usesLanguageSpecificSortCopy(string $fieldName): bool {
+    return (str_starts_with($fieldName, 't') || str_starts_with($fieldName, 's'))
+      && !str_starts_with($fieldName, self::SUGGESTER_SINK_FIELD)
+      && !str_starts_with($fieldName, self::SPELLCHECK_SINK_PREFIX);
+  }
+
+  /**
    * Maps a Search API field to the field used by Wayfinder sorting.
    *
-   * Text fields sort through their dedicated sort_* dynamic field; every
-   * other type sorts on the actual mapped field, preserving cardinality so
-   * Wayfinder can use its native multi-value min/max selection.
+   * Text and string fields sort through their dedicated sort_* dynamic field;
+   * every other type sorts on the actual mapped field, preserving cardinality
+   * so Wayfinder can use its native multi-value min/max selection.
    *
-   * issue #342: the text sort field is language-specific too --
+   * issue #342: the sort field is language-specific too --
    * encodeSolrName('sort' . SEPARATOR . $sort_language_id . '_' . $name),
    * SearchApiSolrBackend.php:1483 -- so 'title' in English sorts on
-   * 'sort_X3b_en_title'. Non-text types are unaffected: their sort field IS
-   * their mapped field, which carries no language.
+   * 'sort_X3b_en_title'.
+   *
+   * issue #358: string fields use the same copy, because upstream gates it on
+   * mapped names beginning with 't' OR 's' (SearchApiSolrBackend.php:1448-
+   * 1454), not text alone.
+   *
+   * `$language` is nullable to distinguish the two callers of this shared
+   * method. Sorting (QueryBuilder::buildSort) and indexing (DocumentBuilder)
+   * always pass a resolved language and WANT the sort copy for eligible types.
+   * Grouping (QueryBuilder/ResponseParser) has no resolved sort language and
+   * omits the argument; upstream groups on the mapped fast field
+   * (SearchApiSolrBackend.php:4600, `reset($field_names)`), never the sort
+   * copy, so a NULL language must resolve to the mapped name for every
+   * non-text type (text keeps its pre-#358 sort_* grouping field, which is
+   * moot because upstream rejects text grouping at :4593-4597). Put plainly:
+   * no language passed => grouping path => only the text family's sort copy is
+   * used; a language passed => sort/index path => every 't'/'s' field's copy.
    */
-  public function sortFieldName(string $fieldId, string $type, bool $multiValued, string $language = self::LANGUAGE_UNSPECIFIED): string {
-    return $this->isTextPrefix(self::TYPE_PREFIXES[$type] ?? $type)
-      ? $this->encodeSolrName('sort' . self::LANGUAGE_SEPARATOR . $language . '_' . $fieldId)
-      : $this->fieldName($fieldId, $type, $multiValued, $language);
+  public function sortFieldName(string $fieldId, string $type, bool $multiValued, ?string $language = NULL): string {
+    $resolvedLanguage = $language ?? self::LANGUAGE_UNSPECIFIED;
+    $mappedName = $this->fieldName($fieldId, $type, $multiValued, $resolvedLanguage);
+
+    // Eligible mapped name AND (caller passed a language [sort/index path] OR
+    // the field is text [grouping path keeps text's pre-#358 sort copy]).
+    $useSortCopy = $this->usesLanguageSpecificSortCopy($mappedName)
+      && ($language !== NULL || str_starts_with($mappedName, 't'));
+
+    return $useSortCopy
+      ? $this->encodeSolrName('sort' . self::LANGUAGE_SEPARATOR . $resolvedLanguage . '_' . $fieldId)
+      : $mappedName;
   }
 
   /**

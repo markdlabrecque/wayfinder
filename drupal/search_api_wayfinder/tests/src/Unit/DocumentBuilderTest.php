@@ -429,10 +429,10 @@ class DocumentBuilderTest extends TestCase {
   /**
    * Issue #339: solr_text_suggester fields alongside a plain 'text' field and
    * another typed field must not disturb the other fields' normal shape, and
-   * must NOT get a sort_* copy themselves -- only plain 'text' does today
-   * (DocumentBuilder.php:95-114 guards on `$type === 'text'` exactly, not
-   * isTextType()/isTextType-like matching, so 'solr_text_suggester' must not
-   * slip through that check).
+   * must NOT get a sort_* copy themselves. The sort-copy gate (issue #358)
+   * is the mapped name's first character -- 't' or 's' -- and the suggester
+   * sink ('twm_suggest') is routed away by its own accumulation branch above
+   * before that gate ever runs, so it can never qualify.
    *
    * @covers ::buildAddCommand
    */
@@ -661,6 +661,131 @@ class DocumentBuilderTest extends TestCase {
 
     $this->assertSame('Title', $doc['sort_X3b_und_title']);
     $this->assertArrayNotHasKey('sort_X3b_en_title', $doc);
+  }
+
+  /**
+   * Issue #358: a SINGLE-valued string field gets a language-specific sort_*
+   * copy, matching captured search_api_solr / solr:9. The live trace
+   * (solr-ref/search-api/trace/00001.json) indexes `ss_field_sku = "ART-001"`
+   * with BOTH `sort_X3b_en_field_sku = "ART-001"` and
+   * `sort_X3b_und_field_sku = "ART-001"` -- a string field whose mapped name
+   * begins with 's' gets the same first-value sort copy a text field does,
+   * because upstream's gate is a first-character test on the mapped name
+   * ('t' or 's'), not a text-only check (SearchApiSolrBackend.php:1448-1454).
+   * Before this fix, DocumentBuilder wrote sort copies only for `$type ===
+   * 'text'`, so a string field sorted on `ss_*` instead of the `sort_*` copy
+   * Solr uses -- a divergence.
+   *
+   * The language manager is injected with the capture site's single enabled
+   * language ('en') so the sort-language set is ['en', 'und'], exactly the two
+   * copies the trace shows.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandAddsSortCopyForSingleValuedStringField(): void {
+    $item = $this->mockItem('node/358a:en', 'entity:node', 'en', [
+      'field_sku' => $this->mockField('field_sku', 'string', ['ART-001']),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper(), $this->mockLanguageManager(['en'])))
+      ->buildAddCommand($item, 'capture_index')['add']['doc'];
+
+    // The mapped field keeps its ordinary single-valued scalar shape ...
+    $this->assertSame('ART-001', $doc['ss_field_sku']);
+    // ... and gets a scalar sort copy in every sort language, exactly as the
+    // trace shows.
+    $this->assertSame('ART-001', $doc['sort_X3b_en_field_sku']);
+    $this->assertSame('ART-001', $doc['sort_X3b_und_field_sku']);
+  }
+
+  /**
+   * Issue #358: a MULTI-valued string field's sort_* copy takes the FIRST
+   * value, exactly like a text field's (finding #153) -- not the min/max
+   * selector the non-text path uses.
+   *
+   * The live trace confirms it (solr-ref/search-api/trace/00001.json):
+   * `sm_field_keywords = ["animals", "classic", "pangram"]` indexes as
+   * `sort_X3b_en_field_keywords = "animals"` (the first value), and
+   * `sm_field_topics = ["legacy", "documentation"]` as
+   * `sort_X3b_en_field_topics = "legacy"`. No sort_* field carries more than
+   * one value anywhere in the trace.
+   *
+   * The values below are chosen so the first value is NEITHER the min NOR the
+   * max: first='mango', min='apple', max='zebra'. A regression that took the
+   * min or max would fail here.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandMultivaluedStringSortCopyTakesFirstValueNotMinMax(): void {
+    $item = $this->mockItem('node/358b:en', 'entity:node', 'en', [
+      'field_pick' => $this->mockField(
+        'field_pick',
+        'string',
+        // first='mango' is neither the min ('apple') nor the max ('zebra').
+        ['mango', 'apple', 'zebra'],
+        TRUE
+      ),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper(), $this->mockLanguageManager(['en'])))
+      ->buildAddCommand($item, 'capture_index')['add']['doc'];
+
+    // The mapped multi-valued field stays an array ...
+    $this->assertSame(['mango', 'apple', 'zebra'], $doc['sm_field_pick']);
+    // ... and its scalar sort copy in every sort language is the FIRST value.
+    $this->assertSame('mango', $doc['sort_X3b_en_field_pick']);
+    $this->assertSame('mango', $doc['sort_X3b_und_field_pick']);
+  }
+
+  /**
+   * Issue #358: a field type whose mapped name does NOT begin with 't' or 's'
+   * still gets no sort_* copy. The trace confirms it for integer
+   * (`its_field_rating`, no sort copy), and the same holds for decimal, date
+   * and boolean -- they sort on their own mapped fast field, where Wayfinder's
+   * native min/max selection is what Solr does. This guards that broadening
+   * the sort-copy gate to 't'/'s' did not sweep in the other prefixes.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandIneligibleTypeGetsNoSortCopy(): void {
+    $item = $this->mockItem('node/358c:en', 'entity:node', 'en', [
+      'field_rating' => $this->mockField('field_rating', 'integer', [5]),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper(), $this->mockLanguageManager(['en'])))
+      ->buildAddCommand($item, 'capture_index')['add']['doc'];
+
+    $this->assertSame(5, $doc['its_field_rating']);
+    $this->assertArrayNotHasKey('sort_X3b_en_field_rating', $doc);
+    $this->assertArrayNotHasKey('sort_X3b_und_field_rating', $doc);
+  }
+
+  /**
+   * Issue #358 regression: broadening the sort-copy gate to string fields must
+   * not disturb text's sort copy on the same branch. A text field and a string
+   * field on one item must EACH get their sort_* copy (text unchanged from
+   * #342, string newly added), while the first-value/first-write rules hold
+   * for both.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandTextAndStringFieldsEachGetSortCopies(): void {
+    $item = $this->mockItem('node/358d:en', 'entity:node', 'en', [
+      'title' => $this->mockField('title', 'text', [new TextValue('Hello')]),
+      'field_sku' => $this->mockField('field_sku', 'string', ['SKU-1']),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper(), $this->mockLanguageManager(['en'])))
+      ->buildAddCommand($item, 'capture_index')['add']['doc'];
+
+    // Text: unchanged -- array value, scalar sort copy in every sort language.
+    $this->assertSame(['Hello'], $doc['tm_X3b_en_title']);
+    $this->assertSame('Hello', $doc['sort_X3b_en_title']);
+    $this->assertSame('Hello', $doc['sort_X3b_und_title']);
+    // String: newly gets the same shape of sort copy.
+    $this->assertSame('SKU-1', $doc['ss_field_sku']);
+    $this->assertSame('SKU-1', $doc['sort_X3b_en_field_sku']);
+    $this->assertSame('SKU-1', $doc['sort_X3b_und_field_sku']);
   }
 
 }

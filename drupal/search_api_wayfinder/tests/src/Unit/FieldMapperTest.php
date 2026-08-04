@@ -223,12 +223,13 @@ class FieldMapperTest extends TestCase {
   }
 
   /**
-   * issue #342: sortFieldName() gains the same optional `$language`
-   * argument as fieldName(). A text-type field sorts through
+   * issue #342 / #358: sortFieldName() gains the same optional `$language`
+   * argument as fieldName(). A text- OR string-type field sorts through
    * `sort_X3b_<enc-lang>_<id>` (encodeSolrName('sort' . SEPARATOR
-   * . $sort_language_id . '_' . $name), :1483); every other type is
-   * unaffected and keeps sorting on its ordinary mapped field name (current
-   * FieldMapper::sortFieldName() behaviour, unchanged for non-text).
+   * . $sort_language_id . '_' . $name), :1483), because upstream gates the sort
+   * copy on mapped names beginning with 't' or 's'
+   * (SearchApiSolrBackend.php:1448-1454). Every other type is unaffected and
+   * keeps sorting on its ordinary mapped field name.
    *
    * @covers ::sortFieldName
    * @dataProvider sortFieldNameProvider
@@ -242,10 +243,34 @@ class FieldMapperTest extends TestCase {
     return [
       'text sort field carries the language, en' => ['title', 'text', FALSE, 'sort_X3b_en_title', 'en'],
       'text sort field defaults to und' => ['title', 'text', FALSE, 'sort_X3b_und_title'],
-      // Non-text: unaffected by language, unchanged from today -- the mapped
-      // field name itself (current FieldMapper::sortFieldName() behaviour).
-      'non-text sort field is the mapped field name, unaffected by language' => ['weight', 'integer', FALSE, 'its_weight', 'en'],
+      // issue #358: string fields sort through the same language-specific
+      // sort_* copy as text -- upstream gates on mapped names beginning with
+      // 't' or 's' (SearchApiSolrBackend.php:1448-1454), for single- and
+      // multi-valued alike.
+      'single string sort field carries the language' => ['field_sku', 'string', FALSE, 'sort_X3b_en_field_sku', 'en'],
+      'multi string sort field carries explicit und' => ['field_keywords', 'string', TRUE, 'sort_X3b_und_field_keywords', 'und'],
+      // Other types sort on their mapped field name, unaffected by language.
+      'numeric sort field is the mapped field name, unaffected by language' => ['weight', 'integer', FALSE, 'its_weight', 'en'],
     ];
+  }
+
+  /**
+   * Issue #358 grouping guard: a caller that omits the language (the grouping
+   * path in QueryBuilder/ResponseParser, which has no resolved sort language)
+   * must keep resolving a string field to its ordinary ss_* mapped name, NOT
+   * the sort copy. Upstream groups on the mapped fast field
+   * (SearchApiSolrBackend.php:4600, `reset($field_names)`), never the sort
+   * copy; ResponseParser's grouped block is keyed by that mapped name
+   * (ResponseParser.php extractResultDocs). Sorting and indexing always pass
+   * a language explicitly, so the null/omitted argument is the signal that
+   * the caller is the grouping path.
+   *
+   * @covers ::sortFieldName
+   */
+  public function testSortFieldNameWithoutLanguageKeepsGroupingOnMappedStringField(): void {
+    $mapper = new FieldMapper();
+    $this->assertSame('ss_field_sku', $mapper->sortFieldName('field_sku', 'string', FALSE));
+    $this->assertSame('sm_field_keywords', $mapper->sortFieldName('field_keywords', 'string', TRUE));
   }
 
   /**
