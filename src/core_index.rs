@@ -1369,7 +1369,12 @@ impl CoreIndex {
         ]))))
     }
 
-    /// One inline nested query: `{!edismax qf='...'}<bound token>` becomes the
+    /// One inline nested query. `{!payload_score ...}` (#340) carries its whole
+    /// query in its own local params, so the bound run is discarded — the same
+    /// discard Solr performs when a `v` local param is present, and empty in
+    /// every client-emitted query anyway (a space follows each block).
+    ///
+    /// Otherwise: `{!edismax qf='...'}<bound token>` becomes the
     /// same `parse_edismax_query` composition a `defType=edismax` request
     /// would get, over just the block's own `qf` — the nested parser's local
     /// params are its whole configuration, so no request-level `mm`/`pf`/`bq`/
@@ -1381,6 +1386,11 @@ impl CoreIndex {
         nq: &local_params::NestedQuery,
         default_field_name: &str,
     ) -> Result<Box<dyn Query>> {
+        if nq.local.query_type.as_deref() == Some("payload_score") {
+            return self
+                .build_payload_score_query(&nq.local)
+                .map_err(anyhow::Error::from);
+        }
         let qf = nq.local.get("qf").unwrap_or("");
         self.parse_edismax_query(
             &nq.text,
@@ -1474,12 +1484,25 @@ impl CoreIndex {
                     function_query::parse(b).map_err(|e| QueryError::Syntax(e.to_string()))?;
                 function_query::validate_fields(&func, resolve)
                     .map_err(|e| QueryError::Syntax(e.to_string()))?;
+                // The child is the **untrimmed** remainder, and that is
+                // load-bearing (#340, finding 168). Solr re-dispatches a
+                // position-0 local-params block only when the string it is
+                // handed literally starts with `{!`
+                // (`QParser.getParser`'s `qstr.startsWith("{!")`), and
+                // `{!boost b=boost_document} {!payload_score ...} ...` leaves a
+                // *leading space* on the remainder. So the trailing blocks are
+                // inline nested queries the lucene parser sums, not a new
+                // position-0 block that would swallow the rest of the child and
+                // discard it. Trimming here would score `pls_client_shape`'s d3
+                // 9.0 (dog only, times boost_document) instead of the captured
+                // 16.0.
+                let child_src = &q[consumed..];
                 // No wrapped query text -> nothing to boost; an empty `q`
                 // matches nothing, the same as the no-`q` path in `select`.
-                let child: Box<dyn Query> = if rest.is_empty() {
+                let child: Box<dyn Query> = if child_src.trim().is_empty() {
                     Box::new(EmptyQuery)
                 } else {
-                    self.parse_query(rest, default_field_name)
+                    self.parse_query(child_src, default_field_name)
                         .map_err(|e| QueryError::Syntax(e.to_string()))?
                 };
                 Ok(Some(Box::new(
@@ -1520,6 +1543,16 @@ impl CoreIndex {
             // take no body (`rest` is ignored): `sfield`/`pt`/`d` resolve from
             // the block's own local params first (e.g. `{!geofilt sfield=loc}`)
             // then the request params (finding 133's client-evidenced form).
+            // `{!payload_score f=<field> v=<term> func=max|min|average|sum}`
+            // (issue #340). Per finding 168 the position-0 form sets the parser
+            // for the whole `q`, and because `v` supplies the query text the
+            // trailing `rest` is *discarded* rather than parsed as a child
+            // query -- Solr's `QParser.getParser` only falls back to the
+            // remainder when no `v` local param is present, and this block's
+            // `v` is mandatory (fixture `pls_two_terms`, where the second
+            // block contributes nothing). The inline form the client actually
+            // emits goes through `extract_nested_queries` instead.
+            Some("payload_score") => Ok(Some(self.build_payload_score_query(&local)?)),
             Some(t @ ("geofilt" | "bbox")) => {
                 let shape = if t == "geofilt" {
                     function_query::GeoShape::Circle
@@ -1584,6 +1617,110 @@ impl CoreIndex {
             .parse()
             .map_err(|_| QueryError::Syntax(format!("`d` `{d_str}` is not a number")))?;
         Ok((sfield, (lat, lon), d))
+    }
+
+    /// Builds a `{!payload_score f=<field> v=<term> func=<fn>}` query (issue
+    /// #340), from either the position-0 or the inline form.
+    ///
+    /// The validation *order* is Solr's own
+    /// (`PayloadScoreQParserPlugin.java:78-95`), because each step's message is
+    /// a captured fixture and a query with two faults must report the same one
+    /// real Solr does: `f` present, `f` defined, `v` analyzes to something,
+    /// `func` known, and only then Wayfinder's own payload-capability check.
+    /// That last step is the one place this diverges — upstream reaches
+    /// `PayloadScoreQuery`'s constructor and dies on an uncaught
+    /// `NullPointerException` (HTTP 500, fixture `pls_err_nonpayload`); a 400 is
+    /// the honest answer and reproducing a crash is not a goal (PRD divergence
+    /// 11).
+    fn build_payload_score_query(
+        &self,
+        local: &local_params::LocalParams,
+    ) -> Result<Box<dyn Query>, QueryError> {
+        let field_name = local
+            .get("f")
+            .ok_or_else(|| QueryError::Syntax("'f' not specified".to_string()))?;
+        // Solr resolves the field type before it looks at `v`, so an undefined
+        // field wins over an empty one (`pls_err_undef_field`).
+        let field_config = self
+            .wf_schema
+            .field_config(field_name)
+            .ok_or_else(|| QueryError::Syntax(format!("undefined field {field_name}")))?;
+        // `v` is analyzed by the field's *own* query analyzer, which is why
+        // `v="DOG"`, `v="dog"` and bare `v=dog` are one query (finding 167:
+        // the type's LowerCaseFilter), and why `v="a"` is empty under its
+        // LengthFilter min=2 rather than a term nothing carries. `parse_block`
+        // has already stripped the quotes `escapePhrase()` adds.
+        //
+        // `tokenize` returns `None` for a type with no analysis chain at all (a
+        // numeric field, say). That is deliberately *not* treated as "analyzes
+        // to empty": such a field is not payload-bearing either, and the
+        // non-payload-field error below names the real problem.
+        let analyzed = local
+            .get("v")
+            .and_then(|v| self.wf_schema.tokenize(&field_config.type_, v));
+        if let Some(terms) = &analyzed {
+            if terms.is_empty() {
+                // Solr's `createSpanQuery` returns null when the analyzer emits
+                // no token, and the plugin turns that into this exact message
+                // (`pls_err_no_v`, `pls_err_short_v`). Same message for an
+                // absent `v`, which never reaches the analyzer at all.
+                return Err(QueryError::Syntax("SpanQuery is null".to_string()));
+            }
+        } else if local.get("v").is_none() {
+            return Err(QueryError::Syntax("SpanQuery is null".to_string()));
+        }
+        // `func` is matched literally: Solr's `PayloadUtils.getPayloadFunction`
+        // is a chain of `equals` comparisons, so `func=MAX` is
+        // `Unknown payload function: MAX` (`pls_err_func_case`), not `max`.
+        let func_name = local.get("func");
+        let func = func_name
+            .and_then(function_query::PayloadFunction::parse_literal)
+            .ok_or_else(|| {
+                QueryError::Syntax(format!(
+                    "Unknown payload function: {}",
+                    func_name.unwrap_or("null")
+                ))
+            })?;
+        if !self.wf_schema.is_boost_term_payload(field_name) {
+            return Err(QueryError::Syntax(format!(
+                "field {field_name} carries no term payloads: `{{!payload_score}}` requires a \
+                 `boost_term_payload` field"
+            )));
+        }
+        let terms = analyzed.unwrap_or_default();
+        if terms.len() > 1 {
+            // ponytail: single-term `v` only. Real Solr builds an ordered
+            // SpanNearQuery here (finding 171, fixture `pls_multiterm_v`
+            // matches d3 at 4.5); the module only ever emits single-token
+            // `boost_term` values, so a span evaluator is a named descope
+            // (spec section D) with a self-expiring divergence entry rather
+            // than a half-working implementation. The descope answers 200 with
+            // no hits — the same wire *shape* as the upstream row, differing
+            // only in the match set, so the differential harness compares it
+            // through the real differ instead of short-circuiting on a status
+            // mismatch. Solr never 400s a multi-term `v`, so a 400 here would
+            // be Wayfinder inventing an error class of its own.
+            return Ok(Box::new(EmptyQuery));
+        }
+        let term_text = terms.into_iter().next().expect("non-empty, checked above");
+        let field = self
+            .wf_schema
+            .field(field_name)
+            .ok_or_else(|| QueryError::Syntax(format!("undefined field {field_name}")))?;
+        // The doc set comes from the payload-stripped indexing side's posting
+        // list; `PayloadScoreQuery` replaces the score with the payload
+        // aggregate read from the field's fast column. `Basic` because
+        // `includeSpanScore` is false, so neither freqs nor positions are read.
+        let child = Box::new(TermQuery::new(
+            Term::from_field_text(field, &term_text),
+            IndexRecordOption::Basic,
+        ));
+        Ok(Box::new(function_query::PayloadScoreQuery::new(
+            child,
+            field_name.to_string(),
+            term_text,
+            func,
+        )))
     }
 
     /// Builds a `defType=edismax` query (issue #7, PRD §5 v1 exception):

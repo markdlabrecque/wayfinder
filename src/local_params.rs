@@ -412,7 +412,18 @@ pub fn extract_nested_queries(q: &str) -> Result<Option<Rewritten>, String> {
             // can find in their own query rather than a reconstructed `{!}`.
             let block_src = &rest[..consumed];
             match local.query_type.as_deref() {
-                Some("edismax") => {}
+                // `payload_score` (issue #340) is the second recognised
+                // nested-query type, and unlike `edismax` it is the *inline*
+                // form the client actually emits: `preQuery` joins
+                // `{!boost b=boost_document}` with one `{!payload_score ...}`
+                // block per boosted term and a `*:*` fallback, and the lucene
+                // parser sums those SHOULD clauses. Its query text lives
+                // entirely in its own local params (`f`/`v`/`func`), so the
+                // bound run after `}` -- empty in every client-emitted query,
+                // since a space follows each block -- is discarded by
+                // `CoreIndex::build_nested_query`, exactly as Solr discards the
+                // remainder when a `v` local param is present.
+                Some("edismax" | "payload_score") => {}
                 Some(other) => {
                     return Err(format!(
                         "unsupported local-params query parser `{other}` in `{block_src}`"

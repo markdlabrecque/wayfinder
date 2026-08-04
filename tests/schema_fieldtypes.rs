@@ -44,7 +44,8 @@ const NON_ENGLISH_LANGUAGE_CODES: &[&str] = &[
 
 /// Built-in type names `resolve_type` accepts that are not language presets:
 /// `string`/`keyword` (both resolve to `Str`), `text_general`, `int`/`long`,
-/// `float`/`double`, `date`, and `location` (#331). `text_en` is listed
+/// `float`/`double`, `date`, `location` (#331)/`location_rpt` (#334), and
+/// `boost_term_payload` (#340). `text_en` is listed
 /// separately below since it is the one `text_*` preset with its own
 /// dedicated tokenizer identity (`wayfinder_text_en_v2`), not a `LANGUAGES`-
 /// table lookup.
@@ -59,6 +60,7 @@ const NON_LANGUAGE_BUILTIN_TYPES: &[&str] = &[
     "date",
     "location",
     "location_rpt",
+    "boost_term_payload",
 ];
 
 /// Names that must never appear: real languages `resolve_type` does not
@@ -98,6 +100,11 @@ const EXPECTED_CLASSES: &[(&str, &str)] = &[
         "location_rpt",
         "wayfinder.SpatialRecursivePrefixTreeFieldType",
     ),
+    // #340: the Drupal module's own configset declares `boost_term_payload`
+    // as `class="solr.TextField"` (`solr-conf-templates/9.x/schema.xml:387`) --
+    // the class is Solr's vocabulary even though Wayfinder's storage is a
+    // payload-stripped index side plus a verbatim fast column.
+    ("boost_term_payload", "wayfinder.TextField"),
     // trace: `text_en`
     ("text_en", "wayfinder.TextField"),
     // trace: every `text_*` entry (`text_und`, `text_ws`, ...) is a TextField.
@@ -113,7 +120,7 @@ const EXPECTED_CLASSES: &[(&str, &str)] = &[
 const EXPECTED_ATTRIBUTE_KEYS: &[&str] = &["indexed", "stored", "multiValued", "docValues"];
 
 /// The exact, complete set of `fieldTypes` names Wayfinder must report for a
-/// schema declaring the custom chains in `extra_custom`: the ten non-language
+/// schema declaring the custom chains in `extra_custom`: the twelve non-language
 /// built-ins (`NON_LANGUAGE_BUILTIN_TYPES` plus `text_en`), one
 /// `text_<code>` per non-English `LANGUAGES` entry, and each custom chain --
 /// nothing else. Sorted, so `assert_eq!` against a sorted actual list is a

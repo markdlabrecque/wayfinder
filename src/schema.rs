@@ -20,7 +20,7 @@ use tantivy::schema::{
 };
 use tantivy::tokenizer::{
     Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer, StopWordFilter, TextAnalyzer,
-    Token, TokenFilter, TokenStream, Tokenizer, TokenizerManager,
+    Token, TokenFilter, TokenStream, Tokenizer, TokenizerManager, WhitespaceTokenizer,
 };
 
 /// Catch-all Tantivy field holding every document field that resolved through a
@@ -86,6 +86,15 @@ const NON_LANGUAGE_BUILTIN_TYPES: &[&str] = &[
     // to the same `ValueKind::Location` rather than forking it.
     "location",
     "location_rpt",
+    // `boost_term_payload` mirrors the Drupal module's own payload-bearing
+    // field type (`solr-conf-templates/9.x/schema.xml:387-406`): whitespace
+    // tokenizer, length min=2/max=100, lowercase, remove-duplicates, then a
+    // delimited float payload split on the last `|`. One Tantivy text field
+    // with *two* tokenizers -- the indexing side drops the `|<float>` suffix
+    // so `{!payload_score v=...}` matches a real posting list, and the fast
+    // (columnar) side keeps the token verbatim so the payload can be read back
+    // at score time (#340).
+    "boost_term_payload",
 ];
 
 /// Every built-in field type `resolve_type` accepts: the non-language types
@@ -120,6 +129,30 @@ const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v2";
 /// Drupal Search API's captured configset uses Snowball and preserves singular
 /// `day`; all analyzed dynamic rules share this one tokenizer in Tantivy.
 const DYNAMIC_TEXT_TOKENIZER: &str = "wayfinder_text_en_v1";
+
+/// `boost_term_payload`'s **indexing** analyzer: the module's front half
+/// (whitespace, length min=2/max=100, lowercase, remove-duplicates) followed by
+/// the delimited-payload split, keeping only the term. `dog|4.5` indexes as
+/// `dog`, so `{!payload_score v="dog"}` resolves against a real posting list.
+const BOOST_TERM_PAYLOAD_TOKENIZER: &str = "wayfinder_boost_term_payload_v1";
+/// `boost_term_payload`'s **fast-field (columnar)** analyzer: the same front
+/// half, but the surviving token is kept verbatim (`dog|4.5`). Tantivy resolves
+/// the indexing tokenizer and the fast-field tokenizer through two independent
+/// managers (`Index::tokenizers()` vs `Index::fast_field_tokenizer()`), both of
+/// which `CoreIndex` seeds with this one `TokenizerManager`, so a single field
+/// can legitimately carry a different analyzer on each side. That is what lets
+/// the payload live on the same field as the term instead of in a synthetic
+/// sibling (#340).
+const BOOST_TERM_PAYLOAD_VERBATIM_TOKENIZER: &str = "wayfinder_boost_term_payload_raw_v1";
+/// The delimiter Solr's `DelimitedPayloadTokenFilterFactory` defaults to, and
+/// the one the module's `sprintf('%s|%.1F')` writes.
+pub const BOOST_TERM_PAYLOAD_DELIMITER: char = '|';
+/// The module's `LengthFilterFactory` bounds on `boost_term_payload`. Applied
+/// *before* the payload split, exactly as the configset orders the chain, which
+/// is why `v="a"` analyzes to nothing (and 400s `SpanQuery is null`) while
+/// `a|1.0` -- seven characters -- would not.
+const BOOST_TERM_PAYLOAD_MIN_LEN: usize = 2;
+const BOOST_TERM_PAYLOAD_MAX_LEN: usize = 100;
 
 /// The on-disk analyzer contract for indexes built with Wayfinder's
 /// Porter-compatible English preset. This is separate from Tantivy's schema:
@@ -321,6 +354,21 @@ impl WayfinderSchema {
             .is_some_and(|f| matches!(f.type_.as_str(), "string" | "keyword"))
     }
 
+    /// True if `name` is a declared `boost_term_payload` field, i.e. one whose
+    /// fast column carries verbatim `<term>|<boost>` tokens a
+    /// `{!payload_score}` can read (#340). Every other field -- including a
+    /// perfectly ordinary analyzed text field -- is not payload-bearing, and
+    /// `{!payload_score f=<that>}` is a 400 rather than the uncaught Lucene NPE
+    /// real Solr answers with (PRD divergence 11, fixture `pls_err_nonpayload`).
+    pub fn is_boost_term_payload(&self, name: &str) -> bool {
+        self.field_config(name).is_some_and(|f| {
+            matches!(
+                resolve_type(&f.type_, &self.field_types),
+                Ok(ResolvedType::BoostTermPayload)
+            )
+        })
+    }
+
     /// Whether this schema can contain static data whose analyzer changed from
     /// v1 Snowball stemming to v2's Porter-compatible terminal-`y` behavior.
     pub fn uses_static_text_en(&self) -> bool {
@@ -399,6 +447,11 @@ impl WayfinderSchema {
         let tokenizer_name = match resolve_type(type_name, &self.field_types).ok()? {
             ResolvedType::Str => "raw".to_string(),
             ResolvedType::Text { tokenizer } => tokenizer,
+            // The indexing-side analyzer: the terms a query actually resolves
+            // against. The verbatim fast-field analyzer is deliberately not
+            // reachable here -- it is storage, not the query-time analysis
+            // chain (#340).
+            ResolvedType::BoostTermPayload => BOOST_TERM_PAYLOAD_TOKENIZER.to_string(),
             _ => return None,
         };
         let mut analyzer = self.tokenizers.get(&tokenizer_name)?;
@@ -425,6 +478,12 @@ enum ResolvedType {
     /// single Tantivy field, which is why `Location` has no arm in the
     /// `field = match resolved { ... }` block below.
     Location,
+    /// The Drupal module's payload-bearing `boost_term` type (#340): one
+    /// Tantivy text field carrying two analyzers -- payload-stripped terms on
+    /// the indexing side, verbatim `<term>|<boost>` tokens in the fast column.
+    /// It takes JSON strings like any other text type, so it is a
+    /// [`ValueKind::Text`] and needs no new arm anywhere downstream.
+    BoostTermPayload,
 }
 
 fn resolve_type(type_: &str, custom: &[FieldTypeConfig]) -> Result<ResolvedType> {
@@ -450,6 +509,11 @@ fn resolve_type(type_: &str, custom: &[FieldTypeConfig]) -> Result<ResolvedType>
         // same encoding; #292 sizing deferred the `location_rpt` choice to #334,
         // which keeps the shared two-column storage (finding 158).
         "location" | "location_rpt" => ResolvedType::Location,
+        // The module's own payload field type, reproduced (#340). See
+        // `BOOST_TERM_PAYLOAD_TOKENIZER` for why this is not a plain
+        // `Text { tokenizer }`: the field needs a *different* analyzer on its
+        // indexing and fast-field sides.
+        "boost_term_payload" => ResolvedType::BoostTermPayload,
         other => {
             let code = other.strip_prefix("text_").filter(|code| {
                 LANGUAGES
@@ -468,7 +532,9 @@ fn resolve_type(type_: &str, custom: &[FieldTypeConfig]) -> Result<ResolvedType>
 
 fn value_kind_of(type_: &str, custom: &[FieldTypeConfig]) -> Result<ValueKind> {
     Ok(match resolve_type(type_, custom)? {
-        ResolvedType::Str | ResolvedType::Text { .. } => ValueKind::Text,
+        ResolvedType::Str | ResolvedType::Text { .. } | ResolvedType::BoostTermPayload => {
+            ValueKind::Text
+        }
         ResolvedType::I64 => ValueKind::I64,
         ResolvedType::F64 => ValueKind::F64,
         ResolvedType::Date => ValueKind::Date,
@@ -593,6 +659,216 @@ impl<T: TokenStream> TokenStream for PorterTerminalYTokenStream<T> {
     }
 }
 
+/// Solr's `LengthFilterFactory`: drops tokens shorter than `min` or longer than
+/// `max` characters. Tantivy ships only `RemoveLongFilter` (an upper bound), and
+/// `boost_term_payload` needs the lower bound too -- it is what makes `v="a"` a
+/// 400 rather than a term query nothing carries (#340, `pls_err_short_v`).
+#[derive(Clone)]
+struct LengthFilter {
+    min: usize,
+    max: usize,
+}
+
+impl TokenFilter for LengthFilter {
+    type Tokenizer<T: Tokenizer> = LengthFilterTokenizer<T>;
+
+    fn transform<T: Tokenizer>(self, tokenizer: T) -> Self::Tokenizer<T> {
+        LengthFilterTokenizer {
+            inner: tokenizer,
+            min: self.min,
+            max: self.max,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct LengthFilterTokenizer<T> {
+    inner: T,
+    min: usize,
+    max: usize,
+}
+
+impl<T: Tokenizer> Tokenizer for LengthFilterTokenizer<T> {
+    type TokenStream<'a> = LengthFilterTokenStream<T::TokenStream<'a>>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        LengthFilterTokenStream {
+            tail: self.inner.token_stream(text),
+            min: self.min,
+            max: self.max,
+        }
+    }
+}
+
+struct LengthFilterTokenStream<T> {
+    tail: T,
+    min: usize,
+    max: usize,
+}
+
+impl<T: TokenStream> TokenStream for LengthFilterTokenStream<T> {
+    fn advance(&mut self) -> bool {
+        while self.tail.advance() {
+            // Solr's LengthFilter measures the term attribute's length, i.e.
+            // characters, not bytes.
+            let len = self.tail.token().text.chars().count();
+            if len >= self.min && len <= self.max {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn token(&self) -> &Token {
+        self.tail.token()
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        self.tail.token_mut()
+    }
+}
+
+/// Solr's `RemoveDuplicatesTokenFilterFactory`: drops a token whose text
+/// duplicates one already emitted *at the same position*. Tokens at different
+/// positions are never duplicates, which is why d3's two `dog|...` values
+/// (`solr-ref/capture.sh`'s pls corpus) both survive -- consecutive multiValued
+/// values sit at consecutive positions.
+#[derive(Clone)]
+struct RemoveDuplicatesFilter;
+
+impl TokenFilter for RemoveDuplicatesFilter {
+    type Tokenizer<T: Tokenizer> = RemoveDuplicatesTokenizer<T>;
+
+    fn transform<T: Tokenizer>(self, tokenizer: T) -> Self::Tokenizer<T> {
+        RemoveDuplicatesTokenizer { inner: tokenizer }
+    }
+}
+
+#[derive(Clone)]
+struct RemoveDuplicatesTokenizer<T> {
+    inner: T,
+}
+
+impl<T: Tokenizer> Tokenizer for RemoveDuplicatesTokenizer<T> {
+    type TokenStream<'a> = RemoveDuplicatesTokenStream<T::TokenStream<'a>>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        RemoveDuplicatesTokenStream {
+            tail: self.inner.token_stream(text),
+            position: None,
+            seen: Vec::new(),
+        }
+    }
+}
+
+struct RemoveDuplicatesTokenStream<T> {
+    tail: T,
+    /// The position the `seen` texts belong to; `None` before the first token.
+    position: Option<usize>,
+    seen: Vec<String>,
+}
+
+impl<T: TokenStream> TokenStream for RemoveDuplicatesTokenStream<T> {
+    fn advance(&mut self) -> bool {
+        while self.tail.advance() {
+            let token = self.tail.token();
+            if self.position != Some(token.position) {
+                self.position = Some(token.position);
+                self.seen.clear();
+            }
+            if self.seen.iter().any(|text| text == &token.text) {
+                continue;
+            }
+            self.seen.push(token.text.clone());
+            return true;
+        }
+        false
+    }
+
+    fn token(&self) -> &Token {
+        self.tail.token()
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        self.tail.token_mut()
+    }
+}
+
+/// The term half of Solr's `DelimitedPayloadTokenFilterFactory` with the
+/// `float` encoder: split the token at its **last** delimiter and keep the
+/// prefix, so `dog|4.5` indexes as `dog`. A token with no delimiter, or whose
+/// suffix is not a float, is left exactly as it is -- Lucene's filter only
+/// separates a payload when it actually finds one to decode.
+///
+/// ponytail: the payload *value* is not carried on the token (tantivy 0.26 has
+/// no postings payload at all). It is read back from the field's fast column,
+/// which `BOOST_TERM_PAYLOAD_VERBATIM_TOKENIZER` populates with the undivided
+/// token -- see `PayloadScoreQuery`.
+#[derive(Clone)]
+struct DelimitedPayloadStripFilter;
+
+impl TokenFilter for DelimitedPayloadStripFilter {
+    type Tokenizer<T: Tokenizer> = DelimitedPayloadStripTokenizer<T>;
+
+    fn transform<T: Tokenizer>(self, tokenizer: T) -> Self::Tokenizer<T> {
+        DelimitedPayloadStripTokenizer { inner: tokenizer }
+    }
+}
+
+#[derive(Clone)]
+struct DelimitedPayloadStripTokenizer<T> {
+    inner: T,
+}
+
+impl<T: Tokenizer> Tokenizer for DelimitedPayloadStripTokenizer<T> {
+    type TokenStream<'a> = DelimitedPayloadStripTokenStream<T::TokenStream<'a>>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        DelimitedPayloadStripTokenStream {
+            tail: self.inner.token_stream(text),
+        }
+    }
+}
+
+struct DelimitedPayloadStripTokenStream<T> {
+    tail: T,
+}
+
+impl<T: TokenStream> TokenStream for DelimitedPayloadStripTokenStream<T> {
+    fn advance(&mut self) -> bool {
+        if !self.tail.advance() {
+            return false;
+        }
+        let text = &mut self.tail.token_mut().text;
+        if let Some(term_len) = split_delimited_payload(text).map(|(term, _)| term.len()) {
+            text.truncate(term_len);
+        }
+        true
+    }
+
+    fn token(&self) -> &Token {
+        self.tail.token()
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        self.tail.token_mut()
+    }
+}
+
+/// Splits one `boost_term_payload` token into `(term, payload)` at its **last**
+/// delimiter, or `None` when there is no delimiter or the suffix is not a
+/// float. The single definition both the indexing filter above and
+/// `PayloadScoreQuery`'s column reader use, so the two halves of the field type
+/// cannot drift apart on what counts as a payload.
+pub fn split_delimited_payload(token: &str) -> Option<(&str, f32)> {
+    let (term, payload) = token.rsplit_once(BOOST_TERM_PAYLOAD_DELIMITER)?;
+    // Rust's `f32::from_str` accepts `inf`/`NaN`, which Lucene's FloatEncoder
+    // (a plain `Float.parseFloat`) also does. Keep them out anyway: a NaN
+    // payload would poison min/max comparisons in the scorer.
+    let value: f32 = payload.parse().ok()?;
+    value.is_finite().then_some((term, value))
+}
+
 /// Builds the `TextAnalyzer` for a `[[field_types]]` chain.
 fn build_analyzer(ft: &FieldTypeConfig) -> Result<TextAnalyzer> {
     let mut builder = match ft.tokenizer.as_str() {
@@ -691,6 +967,30 @@ fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager>
                 .build(),
         );
     }
+    // `boost_term_payload`'s two halves (#340). Both share the module's front
+    // half; they differ only in whether the `|<float>` suffix survives, and the
+    // *same* manager backs both of tantivy's tokenizer lookups (indexing and
+    // fast field), so registering both names here is all the wiring one field
+    // with two analyzers needs.
+    let boost_term_payload_front = || {
+        TextAnalyzer::builder(WhitespaceTokenizer::default())
+            .filter_dynamic(LengthFilter {
+                min: BOOST_TERM_PAYLOAD_MIN_LEN,
+                max: BOOST_TERM_PAYLOAD_MAX_LEN,
+            })
+            .filter_dynamic(LowerCaser)
+            .filter_dynamic(RemoveDuplicatesFilter)
+    };
+    manager.register(
+        BOOST_TERM_PAYLOAD_TOKENIZER,
+        boost_term_payload_front()
+            .filter_dynamic(DelimitedPayloadStripFilter)
+            .build(),
+    );
+    manager.register(
+        BOOST_TERM_PAYLOAD_VERBATIM_TOKENIZER,
+        boost_term_payload_front().build(),
+    );
     for ft in field_types {
         manager.register(&ft.name, build_analyzer(ft)?);
     }
@@ -780,6 +1080,8 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
         .chain([
             TEXT_EN_TOKENIZER.to_string(),
             DYNAMIC_TEXT_TOKENIZER.to_string(),
+            BOOST_TERM_PAYLOAD_TOKENIZER.to_string(),
+            BOOST_TERM_PAYLOAD_VERBATIM_TOKENIZER.to_string(),
         ])
         .collect();
     if let Some(field_type) = parsed
@@ -939,6 +1241,23 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
                     opts = opts.set_fast();
                 }
                 builder.add_date_field(&fc.name, opts)
+            }
+            // The module's payload field type (#340): one text field, two
+            // tokenizers. The fast column is set unconditionally rather than
+            // from `fc.fast` -- it is not optional docValues here but the only
+            // place the payload is kept, so a `fast = false` declaration would
+            // silently leave every `{!payload_score}` scoring 0.
+            ResolvedType::BoostTermPayload => {
+                let indexing = TextFieldIndexing::default()
+                    .set_tokenizer(BOOST_TERM_PAYLOAD_TOKENIZER)
+                    .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+                let mut opts = TextOptions::default()
+                    .set_indexing_options(indexing)
+                    .set_fast(Some(BOOST_TERM_PAYLOAD_VERBATIM_TOKENIZER));
+                if fc.stored {
+                    opts = opts.set_stored();
+                }
+                builder.add_text_field(&fc.name, opts)
             }
             // `Location` is handled above the match (two synthetic columns),
             // so this arm is unreachable; present only to satisfy the match's
