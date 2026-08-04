@@ -23,7 +23,7 @@ Replace the hostname and core name in this `Caddyfile`:
 search.example.com {
     # Wayfinder intentionally leaves these health endpoints unauthenticated.
     # Do not publish them unless external health monitoring requires them.
-    @public_health path /ui/ping /solr/content/admin/ping
+    @public_health path /ui/ping /wayfinder/content/admin/ping
     respond @public_health 404
 
     reverse_proxy 127.0.0.1:8983
@@ -37,7 +37,7 @@ without additional configuration.
 Verify the HTTPS route with the configured Basic-auth username (curl prompts for its password):
 
 ```sh
-curl -u operator 'https://search.example.com/solr/content/select?q=*:*&rows=0'
+curl -u operator 'https://search.example.com/wayfinder/content/select?q=*:*&rows=0'
 ```
 
 Keep port 8983 blocked from external access. If the proxy cannot run on the same host, use only a
@@ -45,6 +45,6 @@ trusted private network or an encrypted tunnel for the upstream hop; never send 
 over an untrusted HTTP hop. In container deployments, expose Wayfinder only on an internal
 container network rather than publishing its HTTP port.
 
-The example returns 404 for `/ui/ping` and `/solr/content/admin/ping` at the public proxy because
+The example returns 404 for `/ui/ping` and `/wayfinder/content/admin/ping` at the public proxy because
 Wayfinder exempts those exact routes from authentication. If external monitoring needs them,
 remove that matcher only deliberately and restrict access with the proxy or firewall.

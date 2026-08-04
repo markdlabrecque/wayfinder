@@ -1377,7 +1377,7 @@ fn admin_info_jvm_system_security() -> (Value, Value, Value) {
 ///
 /// `lucene.wayfinder-spec-version` is the ONE field `search_api_solr`'s
 /// `SolrConnector::getSolrVersion()` (finding 78) actually reads, and it is
-/// read here from `config.admin.reported_solr_version` — see
+/// read here from `config.admin.reported_server_version` — see
 /// `config::Admin` for the version-choice reasoning (PRD open question 2).
 async fn admin_info_system(
     State(state): State<Arc<AppState>>,
@@ -1484,7 +1484,7 @@ async fn core_admin_system(
 /// `solr:9` output, of which `SolrConnectorPluginBase::getStatsSummary()`
 /// (`coverage/search_api_solr_4.4.0_source/src/SolrConnector/SolrConnectorPluginBase.php`,
 /// ~L775-820) reads exactly six leaves on its Solr >= 7.0 branch -- the branch
-/// that applies, since `config.admin.reported_solr_version` reports 9.x:
+/// that applies, since `config.admin.reported_server_version` reports 9.x:
 ///
 /// - `wayfinder-mbeans.UPDATE.updateHandler.stats["UPDATE.updateHandler.docsPending"]`
 /// - `...["UPDATE.updateHandler.softAutoCommitMaxTime"]`

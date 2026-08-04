@@ -95,8 +95,10 @@ max_body_size = 10000000
 # autocommit_max_time = 60000
 
 [admin]
-# Version reported by /solr/admin/info/system and /solr/<core>/admin/system.
-reported_solr_version = "9.0.0"
+# Version reported by /wayfinder/admin/info/system and
+# /wayfinder/<core>/admin/system. The former key name, reported_solr_version,
+# is still accepted as an alias, so existing config files keep working.
+reported_server_version = "9.0.0"
 ```
 
 No heap tuning knob exists, by design: Tantivy is mmap-based and the OS page
@@ -110,10 +112,10 @@ admin UI, including `/update`, `/select`, the other core/admin endpoints, and
 `/ui` pages. The only unauthenticated exceptions are exactly these public health
 checks, where `<configured-core>` is the core name in the schema:
 
-- `/solr/<configured-core>/admin/ping`
+- `/wayfinder/<configured-core>/admin/ping`
 - `/ui/ping`
 
-A ping for a different core, or a longer look-alike path, is protected. Failed authentication returns HTTP 401 with `WWW-Authenticate: Basic realm="solr"` and Wayfinder's JSON error envelope. Real Solr 9's BasicAuthPlugin returned Jetty HTML in the captured failure cases; Wayfinder deliberately stays JSON-only (PRD §2, divergence 9).
+A ping for a different core, or a longer look-alike path, is protected. Failed authentication returns HTTP 401 with `WWW-Authenticate: Basic realm="wayfinder"` and Wayfinder's JSON error envelope. Real Solr 9's BasicAuthPlugin returned Jetty HTML in the captured failure cases; Wayfinder deliberately stays JSON-only (PRD §2, divergence 9).
 
 **Security warning:** HTTP Basic authentication is plaintext-equivalent: it
 base64-encodes credentials but does not encrypt them. Wayfinder intentionally
@@ -132,7 +134,7 @@ paths at the public proxy.
 | `query.rows_limit`, `query.facet_limit_max` | |
 | `resources.doc_store_compression`, `doc_store_blocksize`, `max_body_size` | |
 | `commit.autocommit_max_docs`, `autocommit_max_time` | |
-| `admin.reported_solr_version` | |
+| `admin.reported_server_version` (alias: `reported_solr_version`) | |
 
 ## Tests
 

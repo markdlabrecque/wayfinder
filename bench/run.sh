@@ -277,14 +277,14 @@ run_query_load() { # base_url core out_latency_file -> prints max RSS sample see
 echo "== starting wayfinder =="
 "$WF_BIN" "$SCHEMA_TOML" "$WF_DATA" "$WF_BIND" > "$WORK/wf.log" 2>&1 &
 WF_PID=$!
-WF_COLD_MS=$(wait_for_ping "http://$WF_BIND/solr/content/admin/ping?wt=json")
+WF_COLD_MS=$(wait_for_ping "http://$WF_BIND/wayfinder/content/admin/ping?wt=json")
 echo "wayfinder cold start: ${WF_COLD_MS}ms"
 WF_STARTUP_IDLE_KB=$(pids_rss_kb "$WF_PID")
 WF_STARTUP_IDLE_MB=$(awk -v k="$WF_STARTUP_IDLE_KB" 'BEGIN { printf "%.2f", k / 1024 }')
 echo "wayfinder startup idle mem: ${WF_STARTUP_IDLE_MB}MB"
 
 echo "== indexing wayfinder =="
-index_corpus "http://$WF_BIND/solr" "$SOLR_CORE"
+index_corpus "http://$WF_BIND/wayfinder" "$SOLR_CORE"
 
 sleep 1
 WF_POST_INDEX_KB=$(pids_rss_kb "$WF_PID")
@@ -292,7 +292,7 @@ WF_POST_INDEX_MB=$(awk -v k="$WF_POST_INDEX_KB" 'BEGIN { printf "%.2f", k / 1024
 echo "wayfinder post-index mem: ${WF_POST_INDEX_MB}MB"
 
 echo "== wayfinder warm-up pass (results discarded) =="
-warm_up_pass "http://$WF_BIND/solr" "$SOLR_CORE" "$TERMS_FILE"
+warm_up_pass "http://$WF_BIND/wayfinder" "$SOLR_CORE" "$TERMS_FILE"
 
 # Wayfinder has no query result cache, so there is nothing to flush between
 # the two passes and no cache counters to assert on: its cold and warm
@@ -300,11 +300,11 @@ warm_up_pass "http://$WF_BIND/solr" "$SOLR_CORE" "$TERMS_FILE"
 # below flushes and asserts, which is where the split is load-bearing.
 WF_LATENCIES_COLD="$WORK/wf_latencies_cold.txt"
 echo "== wayfinder cold pass (one query per distinct term) =="
-run_cold_query_pass "http://$WF_BIND/solr" "$SOLR_CORE" "$TERMS_FILE" "$WF_LATENCIES_COLD"
+run_cold_query_pass "http://$WF_BIND/wayfinder" "$SOLR_CORE" "$TERMS_FILE" "$WF_LATENCIES_COLD"
 assert_cold_latency_sample_count "$TERMS_FILE" "$WF_LATENCIES_COLD"
 
 WF_LATENCIES_WARM="$WORK/wf_latencies_warm.txt"
-run_query_load "http://$WF_BIND/solr" "$SOLR_CORE" "$WF_LATENCIES_WARM" &
+run_query_load "http://$WF_BIND/wayfinder" "$SOLR_CORE" "$WF_LATENCIES_WARM" &
 LOAD_PID=$!
 WF_LOAD_KB=0
 while kill -0 "$LOAD_PID" 2>/dev/null; do

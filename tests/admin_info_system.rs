@@ -67,6 +67,23 @@ fn server_config_admin_section_is_overridable() {
     assert_eq!(config.admin.reported_server_version, "8.5.0");
 }
 
+/// Issue #325's entire operator-facing back-compat promise: the key was
+/// renamed `reported_solr_version` -> `reported_server_version`, and
+/// `Admin`'s `#[serde(alias = "reported_solr_version")]` is what keeps a
+/// `wayfinder.toml` written before the rename loading unchanged. `Admin` is
+/// `deny_unknown_fields`, so without the alias this is not a silent no-op but
+/// a hard startup failure on the old key -- which is exactly why it needs a
+/// test rather than trust. Deleting the attribute must turn this red.
+#[test]
+fn server_config_admin_accepts_the_legacy_reported_solr_version_key() {
+    let config = wayfinder::ServerConfig::parse("[admin]\nreported_solr_version = \"8.5.0\"\n")
+        .expect("the pre-#325 key must still parse via the serde alias");
+    assert_eq!(
+        config.admin.reported_server_version, "8.5.0",
+        "the legacy key must populate the renamed field, not fall back to the default"
+    );
+}
+
 #[test]
 fn server_config_admin_rejects_unknown_key_by_name() {
     let err = wayfinder::ServerConfig::parse("[admin]\nreported_server_versionn = \"9.0.0\"\n")

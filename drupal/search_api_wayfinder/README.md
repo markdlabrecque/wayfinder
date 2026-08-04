@@ -4,8 +4,11 @@ A [Search API](https://www.drupal.org/project/search_api) backend plugin
 (plugin id `wayfinder`) that indexes and queries a **Wayfinder** server —
 the Solr-wire-compatible search backend in this repository.
 
-It talks Solr wire format directly over Guzzle (Drupal core's `http_client`
-service). It does **not** depend on `search_api_solr` or Solarium, and it does
+It talks the Solr wire format — param names, semantics, and JSON envelope —
+directly over Guzzle (Drupal core's `http_client` service). Only the request
+*paths* differ: Wayfinder serves them under `/wayfinder/<core>/...` rather than
+`/solr/<core>/...`, which is what the server's **Base path** setting selects.
+It does **not** depend on `search_api_solr` or Solarium, and it does
 not use a connector plugin: the backend plugin is self-contained. Field-naming
 conventions and a handful of method-level behaviours are ported from
 `search_api_solr` (both modules are GPL-2.0-or-later) so that the two produce
@@ -29,12 +32,39 @@ Then, in Drupal:
 1. **Configuration → Search and metadata → Search API → Add server**, and pick
    **Wayfinder** as the backend.
 2. Fill in scheme/host/port/base path/core to point at your Wayfinder instance
-   (defaults: `http://localhost:8983/solr/<core>`). Optionally set the request
+   (defaults: `http://localhost:8983/wayfinder/<core>`). Optionally set the request
    timeout and enable **Retrieve result highlighting from the server**.
 3. Add an index against that server and index content as usual.
 
 Once the server is saved, its *View* page shows the server URL plus the
 Wayfinder version, read from `{core}/admin/system`.
+
+## Upgrading: change the Base path from `/solr` to `/wayfinder`
+
+Wayfinder used to serve its API under `/solr/<core>/...` and the module's
+default **Base path** was `/solr`. Wayfinder now serves the same wire API under
+`/wayfinder/<core>/...`, and the default here is `/wayfinder`. There is no
+`/solr` compatibility route, so a server still pointing at `/solr` gets 404s.
+
+**This is a manual step for existing servers, deliberately not a
+`hook_update_N`.** Changing the default in `defaultConfiguration()` only affects
+*new* servers: Search API merges stored plugin configuration over the defaults,
+so a server saved before this change keeps its stored `path` of `/solr`
+regardless of the new default. An update hook is not used because the stored
+value is legitimately operator-owned — a site may front Wayfinder with a proxy
+that keeps `/solr`, or point the server at a real Solr-compatible endpoint, and
+silently rewriting that would break it.
+
+To upgrade, for each Search API server using the **Wayfinder** backend:
+
+1. Go to **Configuration → Search and metadata → Search API**, edit the server.
+2. Change **Base path** from `/solr` to `/wayfinder`.
+3. Save, then confirm the server's *View* page still reports the Wayfinder
+   version (it reads `{core}/admin/system`, so a wrong base path shows an
+   error there).
+
+Sites that export configuration should update `path` in the server's exported
+`search_api.server.*.yml` too.
 
 ## Wayfinder-side schema
 

@@ -1150,9 +1150,14 @@ async fn spellcheck_223_app() -> (Router, TempDir) {
     (app, dir)
 }
 
-/// Ratified, **permanent** divergences from captured Solr behaviour — the
-/// opposite of `EXPECTED_DIVERGENCES` below, which is a self-expiring to-do
-/// list for unbuilt features. Every entry here cites the PRD/findings
+/// Ratified, **permanent** divergences from captured Solr behaviour, whose
+/// bodies are not diffed at all — `accepted_divergence_reason` short-circuits
+/// before `diff()` runs. `EXPECTED_DIVERGENCES` below still runs the real
+/// differ and only suppresses the failure, so it holds both the self-expiring
+/// to-do entries for unbuilt features *and* the permanent-but-still-diffed
+/// entries (`admin_system`, `admin_info_system`), which stay there
+/// deliberately: moving them here would reduce, not increase, checking.
+/// Every entry here cites the PRD/findings
 /// section that ratifies it (findings doc's "Expected-divergence list"
 /// section explains the distinction). Printed during the manifest-errors
 /// run so the accepted set is visible, not silent.
@@ -1272,8 +1277,9 @@ fn ranked_score_value_ratified_reason(name: &str) -> Option<&'static str> {
 const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[
     (
         "admin_info_system",
-        "issue #59: `responseHeader`, `mode`, and the top-level key set are compared exactly and \
-         do match. The suppressed diffs are: `solr_home`/`core_root` (issue #325: Wayfinder now \
+        "issue #59: `responseHeader` and `mode` are compared exactly and do match. The \
+         top-level key set does not: see `solr_home` below. The suppressed diffs are: \
+         `solr_home`/`core_root` (issue #325: Wayfinder now \
          emits the key `wayfinder_home` in place of `solr_home`, and both `wayfinder_home` and \
          `core_root` carry the value `/var/wayfinder/data`, replacing the literal \"solr\" token \
          and path the fixture's captured Solr still reports); `lucene.solr-spec-version` (issue \
