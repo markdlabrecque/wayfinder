@@ -1,0 +1,17 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":2,
+    "params":{
+      "q":"*:*",
+      "fl":"id",
+      "fq":"{!frange l=2 u=6}",
+      "wt":"json"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.search.SyntaxError"],
+    "msg":"org.apache.solr.search.SyntaxError: Expected identifier at pos 0 str=''",
+    "code":400
+  }
+}

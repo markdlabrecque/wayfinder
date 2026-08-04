@@ -1,0 +1,23 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"*:*",
+      "fl":"id",
+      "fq":"{!frange l=2.5 u=5.5}rating",
+      "sort":"id asc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"d2"
+    },{
+      "id":"d5"
+    }]
+  }
+}

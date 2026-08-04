@@ -3408,3 +3408,135 @@ fi
 cap facet_perfield_prec_lp_vs_field  'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dcat%20facet.limit%3D1%7Dcategory&f.category.facet.limit=3&wt=json'
 cap facet_perfield_prec_lp_vs_global 'select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dcat%20facet.limit%3D1%7Dcategory&facet.limit=3&wt=json'
 cap facet_perfield_prec_field_vs_global 'select?q=*:*&rows=0&facet=true&facet.field=category&f.category.facet.limit=1&facet.limit=3&wt=json'
+
+# --- function range queries: {!frange l=.. u=..}<func> (issue #333) ---------
+# #333 (finding 133): `{!frange}` is Solr's general range-filter-over-function
+# (`FunctionRangeQParserPlugin` -> `ValueSourceRangeFilter`), not a geo-specific
+# construct -- `geodist()` is simply the function that flows through it on the
+# Drupal `setSpatial()` path. Built this way it stays reusable: any function
+# the #289 evaluator knows (`rating`, `product(rating,2)`, constants, ...) is a
+# valid frange body, and `{!frange}geodist()` composes for free once #332 lands
+# the `GeoDist` variant. This block captures frange over the SAME numeric
+# docValues corpus the `fnq` (#289) block uses, so the fixtures are directly
+# analogous, and it needs no geo / location field at all.
+#
+# Verified against `solr:9` (FunctionRangeQParserPlugin.java, 9.10.1): the
+# local params are `l` (lower, optional), `u` (upper, optional), `incl`
+# (include lower bound, boolean, default true) and `incu` (include upper bound,
+# boolean, default true) -- NOT `incl`/`excl` with the tokens "lower"/"upper";
+# those 400 as `invalid boolean value`. A doc matches iff the function value
+# *exists* for that doc (every referenced field has a value) AND falls in the
+# (half-open) range. Missing-field docs are therefore EXCLUDED, even though a
+# bare `{!func}field` scores them 0 -- frange is an `exists()` filter, func is
+# a scorer, and that is the load-bearing difference between the two paths.
+#
+# Own container/port/core for the same reason `fnq` uses one: a function-range
+# corpus needs numeric `docValues` fields, which the base `content` core lacks.
+# Rows land in `manifest-errors.tsv` (not `manifest.tsv`) and get a dedicated
+# `frange_app` in `tests/differential.rs`, like `fnq`/`facets33`/`pf296`.
+FRANGE_CONTAINER=wayfinder-solr-333
+FRANGE_SOLR=http://localhost:9072/solr
+FRANGE_CORE=frange
+if want_any '^frange_'; then
+  if ! docker ps --format '{{.Names}}' | grep -qx "$FRANGE_CONTAINER"; then
+    docker rm -f "$FRANGE_CONTAINER" >/dev/null 2>&1 || true
+    docker run -d --name "$FRANGE_CONTAINER" -p 9072:8983 \
+      solr:9 solr-precreate "$FRANGE_CORE" >/dev/null
+  fi
+  echo -n "waiting for frange solr"
+  for _ in $(seq 60); do
+    if curl -sf "$FRANGE_SOLR/$FRANGE_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n "."; sleep 1
+  done
+  curl -s "$FRANGE_SOLR/$FRANGE_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field": [
+      {"name":"body","type":"text_general","indexed":true,"stored":true},
+      {"name":"boost_document","type":"pfloat","indexed":true,"stored":true,"docValues":true},
+      {"name":"views","type":"pint","indexed":true,"stored":true,"docValues":true},
+      {"name":"rating","type":"pfloat","indexed":true,"stored":true,"docValues":true},
+      {"name":"price","type":"pdouble","indexed":true,"stored":true,"docValues":true}
+    ]
+  }' >/dev/null
+  # Same 5-doc corpus as the fnq block verbatim: d4 has no `price`, d5 has no
+  # `views`, and every doc has a `rating` -- so a missing numeric value is
+  # observable on `price`/`views` (frange excludes it; func would score it 0).
+  curl -sf "$FRANGE_SOLR/$FRANGE_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"d1","body":"quick brown fox","boost_document":1.0,"views":10,"rating":2.0,"price":5.0},
+    {"id":"d2","body":"lazy dog","boost_document":3.0,"views":30,"rating":4.0,"price":15.0},
+    {"id":"d3","body":"quick dog","boost_document":2.0,"views":20,"rating":6.0,"price":10.0},
+    {"id":"d4","body":"quick fox","boost_document":0.5,"views":40,"rating":1.0},
+    {"id":"d5","body":"lazy brown","boost_document":2.5,"rating":5.0,"price":8.0}
+  ]' >/dev/null
+fi
+
+capfrange() {  # capfrange <name> <path-after-core>
+  local name=$1 suffix=$2
+  want "$name" || return 0
+  curl -sg "$FRANGE_SOLR/$FRANGE_CORE/$suffix" \
+    -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$FRANGE_CORE/$suffix" "" "$FRANGE_SOLR" \
+    >> "$MANIFEST_ERRORS"
+  rm -f "$OUT/$name.status"
+}
+
+# Suffixes are percent-encoded for the same reason fnq's are: `{`/`}`/`!`/`(
+# /)`/space/inner `=` would break the in-process axum URI the differential
+# harness replays (tests/common/mod.rs builds `.uri("/solr/...")` from this
+# column), and `Params::parse` percent-decodes them back. See fnq's encoding
+# note.
+#
+# rating corpus: d1=2 d2=4 d3=6 d4=1, d5 has NO rating (excluded by frange).
+#
+# Bounds, default inclusive both. rating in [2,6] -> d1,d2,d3.
+capfrange frange_inclusive        'select?q=*:*&fq=%7B%21frange%20l%3D2%20u%3D6%7Drating&fl=id&sort=id%20asc&wt=json'
+# Lower bound only (>=4): d2,d3.
+capfrange frange_lower_only       'select?q=*:*&fq=%7B%21frange%20l%3D4%7Drating&fl=id&sort=id%20asc&wt=json'
+# Upper bound only (<=2): d1(2),d4(1); d5 has no rating so is EXCLUDED even
+# though a missing numeric value would evaluate to 0 (<=2).
+capfrange frange_upper_only       'select?q=*:*&fq=%7B%21frange%20u%3D2%7Drating&fl=id&sort=id%20asc&wt=json'
+# incl=false -> lower bound exclusive: (2,6] -> d2,d3.
+capfrange frange_incl_false       'select?q=*:*&fq=%7B%21frange%20l%3D2%20u%3D6%20incl%3Dfalse%7Drating&fl=id&sort=id%20asc&wt=json'
+# incu=false -> upper bound exclusive: [2,6) -> d1,d2.
+capfrange frange_incu_false       'select?q=*:*&fq=%7B%21frange%20l%3D2%20u%3D6%20incu%3Dfalse%7Drating&fl=id&sort=id%20asc&wt=json'
+# Both exclusive: (2,6) -> d2.
+capfrange frange_both_excl        'select?q=*:*&fq=%7B%21frange%20l%3D2%20u%3D6%20incl%3Dfalse%20incu%3Dfalse%7Drating&fl=id&sort=id%20asc&wt=json'
+# No bounds at all -> every doc with an existing value. Every doc here has a
+# `rating`, so this is all five: d1,d2,d3,d4,d5.
+capfrange frange_no_bounds        'select?q=*:*&fq=%7B%21frange%7Drating&fl=id&sort=id%20asc&wt=json'
+# Missing-excluded pinned on `price` (d4 has none): l=0 u=100 would include 0,
+# yet d4 is absent -> d1(5),d2(15),d3(10),d5(8).
+capfrange frange_missing_excluded 'select?q=*:*&fq=%7B%21frange%20l%3D0%20u%3D100%7Dprice&fl=id&sort=id%20asc&wt=json'
+# Float bounds on `rating`: [2.5,5.5] -> d2(4),d5(5).
+capfrange frange_float_bounds     'select?q=*:*&fq=%7B%21frange%20l%3D2.5%20u%3D5.5%7Drating&fl=id&sort=id%20asc&wt=json'
+# Compound function over a field: product(rating,2) in [10,20] -> d3(12),d5(10).
+capfrange frange_compound        'select?q=*:*&fq=%7B%21frange%20l%3D10%20u%3D20%7Dproduct%28rating%2C2%29&fl=id&sort=id%20asc&wt=json'
+# Compound exists() on `price` (d4 has none): sum(price,1) in [0,15] ->
+# d1(6),d3(11),d5(9). d4 is excluded EVEN THOUGH 0+1=1 would be in range --
+# the exists() check sees the missing field, not the evaluated 0.
+capfrange frange_compound_missing 'select?q=*:*&fq=%7B%21frange%20l%3D0%20u%3D15%7Dsum%28price%2C1%29&fl=id&sort=id%20asc&wt=json'
+# Constant function references no field, so exists() is true for every doc:
+# sum(1,2,3)=6 in [0,10] -> all five docs, including d5.
+capfrange frange_constant         'select?q=*:*&fq=%7B%21frange%20l%3D0%20u%3D10%7Dsum%281%2C2%2C3%29&fl=id&sort=id%20asc&wt=json'
+# As the main `q` (not fq): a constant-score query, every match scores 1.0.
+# rating in [4,6] -> d2,d3.
+capfrange frange_on_q             'select?q=%7B%21frange%20l%3D4%20u%3D6%7Drating&fl=id,score&sort=id%20asc&wt=json'
+
+# As facet.query: the bucket key is the query string verbatim (Solr honours a
+# leading `{!key=..}` for the label, but that labelled form only matters once
+# #332's geodist rides through frange -- the Drupal distance-facet rewrite).
+# rating in [2,6] -> 3.
+capfrange frange_facet_query      'select?q=*:*&rows=0&facet=true&facet.query=%7B%21frange%20l%3D2%20u%3D6%7Drating&wt=json'
+# A range no doc falls in keeps its key, at 0.
+capfrange frange_facet_query_zero 'select?q=*:*&rows=0&facet=true&facet.query=%7B%21frange%20l%3D100%20u%3D200%7Drating&wt=json'
+
+# Error shapes (400): empty body, unknown field reference, and a non-boolean
+# `incl`. error.msg/metadata/trace are normalised away by the differential
+# harness; only status + error.code are compared.
+capfrange frange_err_empty        'select?q=*:*&fq=%7B%21frange%20l%3D2%20u%3D6%7D&fl=id&wt=json'
+capfrange frange_err_unknown_field 'select?q=*:*&fq=%7B%21frange%20l%3D2%20u%3D6%7Dnosuchfield&fl=id&wt=json'
+capfrange frange_err_bad_bool     'select?q=*:*&fq=%7B%21frange%20l%3D2%20u%3D6%20incl%3Dmaybe%7Drating&fl=id&wt=json'
+
+if want_any '^frange_'; then
+  release "$FRANGE_CONTAINER" "function-range core '$FRANGE_CORE'"
+fi
