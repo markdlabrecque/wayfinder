@@ -3766,3 +3766,238 @@ caph334 heatmap_no_facet_true    "$HEATMAP_CORE/select?q=*:*&rows=0&facet.heatma
 if want_any 'heatmap_'; then
   release "$HEATMAP_CONTAINER" "heatmap core '$HEATMAP_CORE'"
 fi
+
+# --- grouping + facet/stats/highlighting, group.truncate, group.facet (#338) --
+# #290 shipped `group=true` with no other component alongside it, and accepted
+# `group.truncate`/`group.facet` as documented no-ops because nothing was
+# captured. `setGrouping()` sends both unconditionally (finding 130) and a
+# faceted Search API view that switches grouping on sends `facet=true` in the
+# same request, so the grouped-plus-components shape is real client traffic.
+# This block captures it.
+#
+# Own container/port, but core `grouping` and the exact `g1..g6` corpus of the
+# issue-#290 block above (which released its container by here), so the rows
+# route to `tests/differential.rs`'s existing `grouping_app` unchanged.
+# Port 9074: 9073 is the `geo` block (#331).
+#
+# Every row carries `sort=id asc`, which makes both the group order and each
+# group's top document deterministic -- `group.truncate` facets over the top
+# document of each group, so an undefined "most relevant" doc under the default
+# `score desc` on an all-1.0 `q=*:*` would make the fixture order-dependent.
+# With `sort=id asc` the truncated set is exactly {g1 (article), g2 (page),
+# g6 (null group)}, and `fl=id` keeps `score`/`maxScore` out of the envelope.
+G338_CONTAINER=wayfinder-solr-338
+G338_SOLR=http://localhost:9074/solr
+G338_CORE=grouping
+if want_any '^g338_'; then
+  if ! docker ps --format '{{.Names}}' | grep -qx "$G338_CONTAINER"; then
+    docker rm -f "$G338_CONTAINER" >/dev/null 2>&1 || true
+    docker run -d --name "$G338_CONTAINER" -p 9074:8983 \
+      solr:9 solr-precreate "$G338_CORE" >/dev/null
+  fi
+  echo -n "waiting for g338 solr"
+  for _ in $(seq 60); do
+    if curl -sf "$G338_SOLR/$G338_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n "."; sleep 1
+  done
+  curl -s "$G338_SOLR/$G338_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field": [
+      {"name":"body",       "type":"text_en", "indexed":true, "stored":true},
+      {"name":"type",       "type":"string",  "indexed":true, "stored":true, "docValues":true},
+      {"name":"category",   "type":"string",  "indexed":true, "stored":true, "docValues":true, "multiValued":true},
+      {"name":"popularity", "type":"pint",    "indexed":true, "stored":true, "docValues":true}
+    ]
+  }' >/dev/null
+  curl -sf "$G338_SOLR/$G338_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"g1","type":"article","category":["news"],"body":"lazy dog brown","popularity":10},
+    {"id":"g2","type":"page","category":["news"],"body":"lazy garden afternoon","popularity":20},
+    {"id":"g3","type":"article","category":["blog"],"body":"quick thinking saves","popularity":30},
+    {"id":"g4","type":"article","category":["blog"],"body":"dogs cats together","popularity":5},
+    {"id":"g5","type":"page","body":"nothing here","popularity":40},
+    {"id":"g6","body":"orphan ungrouped","popularity":15}
+  ]' >/dev/null
+fi
+
+capg338() {  # capg338 <name> <path-after-core>
+  local name=$1 suffix=$2
+  want "$name" || return 0
+  curl -sg "$G338_SOLR/$G338_CORE/$suffix" \
+    -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$G338_CORE/$suffix" "" "$G338_SOLR" \
+    >> "$MANIFEST_ERRORS"
+  rm -f "$OUT/$name.status"
+}
+
+G338_GRP='group=true&group.field=type&group.ngroups=true'
+G338_FF='facet=true&facet.field=type&facet.field=category'
+G338_TAIL='fl=id&sort=id%20asc&wt=json'
+
+# Baselines: each component alongside the `grouped` envelope, with no
+# `group.truncate`/`group.facet`. Facet counts here are plain document counts
+# over the whole match set (type article=3/page=2, category news=2/blog=2),
+# which is what makes the truncate/group.facet rows below readable as diffs.
+capg338 g338_facet      "select?q=*:*&$G338_GRP&$G338_FF&$G338_TAIL"
+capg338 g338_stats      "select?q=*:*&$G338_GRP&stats=true&stats.field=popularity&$G338_TAIL"
+capg338 g338_all        "select?q=*:*&$G338_GRP&$G338_FF&stats=true&stats.field=popularity&$G338_TAIL"
+# Highlighting: `q=lazy` (text_en, so `body` stems) matches g1 (article) and
+# g2 (page). `highlighting` is keyed by document id at the top level, the same
+# as the ungrouped envelope -- this pins whether it covers only the documents
+# the doclists actually returned.
+capg338 g338_hl         "select?q=lazy&df=body&$G338_GRP&group.limit=2&hl=true&hl.fl=body&$G338_TAIL"
+capg338 g338_hl_facet   "select?q=lazy&df=body&$G338_GRP&group.limit=2&hl=true&hl.fl=body&$G338_FF&$G338_TAIL"
+# No match: pins the empty-facet/empty-stats shape next to an empty `grouped`.
+capg338 g338_zero       "select?q=zzznomatch&df=body&$G338_GRP&$G338_FF&stats=true&stats.field=popularity&$G338_TAIL"
+
+# `group.truncate=true`: facet counts over the collapsed group set (the top
+# document of each group under `sort=id asc`: g1, g2, g6) rather than the
+# matching document set. Expected to move `type` from article=3/page=2 to
+# article=1/page=1 and `category` from news=2/blog=2 to news=2/blog=0.
+capg338 g338_truncate       "select?q=*:*&$G338_GRP&group.truncate=true&$G338_FF&$G338_TAIL"
+# Whether `stats` follows `group.truncate` too, or stays over the full match
+# set, is exactly what this row decides.
+capg338 g338_truncate_stats "select?q=*:*&$G338_GRP&group.truncate=true&stats=true&stats.field=popularity&$G338_TAIL"
+capg338 g338_truncate_false "select?q=*:*&$G338_GRP&group.truncate=false&$G338_FF&$G338_TAIL"
+
+# `group.facet=true`: field-facet counts become the number of GROUPS holding at
+# least one matching document with that value, not the document count.
+# `category` separates the two cleanly: news is on g1 (article) and g2 (page)
+# -> 2 groups, blog is on g3 and g4, both article -> 1 group, where the
+# document counts are 2 and 2. Faceting on the group field itself is the other
+# half: every `type` value is its own group, so each count is 1.
+capg338 g338_groupfacet          "select?q=*:*&$G338_GRP&group.facet=true&$G338_FF&$G338_TAIL"
+capg338 g338_groupfacet_truncate "select?q=*:*&$G338_GRP&group.facet=true&group.truncate=true&$G338_FF&$G338_TAIL"
+# `group.facet` is documented as applying to FIELD facets only. These two rows
+# pin whether `facet.query` and `facet.range` counts stay document counts under
+# it: the same pair of requests with and without the flag.
+capg338 g338_facet_qr       "select?q=*:*&$G338_GRP&facet=true&facet.query=category:news&facet.range=popularity&f.popularity.facet.range.start=0&f.popularity.facet.range.end=50&f.popularity.facet.range.gap=25&$G338_TAIL"
+capg338 g338_groupfacet_qr  "select?q=*:*&$G338_GRP&group.facet=true&facet=true&facet.query=category:news&facet.range=popularity&f.popularity.facet.range.start=0&f.popularity.facet.range.end=50&f.popularity.facet.range.gap=25&$G338_TAIL"
+
+# `category:news` is on g1 (article) and g2 (page) -- 2 documents AND 2 groups,
+# so the `g338_*_qr` pair above cannot tell a grouped `facet.query` count from a
+# document count. `category:blog` can: g3 and g4 are 2 documents but both are
+# `article`, so a grouped count would be 1. Same disambiguation for
+# `group.truncate` (the truncated set {g1,g2,g6} holds no blog document at all).
+G338_QR='facet=true&facet.query=category:blog&facet.range=popularity&f.popularity.facet.range.start=0&f.popularity.facet.range.end=50&f.popularity.facet.range.gap=25'
+capg338 g338_facet_blog      "select?q=*:*&$G338_GRP&$G338_QR&$G338_TAIL"
+capg338 g338_groupfacet_blog "select?q=*:*&$G338_GRP&group.facet=true&$G338_QR&$G338_TAIL"
+capg338 g338_truncate_qr     "select?q=*:*&$G338_GRP&group.truncate=true&$G338_QR&$G338_TAIL"
+# Two `group.field` values with `group.facet=true`: Solr documents grouped
+# facets as computed from the FIRST specified group field. `type` gives 3
+# groups, `popularity` gives 6 (every value distinct), so which one drives the
+# counts is observable.
+# Which document is a group's "most relevant" one for `group.truncate` -- the
+# one the main `sort` picks, or the one `group.sort` picks? `group.sort=id desc`
+# makes article's top document g4 (category blog) instead of g1 (news), which
+# moves the `category` facet, so the fixture names the answer.
+capg338 g338_truncate_groupsort "select?q=*:*&$G338_GRP&group.truncate=true&group.sort=id+desc&$G338_FF&$G338_TAIL"
+# Is the truncated/grouped set the WHOLE group set or only the page of groups
+# `rows` returns? `rows=1` returns one group; if truncation were page-scoped the
+# `type` facet would be `article=1` alone. Same question for `group.facet`.
+capg338 g338_truncate_rows   "select?q=*:*&$G338_GRP&group.truncate=true&rows=1&$G338_FF&$G338_TAIL"
+capg338 g338_groupfacet_rows "select?q=*:*&$G338_GRP&group.facet=true&rows=1&$G338_FF&$G338_TAIL"
+# Which `group.field` does `group.truncate` collapse on when there are two?
+# `type` collapses 6 documents to 3, `popularity` leaves all 6 (every value is
+# distinct), so the facet counts name the answer.
+capg338 g338_truncate_multi  "select?q=*:*&group=true&group.field=type&group.field=popularity&group.ngroups=true&group.truncate=true&$G338_FF&$G338_TAIL"
+# `group.facet` is a faceting flag; this pins that it leaves `stats` alone
+# (unlike `group.truncate`, which `g338_truncate_stats` shows stats does follow).
+capg338 g338_groupfacet_stats "select?q=*:*&$G338_GRP&group.facet=true&stats=true&stats.field=popularity&$G338_TAIL"
+capg338 g338_groupfacet_multi "select?q=*:*&group=true&group.field=type&group.field=popularity&group.ngroups=true&group.facet=true&$G338_FF&$G338_TAIL"
+
+# `{!ex=...}` multi-select faceting (#295) crossed with `group.facet`/
+# `group.truncate` (#338). An excluded facet counts against a REDUCED filter
+# set -- a superset of the documents the grouping pass bucketed -- so the two
+# features interact and nothing captured pins the result. `fq={!tag=t}` is
+# `category:news` (g1/article, g2/page), and the excluded facets count over the
+# full `*:*` set instead: `category` news is g1+g2 = 2 groups, blog is g3+g4,
+# both `article` = 1 group, and `facet.query=category:blog` is likewise 2
+# documents but 1 group. The unexcluded `type` facet still counts against the
+# filtered set. Percent-encoded `{`/`}`/`!` like every other local-param row.
+G338_EX_FQ='fq=%7B%21tag%3Dt%7Dcategory%3Anews'
+G338_EX_F='facet=true&facet.field=%7B%21ex%3Dt%7Dcategory&facet.field=type&facet.query=%7B%21ex%3Dt%7Dcategory%3Ablog'
+capg338 g338_ex_facet      "select?q=*:*&$G338_GRP&$G338_EX_FQ&$G338_EX_F&$G338_TAIL"
+capg338 g338_ex_groupfacet "select?q=*:*&$G338_GRP&group.facet=true&$G338_EX_FQ&$G338_EX_F&$G338_TAIL"
+capg338 g338_ex_truncate   "select?q=*:*&$G338_GRP&group.truncate=true&$G338_EX_FQ&$G338_EX_F&$G338_TAIL"
+capg338 g338_ex_both       "select?q=*:*&$G338_GRP&group.facet=true&group.truncate=true&$G338_EX_FQ&$G338_EX_F&$G338_TAIL"
+
+if want_any '^g338_'; then
+  release "$G338_CONTAINER" "g338 core '$G338_CORE'"
+fi
+
+# --- group.facet over a null group that HAS facet values (#338) --------------
+# The `grouping` corpus above cannot exercise one half of `group.facet`: its
+# only null-group document (g6) carries no `type` AND no `category`, so no
+# captured field facet ever has a term sitting on a document that is missing
+# the group field. A `group.field` terms sub-aggregation structurally cannot see
+# that group (it has no group term), so an implementation that forgets to add
+# the missing-value group back stays green on every `g338_*` row -- confirmed by
+# mutation-testing the correction away. This corpus closes that gap.
+#
+# `type` groups h1/h2 as article, h3 as page, and leaves h4/h5 in the null
+# group. `category` news is on h1 (article), h3 (page), h4 and h5 (both null) --
+# 4 documents but 3 groups, which is the number that only a correct null-group
+# correction produces. blog is on h2 alone: 1 document, 1 group.
+# Own container/port 9075 and own core `g338null`, so nothing above is disturbed.
+G338N_CONTAINER=wayfinder-solr-338-null
+G338N_SOLR=http://localhost:9075/solr
+G338N_CORE=g338null
+if want_any '^g338n_'; then
+  if ! docker ps --format '{{.Names}}' | grep -qx "$G338N_CONTAINER"; then
+    docker rm -f "$G338N_CONTAINER" >/dev/null 2>&1 || true
+    docker run -d --name "$G338N_CONTAINER" -p 9075:8983 \
+      solr:9 solr-precreate "$G338N_CORE" >/dev/null
+  fi
+  echo -n "waiting for g338null solr"
+  for _ in $(seq 60); do
+    if curl -sf "$G338N_SOLR/$G338N_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n "."; sleep 1
+  done
+  curl -s "$G338N_SOLR/$G338N_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field": [
+      {"name":"body",       "type":"text_en", "indexed":true, "stored":true},
+      {"name":"type",       "type":"string",  "indexed":true, "stored":true, "docValues":true},
+      {"name":"category",   "type":"string",  "indexed":true, "stored":true, "docValues":true, "multiValued":true},
+      {"name":"popularity", "type":"pint",    "indexed":true, "stored":true, "docValues":true}
+    ]
+  }' >/dev/null
+  curl -sf "$G338N_SOLR/$G338N_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"h1","type":"article","category":["news"],"body":"first","popularity":10},
+    {"id":"h2","type":"article","category":["blog"],"body":"second","popularity":20},
+    {"id":"h3","type":"page","category":["news"],"body":"third","popularity":30},
+    {"id":"h4","category":["news"],"body":"fourth","popularity":40},
+    {"id":"h5","category":["news"],"body":"fifth","popularity":50}
+  ]' >/dev/null
+fi
+
+capg338n() {  # capg338n <name> <path-after-core>
+  local name=$1 suffix=$2
+  want "$name" || return 0
+  curl -sg "$G338N_SOLR/$G338N_CORE/$suffix" \
+    -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$G338N_CORE/$suffix" "" "$G338N_SOLR" \
+    >> "$MANIFEST_ERRORS"
+  rm -f "$OUT/$name.status"
+}
+
+G338N_GRP='group=true&group.field=type&group.ngroups=true'
+G338N_FF='facet=true&facet.field=type&facet.field=category'
+G338N_TAIL='fl=id&sort=id%20asc&wt=json'
+
+# Baseline document counts, then the same request under `group.facet=true`.
+# `category` news must go 4 -> 3, which is only reachable by counting the null
+# group; blog stays 1 -> 1.
+capg338n g338n_facet      "select?q=*:*&$G338N_GRP&$G338N_FF&$G338N_TAIL"
+capg338n g338n_groupfacet "select?q=*:*&$G338N_GRP&group.facet=true&$G338N_FF&$G338N_TAIL"
+# `facet.missing=true` alongside `group.facet`: the `type` facet's missing
+# bucket covers h4/h5, which are one group (the null group), not two documents.
+capg338n g338n_groupfacet_missing "select?q=*:*&$G338N_GRP&group.facet=true&$G338N_FF&facet.missing=true&$G338N_TAIL"
+capg338n g338n_facet_missing      "select?q=*:*&$G338N_GRP&$G338N_FF&facet.missing=true&$G338N_TAIL"
+# And the truncate half on this corpus: collapsed set is {h1, h3, h4}
+# (`sort=id asc`), so `category` news = 3, blog = 0.
+capg338n g338n_truncate "select?q=*:*&$G338N_GRP&group.truncate=true&$G338N_FF&$G338N_TAIL"
+
+if want_any '^g338n_'; then
+  release "$G338N_CONTAINER" "g338null core '$G338N_CORE'"
+fi

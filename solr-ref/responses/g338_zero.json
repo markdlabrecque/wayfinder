@@ -1,0 +1,51 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2,
+    "params":{
+      "q":"zzznomatch",
+      "df":"body",
+      "facet.field":["type","category"],
+      "stats":"true",
+      "fl":"id",
+      "sort":"id asc",
+      "group.ngroups":"true",
+      "facet":"true",
+      "wt":"json",
+      "group.field":"type",
+      "group":"true",
+      "stats.field":"popularity"
+    }
+  },
+  "grouped":{
+    "type":{
+      "matches":0,
+      "ngroups":0,
+      "groups":[ ]
+    }
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{
+      "type":["article",0,"page",0],
+      "category":["blog",0,"news",0]
+    },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  },
+  "stats":{
+    "stats_fields":{
+      "popularity":{
+        "min":null,
+        "max":null,
+        "count":0,
+        "missing":0,
+        "sum":0.0,
+        "sumOfSquares":0.0,
+        "mean":"NaN",
+        "stddev":0.0
+      }
+    }
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":22,
+    "params":{
+      "q":"lazy",
+      "df":"body",
+      "hl":"true",
+      "group.limit":"2",
+      "fl":"id",
+      "hl.fl":"body",
+      "sort":"id asc",
+      "group.ngroups":"true",
+      "wt":"json",
+      "group.field":"type",
+      "group":"true"
+    }
+  },
+  "grouped":{
+    "type":{
+      "matches":2,
+      "ngroups":2,
+      "groups":[{
+        "groupValue":"article",
+        "doclist":{
+          "numFound":1,
+          "start":0,
+          "numFoundExact":true,
+          "docs":[{
+            "id":"g1"
+          }]
+        }
+      },{
+        "groupValue":"page",
+        "doclist":{
+          "numFound":1,
+          "start":0,
+          "numFoundExact":true,
+          "docs":[{
+            "id":"g2"
+          }]
+        }
+      }]
+    }
+  },
+  "highlighting":{
+    "g1":{
+      "body":["<em>lazy</em> dog brown"]
+    },
+    "g2":{
+      "body":["<em>lazy</em> garden afternoon"]
+    }
+  }
+}

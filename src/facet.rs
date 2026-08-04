@@ -131,7 +131,35 @@ pub fn facet_counts(
     default_field: &str,
     base: &BaseClauses,
 ) -> Result<(Value, Vec<String>)> {
-    facet_counts_inner(index, config, params, default_field, base, None)
+    facet_counts_inner(index, config, params, default_field, base, None, None)
+}
+
+/// [`facet_counts`] with every count expressed in **distinct matching groups**
+/// instead of documents — Solr's `group.facet=true` (issue #338, finding 162).
+/// Applies to field facets, `facet.query` and `facet.range` alike (the ticket
+/// and Solr's own docs claim field-facet-only; `g338_groupfacet_blog` shows
+/// otherwise). `stats` is untouched, which is why this is a `facet` concern and
+/// not a shared one.
+///
+/// Never fused: the fused `/select` aggregation counts documents over the whole
+/// `q` AND `fq` set, which is by definition not what this computes.
+pub fn facet_counts_grouped(
+    index: &CoreIndex,
+    config: &ServerConfig,
+    params: &Params,
+    default_field: &str,
+    base: &BaseClauses,
+    group: &crate::grouping::GroupFacet,
+) -> Result<(Value, Vec<String>)> {
+    facet_counts_inner(
+        index,
+        config,
+        params,
+        default_field,
+        base,
+        None,
+        Some(group),
+    )
 }
 
 /// [`facet_counts`] with `facet.field` answered from the aggregation results
@@ -150,7 +178,15 @@ pub fn facet_counts_fused(
         &tantivy::aggregation::agg_result::AggregationResults,
     ),
 ) -> Result<(Value, Vec<String>)> {
-    facet_counts_inner(index, config, params, default_field, base, Some(fused))
+    facet_counts_inner(
+        index,
+        config,
+        params,
+        default_field,
+        base,
+        Some(fused),
+        None,
+    )
 }
 
 fn facet_counts_inner(
@@ -163,6 +199,7 @@ fn facet_counts_inner(
         &FacetFieldsPlan,
         &tantivy::aggregation::agg_result::AggregationResults,
     )>,
+    group: Option<&crate::grouping::GroupFacet>,
 ) -> Result<(Value, Vec<String>)> {
     let nl = JsonNl::from_params(params);
 
@@ -178,13 +215,18 @@ fn facet_counts_inner(
     // `fused` carries issue #246's already-computed `facet.field` buckets when
     // `select` was able to plan them before the main search; `None` is the
     // unfused path, which runs `facet_fields`' own aggregation passes here.
-    let facet_ranges = facet_ranges(index, params, base, nl)
+    let facet_ranges = facet_ranges(index, params, base, nl, group)
         .map_err(|e| anyhow::Error::new(PreQueryFacetError(e)))?;
     // #295: the `{!tag=...}` each `fq` carries, so a facet's `{!ex=...}` can
-    // drop the clauses it names. Aligned positionally with `base`'s trailing
-    // fq clauses (index 0 is the main query).
+    // drop the clauses it names. Aligned positionally with `base`'s fq clauses
+    // (index 0 is the main query). `base` may end with one further *untagged*
+    // clause -- `group.truncate` appends its collapsed-set `DocSetQuery` there
+    // (issue #338) -- which is fine, and is the property
+    // `excluded_base_clauses` relies on: it walks `fq_tags` positionally from
+    // index 1, so a trailing clause with no `fq_tags` entry is never excludable
+    // and survives every `{!ex=...}` (`g338_ex_truncate`).
     let fq_tags = fq_tag_lists(params);
-    let facet_queries = facet_queries(index, params, default_field, base, &fq_tags)?;
+    let facet_queries = facet_queries(index, params, default_field, base, &fq_tags, group)?;
     // #334: `facet.heatmap` is a post-query facet (the base query has already
     // run by the time `facet_counts_inner` is reached), so its errors are NOT
     // `PreQueryFacetError` -- they get the `response` block attached, like
@@ -195,7 +237,7 @@ fn facet_counts_inner(
         Some((plan, agg_results)) => {
             render_facet_fields(index, config, params, base, plan, agg_results)?
         }
-        None => facet_fields(index, config, params, base, nl, &fq_tags)?,
+        None => facet_fields(index, config, params, base, nl, &fq_tags, group)?,
     };
     let mut counts = Map::new();
     counts.insert("facet_queries".to_string(), facet_queries);
@@ -268,6 +310,11 @@ fn fq_tag_lists(params: &Params) -> Vec<Vec<String>> {
 /// `fq_tags`. An `excluded` entry naming no set tag drops nothing, which is
 /// the silent no-op finding 136 requires; matching is set-intersection, so a
 /// single `{!tag=a,b}` fq is dropped by `{!ex=b}` (finding 137).
+///
+/// A clause past the `fq`s — `group.truncate`'s collapsed-set `DocSetQuery`,
+/// appended last by `select` (issue #338) — has no `fq_tags` entry, so it is
+/// never dropped: `g338_ex_truncate`'s excluded facet still counts over the
+/// collapsed set.
 fn excluded_base_clauses(
     base: &BaseClauses,
     fq_tags: &[Vec<String>],
@@ -309,16 +356,24 @@ fn facet_queries(
     default_field: &str,
     base: &BaseClauses,
     fq_tags: &[Vec<String>],
+    group: Option<&crate::grouping::GroupFacet>,
 ) -> Result<Value> {
     let mut out = Map::new();
     for facet_query in params.get_all("facet.query") {
         let parsed = index.parse_query(facet_query, default_field)?;
         let excluded = local_param_csv(facet_query, "ex");
-        let count = if excluded.is_empty() {
-            index.count(&narrowed(base, Occur::Must, parsed))?
+        let bucket = if excluded.is_empty() {
+            narrowed(base, Occur::Must, parsed)
         } else {
             let reduced = excluded_base_clauses(base, fq_tags, &excluded);
-            index.count(&narrowed(&reduced, Occur::Must, parsed))?
+            narrowed(&reduced, Occur::Must, parsed)
+        };
+        // `group.facet=true` counts distinct groups rather than documents
+        // (`g338_groupfacet_blog`: `category:blog` matches g3/g4, both in the
+        // `article` group, so 1 -- not the 2 of `g338_facet_blog`).
+        let count = match group {
+            Some(group) => group.distinct_groups(index, &bucket)?,
+            None => index.count(&bucket)?,
         };
         out.insert(facet_query.to_string(), json!(count));
     }
@@ -376,6 +431,7 @@ fn facet_fields(
     base: &BaseClauses,
     nl: JsonNl,
     fq_tags: &[Vec<String>],
+    group: Option<&crate::grouping::GroupFacet>,
 ) -> Result<(Value, Vec<String>)> {
     let plan = plan_facet_fields(index, params)?;
     if plan.fields.is_empty() {
@@ -404,22 +460,29 @@ fn facet_fields(
         } else {
             Some(excluded_base_clauses(base, fq_tags, &field.ex))
         };
-        let counts = match reduced.as_ref() {
-            Some(clauses) => {
-                let query = BooleanQuery::from(
-                    clauses
-                        .iter()
-                        .map(|(occur, q)| (*occur, q.box_clone()))
-                        .collect::<BaseClauses>(),
-                );
-                index.term_facet(&field.column, field.kind, &query)?
-            }
-            None => index.term_facet(&field.column, field.kind, &base_query)?,
+        let reduced_query = reduced.as_ref().map(|clauses| {
+            BooleanQuery::from(
+                clauses
+                    .iter()
+                    .map(|(occur, q)| (*occur, q.box_clone()))
+                    .collect::<BaseClauses>(),
+            )
+        });
+        let counted_query: &dyn Query = match &reduced_query {
+            Some(query) => query,
+            None => &base_query,
+        };
+        // `group.facet=true` counts distinct groups per bucket rather than
+        // documents (`g338_groupfacet`: `category` blog is on g3/g4, both
+        // `article`, so 1 -- not 2).
+        let counts = match group {
+            Some(group) => group.term_facet(index, &field.column, field.kind, counted_query)?,
+            None => index.term_facet(&field.column, field.kind, counted_query)?,
         };
         let missing_base = reduced.as_ref().unwrap_or(base);
         out.insert(
             field.label.clone(),
-            shape_field(index, missing_base, field, counts, &shaping, nl)?,
+            shape_field(index, missing_base, field, counts, &shaping, nl, group)?,
         );
     }
     Ok((Value::Object(out), plan.warnings.clone()))
@@ -757,7 +820,9 @@ pub fn render_facet_fields(
         )?;
         out.insert(
             field.label.clone(),
-            shape_field(index, base, field, counts, &shaping, nl)?,
+            // The fused path is document counting by construction (issue #246);
+            // `group.facet` never fuses.
+            shape_field(index, base, field, counts, &shaping, nl, None)?,
         );
     }
     Ok((Value::Object(out), plan.warnings.clone()))
@@ -807,6 +872,7 @@ fn shape_field(
     mut counts: Vec<(String, crate::core_index::FacetOrderKey, u64)>,
     shaping: &BucketShaping,
     nl: JsonNl,
+    group: Option<&crate::grouping::GroupFacet>,
 ) -> Result<Value> {
     counts.retain(|(_, _, count)| *count >= shaping.mincount);
     if shaping.by_index {
@@ -826,7 +892,16 @@ fn shape_field(
         // number of *hits* with no value in the field, read from the fast
         // field column (`ExistsQuery`), never from stored values.
         let has_value = ExistsQuery::new(field.column.clone(), false);
-        let absent = index.count(&narrowed(base, Occur::MustNot, Box::new(has_value)))?;
+        let bucket = narrowed(base, Occur::MustNot, Box::new(has_value));
+        // Under `group.facet=true` the `null` bucket counts distinct groups too,
+        // like every other bucket in the same block. Captured:
+        // `g338n_facet_missing` vs `g338n_groupfacet_missing` (finding 163) --
+        // `type`'s `null` bucket is 2 documents (h4/h5) but 1 group, and
+        // `category`'s is 0 either way.
+        let absent = match group {
+            Some(group) => group.distinct_groups(index, &bucket)?,
+            None => index.count(&bucket)?,
+        };
         buckets.push((None, absent as u64));
     }
     Ok(render_buckets(&buckets, nl))
@@ -836,13 +911,20 @@ fn shape_field(
 /// Each bucket is counted with a real range query over the fast field, so an
 /// empty interior bucket is still emitted, at 0 (`facet_range_date.json`).
 ///
-/// ponytail: only the global `facet.range.*` params, no `f.<field>.facet.range.*`
-/// per-field overrides and no `facet.range.other` / `.include` / `.hardend`.
+/// `facet.range.start` / `.end` / `.gap` each take Solr's per-field addressed
+/// form as well as the bare global: `f.<field>.facet.range.start` wins over
+/// `facet.range.start` (`getFieldParam`'s own precedence, and the form the
+/// issue-#338 captures use throughout — `g338_facet_blog`,
+/// `g338_truncate_qr`, `g338_groupfacet_blog` all send only
+/// `f.popularity.facet.range.*` and get real buckets back).
+///
+/// ponytail: no `facet.range.other` / `.include` / `.hardend`.
 fn facet_ranges(
     index: &CoreIndex,
     params: &Params,
     base: &BaseClauses,
     nl: JsonNl,
+    group: Option<&crate::grouping::GroupFacet>,
 ) -> Result<Value> {
     let fields = params.get_all("facet.range");
     if fields.is_empty() {
@@ -900,7 +982,14 @@ fn facet_ranges(
                 Bound::Included(lower.to_term(field)),
                 Bound::Excluded(upper.to_term(field)),
             );
-            let count = index.count(&narrowed(base, Occur::Must, Box::new(bucket)))?;
+            let bucket = narrowed(base, Occur::Must, Box::new(bucket));
+            // `group.facet=true` counts distinct groups per bucket
+            // (`g338_groupfacet_blog`: the 0-25 popularity bucket holds
+            // g1/g2/g4/g6 -- 4 documents but only 3 groups).
+            let count = match group {
+                Some(group) => group.distinct_groups(index, &bucket)?,
+                None => index.count(&bucket)?,
+            };
             buckets.push((Some(key), count as u64));
         }
 
@@ -1086,7 +1175,8 @@ fn echo_range_end(kind: ValueKind, end: RangeEnd) -> Value {
 
 fn required<'a>(params: &'a Params, key: &str, field_name: &str) -> Result<&'a str> {
     params
-        .get(key)
+        .get(&format!("f.{field_name}.{key}"))
+        .or_else(|| params.get(key))
         .ok_or_else(|| anyhow!("facet.range on field `{field_name}` requires `{key}`"))
 }
 
@@ -1516,7 +1606,7 @@ fast = true
             let plan_err = plan_facet_fields(&index, &params)
                 .expect_err(&format!("`{query_string}` must be a plan-time error"))
                 .to_string();
-            let facet_fields_err = facet_fields(&index, &config, &params, &base, nl, &[])
+            let facet_fields_err = facet_fields(&index, &config, &params, &base, nl, &[], None)
                 .expect_err(&format!(
                     "`{query_string}` must still error out of facet_fields"
                 ))
@@ -1579,7 +1669,7 @@ fast = true
                 let nl = JsonNl::from_params(&params);
 
                 let (expected_fields, expected_warnings) =
-                    facet_fields(&index, &config, &params, &base, nl, &[])
+                    facet_fields(&index, &config, &params, &base, nl, &[], None)
                         .unwrap_or_else(|e| panic!("facet_fields for `{qs}`: {e}"));
 
                 let plan = plan_facet_fields(&index, &params)

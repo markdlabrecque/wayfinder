@@ -1234,6 +1234,90 @@ async fn grouping_app() -> (Router, TempDir) {
     (app, dir)
 }
 
+// --- duplicated schema/corpus for manifest-errors.tsv's `g338n_` rows ------
+// (issue #338, finding 163). The `grouping` corpus above cannot exercise the
+// half of `group.facet` where a document missing the group field still
+// carries a facetable value: its only null-group document (g6) carries
+// neither `type` nor `category`. This corpus's h4/h5 have no `type` but do
+// have `category=news`. Core name `g338null` matches the manifest-errors row
+// URL (`g338null/select?...`), so the runner below routes those rows here.
+const G338NULL_SCHEMA_TOML: &str = r#"
+[core]
+name = "g338null"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "type"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "category"
+type = "string"
+stored = true
+fast = true
+multi_valued = true
+
+[[fields]]
+name = "popularity"
+type = "int"
+stored = true
+fast = true
+"#;
+
+/// The exact 5-doc corpus `solr-ref/capture.sh`'s `g338n_` block indexes:
+/// `type` article on h1/h2, page on h3, missing on h4/h5 (the null group),
+/// while `category=news` sits on h1, h3, h4 and h5.
+fn g338null_corpus() -> Value {
+    json!([
+        {"id":"h1","type":"article","category":["news"],"body":"first","popularity":10},
+        {"id":"h2","type":"article","category":["blog"],"body":"second","popularity":20},
+        {"id":"h3","type":"page","category":["news"],"body":"third","popularity":30},
+        {"id":"h4","category":["news"],"body":"fourth","popularity":40},
+        {"id":"h5","category":["news"],"body":"fifth","popularity":50}
+    ])
+}
+
+/// `POST /wayfinder/g338null/update?commit=true` — cannot be `common::post_docs`,
+/// which is hardcoded to `common::CORE` ("content").
+async fn g338null_post_docs(app: &Router, docs: &Value) -> (StatusCode, Value) {
+    common::request_full(
+        app,
+        "POST",
+        "g338null/update?commit=true",
+        Some(&docs.to_string()),
+    )
+    .await
+}
+
+/// Builds a fresh `g338null`-schema app and indexes the full `h1..h5` corpus
+/// in one commit, matching `solr-ref/capture.sh`'s `g338n_` block.
+async fn g338null_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), G338NULL_SCHEMA_TOML).expect("app must build");
+    let (status, body) = g338null_post_docs(&app, &g338null_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the g338null corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
 /// The issue-#99 capture uses a dedicated three-document core. Its version
 /// values are deliberately time-seeded, so the manifest row is run here for
 /// its request/envelope shape while `tests/version_field.rs` verifies the
@@ -2571,6 +2655,7 @@ fn app_and_request_url<'a>(
     fragsize_app: &'a Router,
     spellcheck_app: &'a Router,
     grouping_app: &'a Router,
+    g338null_app: &'a Router,
     fnq_app: &'a Router,
     pf296_app: &'a Router,
     geo_app: &'a Router,
@@ -2597,6 +2682,7 @@ fn app_and_request_url<'a>(
         Some(("fragsize104", _)) => (fragsize_app, entry.url.clone()),
         Some(("spellcheck_223", _)) => (spellcheck_app, entry.url.clone()),
         Some(("grouping", _)) => (grouping_app, entry.url.clone()),
+        Some(("g338null", _)) => (g338null_app, entry.url.clone()),
         _ => (content_app, entry.url.clone()),
     }
 }
@@ -2636,6 +2722,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let (fragsize_app, _fragsize_dir) = fragsize_app().await;
     let (spellcheck_app, _spellcheck_dir) = spellcheck_223_app().await;
     let (grouping_app, _grouping_dir) = grouping_app().await;
+    let (g338null_app, _g338null_dir) = g338null_app().await;
     let (fnq_app, _fnq_dir) = fnq_app().await;
     let (pf296_app, _pf296_dir) = pf296_app().await;
     let (geo_app, _geo_dir) = geo_app().await;
@@ -2664,6 +2751,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
             &fragsize_app,
             &spellcheck_app,
             &grouping_app,
+            &g338null_app,
             &fnq_app,
             &pf296_app,
             &geo_app,

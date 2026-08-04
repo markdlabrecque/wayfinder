@@ -54,7 +54,7 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use common::{app_with_schema, assert_matches_fixture, get, post_docs};
+use common::{app_with_schema, assert_matches_fixture, fixture, get, post_docs};
 
 /// A dedicated core so `group.field` gets a single-valued string field with
 /// repeated values (`type`: article={g1,g3,g4}, page={g2,g5}, plus a null
@@ -754,23 +754,18 @@ async fn strict_grouping_app_rejects_a_truly_unknown_param() {
 
 /// `group.truncate` and `group.facet` ARE sent by `setGrouping()` (finding
 /// 130), so unlike `group.format`/`group.main` they must NOT 400 under
-/// `strict_params` -- a real module request would otherwise break. Their
-/// TRUE semantics (computing `facet_counts` over collapsed groups) are not
-/// fixture-backed yet, so for now both default to a no-op: with `facet`
-/// absent, neither has any effect, and this request just returns the normal
-/// grouped envelope. This test is the parity guard -- if either param is
-/// accidentally dropped from `SELECT_PARAMS`, this 400s and the guard fires.
-///
-/// ponytail: the ceiling is the group+facet interaction. When a fixture
-/// capturing `group.truncate=true`/`group.facet=true` alongside `facet=true`
-/// lands, the truncated-facet computation must be implemented in
-/// `src/grouping.rs`/`src/facet.rs` and this test broadened to assert it.
+/// `strict_params` -- a real module request would otherwise break. Their TRUE
+/// semantics are now fixture-backed (findings 160/161/162, issue #338): this
+/// replaces the old "accepted but no-op" parity guard with a real assertion
+/// against `g338_groupfacet_truncate` (`group.truncate=true&group.facet=true`
+/// together, with `facet=true`), so a dropped-from-`SELECT_PARAMS` regression
+/// AND a regressed-to-no-op regression both fail this test.
 #[tokio::test]
 async fn grouping_truncate_and_facet_params_are_accepted_under_strict_params() {
     let (app, _dir) = strict_grouping_app().await;
     let (status, body) = get(
         &app,
-        "select?q=*:*&group=true&group.field=type&group.truncate=true&group.facet=true&group.ngroups=true&fl=id&wt=json",
+        "select?q=*:*&group=true&group.field=type&group.truncate=true&group.facet=true&group.ngroups=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
     )
     .await;
     assert_eq!(
@@ -779,11 +774,1197 @@ async fn grouping_truncate_and_facet_params_are_accepted_under_strict_params() {
         "group.truncate/group.facet are sent by the module (finding 130) and must \
          be accepted, not 400 under strict_params, got {body}"
     );
-    // Sanity: the grouped envelope is still produced and well-formed.
+    // Real semantics, not the no-op parity guard this replaces:
+    // `g338_groupfacet_truncate` -- type article=1/page=1, category news=2/blog=0.
+    assert_matches_fixture(body, "g338_groupfacet_truncate");
+}
+
+// ===========================================================================
+// Issue #338: facet_counts / stats / highlighting alongside `grouped`, and
+// real `group.truncate` / `group.facet` semantics.
+//
+// Every expected value below comes from a committed `solr-ref/responses/
+// g338_*.json` fixture (findings 160/161/162) -- named in each test's doc
+// comment -- never from what Wayfinder happens to produce. Two exceptions
+// (explicitly marked) assert a structural self-consistency property named by
+// the task spec rather than a captured Solr number, because no g338 fixture
+// captures that exact param combination.
+// ===========================================================================
+
+// --- section 1: component blocks alongside `grouped` -----------------------
+
+/// A grouped request with `facet=true` and `stats=true` gets `facet_counts`
+/// and `stats` blocks alongside `grouped`, in top-level key order
+/// `responseHeader, grouped, facet_counts, stats` (`highlighting` absent
+/// since `hl` was not requested). `g338_all`: `type` article=3/page=2,
+/// `category` blog=2/news=2, `stats.field=popularity` count=6/min=5/max=40/
+/// sum=120.
+#[tokio::test]
+async fn grouping_facet_and_stats_blocks_render_alongside_grouped() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&facet=true&facet.field=type&facet.field=category&stats=true&stats.field=popularity&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_all");
+    let keys: Vec<&str> = body
+        .as_object()
+        .expect("top-level body must be an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["responseHeader", "grouped", "facet_counts", "stats"],
+        "top-level key order must be responseHeader, grouped, facet_counts, \
+         stats -- the same order the ungrouped path already uses, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 3, "page", 2])),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["blog", 2, "news", 2])),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/stats/stats_fields/popularity/count"),
+        Some(&json!(6)),
+        "got {body}"
+    );
+}
+
+/// `facet=true` alone (no `stats`, no `hl`): `facet_counts` renders and
+/// `stats`/`highlighting` are absent. `g338_facet`.
+#[tokio::test]
+async fn grouping_facet_block_alone_omits_stats_and_highlighting() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_facet");
+    assert!(body.get("stats").is_none(), "got {body}");
+    assert!(body.get("highlighting").is_none(), "got {body}");
+}
+
+/// `stats=true` alone (no `facet`, no `hl`): `stats` renders and
+/// `facet_counts`/`highlighting` are absent. `g338_stats`.
+#[tokio::test]
+async fn grouping_stats_block_alone_omits_facet_and_highlighting() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&stats=true&stats.field=popularity&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_stats");
+    assert!(body.get("facet_counts").is_none(), "got {body}");
+    assert!(body.get("highlighting").is_none(), "got {body}");
+}
+
+/// `highlighting` is keyed by unique-key value and covers only the documents
+/// the doclists actually returned, not every doc that matched `q`.
+/// `g338_hl`: `q=lazy` with `group.limit=2` matches only g1 (article) and g2
+/// (page), so `highlighting` has exactly those two keys.
+#[tokio::test]
+async fn grouping_highlighting_covers_only_rendered_doclist_docs() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=lazy&df=body&group=true&group.field=type&group.ngroups=true&group.limit=2&hl=true&hl.fl=body&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_hl");
+    let mut keys: Vec<&str> = body
+        .pointer("/highlighting")
+        .and_then(Value::as_object)
+        .expect("highlighting must be an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec!["g1", "g2"],
+        "highlighting must contain exactly the rendered doclist docs, got {body}"
+    );
+}
+
+/// A zero-match grouped request still emits the full empty `facet_counts`
+/// shape (all five sub-keys, counts 0) and the empty `stats` shape (min/max
+/// null, mean "NaN", stddev 0.0) next to an empty `grouped` block.
+/// `g338_zero`.
+#[tokio::test]
+async fn grouping_zero_matches_still_emits_full_empty_facet_and_stats_shape() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=zzznomatch&df=body&group=true&group.field=type&group.ngroups=true&facet=true&facet.field=type&facet.field=category&stats=true&stats.field=popularity&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_zero");
+    assert_eq!(
+        body.pointer("/grouped/type"),
+        Some(&json!({"matches": 0, "ngroups": 0, "groups": []})),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 0, "page", 0])),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/stats/stats_fields/popularity/min"),
+        Some(&Value::Null),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/stats/stats_fields/popularity/mean"),
+        Some(&json!("NaN")),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/stats/stats_fields/popularity/stddev"),
+        Some(&json!(0.0)),
+        "got {body}"
+    );
+}
+
+// --- section 2: group.truncate ----------------------------------------------
+
+/// `group.truncate=true` computes facets over the collapsed group set (one
+/// doc per group, the group's `group.sort`-first doc): `{g1, g2, g6}`. `type`
+/// becomes article=1/page=1; `category` becomes news=2/blog=0. The `grouped`
+/// block itself stays untouched (matches=6, ngroups=3). `g338_truncate`.
+#[tokio::test]
+async fn grouping_truncate_collapses_facets_to_one_doc_per_group() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.truncate=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_truncate");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 2, "blog", 0])),
+        "got {body}"
+    );
     assert_eq!(
         body.pointer("/grouped/type/matches")
             .and_then(Value::as_u64),
         Some(6),
-        "the grouped envelope must still render, got {body}"
+        "the grouped block's matches must stay the full match count, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/grouped/type/ngroups")
+            .and_then(Value::as_u64),
+        Some(3),
+        "the grouped block's ngroups must stay untouched by truncate, got {body}"
+    );
+}
+
+/// `group.truncate=true` also collapses `stats`: `stats.field=popularity`
+/// over `{g1, g2, g6}` (popularity 10/20/15) is count=3/min=10/max=20/sum=45/
+/// mean=15/stddev=5/sumOfSquares=725. `g338_truncate_stats`.
+#[tokio::test]
+async fn grouping_truncate_collapses_stats_too() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.truncate=true&stats=true&stats.field=popularity&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_truncate_stats");
+    let stats = body
+        .pointer("/stats/stats_fields/popularity")
+        .expect("stats.stats_fields.popularity must be present");
+    assert_eq!(stats.get("count"), Some(&json!(3)), "got {body}");
+    assert_eq!(stats.get("min"), Some(&json!(10.0)), "got {body}");
+    assert_eq!(stats.get("max"), Some(&json!(20.0)), "got {body}");
+    assert_eq!(stats.get("sum"), Some(&json!(45.0)), "got {body}");
+    assert_eq!(stats.get("mean"), Some(&json!(15.0)), "got {body}");
+    assert_eq!(stats.get("stddev"), Some(&json!(5.0)), "got {body}");
+    assert_eq!(stats.get("sumOfSquares"), Some(&json!(725.0)), "got {body}");
+}
+
+/// `group.truncate=true` also collapses `facet.query` and `facet.range`:
+/// `facet.query=category:blog` 2 -> 0 (blog is on g3/g4, neither collapsed
+/// in); `facet.range` popularity `[0:4, 25:2]` -> `[0:3, 25:0]`.
+/// `g338_truncate_qr`.
+#[tokio::test]
+async fn grouping_truncate_collapses_facet_query_and_range() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.truncate=true&facet=true&facet.query=category:blog&facet.range=popularity&f.popularity.facet.range.start=0&f.popularity.facet.range.end=50&f.popularity.facet.range.gap=25&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_truncate_qr");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_queries/category:blog"),
+        Some(&json!(0)),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_ranges/popularity/counts"),
+        Some(&json!(["0", 3, "25", 0])),
+        "got {body}"
+    );
+}
+
+/// Paging-independent: `rows=1` returns only one group in `grouped`, but the
+/// facet block is still computed over all three collapsed docs, identical to
+/// the unpaged `g338_truncate` counts. `g338_truncate_rows`.
+#[tokio::test]
+async fn grouping_truncate_facets_are_paging_independent() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.truncate=true&rows=1&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_truncate_rows");
+    assert_eq!(
+        body.pointer("/grouped/type/groups")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(1),
+        "rows=1 must still return only one group, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "the facet block must be paging-independent -- same counts as the \
+         unpaged g338_truncate fixture, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 2, "blog", 0])),
+        "got {body}"
+    );
+}
+
+/// With two `group.field` values, truncate collapses on the FIRST
+/// (`type`'s 3-doc collapse), not the second (`popularity`'s 6 singletons,
+/// which would leave every facet count unchanged). `g338_truncate_multi`.
+#[tokio::test]
+async fn grouping_truncate_collapses_on_the_first_group_field() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.field=popularity&group.ngroups=true&group.truncate=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_truncate_multi");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "truncate must collapse on the first group.field (type), not the \
+         second (popularity, which would leave counts at article=3/page=2), \
+         got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 2, "blog", 0])),
+        "got {body}"
+    );
+    // Both grouped.<field> blocks still render, untouched.
+    assert_eq!(
+        body.pointer("/grouped/popularity/ngroups")
+            .and_then(Value::as_u64),
+        Some(6),
+        "got {body}"
+    );
+}
+
+/// `group.sort=id desc` moves the collapsed set from `{g1, g2, g6}` to
+/// `{g4, g5, g6}` (each group's LAST doc by id, since group.sort reverses
+/// within-group order): `category` becomes blog=1/news=0.
+/// `g338_truncate_groupsort`.
+#[tokio::test]
+async fn grouping_truncate_collapse_follows_group_sort_not_main_sort() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.truncate=true&group.sort=id+desc&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_truncate_groupsort");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["blog", 1, "news", 0])),
+        "group.sort, not the main sort, must decide which doc each group \
+         collapses to, got {body}"
+    );
+    let groups = groups_of(&body, "type");
+    assert_eq!(
+        groups,
+        vec![
+            (json!("article"), vec!["g4".into()], None),
+            (json!("page"), vec!["g5".into()], None),
+            (json!(null), vec!["g6".into()], None),
+        ],
+        "got {body}"
+    );
+}
+
+/// `group.truncate=false` is byte-identical to omitting `group.truncate`
+/// entirely: facet counts stay at the full, uncollapsed article=3/page=2,
+/// blog=2/news=2. `g338_truncate_false`.
+#[tokio::test]
+async fn grouping_truncate_false_is_identical_to_omitted() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.truncate=false&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_truncate_false");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 3, "page", 2])),
+        "group.truncate=false must behave exactly as if omitted, got {body}"
+    );
+}
+
+// --- section 3: group.facet --------------------------------------------------
+
+/// `group.facet=true` counts distinct matching GROUPS, not documents, using
+/// the first `group.field`'s grouping. `category` blog is on g3/g4, both
+/// `article`, so blog becomes 1 (was 2 documents); news is on g1(article)/
+/// g2(page), two distinct groups, so news stays 2. Faceting on the group
+/// field itself gives 1 per value: `type` article=1/page=1. `g338_groupfacet`.
+#[tokio::test]
+async fn grouping_group_facet_counts_distinct_groups_not_documents() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.facet=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_groupfacet");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 2, "blog", 1])),
+        "blog (g3,g4, both article) must count as 1 distinct group, not 2 \
+         documents, got {body}"
+    );
+}
+
+/// `group.facet=true` leaves `stats` untouched -- it still reports the full,
+/// ungrouped figures (count=6/min=5/max=40/mean=20/etc), matching plain
+/// `stats=true` (`g338_stats`). `g338_groupfacet_stats`.
+#[tokio::test]
+async fn grouping_group_facet_leaves_stats_untouched() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.facet=true&stats=true&stats.field=popularity&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_groupfacet_stats");
+    let stats = body
+        .pointer("/stats/stats_fields/popularity")
+        .expect("stats.stats_fields.popularity must be present");
+    assert_eq!(stats.get("count"), Some(&json!(6)), "got {body}");
+    assert_eq!(stats.get("min"), Some(&json!(5.0)), "got {body}");
+    assert_eq!(stats.get("max"), Some(&json!(40.0)), "got {body}");
+    assert_eq!(stats.get("mean"), Some(&json!(20.0)), "got {body}");
+}
+
+/// `group.facet=true` also regroups `facet.query`: `category:blog` matches
+/// documents g3 and g4 (both `article`), so the plain document count is 2
+/// (`g338_facet_blog`) but the group-facet count is 1 distinct group
+/// (`g338_groupfacet_blog`).
+#[tokio::test]
+async fn grouping_group_facet_regroups_facet_query() {
+    let (app, _dir) = grouping_app().await;
+
+    let (status, plain) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&facet=true&facet.query=category:blog&facet.range=popularity&f.popularity.facet.range.start=0&f.popularity.facet.range.end=50&f.popularity.facet.range.gap=25&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {plain}");
+    assert_matches_fixture(plain.clone(), "g338_facet_blog");
+    assert_eq!(
+        plain.pointer("/facet_counts/facet_queries/category:blog"),
+        Some(&json!(2)),
+        "got {plain}"
+    );
+
+    let (status, grouped) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.facet=true&facet=true&facet.query=category:blog&facet.range=popularity&f.popularity.facet.range.start=0&f.popularity.facet.range.end=50&f.popularity.facet.range.gap=25&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {grouped}");
+    assert_matches_fixture(grouped.clone(), "g338_groupfacet_blog");
+    assert_eq!(
+        grouped.pointer("/facet_counts/facet_queries/category:blog"),
+        Some(&json!(1)),
+        "group.facet must regroup facet.query counts to distinct groups (1), \
+         not documents (2), got {grouped}"
+    );
+}
+
+/// `group.facet=true` also regroups `facet.range`: the `0-25` popularity
+/// bucket holds documents g1/g2/g4/g6 (4 documents, `g338_facet_blog`), but
+/// only 3 distinct groups (article via g1 or g4, page via g2, null via g6),
+/// so the group-faceted count is 3 (`g338_groupfacet_blog`); the `25-50`
+/// bucket (g3/g5, article+page, 2 distinct groups) stays 2 either way.
+#[tokio::test]
+async fn grouping_group_facet_regroups_facet_range() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.facet=true&facet=true&facet.query=category:blog&facet.range=popularity&f.popularity.facet.range.start=0&f.popularity.facet.range.end=50&f.popularity.facet.range.gap=25&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_groupfacet_blog");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_ranges/popularity/counts"),
+        Some(&json!(["0", 3, "25", 2])),
+        "the 0-25 bucket has 4 documents but only 3 distinct groups, got {body}"
+    );
+}
+
+/// `group.facet=true` is paging-independent: `rows=1` returns only one group
+/// in `grouped`, but the group-facet block is still computed over all groups.
+/// `g338_groupfacet_rows`.
+#[tokio::test]
+async fn grouping_group_facet_is_paging_independent() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.facet=true&rows=1&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_groupfacet_rows");
+    assert_eq!(
+        body.pointer("/grouped/type/groups")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(1),
+        "rows=1 must still return only one group, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 2, "blog", 1])),
+        "the group-facet block must be paging-independent, got {body}"
+    );
+}
+
+/// With two `group.field` values, `group.facet=true` counts come from the
+/// FIRST field (`type`): identical to the single-field `g338_groupfacet`
+/// counts, not derived from `popularity`'s 6 singleton groups (which would
+/// leave every count at the plain document count).
+/// `g338_groupfacet_multi`.
+#[tokio::test]
+async fn grouping_group_facet_uses_the_first_group_field() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.field=popularity&group.ngroups=true&group.facet=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_groupfacet_multi");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 2, "blog", 1])),
+        "group.facet must use the first group.field (type), not the second \
+         (popularity, whose singleton groups would leave blog at 2), got {body}"
+    );
+}
+
+/// Combined with `group.truncate=true`: truncation applies first (collapsing
+/// to `{g1, g2, g6}`), then group counting runs over that truncated set --
+/// every truncated doc is its own group, so the counts equal the
+/// truncate-only counts (`g338_truncate`'s facet block). This is the general-
+/// implementation check the spec calls for: no special-casing the combined
+/// flags. `g338_groupfacet_truncate`.
+#[tokio::test]
+async fn grouping_group_facet_combined_with_truncate_matches_truncate_only_counts() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.facet=true&group.truncate=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_groupfacet_truncate");
+    // The spec's explicit cross-check: this must equal g338_truncate's
+    // facet_counts block byte-for-byte, proving the combination is derived
+    // from a general implementation rather than special-cased.
+    let truncate_only = fixture("g338_truncate");
+    assert_eq!(
+        body.get("facet_counts"),
+        truncate_only.get("facet_counts"),
+        "group.facet + group.truncate must equal group.truncate alone -- every \
+         truncated doc is its own group, got {body}"
+    );
+}
+
+// --- section 4: {!ex=...} multi-select faceting + group.facet (#338, ------
+// finding 164) --------------------------------------------------------------
+//
+// `fq={!tag=t}category:news` filters the grouped hit list down to {g1, g2}
+// (article, page), but `facet.field={!ex=t}category` / `facet.query=
+// {!ex=t}category:blog` are excluded from that filter and must count against
+// the FULL, unfiltered `*:*` set -- documents g3/g4 (`category:blog`, both
+// `type:article`) never appear in the grouped result at all. The unexcluded
+// `facet.field=type` stays on the filtered set throughout.
+
+/// Baseline document counts (no `group.facet`): the excluded
+/// `facet.field=category` is `blog=2, news=2` (full corpus), the excluded
+/// `facet.query=category:blog` is 2, and the unexcluded `facet.field=type`
+/// stays on the filtered {g1, g2} set at `article=1, page=1`. `g338_ex_facet`.
+#[tokio::test]
+async fn grouping_excluded_facet_counts_documents_against_the_unfiltered_set() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true\
+         &fq=%7B%21tag%3Dt%7Dcategory:news\
+         &facet=true&facet.field=%7B%21ex%3Dt%7Dcategory&facet.field=type\
+         &facet.query=%7B%21ex%3Dt%7Dcategory:blog&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_ex_facet");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["blog", 2, "news", 2])),
+        "the excluded facet.field must count the full, unfiltered corpus, \
+         got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "the unexcluded facet.field must stay on the filtered {{g1,g2}} set, \
+         got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_queries/{!ex=t}category:blog"),
+        Some(&json!(2)),
+        "the excluded facet.query must count the full, unfiltered corpus, \
+         got {body}"
+    );
+    assert_eq!(
+        body.pointer("/grouped/type/matches")
+            .and_then(Value::as_u64),
+        Some(2),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/grouped/type/ngroups")
+            .and_then(Value::as_u64),
+        Some(2),
+        "got {body}"
+    );
+}
+
+/// `group.facet=true` on top: the excluded `category` facet must count
+/// GROUPS over the unfiltered set -- g3/g4 (`blog`) are both `type:article`,
+/// so `blog` becomes 1 distinct group even though NEITHER document is in the
+/// grouped/filtered result at all. `news` stays 2 (g1/article, g2/page, two
+/// distinct groups). The excluded `facet.query=category:blog` follows the
+/// same regrouping, 2 -> 1. The unexcluded `facet.field=type` is unaffected
+/// (`article=1, page=1`), because it is on the group field itself.
+/// `g338_ex_groupfacet`.
+///
+/// This is the defect finding 164 names: `GroupFacet::distinct_groups` looks
+/// each excluded-facet document up in a `doc_group` map built only from
+/// documents the grouping pass actually bucketed (the filtered set), so g3/g4
+/// are silently absent from the map and dropped from the count instead of
+/// contributing their `type` group.
+#[tokio::test]
+async fn grouping_excluded_facet_group_counts_span_the_unfiltered_set() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true\
+         &group.facet=true\
+         &fq=%7B%21tag%3Dt%7Dcategory:news\
+         &facet=true&facet.field=%7B%21ex%3Dt%7Dcategory&facet.field=type\
+         &facet.query=%7B%21ex%3Dt%7Dcategory:blog&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_ex_groupfacet");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 2, "blog", 1])),
+        "blog (g3,g4, both article, filtered OUT of the grouped result \
+         entirely) must still count as 1 distinct group under the excluded \
+         facet, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "the unexcluded facet.field=type must stay on the filtered set, \
+         got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_queries/{!ex=t}category:blog"),
+        Some(&json!(1)),
+        "the excluded facet.query must also regroup to 1 distinct group over \
+         the unfiltered set, got {body}"
+    );
+}
+
+/// `group.truncate=true` (no `group.facet`) with an excluded facet: the
+/// grouped/filtered set collapses to {g1, g2} (unchanged, since both were
+/// already singleton groups), and the excluded `category` facet counts the
+/// collapsed set as `news=2, blog=0` -- g3/g4 were never in the filtered set
+/// to begin with, truncate or not. `g338_ex_truncate`.
+#[tokio::test]
+async fn grouping_excluded_facet_with_truncate_collapses_the_filtered_set() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true\
+         &group.truncate=true\
+         &fq=%7B%21tag%3Dt%7Dcategory:news\
+         &facet=true&facet.field=%7B%21ex%3Dt%7Dcategory&facet.field=type\
+         &facet.query=%7B%21ex%3Dt%7Dcategory:blog&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_ex_truncate");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 2, "blog", 0])),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_queries/{!ex=t}category:blog"),
+        Some(&json!(0)),
+        "got {body}"
+    );
+}
+
+/// `group.truncate=true` AND `group.facet=true` together with an excluded
+/// facet: identical to truncate alone -- every collapsed document is its own
+/// group, so group-counting on top of the truncated set changes nothing.
+/// `g338_ex_both`.
+#[tokio::test]
+async fn grouping_excluded_facet_with_truncate_and_group_facet_matches_truncate_only() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true\
+         &group.truncate=true&group.facet=true\
+         &fq=%7B%21tag%3Dt%7Dcategory:news\
+         &facet=true&facet.field=%7B%21ex%3Dt%7Dcategory&facet.field=type\
+         &facet.query=%7B%21ex%3Dt%7Dcategory:blog&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_ex_both");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 2, "blog", 0])),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_queries/{!ex=t}category:blog"),
+        Some(&json!(0)),
+        "got {body}"
+    );
+}
+
+// --- section 5: stale doc addresses across a multi-segment index (#338, ----
+// defect 2) -------------------------------------------------------------------
+//
+// `DocSetQuery` (used for `group.truncate`) and `GroupFacet::doc_group` key
+// documents by raw `DocAddress`/`(segment_ord, doc_id)` pairs. Every g338
+// fixture above is indexed in one commit, so the corpus lives in exactly one
+// segment and a stale or unguarded segment ordinal can never surface. This
+// section indexes the SAME grouping corpus across multiple commits with
+// `merge_policy = "no_merge"`, so the index is genuinely multi-segment, and
+// checks that `group.truncate`/`group.facet` still produce the single-segment
+// fixtures' numbers (`g338_truncate`, `g338_groupfacet`) -- segment layout
+// must not change the answer.
+
+/// Builds an app on `GROUPING_SCHEMA_TOML` with `merge_policy = "no_merge"`,
+/// indexing `grouping_corpus()` split across three separate `post_docs` calls
+/// (three commits) so tantivy cannot coalesce them into one segment.
+async fn multi_segment_grouping_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let schema_path = dir.path().join("schema.toml");
+    std::fs::write(&schema_path, GROUPING_SCHEMA_TOML).expect("write schema.toml");
+    let config_path = dir.path().join("wayfinder.toml");
+    std::fs::write(&config_path, "[indexing]\nmerge_policy = \"no_merge\"\n")
+        .expect("write wayfinder.toml");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    let app =
+        wayfinder::app_with_config(&schema_path, &data_dir, &config_path).expect("app must build");
+
+    let corpus = grouping_corpus();
+    let docs = corpus.as_array().expect("grouping_corpus is an array");
+    for doc in docs {
+        let (status, body) = post_docs(&app, &json!([doc])).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "indexing one doc of the grouping corpus must succeed, got {body}"
+        );
+    }
+    (app, dir)
+}
+
+/// Self-checking multi-segment precondition: `admin/luke`'s `index.segmentCount`
+/// must be strictly greater than 1, or the test below would pass vacuously on
+/// a single segment and catch nothing.
+#[tokio::test]
+async fn multi_segment_grouping_app_is_genuinely_multi_segment() {
+    let (app, _dir) = multi_segment_grouping_app().await;
+    let (status, body) = get(&app, "admin/luke?wt=json&json.nl=flat").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET admin/luke must succeed: {body}"
+    );
+    let segment_count = body
+        .pointer("/index/segmentCount")
+        .and_then(Value::as_u64)
+        .expect("index.segmentCount must be present");
+    assert!(
+        segment_count > 1,
+        "six docs committed one at a time under merge_policy = \"no_merge\" \
+         must leave more than one searchable segment, or this precondition \
+         is not testing what it claims to; got segmentCount={segment_count}"
+    );
+}
+
+/// `group.truncate=true` over the multi-segment index must produce exactly
+/// the same facet numbers as the single-segment `g338_truncate` fixture:
+/// `type` article=1/page=1, `category` news=2/blog=0.
+#[tokio::test]
+async fn multi_segment_group_truncate_matches_the_single_segment_fixture() {
+    let (app, _dir) = multi_segment_grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.truncate=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_truncate");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "a multi-segment index must not change group.truncate's facet \
+         counts, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 2, "blog", 0])),
+        "got {body}"
+    );
+}
+
+/// `group.facet=true` over the multi-segment index must produce exactly the
+/// same group counts as the single-segment `g338_groupfacet` fixture:
+/// `type` article=1/page=1, `category` news=2/blog=1.
+#[tokio::test]
+async fn multi_segment_group_facet_matches_the_single_segment_fixture() {
+    let (app, _dir) = multi_segment_grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.facet=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338_groupfacet");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "a multi-segment index must not change group.facet's group counts, \
+         got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 2, "blog", 1])),
+        "blog (g3,g4, both article) must still count as 1 distinct group \
+         across segment boundaries, got {body}"
+    );
+}
+
+// --- required extras: facet flags don't turn faceting on; hl union ---------
+
+/// `group.facet=true` and `group.truncate=true` do not themselves turn
+/// faceting on: with `facet=false` (the default), there is no `facet_counts`
+/// key at all. No g338 fixture captures this combination (Solr was never
+/// asked for `facet.field` here) -- this is the spec's explicit "the flags do
+/// not turn faceting on" requirement, checked structurally against the
+/// response's own top-level keys.
+#[tokio::test]
+async fn grouping_facet_and_truncate_flags_do_not_themselves_enable_faceting() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.facet=true&group.truncate=true&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert!(
+        body.get("facet_counts").is_none(),
+        "group.facet/group.truncate must not enable facet_counts on their \
+         own -- facet=true was never sent, got {body}"
+    );
+    // Sanity: the grouped envelope still renders normally.
+    assert_eq!(
+        body.pointer("/grouped/type/matches")
+            .and_then(Value::as_u64),
+        Some(6),
+        "got {body}"
+    );
+}
+
+/// `hl=true` with `group.limit=2`: when a group's doclist renders two docs,
+/// `highlighting` covers both. No g338 fixture captures a group with two
+/// query-matching docs and `hl=true` together, so this checks the structural
+/// invariant the spec names directly: `highlighting`'s key set is exactly the
+/// union of every doc id actually rendered across all doclists. `q=lazy quick`
+/// (OR) matches g1/g3 (article) and g2 (page); with `group.limit=2` the
+/// article doclist renders both g1 and g3.
+#[tokio::test]
+async fn grouping_hl_with_group_limit_two_covers_both_docs_of_a_group() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=lazy+quick&df=body&group=true&group.field=type&group.ngroups=true&group.limit=2&hl=true&hl.fl=body&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    let article_docs = groups_of(&body, "type")
+        .into_iter()
+        .find(|(gv, _, _)| gv == &json!("article"))
+        .map(|(_, docs, _)| docs)
+        .unwrap_or_default();
+    assert_eq!(
+        article_docs.len(),
+        2,
+        "the article group must render both matching docs (g1, g3) under \
+         group.limit=2 for this test to be meaningful, got {body}"
+    );
+    let mut rendered_ids: Vec<String> = groups_of(&body, "type")
+        .into_iter()
+        .flat_map(|(_, docs, _)| docs)
+        .collect();
+    rendered_ids.sort();
+    let mut hl_keys: Vec<String> = body
+        .pointer("/highlighting")
+        .and_then(Value::as_object)
+        .expect("highlighting must be an object")
+        .keys()
+        .cloned()
+        .collect();
+    hl_keys.sort();
+    assert_eq!(
+        hl_keys, rendered_ids,
+        "highlighting's key set must be exactly the union of every rendered \
+         doclist's docs, including both docs of the two-doc article group, \
+         got {body}"
+    );
+}
+
+/// Multiple `group.field` blocks with `hl=true`: `highlighting` is the union
+/// of every rendered doclist across ALL `group.field` blocks, not just the
+/// first. No g338 fixture captures multiple `group.field` values with
+/// `hl=true` together, so this checks the same structural invariant as above
+/// across two fields. `q=lazy quick` matches g1/g2/g3; `group.field=type`
+/// (default group.limit=1) renders one doc per group (2 of the 3 matches);
+/// `group.field=popularity` gives every matched doc its own singleton group,
+/// so it renders all 3 -- the union across both fields must be all 3, a
+/// strict superset of the `type` field alone.
+#[tokio::test]
+async fn grouping_hl_unions_doclists_across_multiple_group_fields() {
+    let (app, _dir) = grouping_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=lazy+quick&df=body&group=true&group.field=type&group.field=popularity&group.ngroups=true&hl=true&hl.fl=body&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    let type_ids: Vec<String> = groups_of(&body, "type")
+        .into_iter()
+        .flat_map(|(_, docs, _)| docs)
+        .collect();
+    assert!(
+        type_ids.len() < 3,
+        "the type field alone (default group.limit=1) must render fewer than \
+         all 3 matches for this to be a meaningful union check, got {body}"
+    );
+    let mut rendered_ids: Vec<String> = type_ids;
+    rendered_ids.extend(
+        groups_of(&body, "popularity")
+            .into_iter()
+            .flat_map(|(_, docs, _)| docs),
+    );
+    rendered_ids.sort();
+    rendered_ids.dedup();
+    assert_eq!(
+        rendered_ids,
+        vec!["g1".to_string(), "g2".to_string(), "g3".to_string()],
+        "the union across both group.field blocks must be all 3 matched docs, \
+         got {body}"
+    );
+    let mut hl_keys: Vec<String> = body
+        .pointer("/highlighting")
+        .and_then(Value::as_object)
+        .expect("highlighting must be an object")
+        .keys()
+        .cloned()
+        .collect();
+    hl_keys.sort();
+    assert_eq!(
+        hl_keys, rendered_ids,
+        "highlighting must be the union of doclists across every group.field \
+         block, not just the first, got {body}"
+    );
+}
+
+// --- group.facet over a null group with facet values (#338, finding 163) --
+
+/// Same schema shape as `GROUPING_SCHEMA_TOML` but named `content` for the
+/// same reason (`common::get`/`post_docs` address `CORE` unchanged). A
+/// separate corpus because `grouping_corpus()`'s only null-group document
+/// (g6) carries no facetable value at all -- the one shape `group.facet`'s
+/// missing-value-group correction needs a document that *does* have a
+/// facetable value but is missing the group field.
+const G338NULL_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "type"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "category"
+type = "string"
+stored = true
+fast = true
+multi_valued = true
+
+[[fields]]
+name = "popularity"
+type = "int"
+stored = true
+fast = true
+"#;
+
+/// The exact 5-doc corpus `solr-ref/capture.sh`'s `g338n_` block indexes:
+/// `type` article on h1/h2, page on h3, missing on h4/h5 (the null group),
+/// while `category=news` sits on h1, h3, h4 and h5.
+fn g338null_corpus() -> Value {
+    json!([
+        {"id":"h1","type":"article","category":["news"],"body":"first","popularity":10},
+        {"id":"h2","type":"article","category":["blog"],"body":"second","popularity":20},
+        {"id":"h3","type":"page","category":["news"],"body":"third","popularity":30},
+        {"id":"h4","category":["news"],"body":"fourth","popularity":40},
+        {"id":"h5","category":["news"],"body":"fifth","popularity":50}
+    ])
+}
+
+/// Builds an app on `G338NULL_SCHEMA_TOML` and indexes `g338null_corpus()`.
+async fn g338null_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = app_with_schema(dir.path(), G338NULL_SCHEMA_TOML).expect("app must build");
+    let (status, body) = post_docs(&app, &g338null_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the g338null corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
+/// Baseline document counts: `type` article=2/page=1 (h4/h5 have no `type`
+/// at all, so they contribute nothing to the `type` facet), `category`
+/// news=4/blog=1. `g338n_facet`.
+#[tokio::test]
+async fn g338null_facet_counts_documents() {
+    let (app, _dir) = g338null_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338n_facet");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 4, "blog", 1])),
+        "got {body}"
+    );
+}
+
+/// The mutation-kill case: under `group.facet=true`, `category` news must go
+/// 4 documents -> 3 groups (article via h1, page via h3, and the null group
+/// via h4/h5 together) -- reachable only by adding the missing-value group
+/// back, since a `group.field=type` terms sub-aggregation cannot see h4/h5 (no
+/// group term). `blog` stays 1 -> 1. `type`'s own facet is unaffected by the
+/// correction (h4/h5 have no `type` value to facet on at all):
+/// article=1/page=1. `g338n_groupfacet`.
+#[tokio::test]
+async fn g338null_group_facet_counts_the_null_group_as_one_group() {
+    let (app, _dir) = g338null_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.facet=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338n_groupfacet");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 3, "blog", 1])),
+        "news is on h1 (article), h3 (page), and h4+h5 (the null group) -- \
+         group.facet must count that as 3 distinct groups, not 4 documents \
+         and not 2 (which is what a terms sub-aggregation sees on its own, \
+         since h4/h5 produce no group term), got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "got {body}"
+    );
+}
+
+/// `facet.missing=true` baseline: the `type` facet's `null` bucket is 2
+/// documents (h4, h5); `category`'s `null` bucket is 0 (every document has a
+/// `category`). `g338n_facet_missing`.
+#[tokio::test]
+async fn g338null_facet_missing_counts_documents() {
+    let (app, _dir) = g338null_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&facet=true&facet.field=type&facet.field=category&facet.missing=true&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338n_facet_missing");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 2, "page", 1, null, 2])),
+        "got {body}"
+    );
+}
+
+/// `facet.missing=true` combined with `group.facet=true`: the `type` facet's
+/// `null` bucket is 1 group (h4 and h5 are both the same null group), not 2
+/// documents. `category`'s `null` bucket stays 0 either way -- every document
+/// has a `category`, so the correction has nothing to add there.
+/// `g338n_groupfacet_missing`.
+#[tokio::test]
+async fn g338null_group_facet_missing_counts_the_null_bucket_as_one_group() {
+    let (app, _dir) = g338null_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.facet=true&facet=true&facet.field=type&facet.field=category&facet.missing=true&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338n_groupfacet_missing");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1, null, 1])),
+        "the type facet's null bucket covers h4/h5, which are one group (the \
+         null group itself), not two documents, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 3, "blog", 1, null, 0])),
+        "got {body}"
+    );
+}
+
+/// `group.truncate=true` on this corpus (no `group.facet`): the collapsed set
+/// under `sort=id asc` is {h1, h3, h4} (first doc per `type` group), so
+/// `category` news = 3 (h1, h3, h4) and blog = 0 (h2 is truncated away).
+/// `type`'s own facet over the truncated set is article=1/page=1 (h4 has no
+/// `type`). `g338n_truncate`.
+#[tokio::test]
+async fn g338null_truncate_collapses_facets_to_the_first_doc_per_group() {
+    let (app, _dir) = g338null_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.truncate=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338n_truncate");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 3, "blog", 0])),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "got {body}"
     );
 }

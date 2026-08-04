@@ -1,0 +1,60 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2,
+    "params":{
+      "facet.field":["{!ex=t}category","type"],
+      "fl":"id",
+      "fq":"{!tag=t}category:news",
+      "sort":"id asc",
+      "group.ngroups":"true",
+      "facet.query":"{!ex=t}category:blog",
+      "q":"*:*",
+      "group.truncate":"true",
+      "group.facet":"true",
+      "facet":"true",
+      "wt":"json",
+      "group.field":"type",
+      "group":"true"
+    }
+  },
+  "grouped":{
+    "type":{
+      "matches":2,
+      "ngroups":2,
+      "groups":[{
+        "groupValue":"article",
+        "doclist":{
+          "numFound":1,
+          "start":0,
+          "numFoundExact":true,
+          "docs":[{
+            "id":"g1"
+          }]
+        }
+      },{
+        "groupValue":"page",
+        "doclist":{
+          "numFound":1,
+          "start":0,
+          "numFoundExact":true,
+          "docs":[{
+            "id":"g2"
+          }]
+        }
+      }]
+    }
+  },
+  "facet_counts":{
+    "facet_queries":{
+      "{!ex=t}category:blog":0
+    },
+    "facet_fields":{
+      "category":["news",2,"blog",0],
+      "type":["article",1,"page",1]
+    },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  }
+}

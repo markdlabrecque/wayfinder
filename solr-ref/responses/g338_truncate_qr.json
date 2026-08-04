@@ -1,0 +1,75 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":3,
+    "params":{
+      "facet.range":"popularity",
+      "fl":"id",
+      "sort":"id asc",
+      "group.ngroups":"true",
+      "f.popularity.facet.range.gap":"25",
+      "facet.query":"category:blog",
+      "q":"*:*",
+      "f.popularity.facet.range.end":"50",
+      "group.truncate":"true",
+      "f.popularity.facet.range.start":"0",
+      "facet":"true",
+      "wt":"json",
+      "group.field":"type",
+      "group":"true"
+    }
+  },
+  "grouped":{
+    "type":{
+      "matches":6,
+      "ngroups":3,
+      "groups":[{
+        "groupValue":"article",
+        "doclist":{
+          "numFound":3,
+          "start":0,
+          "numFoundExact":true,
+          "docs":[{
+            "id":"g1"
+          }]
+        }
+      },{
+        "groupValue":"page",
+        "doclist":{
+          "numFound":2,
+          "start":0,
+          "numFoundExact":true,
+          "docs":[{
+            "id":"g2"
+          }]
+        }
+      },{
+        "groupValue":null,
+        "doclist":{
+          "numFound":1,
+          "start":0,
+          "numFoundExact":true,
+          "docs":[{
+            "id":"g6"
+          }]
+        }
+      }]
+    }
+  },
+  "facet_counts":{
+    "facet_queries":{
+      "category:blog":0
+    },
+    "facet_fields":{ },
+    "facet_ranges":{
+      "popularity":{
+        "counts":["0",3,"25",0],
+        "gap":25,
+        "start":0,
+        "end":50
+      }
+    },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  }
+}

@@ -249,14 +249,9 @@ const SELECT_PARAMS: &[&str] = &[
     "function",
     // Result grouping (issue #290, finding 130): `setGrouping()` sends
     // exactly these six `group.*` params plus `group` (from Solarium's
-    // component). `group.truncate` and `group.facet` are accepted for
-    // strict_params parity even though their facet-interaction semantics
-    // (computing facets over collapsed groups) are not yet fixture-backed —
-    // their defaults (false) leave Wayfinder's existing facet behaviour
-    // correct, so accepting them changes nothing until a request sets them
-    // true. `group.format` and `group.main` are deliberately absent: they are
-    // never sent (finding 130) and must 400 under strict_params rather than be
-    // silently accepted as an unimplemented param.
+    // component). `group.format` and `group.main` are deliberately absent:
+    // they are never sent (finding 130) and must 400 under strict_params
+    // rather than be silently accepted as an unimplemented param.
     "group",
     "group.field",
     "group.ngroups",
@@ -336,7 +331,12 @@ const SELECT_PARAMS: &[&str] = &[
 /// `.method`, `.range.*`) is unimplemented here and must keep 400ing under
 /// `strict_params` — pinned by
 /// `strict_params_still_rejects_an_unrelated_f_dot_param`
-/// (`tests/facet_field_missing_override.rs`). Allowlisting a per-field param
+/// (`tests/facet_field_missing_override.rs`). `.range.start`/`.end`/`.gap`
+/// joined the list with issue #338, in the same change that made
+/// `facet::required` read the addressed form: the g338 range captures
+/// (`g338_facet_blog`, `g338_truncate_qr`, `g338_groupfacet_blog`) send only
+/// `f.popularity.facet.range.*` and get real buckets back, so the addressed
+/// form has to be honoured, not merely tolerated. Allowlisting a per-field param
 /// whose value is then ignored converts a loud 400 into a silently wrong
 /// answer: a client asking for `f.category.facet.prefix=x` would get the whole
 /// bucket list and no indication the filter was dropped. Upgrade path:
@@ -349,6 +349,9 @@ const PER_FIELD_PARAMS: &[&str] = &[
     "facet.limit",
     "facet.mincount",
     "facet.sort",
+    "facet.range.start",
+    "facet.range.end",
+    "facet.range.gap",
 ];
 /// `commitWithin` / `overwrite` / `softCommit` landed with #9. `omitHeader`
 /// landed with #143 — `search_api_solr` sends `omitHeader=false` on every
@@ -3277,19 +3280,23 @@ async fn select(
     // collector buckets every match by the group field's fast value (a
     // single-valued, non-text field — validated inside `grouping::grouping`,
     // which 400s on undefined / non-fast / multiValued the way Solr does,
-    // finding 130). Branching here, before the ungrouped top-N search, means a
-    // grouped request never materialises the hits it would then discard.
+    // finding 130). Running here, before the ungrouped top-N search, means a
+    // grouped request never materialises the hits it would then discard: the
+    // whole ungrouped middle section below is skipped, and everything after it
+    // (`facet_counts`, `stats`, `highlighting`, `spellcheck`, the header) is
+    // shared — a grouped response carries those blocks exactly as an ungrouped
+    // one does (issue #338, findings 160/161/162).
     //
     // `fl`/`wants_score` are derived the same way the ungrouped path derives
-    // them below; duplicated locally so this early branch is self-contained
-    // and leaves that path byte-identical.
+    // them below; duplicated locally so this call is self-contained and leaves
+    // that path byte-identical.
     let fl_group: Option<Vec<String>> = params
         .get("fl")
         .map(|fl| fl.split(',').map(|s| s.trim().to_string()).collect());
     let wants_score_group = fl_group
         .as_deref()
         .is_some_and(|fl| fl.iter().any(|f| f == "score"));
-    if let Some(grouped) = grouping::grouping(
+    let grouped = grouping::grouping(
         &state.index,
         &params,
         parsed.as_ref().map(|(q, fqs)| (q.as_ref(), fqs.as_slice())),
@@ -3298,25 +3305,7 @@ async fn select(
         start,
         fl_group.as_deref(),
         wants_score_group,
-    )? {
-        // A grouped response keeps `responseHeader` (gated by `omitHeader`)
-        // and replaces `response` with `grouped` — no `facet_counts`/
-        // `stats`/`highlighting` block, matching the fixture shape (none of
-        // the `group_*` fixtures combine grouping with another component).
-        let mut response_header = Map::new();
-        response_header.insert("status".to_string(), json!(0));
-        response_header.insert("QTime".to_string(), json!(0));
-        response_header.insert("params".to_string(), json!(params.echo()));
-        let body = if params.omit_header() {
-            json!({ "grouped": grouped })
-        } else {
-            json!({
-                "responseHeader": response_header,
-                "grouped": grouped,
-            })
-        };
-        return Ok(axum::Json(body).into_response());
-    }
+    )?;
 
     // Fused faceting (issue #246): the `facet.field` terms aggregation runs
     // over exactly the doc set the hit list iterates (`q` AND every `fq`), so
@@ -3330,165 +3319,177 @@ async fn select(
     // `PreQueryFacetError` treatment and whether the envelope carries a
     // `response` block all stay bit-identical. Double validation costs nothing
     // on a request that is already failing.
-    let mut facet_field_plan = if facet_requested {
-        facet::plan_facet_fields(&state.index, &params)
-            .ok()
-            .filter(|plan| !plan.fields.is_empty())
-    } else {
-        None
-    };
-    // #295: an excluded facet.field (`{!ex=...}`) counts against a reduced
-    // filter set, which the fused aggregation (over the full q+fq set) cannot
-    // produce. Drop the plan so the dispatch below takes the unfused path,
-    // which builds a per-facet base. Multi-select facet requests are rare and
-    // not the hot path, so forgoing fusing for them is a deliberate
-    // simplification (see `FacetFieldsPlan::exclusion_active`).
-    if facet_field_plan
-        .as_ref()
-        .is_some_and(|plan| plan.exclusion_active)
-    {
-        facet_field_plan = None;
-    }
-
-    // Bounded search (issue #242): only the first `start + rows` hits are
-    // materialised; `num_found` and `max_score` still cover every match.
+    let mut facet_field_plan: Option<facet::FacetFieldsPlan> = None;
     let mut facet_field_aggs = None;
-    let outcome = match &parsed {
-        None => crate::collector::TopOutcome {
-            num_found: 0,
-            max_score: None,
-            top: Vec::new(),
-        },
-        Some((query, filter_queries)) => {
-            let unfused = || {
-                state
-                    .index
-                    .search_top(
-                        query.as_ref(),
-                        filter_queries,
-                        &sort,
-                        start.saturating_add(rows),
-                    )
-                    .map_err(|e| {
-                        WfError::internal("wayfinder::SearchError", e.to_string())
-                            .with_params(&params)
-                    })
+    // A grouped request has no ungrouped hit list and no `response` block at
+    // all: `grouped` stands where `response` would, and `highlighting` covers
+    // the documents the doclists rendered instead of `response.docs` (issue
+    // #338). Skipping this whole section is what keeps the property that a
+    // grouped request never materialises the hits it would then discard.
+    let (response, page) = match &grouped {
+        Some(outcome) => (None, outcome.rendered.clone()),
+        None => {
+            facet_field_plan = if facet_requested {
+                facet::plan_facet_fields(&state.index, &params)
+                    .ok()
+                    .filter(|plan| !plan.fields.is_empty())
+            } else {
+                None
             };
-            // Attempted, not borrowed-through, so the plan can be dropped
-            // below without fighting the borrow checker.
-            let attempt = facet_field_plan.as_ref().map(|plan| {
-                state.index.search_top_with_aggs(
-                    query.as_ref(),
-                    filter_queries,
-                    &sort,
-                    start.saturating_add(rows),
-                    plan.aggregations.clone(),
-                )
-            });
-            match attempt {
-                Some(Ok((outcome, aggs))) => {
-                    facet_field_aggs = Some(aggs);
-                    outcome
-                }
-                // An aggregation-class refusal (bucket limit, memory limit,
-                // a malformed aggregation) is exactly the error the unfused
-                // path raises out of `facet_counts` as a 400
-                // `wayfinder::FacetError` with the `response` block attached
-                // -- not the 500 `wayfinder::SearchError` it would become
-                // here. Un-fuse and let that path answer it, so the wire
-                // output stays bit-identical whichever way the request went.
-                Some(Err(e)) if crate::core_index::is_aggregation_error(&e) => {
-                    facet_field_plan = None;
-                    unfused()?
-                }
-                Some(Err(e)) => {
-                    return Err(WfError::internal("wayfinder::SearchError", e.to_string())
-                        .with_params(&params));
-                }
-                None => unfused()?,
+            // #295: an excluded facet.field (`{!ex=...}`) counts against a reduced
+            // filter set, which the fused aggregation (over the full q+fq set) cannot
+            // produce. Drop the plan so the dispatch below takes the unfused path,
+            // which builds a per-facet base. Multi-select facet requests are rare and
+            // not the hot path, so forgoing fusing for them is a deliberate
+            // simplification (see `FacetFieldsPlan::exclusion_active`).
+            if facet_field_plan
+                .as_ref()
+                .is_some_and(|plan| plan.exclusion_active)
+            {
+                facet_field_plan = None;
             }
+
+            // Bounded search (issue #242): only the first `start + rows` hits are
+            // materialised; `num_found` and `max_score` still cover every match.
+            let outcome = match &parsed {
+                None => crate::collector::TopOutcome {
+                    num_found: 0,
+                    max_score: None,
+                    top: Vec::new(),
+                },
+                Some((query, filter_queries)) => {
+                    let unfused = || {
+                        state
+                            .index
+                            .search_top(
+                                query.as_ref(),
+                                filter_queries,
+                                &sort,
+                                start.saturating_add(rows),
+                            )
+                            .map_err(|e| {
+                                WfError::internal("wayfinder::SearchError", e.to_string())
+                                    .with_params(&params)
+                            })
+                    };
+                    // Attempted, not borrowed-through, so the plan can be dropped
+                    // below without fighting the borrow checker.
+                    let attempt = facet_field_plan.as_ref().map(|plan| {
+                        state.index.search_top_with_aggs(
+                            query.as_ref(),
+                            filter_queries,
+                            &sort,
+                            start.saturating_add(rows),
+                            plan.aggregations.clone(),
+                        )
+                    });
+                    match attempt {
+                        Some(Ok((outcome, aggs))) => {
+                            facet_field_aggs = Some(aggs);
+                            outcome
+                        }
+                        // An aggregation-class refusal (bucket limit, memory limit,
+                        // a malformed aggregation) is exactly the error the unfused
+                        // path raises out of `facet_counts` as a 400
+                        // `wayfinder::FacetError` with the `response` block attached
+                        // -- not the 500 `wayfinder::SearchError` it would become
+                        // here. Un-fuse and let that path answer it, so the wire
+                        // output stays bit-identical whichever way the request went.
+                        Some(Err(e)) if crate::core_index::is_aggregation_error(&e) => {
+                            facet_field_plan = None;
+                            unfused()?
+                        }
+                        Some(Err(e)) => {
+                            return Err(WfError::internal("wayfinder::SearchError", e.to_string())
+                                .with_params(&params));
+                        }
+                        None => unfused()?,
+                    }
+                }
+            };
+
+            let num_found = outcome.num_found;
+
+            let fl: Option<Vec<String>> = params
+                .get("fl")
+                .map(|fl| fl.split(',').map(|s| s.trim().to_string()).collect());
+
+            let page = outcome
+                .top
+                .iter()
+                .skip(start)
+                .take(rows)
+                .copied()
+                .collect::<Vec<_>>();
+
+            // `fl=score` is what turns scoring output on at all (Solr), so this is
+            // the single check that gates both the per-doc `score` key and
+            // `response.maxScore` below.
+            let wants_score = fl
+                .as_deref()
+                .is_some_and(|fl| fl.iter().any(|f| f == "score"));
+
+            // #331: `<alias>:geodist()` fl entries are computed fields, resolved from
+            // the `sfield`/`pt` request params and evaluated per doc below. Built once
+            // here so the page loop only does the per-doc fast-field read.
+            let computed = computed_fl_fields(fl.as_deref(), &params, &state.index.wf_schema)?;
+
+            let mut docs = Vec::with_capacity(page.len());
+            for (score, addr) in page.iter().copied() {
+                let mut doc = state
+                    .index
+                    .render_doc(addr, fl.as_deref(), Some(score))
+                    .map_err(|e| {
+                        WfError::internal("wayfinder::DocError", e.to_string()).with_params(&params)
+                    })?;
+                // Computed fields append after the stored fields (Solr's transformer
+                // ordering; the `fl=*,dist:geodist()` capture places `dist` last).
+                for (alias, func) in &computed {
+                    let value = state.index.eval_function(addr, func).map_err(|e| {
+                        WfError::internal("wayfinder::DocError", e.to_string()).with_params(&params)
+                    })?;
+                    if let Value::Object(map) = &mut doc {
+                        map.insert(alias.clone(), json!(value));
+                    }
+                }
+                docs.push(doc);
+            }
+
+            // Key order in the fixtures is `numFound, start, maxScore, numFoundExact,
+            // docs` — `maxScore` sits between `start` and `numFoundExact`, which a
+            // `json!` object literal can't express conditionally, so this is built
+            // the same way `response_header` is below. Built *before* `facet_result`
+            // (issue #35): a `facet.query`/`facet.field` error is detected only after
+            // the base query has already run, so Solr's own fixtures for those errors
+            // (`facet_unknown_field.json`, `facet_err_query_single.json`) still carry
+            // this `response` block alongside `error` — it has to exist already so it
+            // can be attached to that error below.
+            let mut response = Map::new();
+            response.insert("numFound".to_string(), json!(num_found));
+            response.insert("start".to_string(), json!(start));
+            if wants_score {
+                // ponytail: computed as the max score across the *whole*
+                // (unpaginated) match set, not just the current page — an
+                // unverified choice, not a fixtured fact. Every scored fixture
+                // (`select_term_scored.json`, `select_quick_scored.json`) has
+                // `start=0` with the full result set on one page, so page-max and
+                // global-max are indistinguishable there; no fixture pages a scored
+                // query to tell them apart.
+                //
+                // ponytail: no fixture covers `fl=score` against zero hits, so
+                // whether Solr omits `maxScore` or reports `0.0` there is
+                // unverified; this omits the key entirely on the (untested)
+                // assumption that Solr does the same, mirroring how `docs: []`
+                // still reports a real `numFound: 0` without inventing a score.
+                if let Some(max_score) = outcome.max_score {
+                    response.insert("maxScore".to_string(), json!(max_score));
+                }
+            }
+            response.insert("numFoundExact".to_string(), json!(true));
+            response.insert("docs".to_string(), json!(docs));
+            (Some(response), page)
         }
     };
-
-    let num_found = outcome.num_found;
-
-    let fl: Option<Vec<String>> = params
-        .get("fl")
-        .map(|fl| fl.split(',').map(|s| s.trim().to_string()).collect());
-
-    let page = outcome
-        .top
-        .iter()
-        .skip(start)
-        .take(rows)
-        .copied()
-        .collect::<Vec<_>>();
-
-    // `fl=score` is what turns scoring output on at all (Solr), so this is
-    // the single check that gates both the per-doc `score` key and
-    // `response.maxScore` below.
-    let wants_score = fl
-        .as_deref()
-        .is_some_and(|fl| fl.iter().any(|f| f == "score"));
-
-    // #331: `<alias>:geodist()` fl entries are computed fields, resolved from
-    // the `sfield`/`pt` request params and evaluated per doc below. Built once
-    // here so the page loop only does the per-doc fast-field read.
-    let computed = computed_fl_fields(fl.as_deref(), &params, &state.index.wf_schema)?;
-
-    let mut docs = Vec::with_capacity(page.len());
-    for (score, addr) in page.iter().copied() {
-        let mut doc = state
-            .index
-            .render_doc(addr, fl.as_deref(), Some(score))
-            .map_err(|e| {
-                WfError::internal("wayfinder::DocError", e.to_string()).with_params(&params)
-            })?;
-        // Computed fields append after the stored fields (Solr's transformer
-        // ordering; the `fl=*,dist:geodist()` capture places `dist` last).
-        for (alias, func) in &computed {
-            let value = state.index.eval_function(addr, func).map_err(|e| {
-                WfError::internal("wayfinder::DocError", e.to_string()).with_params(&params)
-            })?;
-            if let Value::Object(map) = &mut doc {
-                map.insert(alias.clone(), json!(value));
-            }
-        }
-        docs.push(doc);
-    }
-
-    // Key order in the fixtures is `numFound, start, maxScore, numFoundExact,
-    // docs` — `maxScore` sits between `start` and `numFoundExact`, which a
-    // `json!` object literal can't express conditionally, so this is built
-    // the same way `response_header` is below. Built *before* `facet_result`
-    // (issue #35): a `facet.query`/`facet.field` error is detected only after
-    // the base query has already run, so Solr's own fixtures for those errors
-    // (`facet_unknown_field.json`, `facet_err_query_single.json`) still carry
-    // this `response` block alongside `error` — it has to exist already so it
-    // can be attached to that error below.
-    let mut response = Map::new();
-    response.insert("numFound".to_string(), json!(num_found));
-    response.insert("start".to_string(), json!(start));
-    if wants_score {
-        // ponytail: computed as the max score across the *whole*
-        // (unpaginated) match set, not just the current page — an
-        // unverified choice, not a fixtured fact. Every scored fixture
-        // (`select_term_scored.json`, `select_quick_scored.json`) has
-        // `start=0` with the full result set on one page, so page-max and
-        // global-max are indistinguishable there; no fixture pages a scored
-        // query to tell them apart.
-        //
-        // ponytail: no fixture covers `fl=score` against zero hits, so
-        // whether Solr omits `maxScore` or reports `0.0` there is
-        // unverified; this omits the key entirely on the (untested)
-        // assumption that Solr does the same, mirroring how `docs: []`
-        // still reports a real `numFound: 0` without inventing a score.
-        if let Some(max_score) = outcome.max_score {
-            response.insert("maxScore".to_string(), json!(max_score));
-        }
-    }
-    response.insert("numFoundExact".to_string(), json!(true));
-    response.insert("docs".to_string(), json!(docs));
 
     // Facet and stats counts are both aggregated over a *real* query (`q` AND
     // every `fq`), not over `hits`: Solr enumerates the field's whole term
@@ -3496,7 +3497,7 @@ async fn select(
     // list cannot see (`search` filters post-hoc with `retain`, so the
     // Boolean query is rebuilt here rather than reused). Shared between both
     // features rather than built twice.
-    let base: facet::BaseClauses = match &parsed {
+    let mut base: facet::BaseClauses = match &parsed {
         // No `q` matches nothing, so neither does any facet/stats block — but
         // the term dictionary is still enumerated, at 0, exactly as
         // `facet_zero` shows for a `q` that matches nothing, and `stats_zero`
@@ -3509,6 +3510,28 @@ async fn select(
                     .map(|fq| (Occur::Must, fq.box_clone())),
             )
             .collect(),
+    };
+    // `group.truncate=true` (issue #338, finding 161): facets, `stats`,
+    // `facet.query` and `facet.range` are all computed over the *collapsed*
+    // group set rather than every matching document, so the restriction goes
+    // into the one base both components share — one place, and `stats` follows
+    // for free (`g338_truncate_stats`), which the ticket's facets-only premise
+    // missed. It is appended *after* the `fq` clauses so #295's positional
+    // `{!tag}`/`{!ex}` alignment is untouched, and (having no tag) no
+    // `{!ex=...}` can drop it.
+    if let Some(query) = grouped.as_ref().and_then(|g| g.truncate_query.as_ref()) {
+        base.push((Occur::Must, Box::new(query.clone()) as Box<dyn Query>));
+    }
+    let group_facet = grouped.as_ref().and_then(|g| g.group_facet.as_ref());
+    // ponytail: the ungrouped component code attaches the already-built
+    // `response` block to a facet/stats/hl 400 (issue #35's precedent). A
+    // grouped response has no `response` block to attach, and no fixture
+    // captures a grouped request with an invalid facet/stats/hl param, so the
+    // grouped path answers with the error envelope alone rather than inventing
+    // a shape. Capture one before relying on it either way.
+    let attach_response = |err: WfError| match &response {
+        Some(response) => err.with_response(Value::Object(response.clone())),
+        None => err,
     };
 
     // `facet=true` gates the whole block; `facet.field` alone does not turn
@@ -3523,8 +3546,20 @@ async fn select(
         // Issue #246: when the plan phase succeeded above, `facet.field`'s
         // buckets are already computed and only need shaping; otherwise this
         // is the unchanged, unfused path.
-        let counts = match (&facet_field_plan, &facet_field_aggs) {
-            (Some(plan), Some(aggs)) => facet::facet_counts_fused(
+        let counts = match (group_facet, &facet_field_plan, &facet_field_aggs) {
+            // `group.facet=true` (issue #338) counts distinct groups, not
+            // documents, which the fused document-count aggregation cannot
+            // produce — and never coexists with a plan anyway, since the
+            // grouped path skips the planning phase entirely.
+            (Some(group), _, _) => facet::facet_counts_grouped(
+                &state.index,
+                &state.config,
+                &params,
+                &default_field,
+                &base,
+                group,
+            ),
+            (None, Some(plan), Some(aggs)) => facet::facet_counts_fused(
                 &state.index,
                 &state.config,
                 &params,
@@ -3548,7 +3583,7 @@ async fn select(
             if e.downcast_ref::<facet::PreQueryFacetError>().is_some() {
                 err
             } else {
-                err.with_response(Value::Object(response.clone()))
+                attach_response(err)
             }
         })?)
     } else {
@@ -3564,10 +3599,13 @@ async fn select(
     // gates `facet_counts` — `stats.field` alone does not turn it on (mirrors
     // `facet.field`'s own convention, and matches `stats_key_absent_without_stats_true`).
     let stats_result = if stats_requested {
+        // Deliberately NOT group-aware: `group.facet=true` leaves `stats`
+        // reporting the full, ungrouped figures (`g338_groupfacet_stats`),
+        // unlike `group.truncate`, which reaches `stats` through `base` above.
         Some(stats::stats(&state.index, &params, &base).map_err(|e| {
-            WfError::bad_request("wayfinder::StatsError", e.to_string())
-                .with_params(&params)
-                .with_response(Value::Object(response.clone()))
+            attach_response(
+                WfError::bad_request("wayfinder::StatsError", e.to_string()).with_params(&params),
+            )
         })?)
     } else {
         None
@@ -3575,7 +3613,9 @@ async fn select(
 
     // `hl=true` gates the whole `highlighting` block (finding 52); it is
     // keyed by unique-key value over the docs actually returned on this
-    // page, matching `response.docs`'s own pagination.
+    // page, matching `response.docs`'s own pagination — or, on the grouped
+    // path, the union of every rendered doclist (`page` is
+    // `GroupedOutcome::rendered` there, `g338_hl`).
     let highlighting_result = if hl_requested {
         let result = match &parsed {
             Some((query, _)) => highlight::highlighting(
@@ -3602,9 +3642,10 @@ async fn select(
             // failure that isn't request-input (a genuine Tantivy/searcher
             // error) stays a 500.
             if e.downcast_ref::<highlight::InvalidHlField>().is_some() {
-                WfError::bad_request("wayfinder::HighlightError", e.to_string())
-                    .with_params(&params)
-                    .with_response(Value::Object(response.clone()))
+                attach_response(
+                    WfError::bad_request("wayfinder::HighlightError", e.to_string())
+                        .with_params(&params),
+                )
             } else {
                 WfError::internal("wayfinder::HighlightError", e.to_string()).with_params(&params)
             }
@@ -3627,16 +3668,30 @@ async fn select(
     response_header.insert("params".to_string(), json!(params.echo()));
 
     // `omitHeader=true` drops the header and nothing else (issue #143); the
-    // `response` block and every optional block below are unaffected. See
-    // `Params::omit_header` for the ground truth and the error-path ceiling.
-    let mut body = if params.omit_header() {
-        json!({ "response": response })
-    } else {
-        json!({
-            "responseHeader": response_header,
-            "response": response,
-        })
-    };
+    // `response`/`grouped` block and every optional block below are
+    // unaffected. See `Params::omit_header` for the ground truth and the
+    // error-path ceiling.
+    //
+    // A grouped response emits `grouped` where an ungrouped one emits
+    // `response`, in the same slot — hence the fixtures' top-level key order
+    // `responseHeader, grouped, facet_counts, stats, highlighting` (issue
+    // #338, `g338_all`).
+    let mut root = Map::new();
+    if !params.omit_header() {
+        root.insert("responseHeader".to_string(), Value::Object(response_header));
+    }
+    match grouped {
+        Some(outcome) => {
+            root.insert("grouped".to_string(), outcome.block);
+        }
+        None => {
+            root.insert(
+                "response".to_string(),
+                Value::Object(response.expect("the ungrouped path always builds a response block")),
+            );
+        }
+    }
+    let mut body = Value::Object(root);
 
     if let Some((facet_counts, _)) = facet_result {
         body["facet_counts"] = facet_counts;

@@ -23,6 +23,7 @@ use tantivy::aggregation::{
     AggContextParams, AggregationCollector, AggregationLimitsGuard, DEFAULT_BUCKET_LIMIT, Key,
 };
 use tantivy::collector::{Count, DocSetCollector};
+use tantivy::index::SegmentId;
 use tantivy::query::{
     AllQuery, BooleanQuery, BoostQuery, ConstScoreQuery, DisjunctionMaxQuery, EmptyQuery,
     ExistsQuery, Occur, PhraseQuery, Query, QueryClone, QueryParser, RangeQuery, RegexQuery,
@@ -2639,6 +2640,15 @@ impl CoreIndex {
     /// The caller (`src/grouping.rs`) validates that `group_clause`'s field is
     /// single-valued and fast, and applies `group.limit`/`group.offset`/
     /// `rows`/`start` to the fruit.
+    ///
+    /// Returns the fruit **and the `SegmentId` list of the searcher that
+    /// produced it**, indexed by the same segment ordinal the fruit's
+    /// `DocAddress`es carry (issue #338). The two are returned together
+    /// deliberately: the reader reloads on commit, so a segment list taken from
+    /// a later `self.reader.searcher()` call can resolve the same ordinal onto a
+    /// different segment, and anything that turns these addresses back into a
+    /// query (`crate::grouping::DocSetQuery`) would then silently run over the
+    /// wrong documents. One searcher, one list, handed over as a pair.
     pub fn search_grouping(
         &self,
         query: &dyn Query,
@@ -2646,13 +2656,19 @@ impl CoreIndex {
         main_clauses: Vec<SortClause>,
         within_clauses: Vec<SortClause>,
         group_clause: SortClause,
-    ) -> Result<GroupingFruit> {
+    ) -> Result<(GroupingFruit, Vec<SegmentId>)> {
         let searcher = self.reader.searcher();
+        let segment_ids: Vec<SegmentId> = searcher
+            .segment_readers()
+            .iter()
+            .map(|reader| reader.segment_id())
+            .collect();
         let collector = GroupingCollector::new(main_clauses, within_clauses, group_clause);
-        match compose_filtered(query, filter_queries) {
-            None => Ok(searcher.search(query, &collector)?),
-            Some(composed) => Ok(searcher.search(&composed, &collector)?),
-        }
+        let fruit = match compose_filtered(query, filter_queries) {
+            None => searcher.search(query, &collector)?,
+            Some(composed) => searcher.search(&composed, &collector)?,
+        };
+        Ok((fruit, segment_ids))
     }
 
     /// Renders the stored fields of `addr` as a Solr-shaped doc JSON object,
@@ -3616,6 +3632,161 @@ impl CoreIndex {
         );
         let results = self.reader.searcher().search(query, &collector)?;
         render_term_facet_buckets(field_name, kind, &results, AGG_NAME)
+    }
+
+    /// [`term_facet`](Self::term_facet) with every bucket's count replaced by
+    /// the number of **distinct values of `group_column`** among the documents
+    /// in that bucket — Solr's `group.facet=true` (issue #338, finding 162).
+    ///
+    /// One pass, no per-document work in Wayfinder: a terms sub-aggregation on
+    /// the group column inside each outer bucket makes the distinct-group count
+    /// simply "how many sub-buckets did this bucket get?". The outer buckets
+    /// themselves are rendered by the same
+    /// [`render_term_facet_buckets`] the ungrouped path uses, so bucket-key
+    /// rendering (Java `Double.toString`, dates, the order key) cannot drift
+    /// between the two.
+    ///
+    /// Documents with **no** value in `group_column` are invisible to the
+    /// sub-aggregation (they belong to Solr's `null` group, which is a real
+    /// group and does count). The caller adds them, because only it knows which
+    /// documents those are — see `crate::grouping::GroupFacet::term_facet`.
+    ///
+    /// ponytail: two ceilings, both inherited from
+    /// [`terms_aggregation`]'s own `MAX_FACET_TERMS` sizing. A bucket holding
+    /// more than `MAX_FACET_TERMS` distinct group values undercounts, and the
+    /// per-request bucket budget is now charged `1 + <distinct groups>` per
+    /// outer bucket instead of 1 (`BucketEntry::get_bucket_count`), so a
+    /// high-cardinality `group.facet` request can trip Tantivy's bucket limit
+    /// where the same request without `group.facet` would not. Both need
+    /// streaming/paged faceting to lift, which is out of issue #338's scope.
+    pub fn term_facet_grouped(
+        &self,
+        field_name: &str,
+        kind: Option<ValueKind>,
+        group_column: &str,
+        query: &dyn Query,
+    ) -> Result<Vec<(String, FacetOrderKey, u64)>> {
+        const AGG_NAME: &str = "wf_terms";
+        const GROUP_AGG_NAME: &str = "wf_groups";
+
+        let mut outer = terms_aggregation(field_name);
+        // `min_doc_count: 1` (the default) is what makes the sub-bucket count
+        // an exact distinct-group count: a zero-count sub-bucket would be a
+        // group that is *not* in this facet bucket.
+        let mut group_agg = terms_aggregation(group_column);
+        if let AggregationVariants::Terms(terms) = &mut group_agg.agg {
+            terms.min_doc_count = Some(1);
+        }
+        outer
+            .sub_aggregation
+            .insert(GROUP_AGG_NAME.to_string(), group_agg);
+
+        let mut aggs = Aggregations::default();
+        aggs.insert(AGG_NAME.to_string(), outer);
+
+        let collector = AggregationCollector::from_aggs(
+            aggs,
+            AggContextParams::new(
+                AggregationLimitsGuard::default(),
+                self.index.tokenizers().clone(),
+            ),
+        );
+        let results = self.reader.searcher().search(query, &collector)?;
+        let rendered = render_term_facet_buckets(field_name, kind, &results, AGG_NAME)?;
+
+        let Some(AggregationResult::BucketResult(BucketResult::Terms { buckets, .. })) =
+            results.0.get(AGG_NAME)
+        else {
+            return Err(anyhow!(
+                "could not group-facet on field `{field_name}`: unexpected aggregation result"
+            ));
+        };
+        // `render_term_facet_buckets` maps the same bucket list in order, so
+        // the two zip 1:1.
+        let mut out = Vec::with_capacity(rendered.len());
+        for ((term, order, doc_count), bucket) in rendered.into_iter().zip(buckets.iter()) {
+            let groups = match bucket.sub_aggregation.0.get(GROUP_AGG_NAME) {
+                Some(AggregationResult::BucketResult(BucketResult::Terms { buckets, .. })) => {
+                    buckets.len() as u64
+                }
+                // A bucket the `min_doc_count: 0` term-dictionary fill added
+                // holds no documents at all, so it holds no groups either.
+                _ if doc_count == 0 => 0,
+                _ => {
+                    return Err(anyhow!(
+                        "could not group-facet on field `{field_name}`: bucket `{term}` \
+                         has no group sub-aggregation"
+                    ));
+                }
+            };
+            out.push((term, order, groups));
+        }
+        Ok(out)
+    }
+
+    /// How many **distinct values of `group_column`** the documents matching
+    /// `query` hold, counting the documents that have *no* value there as one
+    /// further group. Solr's `group.facet=true` count for a bucket defined by a
+    /// query rather than by a term: `facet.query`, each `facet.range` bucket and
+    /// `facet.missing` (issue #338, findings 162/163/164).
+    ///
+    /// Read off the group column for whatever document set `query` produces,
+    /// never from a doc -> group map built during the grouping pass: an excluded
+    /// facet (`{!ex=...}`, #295) counts over a *reduced* filter set, which is a
+    /// superset of the documents the grouping pass bucketed, and finding 164
+    /// pins that those extra documents must still be counted
+    /// (`g338_ex_groupfacet`). Since a group *is* a distinct column value, the
+    /// value is the group identity and no map is needed.
+    ///
+    /// The "no value" group is Solr's `null` group, which is a real group and
+    /// does count (finding 163, `g338n_groupfacet`); it is invisible to the
+    /// terms aggregation, so it is counted with a separate `ExistsQuery` pass
+    /// rather than by a sentinel bucket key that a real group value could
+    /// collide with.
+    ///
+    /// ponytail: same `MAX_FACET_TERMS` ceiling as [`terms_aggregation`] -- a
+    /// bucket spanning more than that many distinct group values undercounts.
+    /// Lifting it needs streaming faceting, out of issue #338's scope.
+    pub fn distinct_group_count(&self, group_column: &str, query: &dyn Query) -> Result<usize> {
+        const AGG_NAME: &str = "wf_groups";
+
+        let mut agg = terms_aggregation(group_column);
+        // `min_doc_count: 1`: a zero-count bucket is a term-dictionary fill, i.e.
+        // a group with no document in this bucket, which must not be counted.
+        if let AggregationVariants::Terms(terms) = &mut agg.agg {
+            terms.min_doc_count = Some(1);
+        }
+        let mut aggs = Aggregations::default();
+        aggs.insert(AGG_NAME.to_string(), agg);
+
+        let collector = AggregationCollector::from_aggs(
+            aggs,
+            AggContextParams::new(
+                AggregationLimitsGuard::default(),
+                self.index.tokenizers().clone(),
+            ),
+        );
+        let results = self.reader.searcher().search(query, &collector)?;
+        let Some(AggregationResult::BucketResult(BucketResult::Terms { buckets, .. })) =
+            results.0.get(AGG_NAME)
+        else {
+            return Err(anyhow!(
+                "could not count groups on field `{group_column}`: unexpected aggregation result"
+            ));
+        };
+        let mut groups = buckets.len();
+
+        let missing = BooleanQuery::from(vec![
+            (Occur::Must, query.box_clone()),
+            (
+                Occur::MustNot,
+                Box::new(ExistsQuery::new(group_column.to_string(), false)) as Box<dyn Query>,
+            ),
+        ]);
+        if self.count(&missing)? > 0 {
+            groups += 1;
+        }
+        Ok(groups)
     }
 
     /// Solr's `stats.field`: min/max/count/sum/sumOfSquares/mean/stddev over a

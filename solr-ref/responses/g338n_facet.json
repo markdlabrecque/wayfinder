@@ -1,0 +1,64 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":16,
+    "params":{
+      "q":"*:*",
+      "facet.field":["type","category"],
+      "fl":"id",
+      "sort":"id asc",
+      "group.ngroups":"true",
+      "facet":"true",
+      "wt":"json",
+      "group.field":"type",
+      "group":"true"
+    }
+  },
+  "grouped":{
+    "type":{
+      "matches":5,
+      "ngroups":3,
+      "groups":[{
+        "groupValue":"article",
+        "doclist":{
+          "numFound":2,
+          "start":0,
+          "numFoundExact":true,
+          "docs":[{
+            "id":"h1"
+          }]
+        }
+      },{
+        "groupValue":"page",
+        "doclist":{
+          "numFound":1,
+          "start":0,
+          "numFoundExact":true,
+          "docs":[{
+            "id":"h3"
+          }]
+        }
+      },{
+        "groupValue":null,
+        "doclist":{
+          "numFound":2,
+          "start":0,
+          "numFoundExact":true,
+          "docs":[{
+            "id":"h4"
+          }]
+        }
+      }]
+    }
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{
+      "type":["article",2,"page",1],
+      "category":["news",4,"blog",1]
+    },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  }
+}

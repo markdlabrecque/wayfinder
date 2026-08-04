@@ -2884,3 +2884,115 @@ as *grid math*, not storage).
      a descope with a guard. The `<field>:<geom>` `fq` is a rectangle-containment
      filter over the point (`heatmap_fq_rect`): it restricts the doc set, and the
      heatmap then counts only surviving docs.
+
+## Findings from the #338 grouping-components capture (`group.truncate`, `group.facet`)
+
+Captured against real `solr:9` via `capture.sh --only '^g338_'` / `'^g338n_'`
+(cores `grouping` -- the #290 `g1..g6` corpus -- and `g338null`). Rows are in
+`manifest-errors.tsv` (own cores).
+
+160. **A grouped response carries `facet_counts`, `stats` and `highlighting`
+      alongside `grouped` — the `grouped` block does not replace them.**
+      Captured against real `solr:9` (the `g338_*` block, #338) on the same
+      `grouping` core/corpus as #290. `group=true&facet=true` returns
+      `responseHeader` + `grouped` + `facet_counts` (`g338_facet`); adding
+      `stats=true` and `hl=true` adds `stats` and `highlighting` at the top
+      level in that order (`g338_all`, `g338_hl`). `highlighting` is keyed by
+      document id exactly as in the ungrouped envelope, and covers only the
+      documents the doclists actually returned (`g338_hl`: `q=lazy` matches g1
+      and g2, and both appear). A zero-match grouped request still emits the
+      full empty `facet_counts` (every sub-key present, counts 0) and the
+      empty-`stats` shape (`min`/`max` null, `mean` `"NaN"`) next to
+      `grouped.<field>: {matches: 0, ngroups: 0, groups: []}` (`g338_zero`).
+      What #290 shipped — `grouped` alone, no other component block — is a
+      divergence, not the Solr shape.
+
+161. **`group.truncate=true` recomputes facets AND stats over the collapsed
+      group set (one document per group), not over the matching document
+      set.** Captured (#338, `sort=id asc` so each group's top document is
+      deterministic: g1/article, g2/page, g6/null). Over the full 6-doc match
+      set `facet.field=type` is `article=3, page=2` and `category` is
+      `blog=2, news=2`; with `group.truncate=true` they become `article=1,
+      page=1` and `news=2, blog=0` (`g338_facet` vs `g338_truncate`).
+      `group.truncate=false` is byte-identical to omitting it
+      (`g338_truncate_false`). It is **not** field-facet-only: `facet.query`
+      `category:blog` drops 2 -> 0 and the `facet.range` buckets go
+      `[0:4, 25:2]` -> `[0:3, 25:0]` (`g338_truncate_qr`), and `stats.field`
+      follows too — `popularity` goes count 6/min 5/max 40/sum 120 to count
+      3/min 10/max 20/sum 45, i.e. exactly {g1:10, g2:20, g6:15}
+      (`g338_truncate_stats`). The `grouped` block itself is untouched:
+      `matches` stays 6 and `ngroups` stays 3. The collapsed set is the WHOLE
+      group set, not the page of groups `rows` returns: `rows=1` returns one
+      group and still facets `article=1, page=1` (`g338_truncate_rows`). With
+      two `group.field` values it collapses on the FIRST:
+      `group.field=type&group.field=popularity` gives `type`'s 3-document
+      collapse, not `popularity`'s 6 singletons (`g338_truncate_multi`). The
+      "most relevant document" of a group is the one `group.sort` picks, not the
+      one the main `sort` picks: `group.sort=id desc` collapses to {g4, g5, g6}
+      and the `category` facet becomes `blog=1, news=0`
+      (`g338_truncate_groupsort`).
+
+162. **`group.facet=true` turns every facet count into a count of matching
+      GROUPS, including `facet.query` and `facet.range` — the "field facets
+      only" reading is wrong.** Captured (#338). With `group.field=type`,
+      `facet.field=category` goes from the document counts `blog=2, news=2` to
+      `news=2, blog=1`: `news` is on g1 (article) and g2 (page) = 2 groups,
+      `blog` is on g3 and g4, both `article` = 1 group (`g338_facet` vs
+      `g338_groupfacet`). Faceting on the group field itself yields 1 per value
+      (`type: article=1, page=1`). The same regrouping applies to
+      `facet.query=category:blog` (2 -> 1) and to `facet.range`, whose
+      `popularity` buckets go `[0:4, 25:2]` -> `[0:3, 25:2]` -- the `0-25`
+      bucket holds g1/g2/g4/g6, which are only 3 distinct groups
+      (`g338_facet_blog` vs `g338_groupfacet_blog`). `stats` is **not** affected — unlike
+      `group.truncate`, `group.facet` leaves `stats_fields` at the full-match
+      figures (`g338_groupfacet_stats`). With several `group.field` values the
+      counts come from the FIRST one: `group.field=type&group.field=popularity`
+      gives the same `type=1/1`, `news=2, blog=1` as `type` alone, not
+      `popularity`'s 6 singleton groups (`g338_groupfacet_multi`). Combined
+      with `group.truncate=true`, truncation applies first and the group
+      counting then runs over the truncated set (`news=2, blog=0`,
+      `g338_groupfacet_truncate`). Like `group.truncate`, it is
+      paging-independent: `rows=1` returns one group and still counts over all
+      of them (`g338_groupfacet_rows`).
+
+163. **Under `group.facet=true` the group of documents *missing* the
+      `group.field` counts as one group like any other, including in
+      `facet.missing`.** Captured against real `solr:9` (the `g338n_*` block,
+      #338, own core `g338null`) on a corpus built for exactly this: h1/h2 are
+      `type=article`, h3 is `type=page`, and h4/h5 have no `type` at all, while
+      `category=news` sits on h1, h3, h4 and h5. `facet.field=category` is
+      `news=4, blog=1` by document count and `news=3, blog=1` under
+      `group.facet=true` (`g338n_facet` vs `g338n_groupfacet`) -- article, page
+      and the null group. This is the one shape the #290 `grouping` corpus cannot
+      express (its only null-group document, g6, carries no facetable value at
+      all), and it is the shape a `group.field` terms sub-aggregation cannot see:
+      a document missing the group field produces no group term, so an
+      implementation that does not add the missing-value group back reports 2,
+      not 3. With `facet.missing=true` the `type` facet's `null` bucket is
+      likewise 2 documents but 1 group (`g338n_facet_missing` vs
+      `g338n_groupfacet_missing`), and `category`'s `null` bucket is 0 either way
+      (every document has a `category`). `group.truncate=true` on the same corpus
+      collapses to {h1, h3, h4} under `sort=id asc` -> `news=3, blog=0`
+      (`g338n_truncate`).
+
+164. **`{!ex=...}` multi-select faceting and `group.facet` compose: the excluded
+      facet counts GROUPS over the reduced filter set, which is a superset of the
+      documents the grouping pass bucketed.** Captured (#338, the `g338_ex_*`
+      rows). With `fq={!tag=t}category:news` the grouped result holds 2 documents
+      in 2 groups (article/g1, page/g2), and the excluded facets count over the
+      full `*:*` set instead: `facet.field={!ex=t}category` is `blog=2, news=2`
+      by document count and `news=2, blog=1` under `group.facet=true` -- `blog`
+      is g3+g4, both `article`, so 1 group, even though neither document is in
+      the filtered result at all. `facet.query={!ex=t}category:blog` behaves the
+      same, 2 -> 1. The unexcluded `facet.field=type` still counts against the
+      filtered set (`article=1, page=1`) under both. `g338_ex_facet` vs
+      `g338_ex_groupfacet`. The consequence for an implementation: a doc ->
+      group map built from the grouping pass cannot answer an excluded facet,
+      because the documents it must count were filtered out before grouping ran;
+      the group value has to be read for whatever document set the reduced base
+      produces.
+
+      `group.truncate=true` with an excluded facet keeps the collapse: the
+      `{!ex=t}category` facet is `news=2, blog=0` and the excluded `facet.query`
+      is 0 (`g338_ex_truncate`), and adding `group.facet=true` on top changes
+      nothing (`g338_ex_both`) -- each collapsed document is its own group.
