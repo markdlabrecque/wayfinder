@@ -874,7 +874,7 @@ a new client whose capture shows real usage, the same bar every descope above al
 | Solr 9.x feature | Note |
 |---|---|
 | JSON Request API | Requests arrive as query params; no captured request uses a JSON request body. Distinct from the JSON *Facet* API below, which is a single param and has shipped. |
-| ~~JSON Facet API~~ — **shipped, #343** | Not unscheduled any more. Solarium's JSON Facet API (`createJsonFacetAggregation`, e.g. `max(_version_)`) appears only on admin diagnostics screens (finding 132), never on a search path — client evidence, just non-search evidence. The evidenced surface landed in #343: `json.facet` with `type: terms` (`field`, `limit`, `mincount`, `sort`), arbitrary `facet`-key nesting, and `max()` aggregations, to the 4-level topology `doGetMaxDocumentVersions()` sends. Everything unevidenced (`type: query`/`range`, other aggregation functions, `domain`/`offset`/`numBuckets`/…) returns 400 rather than being silently ignored — findings 165-168. |
+| ~~JSON Facet API~~ — **shipped, #343** | Not unscheduled any more. Solarium's JSON Facet API (`createJsonFacetAggregation`, e.g. `max(_version_)`) appears only on admin diagnostics screens (finding 132), never on a search path — client evidence, just non-search evidence. The evidenced surface landed in #343: `json.facet` with `type: terms` (`field`, `limit`, `mincount`, `sort`), arbitrary `facet`-key nesting, and `max()` aggregations, to the 4-level topology `doGetMaxDocumentVersions()` sends. Everything unevidenced (`type: query`/`range`, other aggregation functions, `domain`/`offset`/`numBuckets`/…) returns 400 rather than being silently ignored — findings 175-178. |
 | `facet.pivot`, `facet.interval` | Only field, query, and heatmap faceting is emitted. `facet.range` is equally unemitted, but v1 already shipped it — kept as surplus, not unshipped. |
 | Collapse & Expand (`fq={!collapse}`, `expand=true`) | The module's "collapse" identifiers drive Solr grouping (`group=true`), which stays in v3. |
 | Query Elevation (`/elevate`) | Relevance tweaks travel as `bq`/`boost` function queries; no elevation params. |
@@ -995,7 +995,7 @@ is (§2 envelope fact 8). The field is also statable — `stats.field=_version_`
 #5) via `check_statable`'s deliberate `_version_` exception. That is a correct general capability
 of the field; it is not what the diagnostics screens use (they use the JSON facet above), and both
 stay — the two render differently on the wire (the stats component emits a float, a JSON facet
-aggregation a raw integer, finding 167), so they are separate paths, not one behind the other. The
+aggregation a raw integer, finding 177), so they are separate paths, not one behind the other. The
 execution record lives in `tests/version_field.rs` and `docs/reports/` (see #293's and #343's
 reports).
 
@@ -1008,7 +1008,7 @@ standalone param (no `facet=true`), `type: terms` over fast fields with `field`/
 `sort`, arbitrary nesting via the `facet` key, `max()` aggregations including `max(_version_)`, and
 the implicit `count` — the full 4-level topology `doGetMaxDocumentVersions()` sends. The delivered
 field turned out to be exactly the right shape to aggregate over, as this section predicted: #343
-needed no change to `_version_` itself. Ground truth is the 20 `jf343_*` fixtures; findings 165-168
+needed no change to `_version_` itself. Ground truth is the 20 `jf343_*` fixtures; findings 175-178
 record the envelope, and 168 records the two Solr behaviours Wayfinder deliberately 400s on instead
 (terms on a non-docValues field, `max()` over a text field). `_version_` remains non-facetable and
 non-sortable — `tests/version_field.rs` still asserts both are 400.

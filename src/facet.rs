@@ -1385,7 +1385,7 @@ fn render_buckets(buckets: &[(Option<String>, u64)], nl: JsonNl) -> Value {
 /// check rather than resolving through here into a field with no handle.
 ///
 /// `crate::json_facet` shares this check for its own `type: terms` facets
-/// (issue #343): finding 168's `json.facet` divergence and finding 105's
+/// (issue #343): finding 178's `json.facet` divergence and finding 105's
 /// classic-facet one are the same refusal for the same reason, down to the
 /// wording `tests/json_facet.rs` asserts, so they share one copy of it.
 pub(crate) fn check_facetable(

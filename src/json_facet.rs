@@ -10,9 +10,9 @@
 //! `q`/`fq`.
 //!
 //! Facts pinned by the committed `solr-ref/responses/jf343_*.json` fixtures
-//! (findings 165-168):
+//! (findings 175-178):
 //!
-//! - **The aggregation wire form is a bare string** (finding 165):
+//! - **The aggregation wire form is a bare string** (finding 175):
 //!   `{"maxVersion":"max(_version_)"}`. Solarium's `JsonAggregation::serialize()`
 //!   emits the string; `function` is the PHP *option* name and never reaches
 //!   the wire, and the object form `{"type":"func","func":…}` is never sent.
@@ -27,7 +27,7 @@
 //! - An aggregation renders as a bare scalar at its key, and over an integer
 //!   column as a **raw JSON integer** (`"maxVersion":1872604773983715328`) —
 //!   *not* the float the `stats` component emits for the identical column
-//!   (finding 167). The two renderers therefore cannot be shared, which is why
+//!   (finding 177). The two renderers therefore cannot be shared, which is why
 //!   this module does not route `max()` through `stats.rs`.
 //! - A terms facet renders `{"buckets":[{"val":…,"count":…}, …]}`, and a
 //!   sub-facet appears **inline inside each bucket object**, as a sibling of
@@ -42,7 +42,7 @@
 //!   field-resolution failure (`jf343_err_unknown_field`) emits
 //!   `responseHeader, response, error`.
 //!
-//! **Documented divergences** (finding 168), both captured so they stay
+//! **Documented divergences** (finding 178), both captured so they stay
 //! visible:
 //!
 //! - `jf343_err_no_docvalues.json` — a terms facet on a field without
@@ -89,7 +89,7 @@ const DEFAULT_JSON_FACET_MINCOUNT: u64 = 1;
 /// ponytail: the unevidenced Solr settings `domain`, `offset`, `numBuckets`,
 /// `allBuckets`, `missing`, `prefix`, `method`, `refine`, `overrequest` and
 /// `excludeTags` are all deliberately *absent* from this list, so each 400s.
-/// The captured client (finding 165) sends none of them. Implement one only
+/// The captured client (finding 175) sends none of them. Implement one only
 /// alongside a capture that pins its semantics.
 const TERMS_KEYS: &[&str] = &["type", "field", "limit", "mincount", "sort", "facet"];
 
@@ -109,7 +109,7 @@ struct ParsedEntry {
 
 #[derive(Debug, PartialEq)]
 enum ParsedNode {
-    /// `"max(<field>)"`, the sole evidenced aggregation (finding 165).
+    /// `"max(<field>)"`, the sole evidenced aggregation (finding 175).
     Max {
         field: String,
     },
@@ -163,7 +163,7 @@ fn parse_entries(obj: &Map<String, Value>) -> Result<Vec<ParsedEntry>> {
     Ok(entries)
 }
 
-/// The bare-string aggregation form (finding 165). Only `max(<field>)` is
+/// The bare-string aggregation form (finding 175). Only `max(<field>)` is
 /// implemented.
 ///
 /// ponytail: every other Solr aggregation — `min`, `sum`, `avg`, `sumsq`,
@@ -290,7 +290,7 @@ enum PlanNode {
     Max {
         agg_name: String,
         /// Whether the column is an integer one, i.e. whether the result
-        /// renders as a raw JSON integer (finding 167).
+        /// renders as a raw JSON integer (finding 177).
         integral: bool,
     },
     Terms {
@@ -317,7 +317,7 @@ fn resolve_aggregation_column(
 ) -> Result<(String, bool)> {
     if field_name == VERSION_FIELD {
         // An i64 fast column, hence integral: `max(_version_)` renders as a
-        // raw integer, which is the whole point of finding 167.
+        // raw integer, which is the whole point of finding 177.
         return Ok((VERSION_FIELD.to_string(), true));
     }
     match schema.resolved_fast(field_name) {
@@ -332,7 +332,7 @@ fn resolve_aggregation_column(
         .expect("resolved_fast proved this field resolves");
     // ponytail: `max()` is numeric only. A **text** column is refused rather
     // than answered with Solr's lexicographic maximum
-    // (`jf343_err_agg_text.json`, finding 168), and a **date** column is
+    // (`jf343_err_agg_text.json`, finding 178), and a **date** column is
     // refused because no capture pins whether Solr renders that maximum as an
     // RFC3339 string or as a raw millisecond long -- guessing would be an
     // invisible divergence. Capture one before implementing it.
@@ -380,7 +380,7 @@ fn resolve_entries(
             ParsedNode::Terms(terms) => {
                 // The same facetability contract classic `facet.field` uses,
                 // including its exact "fast values (docValues)" wording — the
-                // divergence in finding 105 and the one in finding 168 are the
+                // divergence in finding 105 and the one in finding 178 are the
                 // same refusal for the same reason, so they share one check.
                 facet::check_facetable(schema, &terms.field, true)?;
                 let column = schema
@@ -417,7 +417,7 @@ fn resolve_entries(
 
 /// Renders one aggregation's scalar result. An integer column renders as a raw
 /// JSON integer, *not* as the float the `stats` component emits for the very
-/// same column (finding 167) — the two paths cannot share a renderer.
+/// same column (finding 177) — the two paths cannot share a renderer.
 ///
 /// Tantivy's metric aggregations accumulate in `f64`, so an integral result is
 /// exact up to 2^53. Wayfinder's `_version_` is seeded from epoch
@@ -775,7 +775,7 @@ fast = true
         assert_ne!(
             render_max(Some(60.0), true),
             render_max(Some(60.0), false),
-            "finding 167: the integer form is not the float form the stats component emits"
+            "finding 177: the integer form is not the float form the stats component emits"
         );
     }
 

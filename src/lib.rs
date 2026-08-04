@@ -240,7 +240,7 @@ const SELECT_PARAMS: &[&str] = &[
     "facet.heatmap.distErr",
     "facet.heatmap.format",
     "json.nl",
-    // The JSON Facet API (issue #343, finding 165): one param whose value is a
+    // The JSON Facet API (issue #343, finding 175): one param whose value is a
     // whole JSON object. `facet=true` is *not* sent alongside it, so it has to
     // work standalone.
     "json.facet",

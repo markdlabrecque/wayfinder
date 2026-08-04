@@ -1416,7 +1416,7 @@ async fn g338null_app() -> (Router, TempDir) {
 }
 
 // --- duplicated schema/corpus for manifest-errors.tsv's `jf343_` rows ------
-// (issue #343, findings 165-168). `json.facet` was captured against its own
+// (issue #343, findings 175-178). `json.facet` was captured against its own
 // `jsonfacet343` core, so its 20 manifest-errors rows need their own hermetic
 // app the way `g338null_` does — without one they count as unrun and
 // `manifest_errors_every_row_runs_against_the_matching_hermetic_app` stays red.
@@ -1425,7 +1425,7 @@ async fn g338null_app() -> (Router, TempDir) {
 //
 // `body` is deliberately **not** `fast`: its non-fastness is exactly what
 // `jf343_err_no_docvalues` (a terms facet on it) and `jf343_err_agg_text`
-// (`max(body)`) exercise — the two ratified divergences of finding 168.
+// (`max(body)`) exercise — the two ratified divergences of finding 178.
 const JSONFACET343_SCHEMA_TOML: &str = r#"
 [core]
 name = "jsonfacet343"
@@ -1685,13 +1685,13 @@ const ACCEPTED_DIVERGENCES: &[(&str, &str)] = &[
     ),
     (
         "jf343_err_no_docvalues",
-        "finding 168 / spec 343 section 1c, same divergence family as facet_non_docvalues_text: a \
+        "finding 178 / spec 343 section 1c, same divergence family as facet_non_docvalues_text: a \
          json.facet terms facet on a non-docValues field is 200 with empty buckets in Solr, \
          Wayfinder 400s it consistently with the classic-facet behaviour of finding 105",
     ),
     (
         "jf343_err_agg_text",
-        "finding 168 / spec 343 section 1c: Solr's max() over a text field returns the \
+        "finding 178 / spec 343 section 1c: Solr's max() over a text field returns the \
          lexicographic maximum as a string; Wayfinder 400s instead, because the evidenced client \
          reads an aggregation as a number and silently handing it a string yields wrong values \
          that look right",
@@ -3105,7 +3105,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
                         failures.push(format!(
                             "{}: Wayfinder matched the fixture's status — the documented \
                              json.facet divergence no longer holds, remove this \
-                             ACCEPTED_DIVERGENCES entry and update finding 168 ({reason})",
+                             ACCEPTED_DIVERGENCES entry and update finding 178 ({reason})",
                             entry.name
                         ));
                     }

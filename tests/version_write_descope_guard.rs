@@ -158,7 +158,7 @@ fn version_is_present_in_trace_responses_so_the_request_scan_is_not_blind() {
 /// Since #343 this no longer guards a deferral — it pins the *reason* #343 was
 /// built and the shape it was built to. If the client's read path moves off
 /// Solarium's JSON-facet API, `src/json_facet.rs`'s scope (bare-string
-/// aggregation, `type: terms` nesting, `max()` only — spec §1a, finding 167)
+/// aggregation, `type: terms` nesting, `max()` only — spec §1a, finding 177)
 /// is aimed at a client that no longer exists and needs re-deriving, not
 /// extending.
 #[test]
