@@ -128,7 +128,7 @@ class FieldMapperTest extends TestCase {
       // text-family type gets (SearchApiSolrBackend.php:2440-2446, "Don't use
       // the language separator here!"). Field id and cardinality play no
       // part at all: the language alone determines the sink.
-      'solr_text_spellcheck, language en' => ['field_x', 'solr_text_spellcheck', FALSE, 'spellcheck_en'],
+      'solr_text_spellcheck, language en' => ['field_x', 'solr_text_spellcheck', FALSE, 'spellcheck_en', 'en'],
       'solr_text_spellcheck with de-AT uses an underscore, not X3b' => ['field_x', 'solr_text_spellcheck', FALSE, 'spellcheck_de_AT', 'de-AT'],
       'solr_text_spellcheck is unaffected by field id' => ['field_y', 'solr_text_spellcheck', TRUE, 'spellcheck_en', 'en'],
     ];
