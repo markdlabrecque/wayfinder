@@ -33,6 +33,28 @@ use Drupal\search_api\Query\QueryInterface;
 class QueryBuilder {
 
   /**
+   * Stored fields needed to construct a v1 Search API result item.
+   *
+   * `id` carries the composite Search API item id, `index_id` preserves the
+   * multi-index identity selected by the mandatory fq, and `score` populates
+   * the result item's relevance. Wayfinder supports literal names and
+   * positive globs in fl, but no exclusions (src/core_index.rs), so an
+   * explicit consumer-derived list is the only shape that keeps the
+   * twm_suggest and spellcheck_* index-side sinks out of response documents.
+   *
+   * search_api_solr 4.4.0 likewise always sets fl and treats id/language/score
+   * as its baseline required fields (SearchApiSolrBackend.php:2108-2121,
+   * 2163-2202). This module encodes language in the composite id and its
+   * ResponseParser reads only id and score from each document.
+   *
+   * ponytail: Search API's search_api_retrieved_field_values option is not
+   * honoured yet. Supporting stored result data later must extend this list
+   * with the requested mapped fields instead of falling back to `*`, which
+   * would expose the plumbing sinks again.
+   */
+  private const SELECT_FIELDS = ['id', 'index_id', 'score'];
+
+  /**
    * The resolved language set for the query currently being built.
    *
    * @var array<int, string>
@@ -91,6 +113,8 @@ class QueryBuilder {
     if ($qf !== '') {
       $params['qf'] = $qf;
     }
+
+    $params['fl'] = implode(',', self::SELECT_FIELDS);
 
     $filters = [$this->indexScopeFilter($index)];
     $conditions = $query->getConditionGroup();
