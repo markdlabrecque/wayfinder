@@ -1388,7 +1388,7 @@ impl CoreIndex {
     ) -> Result<Box<dyn Query>> {
         if nq.local.query_type.as_deref() == Some("payload_score") {
             return self
-                .build_payload_score_query(&nq.local)
+                .build_payload_score_query(&nq.local, &nq.text)
                 .map_err(anyhow::Error::from);
         }
         let qf = nq.local.get("qf").unwrap_or("");
@@ -1545,14 +1545,15 @@ impl CoreIndex {
             // then the request params (finding 133's client-evidenced form).
             // `{!payload_score f=<field> v=<term> func=max|min|average|sum}`
             // (issue #340). Per finding 168 the position-0 form sets the parser
-            // for the whole `q`, and because `v` supplies the query text the
+            // for the whole `q`, and when `v` supplies the query text the
             // trailing `rest` is *discarded* rather than parsed as a child
-            // query -- Solr's `QParser.getParser` only falls back to the
-            // remainder when no `v` local param is present, and this block's
-            // `v` is mandatory (fixture `pls_two_terms`, where the second
-            // block contributes nothing). The inline form the client actually
-            // emits goes through `extract_nested_queries` instead.
-            Some("payload_score") => Ok(Some(self.build_payload_score_query(&local)?)),
+            // query (fixture `pls_two_terms`, where the second block
+            // contributes nothing). `rest` is still passed through, because
+            // Solr's `QParser.getParser` falls back to it when no `v` local
+            // param is present -- `{!payload_score f=... func=max}dog` is a
+            // working query (`plsz_vbound_max`). The inline form the client
+            // actually emits goes through `extract_nested_queries` instead.
+            Some("payload_score") => Ok(Some(self.build_payload_score_query(&local, rest)?)),
             Some(t @ ("geofilt" | "bbox")) => {
                 let shape = if t == "geofilt" {
                     function_query::GeoShape::Circle
@@ -1635,6 +1636,7 @@ impl CoreIndex {
     fn build_payload_score_query(
         &self,
         local: &local_params::LocalParams,
+        bound: &str,
     ) -> Result<Box<dyn Query>, QueryError> {
         let field_name = local
             .get("f")
@@ -1655,9 +1657,22 @@ impl CoreIndex {
         // numeric field, say). That is deliberately *not* treated as "analyzes
         // to empty": such a field is not payload-bearing either, and the
         // non-payload-field error below names the real problem.
-        let analyzed = local
-            .get("v")
-            .and_then(|v| self.wf_schema.tokenize(&field_config.type_, v));
+        //
+        // With no `v` at all, the query text is the *bound* run after `}` --
+        // Solr's general local-params contract (finding 173), which
+        // `QParser.getParser`
+        // applies to every parser and this one does not opt out of:
+        // `{!payload_score f=boost_term func=max}dog` is a working query
+        // (`plsz_vbound_max`), and an explicit `v` beats a bound run that
+        // disagrees with it (`plsz_vbound_v_wins`, where `v="cat"` wins over a
+        // bound `dog`). `pls_err_no_v` is the case where there is no bound text
+        // either, which is the only reason the absent-`v` 400 still exists.
+        let query_text = local.get("v").unwrap_or(bound);
+        let analyzed = if query_text.is_empty() {
+            None
+        } else {
+            self.wf_schema.tokenize(&field_config.type_, query_text)
+        };
         if let Some(terms) = &analyzed {
             if terms.is_empty() {
                 // Solr's `createSpanQuery` returns null when the analyzer emits
@@ -1666,7 +1681,7 @@ impl CoreIndex {
                 // absent `v`, which never reaches the analyzer at all.
                 return Err(QueryError::Syntax("SpanQuery is null".to_string()));
             }
-        } else if local.get("v").is_none() {
+        } else if query_text.is_empty() {
             return Err(QueryError::Syntax("SpanQuery is null".to_string()));
         }
         // `func` is matched literally: Solr's `PayloadUtils.getPayloadFunction`

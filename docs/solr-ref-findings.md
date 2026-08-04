@@ -3101,3 +3101,23 @@ the only way the four payload functions are distinguishable from each other.
       ("the accumulator never sees a value, so the document scores 0" and "only
       `sum` returns 0") are wrong. Captured on a dedicated `plsz` core so the
       `pls_*` fixtures stay put.
+
+173. **`{!payload_score}` with no `v` takes its query text from the bound run
+      after `}`.** Solr's general local-params contract
+      (`QParser.getParser`) applies to this parser like any other, so
+      `{!payload_score f=boost_term func=max}dog` is a working query
+      (`plsz_vbound_max`, scoring z2 3.0 and z1 1.0 exactly as the `v="dog"`
+      form does), and an explicit `v` beats a bound run that disagrees with it
+      (`plsz_vbound_v_wins`: `v="cat"` with a bound `dog` returns z3 only).
+
+      `pls_err_no_v` -- 400 `SpanQuery is null` -- is not in tension with this:
+      it has no bound text either, so there is nothing to fall back to. That
+      single fixture is what made "`v` is mandatory" look true, and the first
+      implementation of #340 encoded it as such.
+
+174. **Two identical `<term>|<boost>` values both count.**
+      `RemoveDuplicatesTokenFilter` drops duplicates only within a single
+      position, and consecutive multiValued values sit at consecutive positions
+      (finding 171), so `["bird|2.0","bird|2.0"]` aggregates `[2.0, 2.0]`:
+      `sum` 4.0 and `average` 2.0, not 2.0 and 2.0 (`plsz_dup_sum`,
+      `plsz_dup_average`).

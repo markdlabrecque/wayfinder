@@ -275,3 +275,7 @@ plsz_mixed_max	200	GET	plsz/select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D
 plsz_mixed_min	200	GET	plsz/select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Dmin%7D&fl=id,score&sort=score%20desc,id%20asc&wt=json		http://localhost:9077/solr
 plsz_mixed_average	200	GET	plsz/select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Daverage%7D&fl=id,score&sort=score%20desc,id%20asc&wt=json		http://localhost:9077/solr
 plsz_mixed_sum	200	GET	plsz/select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Dsum%7D&fl=id,score&sort=score%20desc,id%20asc&wt=json		http://localhost:9077/solr
+plsz_vbound_max	200	GET	plsz/select?q=%7B%21payload_score%20f%3Dboost_term%20func%3Dmax%7Ddog&fl=id,score&sort=score%20desc,id%20asc&wt=json		http://localhost:9077/solr
+plsz_vbound_v_wins	200	GET	plsz/select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Dmax%7Ddog&fl=id,score&sort=score%20desc,id%20asc&wt=json		http://localhost:9077/solr
+plsz_dup_sum	200	GET	plsz/select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22bird%22%20func%3Dsum%7D&fl=id,score&sort=score%20desc,id%20asc&wt=json		http://localhost:9077/solr
+plsz_dup_average	200	GET	plsz/select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22bird%22%20func%3Daverage%7D&fl=id,score&sort=score%20desc,id%20asc&wt=json		http://localhost:9077/solr

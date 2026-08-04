@@ -1388,12 +1388,15 @@ impl PayloadScoreWeight {
 impl Weight for PayloadScoreWeight {
     fn scorer(&self, reader: &SegmentReader, boost: Score) -> tantivy::Result<Box<dyn Scorer>> {
         Ok(Box::new(PayloadScoreScorer {
-            child: self.child.scorer(reader, boost)?,
+            // `1.0`, not `boost`: the child's score is never read (payload-only
+            // scoring), so forwarding the boost into it would silently drop a
+            // `^n` on the block. Passing the identity here makes that explicit
+            // rather than leaving the reader to infer it from the `score()`
+            // below — the child exists only to drive the doc set.
+            child: self.child.scorer(reader, 1.0)?,
             column: self.columns(reader)?,
             func: self.func,
-            // The child's score is never read (payload-only scoring), so
-            // forwarding `boost` into it would silently drop a `^n` on the
-            // block. Apply it here instead, as `BoostQuery` would.
+            // Applied to the aggregate in `score()`, as `BoostQuery` would.
             boost,
             values: Vec::new(),
         }))

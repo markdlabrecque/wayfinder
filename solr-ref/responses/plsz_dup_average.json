@@ -1,0 +1,22 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"{!payload_score f=boost_term v=\"bird\" func=average}",
+      "fl":"id,score",
+      "sort":"score desc,id asc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":1,
+    "start":0,
+    "maxScore":2.0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"z4",
+      "score":2.0
+    }]
+  }
+}

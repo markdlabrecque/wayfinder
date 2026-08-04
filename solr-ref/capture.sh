@@ -4208,7 +4208,8 @@ if want_any '^plsz_'; then
   curl -sf "$PLSZ_SOLR/$PLSZ_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
     {"id":"z1","boost_term":["dog"]},
     {"id":"z2","boost_term":["dog|3.0"]},
-    {"id":"z3","boost_term":["cat","cat|2.0"]}
+    {"id":"z3","boost_term":["cat","cat|2.0"]},
+    {"id":"z4","boost_term":["bird|2.0","bird|2.0"]}
   ]' >/dev/null
 fi
 
@@ -4239,6 +4240,25 @@ capplsz plsz_mixed_max     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D
 capplsz plsz_mixed_min     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Dmin%7D&$PLSZ_TAIL"
 capplsz plsz_mixed_average "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Daverage%7D&$PLSZ_TAIL"
 capplsz plsz_mixed_sum     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Dsum%7D&$PLSZ_TAIL"
+
+# Solr's general local-params contract says a block with no `v` takes its query
+# text from the *bound* run after `}`. `pls_err_no_v` shows the 400 when there
+# is no bound text either, but says nothing about the case where there is one --
+# so these two rows settle whether `{!payload_score f=... func=max}dog` is a
+# working query and whether an explicit `v` beats a bound run that disagrees
+# with it. The module always emits an explicit `v`
+# (`Utility::flattenKeysToPayloadScore`), so this is contract coverage rather
+# than client-path coverage.
+capplsz plsz_vbound_max    "select?q=%7B%21payload_score%20f%3Dboost_term%20func%3Dmax%7Ddog&$PLSZ_TAIL"
+capplsz plsz_vbound_v_wins "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Dmax%7Ddog&$PLSZ_TAIL"
+
+# Two *identical* `<term>|<boost>` values. `RemoveDuplicatesTokenFilter` drops
+# duplicates only within one position, and consecutive multiValued values sit at
+# consecutive positions (finding 171), so both occurrences survive and both
+# count: `sum` 4.0 and `average` 2.0 rather than 2.0 and 2.0. z4 uses `bird`, a
+# term no other row queries, so adding it moves none of the committed fixtures.
+capplsz plsz_dup_sum     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22bird%22%20func%3Dsum%7D&$PLSZ_TAIL"
+capplsz plsz_dup_average "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22bird%22%20func%3Daverage%7D&$PLSZ_TAIL"
 
 if want_any '^plsz_'; then
   release "$PLSZ_CONTAINER" "payload-free core '$PLSZ_CORE'"

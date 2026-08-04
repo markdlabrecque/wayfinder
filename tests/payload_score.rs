@@ -538,3 +538,41 @@ async fn inline_payload_score_block_boost_multiplies_the_aggregate() {
         );
     }
 }
+
+/// `plsz_vbound_max` / `plsz_vbound_v_wins`: with no `v` local param, the query
+/// text is the **bound run** after `}` — Solr's general local-params contract
+/// (`QParser.getParser`), which `payload_score` does not opt out of. An
+/// explicit `v` wins over a bound run that disagrees with it.
+///
+/// `pls_err_no_v` is not in tension with this: it has no bound text either, so
+/// there is nothing to fall back to and the `SpanQuery is null` 400 stands.
+/// That fixture alone was what made "v is mandatory" look true.
+#[tokio::test]
+async fn payload_score_v_defaults_to_the_bound_run() {
+    let (app, _dir) = plsz_app().await;
+    let tail = "&fl=id,score&sort=score%20desc,id%20asc&wt=json";
+
+    // No `v`; the bound `dog` is the query text.
+    let (status, body) = get(
+        &app,
+        &format!("select?q=%7B%21payload_score%20f%3Dboost_term%20func%3Dmax%7Ddog{tail}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "plsz_vbound_max: {body}");
+    assert_scores_close(
+        &doc_scores(&body),
+        &[("z2", 3.0), ("z1", 1.0)],
+        "plsz_vbound_max",
+    );
+
+    // `v="cat"` alongside a bound `dog`: `v` wins, so only z3 matches.
+    let (status, body) = get(
+        &app,
+        &format!(
+            "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Dmax%7Ddog{tail}"
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "plsz_vbound_v_wins: {body}");
+    assert_scores_close(&doc_scores(&body), &[("z3", 2.0)], "plsz_vbound_v_wins");
+}

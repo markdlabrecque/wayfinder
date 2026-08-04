@@ -354,6 +354,17 @@ where
 /// Note `"` is deliberately *not* a terminator: every captured bound run is a
 /// quoted phrase, optionally `+`-prefixed, and the quotes belong to the nested
 /// query's own text.
+/// ponytail: a `^n` immediately after `}` is swallowed into the bound token and
+/// then discarded with it, so `{!payload_score f=... v=... func=max}^2` is
+/// silently *unboosted* where Solr's lucene grammar would apply the boost. The
+/// parenthesised form `({!payload_score ...})^2` works, because `)` ends the
+/// bound token. This is a ceiling of the extractor, shared with `{!edismax}`,
+/// not of any one parser -- and it is unfixtured in both directions: no capture
+/// puts a boost on a nested block, and the client emits none
+/// (`SearchApiSolrBackend::preQuery` joins bare blocks with spaces). Lifting it
+/// means teaching this function that `^`/`~` end a bound token, which needs a
+/// fixture first: `{!edismax}foo^2` may well mean "boost the nested query" or
+/// "the bound text is literally `foo^2`", and nothing captured says which.
 fn bound_token_len(rest: &str) -> usize {
     let mut depth = 0usize;
     let mut in_quote = false;
@@ -417,12 +428,14 @@ pub fn extract_nested_queries(q: &str) -> Result<Option<Rewritten>, String> {
                 // form the client actually emits: `preQuery` joins
                 // `{!boost b=boost_document}` with one `{!payload_score ...}`
                 // block per boosted term and a `*:*` fallback, and the lucene
-                // parser sums those SHOULD clauses. Its query text lives
-                // entirely in its own local params (`f`/`v`/`func`), so the
-                // bound run after `}` -- empty in every client-emitted query,
-                // since a space follows each block -- is discarded by
-                // `CoreIndex::build_nested_query`, exactly as Solr discards the
-                // remainder when a `v` local param is present.
+                // parser sums those SHOULD clauses. Its query text normally
+                // lives entirely in its own local params (`f`/`v`/`func`), and
+                // the bound run after `}` is empty in every client-emitted
+                // query, since a space follows each block. When `v` *is*
+                // absent, `CoreIndex::build_payload_score_query` falls back to
+                // the bound run -- Solr's general local-params contract
+                // (`plsz_vbound_max`); an explicit `v` wins over it
+                // (`plsz_vbound_v_wins`).
                 Some("edismax" | "payload_score") => {}
                 Some(other) => {
                     return Err(format!(

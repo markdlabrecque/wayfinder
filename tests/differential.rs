@@ -1024,14 +1024,19 @@ fn pls_corpus() -> Value {
 /// The 3-doc corpus `capture.sh`'s plsz block indexes into the `plsz` core
 /// (finding 172). z1's only occurrence of `dog` is a *bare* token; z2 is the
 /// payloaded control; z3 carries both forms of `cat`, which is what separates
-/// "a payload-free occurrence contributes 1.0" from "it is skipped". Reuses
+/// "a payload-free occurrence contributes 1.0" from "it is skipped". z4 carries
+/// one term twice with the same payload, which pins that both occurrences count
+/// (finding 174 -- `RemoveDuplicatesTokenFilter` is position-scoped); it uses a
+/// term no other
+/// row queries, so it moves none of the other `plsz` fixtures. Reuses
 /// `PLS_SCHEMA_TOML` -- a superset of what these docs need, and the same
 /// `boost_term_payload` field config the live `plsz` core was given.
 fn plsz_corpus() -> Value {
     json!([
         {"id":"z1","boost_term":["dog"]},
         {"id":"z2","boost_term":["dog|3.0"]},
-        {"id":"z3","boost_term":["cat","cat|2.0"]}
+        {"id":"z3","boost_term":["cat","cat|2.0"]},
+        {"id":"z4","boost_term":["bird|2.0","bird|2.0"]}
     ])
 }
 
