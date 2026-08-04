@@ -162,26 +162,26 @@ d7e9429 docs(search-api): negated conditions AND variants, all-language sort cop
 f88506d docs(search-api): state the variant-combination rule, note sort-copy growth
 ```
 
-## Follow-ups (deferred, not filed as issues here)
+## Follow-ups (deferred, all filed)
 
-1. `tests/online_snapshot.rs` is load-sensitive and flakes under parallel
+1. **#357** — `tests/online_snapshot.rs` is load-sensitive and flakes under parallel
    test load — pre-existing, not introduced by this branch.
-2. String-field sort naming divergence: traces show
+2. **#358** — string-field sort naming divergence: traces show
    `sort_X3b_en_field_sku`; upstream gates the sort copy on the Solr field
    name starting with `t` **or** `s`, while Wayfinder's `sortFieldName()`
    only special-cases text. Pre-existing divergence, not introduced here.
-3. The server consumes only the first `spellcheck.dictionary` value when
+3. **#359** — the server consumes only the first `spellcheck.dictionary` value when
    multiple are sent (a per-resolved-language repeated param is emitted, but
    the server only honors one).
-4. `ResponseParser` drops the `{word, freq}` extendedResults suggestion
+4. **#360** — `ResponseParser` drops the `{word, freq}` extendedResults suggestion
    shape entirely — marked with a `ponytail:` comment naming the ceiling,
    not implemented.
-5. `twm_suggest`/`spellcheck_<lang>` sink fields are returned inside `docs`
+5. **#361** — `twm_suggest`/`spellcheck_<lang>` sink fields are returned inside `docs`
    for want of an explicit `fl` in `QueryBuilder`. This was the withdrawn
    spec deliverable (item 1 above) — `QueryBuilder` never emits a plain
    `fl` today, so there is nothing to exclude sinks from; adding `fl`
    emission is a separate, out-of-scope feature.
-6. With N enabled site languages, every text field now carries N+1
+6. **#362** — with N enabled site languages, every text field now carries N+1
    identical sort copies (one per language plus `und`). This matches
    upstream's own behavior exactly, but it is real index-size growth worth
    tracking.
