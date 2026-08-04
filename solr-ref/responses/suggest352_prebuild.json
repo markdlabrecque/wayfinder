@@ -1,0 +1,14 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1
+  },
+  "suggest":{
+    "und":{
+      "qu":{
+        "numFound":0,
+        "suggestions":[ ]
+      }
+    }
+  }
+}

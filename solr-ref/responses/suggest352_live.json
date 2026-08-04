@@ -1,0 +1,26 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0
+  },
+  "suggest":{
+    "und":{
+      "qu":{
+        "numFound":3,
+        "suggestions":[{
+          "term":"<b>qu</b>ick",
+          "weight":0,
+          "payload":""
+        },{
+          "term":"<b>qu</b>iet",
+          "weight":0,
+          "payload":""
+        },{
+          "term":"<b>qu</b>ickly",
+          "weight":0,
+          "payload":""
+        }]
+      }
+    }
+  }
+}

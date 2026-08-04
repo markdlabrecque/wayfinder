@@ -4074,6 +4074,10 @@ cappls() {  # cappls <name> <path-after-core>
     -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$(cat "$OUT/$name.status")" GET "$PLS_CORE/$suffix" "" "$PLS_SOLR" \
+    >> "$MANIFEST_ERRORS"
+  rm -f "$OUT/$name.status"
+}
+
 # --- solr.DateRangeField intervals (issue #341) ------------------------------
 # Appended block; nothing above is edited. Own container/port/core, per the
 # wayfinder-solr-24 precedent: `date_range` is NOT in solr:9's `_default`
@@ -4495,6 +4499,8 @@ capjf343 jf343_terms_sort_index    '{"siteHashes":{"limit":-1,"field":"index_id"
 
 if want_any '^jf343_'; then
   release "$JF343_CONTAINER" "json-facet core '$JF343_CORE'"
+fi
+
 DR341_TAIL='fl=id&sort=id%20asc&rows=20&wt=json'
 # The query interval every predicate fixture below uses, so the three ops are
 # directly comparable on one corpus: May 1 -- Jul 1 2020.
@@ -4628,4 +4634,63 @@ capdr341 dr341_fieldtypes "$DR341_CORE/schema/fieldtypes?wt=json"
 
 if want_any '^dr341_'; then
   release "$DR341_CONTAINER" "date-range core '$DR341_CORE'"
+fi
+
+# --- `/suggest` cron build and live-index divergence (issue #352) ----------
+# The full search_api_solr 4.4.0 source overturned finding 154's three-file
+# snapshot conclusion: SearchApiSolrHooks.php:143-161 calls this handler from
+# cron after index updates. Configure the canonical content core in place so
+# these remain core-relative GET rows in manifest.tsv and the live differential
+# runner can replay them against the same `$SOLR/$CORE` base as every other row.
+if want_any '^suggest352_'; then
+  # The main corpus has no `twm_suggest` values, so deleting our two stable IDs
+  # before the first build makes re-runs deterministic even against a warm
+  # container: the materialized Solr dictionary starts genuinely empty.
+  curl -s "$SOLR/$CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field": {
+      "name":"twm_suggest", "type":"text_general", "indexed":true,
+      "stored":true, "multiValued":true
+    }
+  }' >/dev/null
+  curl -s "$SOLR/$CORE/config" -H 'Content-Type: application/json' -d '{
+    "add-searchcomponent": {
+      "name":"suggest", "class":"solr.SuggestComponent",
+      "suggester": {
+        "name":"und", "lookupImpl":"AnalyzingInfixLookupFactory",
+        "dictionaryImpl":"DocumentDictionaryFactory", "field":"twm_suggest",
+        "suggestAnalyzerFieldType":"text_general", "buildOnCommit":"false",
+        "buildOnStartup":"false"
+      }
+    }
+  }' >/dev/null
+  curl -s "$SOLR/$CORE/config" -H 'Content-Type: application/json' -d '{
+    "add-requesthandler": {
+      "name":"/suggest", "class":"solr.SearchHandler", "startup":"lazy",
+      "defaults": {
+        "suggest":"true", "suggest.dictionary":"und", "suggest.count":"10"
+      },
+      "components":["suggest"]
+    }
+  }' >/dev/null
+  curl -sf "$SOLR/$CORE/update?commit=true&wt=json" \
+    -H 'Content-Type: application/json' \
+    -d '{"delete":{"query":"id:suggest352_*"}}' >/dev/null
+  curl -sf "$SOLR/$CORE/suggest?suggest.buildAll=true&wt=json" >/dev/null
+  curl -sf "$SOLR/$CORE/update?commit=true&wt=json" \
+    -H 'Content-Type: application/json' -d '[
+      {"id":"suggest352_1","twm_suggest":["quick","quiet"]},
+      {"id":"suggest352_2","twm_suggest":["quickly"]}
+    ]' >/dev/null
+
+  # Solr still reads the empty materialized dictionary here; Wayfinder reads
+  # Tantivy's live term dictionary and deliberately returns results immediately.
+  cap suggest352_prebuild \
+    'suggest?suggest.q=qu&suggest.dictionary=und&suggest.count=10&wt=json'
+  # Drupal cron sends only buildAll. Its fire-and-forget client closes without
+  # reading this captured response, but the synchronous envelope is still the
+  # wire ground truth for clients that do read it.
+  cap suggest352_buildall 'suggest?suggest.buildAll=true&wt=json'
+  # The post-build shape is the fixture for Wayfinder's always-live response.
+  cap suggest352_live \
+    'suggest?suggest.q=qu&suggest.dictionary=und&suggest.count=10&wt=json'
 fi
