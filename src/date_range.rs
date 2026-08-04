@@ -383,14 +383,23 @@ fn precision_end_ms(start: OffsetDateTime, precision: Precision) -> Option<i64> 
         Precision::Minute => start.checked_add(Duration::minutes(1))?,
         Precision::Second => start.checked_add(Duration::seconds(1))?,
     };
-    // Clamp on BOTH sides, and never below `start`. When `next` itself clamps
-    // to `MAX_MS`, the naive `- 1` puts `end` one millisecond *before* `start`,
-    // and that inverted interval then reports finding 170's `Wrong order` for a
-    // query the client wrote in the correct order (and rejects a document Solr
-    // accepts). Guarding only the low side left every literal from 2263 to 9998
-    // inverted; `9999` escaped only because its end clamps to exactly `MAX_MS`.
-    let start_ms = to_millis(start);
-    Some(to_millis(next).saturating_sub(1).clamp(start_ms, MAX_MS))
+    // Never below `start`. When `next` itself clamps to `MAX_MS`, the naive
+    // `- 1` puts `end` one millisecond *before* `start`, and that inverted
+    // interval then reports finding 170's `Wrong order` for a query the client
+    // wrote in the correct order (and rejects a document Solr accepts).
+    // Guarding only the low side left every literal from 2263 to 9998 inverted;
+    // `9999` escaped only because its end clamps to exactly `MAX_MS`.
+    //
+    // The trade this makes, and it is a real one: when BOTH endpoints of an
+    // interval land past `MAX_MS` they collapse to the same instant, so a
+    // *reversed* far-future interval (`[9999 TO 2263]`) stops being finding
+    // 170's `Wrong order` 500 and answers as the point interval at the bound
+    // (`reversed_interval_past_the_upper_bound_collapses_instead_of_erroring`).
+    // Reversal is still detected whenever at least one endpoint is
+    // representable, which is every interval a client outside the ceiling zone
+    // can write. No upper clamp is needed here: `to_millis` has already clamped
+    // `next` to `MAX_MS`, so the `- 1` can never exceed it.
+    Some(to_millis(next).saturating_sub(1).max(to_millis(start)))
 }
 
 /// `dt` as a millisecond timestamp, **clamped** into `MIN_MS..=MAX_MS` rather

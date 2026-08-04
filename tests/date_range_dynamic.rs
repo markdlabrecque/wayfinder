@@ -1088,3 +1088,34 @@ async fn dynamic_field_less_literal_in_qf_is_an_interval_query() {
         "a dynamic date_range field in `qf` must be the interval query: {body}"
     );
 }
+
+/// The dynamic mirror of
+/// `tests/date_range.rs::far_future_truncated_endpoints_do_not_invert_the_interval`:
+/// the endpoint clamp is applied when the interval is parsed, so it must hold
+/// identically on the dynamic path, which reads its endpoints back out of the
+/// `_dynamic` JSON columns rather than a declared field's own.
+#[tokio::test]
+async fn dynamic_far_future_truncated_endpoints_do_not_invert_the_interval() {
+    let (app, _dir) = dynamic_date_range_app().await;
+    for query in [
+        "drs_x%3A%5B3000%20TO%203001%5D",
+        "drs_x%3A%5B2300%20TO%202400%5D",
+        "drs_x%3A%5B2262-05%20TO%202262-06%5D",
+    ] {
+        let (status, body) = get(
+            &app,
+            &format!("select?q={query}&fl=id&sort=id%20asc&rows=20&wt=json"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "`{query}` is correctly ordered and must not report Wrong order: {body}"
+        );
+        assert_eq!(
+            ids(&body),
+            vec!["d6".to_string(), "d7".to_string()],
+            "`{query}` clamps to the point interval at MAX_MS: {body}"
+        );
+    }
+}

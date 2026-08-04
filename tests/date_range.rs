@@ -1322,3 +1322,97 @@ async fn field_less_literal_in_qf_is_an_interval_query() {
         );
     }
 }
+
+// --- round-4 review: `qf` alongside free text, and the reversed far-future
+// --- interval the clamp collapses ------------------------------------------
+
+/// A `qf` naming a `date_range` field **and** an ordinary field must still
+/// answer the ordinary field: a literal that is not a date makes the
+/// `date_range` disjunct unanswerable, not the whole request invalid.
+///
+/// This follows the ceiling issue #84 already ratified for typed `qf` fields
+/// (`field_target`'s ponytail, `src/core_index.rs:2106-2113`): a `qf` field
+/// whose type cannot encode the literal contributes a clause that cannot match
+/// rather than failing the request, and "raising this ceiling means encoding
+/// [the typed] terms here, not restoring the 400". `int` and `date` fields in
+/// `qf` already behave exactly this way, so `date_range` matching them is the
+/// consistent answer. Not fixture-derived: no capture sends a `qf` naming a
+/// `DateRangeField`.
+#[tokio::test]
+async fn qf_naming_a_date_range_field_alongside_another_still_answers_the_other() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?defType=edismax&qf=id%20drs_x&q=d3&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a non-date literal must not 400 the whole request: {body}"
+    );
+    assert_eq!(
+        ids(&body),
+        vec!["d3".to_string()],
+        "the `id` disjunct must still answer; only the date_range one drops: {body}"
+    );
+}
+
+/// And the degenerate case the same ceiling covers: a `qf` naming *only* a
+/// `date_range` field, with a literal that is not a date, is the quiet
+/// `numFound: 0` issue #84 chose over a 400 -- the identical outcome a `qf`
+/// naming only a numeric dynamic field produces today.
+#[tokio::test]
+async fn qf_naming_only_a_date_range_field_with_a_non_date_literal_is_zero_hits() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?defType=edismax&qf=drs_x&q=hello&fl=id&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["response"]["numFound"].as_u64(),
+        Some(0),
+        "issue #84's ratified trade: a quiet 0 hits, not a 400: {body}"
+    );
+}
+
+/// The documented consequence of clamping both ends: when BOTH endpoints land
+/// past `MAX_MS` they collapse to the same instant, so an interval written in
+/// reversed order stops being finding 170's `Wrong order` 500 and answers as
+/// the point interval at the bound. Pinned here so it is a recorded choice
+/// rather than a side effect -- reversal is still detected whenever at least
+/// one endpoint is representable (`drs_x:[2022 TO 1677]`,
+/// `drs_x:[2262-04-12 TO 2262-04-11]` both still 500).
+#[tokio::test]
+async fn reversed_interval_past_the_upper_bound_collapses_instead_of_erroring() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=drs_x%3A%5B9999%20TO%202263%5D&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "both endpoints clamp to MAX_MS, so there is no order left to be wrong: {body}"
+    );
+    assert_eq!(
+        ids(&body),
+        vec!["d6".to_string(), "d7".to_string()],
+        "the point interval at MAX_MS: {body}"
+    );
+    // The other direction is untouched: with a representable endpoint, a
+    // reversed interval is still the finding-170 500.
+    let (status, body) = get(
+        &app,
+        "select?q=drs_x%3A%5B2022%20TO%201677%5D&fl=id&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a reversed interval inside the representable range still 500s: {body}"
+    );
+}

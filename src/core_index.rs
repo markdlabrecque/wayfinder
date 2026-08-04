@@ -2056,7 +2056,7 @@ impl CoreIndex {
                 tantivy::query_grammar::UserInputLeaf::Literal(lit) if lit.field_name.is_none() => {
                     literal_texts.push(lit.phrase.clone());
                     let quoted = lit.delimiter != tantivy::query_grammar::Delimiter::None;
-                    self.build_field_disjunction(&lit.phrase, quoted, &qf_fields, tie)?
+                    self.build_field_disjunction(&lit.phrase, quoted, &qf_fields, tie)
                 }
                 _ => self.build_ast(
                     tantivy::query_grammar::UserInputAst::Leaf(Box::new(leaf)),
@@ -2337,33 +2337,50 @@ impl CoreIndex {
         quoted: bool,
         qf_fields: &[(FieldTarget, f32)],
         tie: f32,
-    ) -> Result<Box<dyn Query>, QueryError> {
+    ) -> Box<dyn Query> {
         let mut disjuncts: Vec<Box<dyn Query>> = Vec::with_capacity(qf_fields.len());
         for (target, field_boost) in qf_fields {
             // A field-LESS literal never reaches `build_leaf`, so #341's
             // per-leaf interception does not cover it: a `date_range` field
-            // named in `qf`/`pf` would otherwise contribute a term query against
-            // the raw text field holding the verbatim string (finding 165), i.e.
-            // it would match only the document whose stored string happens to be
+            // named in `qf` would otherwise contribute a term query against the
+            // raw text field holding the verbatim string (finding 165), i.e. it
+            // would match only the document whose stored string happens to be
             // literally the query text -- the same silently-wrong-term-query
             // failure that interception exists to prevent. Solr routes a `qf`
             // field through `FieldType::getFieldQuery`, which for
             // `DateRangeField` is the interval query, so build that instead.
+            //
+            // A literal that is not a date drops the disjunct rather than
+            // failing the request, which is the ceiling issue #84 already
+            // ratified for every other typed `qf` field (see `field_target`'s
+            // ponytail): `qf` is a text-relevance param, so a field whose type
+            // cannot encode the literal contributes a clause that cannot match
+            // and the *text* fields alongside it still answer. Restoring a 400
+            // here would 400 an ordinary keyword search for naming a
+            // `date_range` field in `qf` -- and would be inconsistent with the
+            // `int`/`date` fields that already drop quietly.
+            //
+            // ponytail: `pf` (`build_pf_query`) is NOT intercepted. It builds a
+            // `PhraseQuery` over the raw text field, which for a `date_range`
+            // field yields fewer than two tokens or a phrase that matches
+            // nothing -- so a `pf` naming one contributes no phrase boost rather
+            // than a wrong one. Raising that ceiling means an interval-shaped
+            // boost query, which no capture exercises and no fixture pins.
             if let Some((start_col, end_col)) = self.leaf_date_range_columns(&match target {
                 FieldTarget::Static(field) => {
                     self.index.schema().get_field_name(*field).to_string()
                 }
                 FieldTarget::Dynamic { path, .. } => path.clone(),
             }) {
-                let interval =
-                    date_range::parse_interval(phrase_text).map_err(Self::date_range_error)?;
-                let dr: Box<dyn Query> = Box::new(date_range::DateRangeQuery::new(
-                    start_col,
-                    end_col,
-                    date_range::Op::Intersects,
-                    interval,
-                ));
-                disjuncts.push(Box::new(BoostQuery::new(dr, *field_boost)));
+                if let Ok(interval) = date_range::parse_interval(phrase_text) {
+                    let dr: Box<dyn Query> = Box::new(date_range::DateRangeQuery::new(
+                        start_col,
+                        end_col,
+                        date_range::Op::Intersects,
+                        interval,
+                    ));
+                    disjuncts.push(Box::new(BoostQuery::new(dr, *field_boost)));
+                }
                 continue;
             }
             let tokens = self.tokenize_for_target(target, phrase_text);
@@ -2397,11 +2414,9 @@ impl CoreIndex {
             disjuncts.push(Box::new(BoostQuery::new(base, *field_boost)));
         }
         if disjuncts.is_empty() {
-            Ok(Box::new(EmptyQuery))
+            Box::new(EmptyQuery)
         } else {
-            Ok(Box::new(DisjunctionMaxQuery::with_tie_breaker(
-                disjuncts, tie,
-            )))
+            Box::new(DisjunctionMaxQuery::with_tie_breaker(disjuncts, tie))
         }
     }
 
