@@ -270,7 +270,7 @@ class DocumentBuilderTest extends TestCase {
   /**
    * Issue #339: TWO solr_text_suggester fields on one item must ACCUMULATE
    * into the fixed sink field `twm_suggest`, not have the second silently
-   * overwrite the first via `$doc[$name] = ...` (DocumentBuilder.php:73).
+   * overwrite the first via `$doc[$name] = ...` (DocumentBuilder.php:93).
    *
    * search_api_solr does not hit this bug because its Solarium
    * Document::addField() appends to an existing key instead of assigning;
@@ -365,7 +365,7 @@ class DocumentBuilderTest extends TestCase {
    * Issue #339: solr_text_suggester fields alongside a plain 'text' field and
    * another typed field must not disturb the other fields' normal shape, and
    * must NOT get a sort_* copy themselves -- only plain 'text' does today
-   * (DocumentBuilder.php:75-94 guards on `$type === 'text'` exactly, not
+   * (DocumentBuilder.php:95-114 guards on `$type === 'text'` exactly, not
    * isTextType()/isTextType-like matching, so 'solr_text_suggester' must not
    * slip through that check).
    *
@@ -405,7 +405,7 @@ class DocumentBuilderTest extends TestCase {
     $this->assertArrayNotHasKey('twm_field_suggest_a', $doc);
     $this->assertArrayNotHasKey('twm_field_suggest_b', $doc);
     $this->assertArrayNotHasKey('tws_field_suggest_a', $doc);
-    $this->assertArrayNotHasKey('twm_field_suggest_b', $doc);
+    $this->assertArrayNotHasKey('tws_field_suggest_b', $doc);
   }
 
 }

@@ -79,7 +79,7 @@ class DocumentBuilder {
         // Document::addField(), which APPENDS when the key already exists.
         // Issue #339: accumulate instead, in item-field iteration order.
         //
-        // The sink is always an array, regardless of each contributing
+        // ponytail: the sink is always an array, regardless of each contributing
         // field's cardinality: the preset declares twm_suggest as
         // multi_valued = true (presets/search-api.toml:99-103), so a
         // one-element array is the honest shape for a single-valued
