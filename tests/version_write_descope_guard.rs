@@ -1,18 +1,23 @@
-//! Expiring guard for the `_version_` v1 decision (#293, PRD §5 "v3 —
-//! `_version_`").
+//! Expiring guard for what is **still** descoped around `_version_` after
+//! #343 — the **write side** (#293, PRD §5 "v3 — `_version_`").
 //!
-//! Finding 132 (the #307 source sweep) corrected this issue's premise. The
-//! client reads `_version_` **only** through a JSON facet aggregation
+//! Finding 132 (the #307 source sweep) corrected #293's premise. The client
+//! reads `_version_` **only** through a JSON facet aggregation
 //! (`createJsonFacetAggregation` + `max(_version_)`), on admin "max document
 //! version" diagnostics screens — never via `stats.field`, never written,
 //! never as an optimistic-concurrency precondition (`versions=true`), never
-//! with atomic-update field modifiers. So #293's v1 outcome is a recorded
-//! no-op-with-decision: the `_version_` field (#99/#102) is real, fast,
-//! populated per document, and stats-only — exactly the shape JSON faceting
-//! needs when it lands — and the real client dependency (JSON facet
-//! aggregation with nesting) is a separate, larger, deprioritized feature
-//! whose only client is an admin diagnostics screen. Nothing a site searches
-//! depends on `_version_`.
+//! with atomic-update field modifiers. #293 therefore delivered the field
+//! (#99/#102: real, fast, populated per document, stats-capable) and rescoped
+//! the read path — JSON faceting with aggregations and nesting — to its own
+//! item.
+//!
+//! **That read path landed in #343**, so this file was narrowed to match: it
+//! was `version_descope_guard.rs`, it lost `json.facet` from its request
+//! needles, and it lost the read-path deferral framing. What it keeps is the
+//! coverage #343 did not touch and deleting the file would have silently
+//! dropped: the two write-side descopes (`versions=true` optimistic
+//! concurrency, atomic-update field modifiers), the trace request-side scan
+//! with its positive control, and the finding-132 PRD tripwires.
 //!
 //! Per CLAUDE.md's rule for deliberate skips, this guard must fail the day the
 //! evidence stops holding. When it goes red, the fix is **not** to weaken it
@@ -23,9 +28,9 @@
 //!
 //!   1. The captured client never sends `_version_` request-side across the 28
 //!      committed traces in `solr-ref/search-api/trace/` — not as a doc field
-//!      in an update body, not as `versions=true`, not as `max(_version_)`,
-//!      not as a `json.facet`. (The diagnostics requests that do read it are
-//!      admin screens, not captured search traffic.)
+//!      in an update body, not as `versions=true`, not as `max(_version_)`.
+//!      (The diagnostics requests that read it are admin screens, not captured
+//!      search traffic; #343 serves them, it does not put them in a trace.)
 //!   2. The frozen `search_api_solr` 4.4.0 source builds every `_version_`
 //!      aggregation through Solarium's JSON-facet API and writes every
 //!      document whole through `addDocument(s)`.
@@ -35,11 +40,15 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 /// `_version_`-related needles whose request-side presence would mean a client
-/// actually exercises a `_version_` feature. `json.facet` is included because
-/// it is the channel the diagnostics screens read `_version_` on; if it ever
-/// shows up in a captured search trace, the "nothing searched depends on
-/// `_version_`" premise is the thing to revisit.
-const REQUEST_NEEDLES: &[&str] = &["_version_", "versions=true", "max(_version_)", "json.facet"];
+/// actually exercises a `_version_` feature on a *search* path.
+///
+/// `json.facet` was deliberately removed from this list when #343 landed:
+/// server-side `json.facet` is now implemented, so its appearance in a trace
+/// would no longer signal an unmet dependency. `max(_version_)` stays — it is
+/// implemented too, but a *search* trace computing it would still overturn
+/// "nothing a site searches depends on `_version_`", which is what the
+/// write-side descopes below rest on.
+const REQUEST_NEEDLES: &[&str] = &["_version_", "versions=true", "max(_version_)"];
 
 const SOURCE: &str = include_str!(
     "../coverage/search_api_solr_4.4.0_source/src/Plugin/search_api/backend/SearchApiSolrBackend.php"
@@ -85,8 +94,8 @@ fn trace_corpus_is_the_28_traces_the_decision_was_checked_against() {
 /// No captured client request — query string, headers, or body — references
 /// `_version_` in any form. This is the premise behind "nothing a site
 /// searches depends on `_version_`": the only client path that reads it (the
-/// admin diagnostics JSON-facet screen) is not captured search traffic, and
-/// no client writes it or sends `versions=true`.
+/// admin diagnostics JSON-facet screen, served since #343) is not captured
+/// search traffic, and no client writes it or sends `versions=true`.
 #[test]
 fn no_trace_request_references_version_in_any_form() {
     for file in trace_files() {
@@ -145,14 +154,21 @@ fn version_is_present_in_trace_responses_so_the_request_scan_is_not_blind() {
 /// `_version_` is read only through a JSON facet aggregation. Both tokens
 /// must appear together: `createJsonFacetAggregation` is Solarium's JSON-facet
 /// API and `max(_version_)` is the aggregate the diagnostics screens compute.
+///
+/// Since #343 this no longer guards a deferral — it pins the *reason* #343 was
+/// built and the shape it was built to. If the client's read path moves off
+/// Solarium's JSON-facet API, `src/json_facet.rs`'s scope (bare-string
+/// aggregation, `type: terms` nesting, `max()` only — spec §1a, finding 167)
+/// is aimed at a client that no longer exists and needs re-deriving, not
+/// extending.
 #[test]
 fn source_reads_version_only_through_a_json_facet_aggregation() {
     assert!(
         SOURCE.contains("createJsonFacetAggregation"),
         "the source no longer builds a JSON facet aggregation. PRD §5's v3 `_version_` decision \
          (#293) records that the client reads `_version_` via `createJsonFacetAggregation` \
-         (finding 132); if that API usage moved, re-establish how `_version_` is read before \
-         trusting this guard."
+         (finding 132), and #343 built `json.facet` to exactly that shape; if that API usage \
+         moved, re-derive the wire form from the new source before extending src/json_facet.rs."
     );
     assert!(
         SOURCE.contains("max(_version_)"),
@@ -268,6 +284,32 @@ fn prd_version_section_references_the_decision_issue() {
         "PRD §5's v3 `_version_` section should reference issue #293 so a future reader can find \
          the decision and its evidence (finding 132)."
     );
+}
+
+/// The mirror image of the guard this file used to be: #343 landed the read path, so the PRD must
+/// stop calling it deferred. Without this, the narrowing done in #343 could silently rot back into
+/// a doc that describes a descope Wayfinder no longer has — the same failure mode CLAUDE.md's
+/// expiring-skip rule exists to prevent, pointed the other way.
+#[test]
+fn prd_version_section_records_the_json_facet_read_path_as_landed_not_deferred() {
+    let section = version_section();
+    assert!(
+        section.contains("#343"),
+        "PRD §5's v3 `_version_` section does not reference #343. The JSON-facet read path it \
+         once deferred has landed; the section must say so and point at the issue, or a reader \
+         will re-descope a shipped feature."
+    );
+    for p in version_paragraphs() {
+        let lower = p.to_lowercase();
+        let names_the_read_path = lower.contains("json facet") || lower.contains("json.facet");
+        let calls_it_deferred = lower.contains("deferred") || lower.contains("not v1 work");
+        assert!(
+            !(names_the_read_path && calls_it_deferred),
+            "PRD §5's v3 `_version_` section still describes the JSON-facet read path as \
+             deferred in this block:\n{p}\nIt shipped in #343. Update the wording rather than \
+             relaxing this assertion."
+        );
+    }
 }
 
 /// The §5 parity table used to claim "`json.facet` appears nowhere in its source". That is
