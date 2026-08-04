@@ -2919,7 +2919,11 @@ as *grid math*, not storage).
       group and still facets `article=1, page=1` (`g338_truncate_rows`). With
       two `group.field` values it collapses on the FIRST:
       `group.field=type&group.field=popularity` gives `type`'s 3-document
-      collapse, not `popularity`'s 6 singletons (`g338_truncate_multi`).
+      collapse, not `popularity`'s 6 singletons (`g338_truncate_multi`). The
+      "most relevant document" of a group is the one `group.sort` picks, not the
+      one the main `sort` picks: `group.sort=id desc` collapses to {g4, g5, g6}
+      and the `category` facet becomes `blog=1, news=0`
+      (`g338_truncate_groupsort`).
 
 161. **`group.facet=true` turns every facet count into a count of matching
       GROUPS, including `facet.query` and `facet.range` — the "field facets

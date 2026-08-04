@@ -3886,6 +3886,11 @@ capg338 g338_truncate_qr     "select?q=*:*&$G338_GRP&group.truncate=true&$G338_Q
 # facets as computed from the FIRST specified group field. `type` gives 3
 # groups, `popularity` gives 6 (every value distinct), so which one drives the
 # counts is observable.
+# Which document is a group's "most relevant" one for `group.truncate` -- the
+# one the main `sort` picks, or the one `group.sort` picks? `group.sort=id desc`
+# makes article's top document g4 (category blog) instead of g1 (news), which
+# moves the `category` facet, so the fixture names the answer.
+capg338 g338_truncate_groupsort "select?q=*:*&$G338_GRP&group.truncate=true&group.sort=id+desc&$G338_FF&$G338_TAIL"
 # Is the truncated/grouped set the WHOLE group set or only the page of groups
 # `rows` returns? `rows=1` returns one group; if truncation were page-scoped the
 # `type` facet would be `article=1` alone. Same question for `group.facet`.
