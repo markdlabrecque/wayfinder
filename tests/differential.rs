@@ -872,6 +872,70 @@ async fn heatmap_app() -> (Router, TempDir) {
     (app, dir)
 }
 
+// --- issue #341: `date_range` (solr.DateRangeField) interval fields.
+// The 36 `dr341_*` rows in manifest-errors.tsv were captured against a
+// dedicated `daterange` core (capture.sh's #341 block). Schema and corpus are
+// byte-for-byte the ones that block declares and indexes; the core is named
+// `content` here so `daterange/...` rows rewrite to `content/...` in
+// `app_and_request_url`, the same trick `fnq`/`pf296`/`facets33` use.
+//
+// The five 500-status `dr341_err_*` fixtures carry a Java stack trace under
+// `error.trace`, and the four 400s carry `error.metadata`; `normalize()`
+// already drops `msg`/`metadata`/`trace` (finding 10, extended by 59), so the
+// generic differ compares only the envelope and `error.code` on those rows.
+// The verbatim `error.msg` strings finding 170 pins are asserted separately in
+// `tests/date_range.rs`, which this does not duplicate.
+const DR341_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "id"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "drs_x"
+type = "date_range"
+stored = true
+
+[[fields]]
+name = "drm_x"
+type = "date_range"
+multi_valued = true
+stored = true
+"#;
+
+fn dr341_corpus() -> Value {
+    json!([
+        {"id":"d1","drs_x":"2020"},
+        {"id":"d2","drs_x":"2020-06"},
+        {"id":"d3","drs_x":"[2020-03-01T00:00:00Z TO 2020-09-30T00:00:00Z]"},
+        {"id":"d4","drs_x":"2020-06-15T12:00:00Z"},
+        {"id":"d5","drs_x":"[* TO 2019-12-31T23:59:59Z]"},
+        {"id":"d6","drs_x":"[2021-01-01T00:00:00Z TO *]"},
+        {"id":"d7","drs_x":"[* TO *]"},
+        {"id":"d8","drm_x":["2020","2022-05"]},
+        {"id":"d9","drm_x":["2020"]}
+    ])
+}
+
+async fn dr341_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), DR341_SCHEMA_TOML).expect("dr341 app must build");
+    let (status, body) = post_docs(&app, &dr341_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the dr341 corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
 /// Fetches `select?<qs>` against `app` and asserts the `facet_heatmaps` block
 /// equals the named fixture's, byte-for-byte (QTime/_version_ live outside
 /// `facet_counts`, so no normalisation is needed here).
@@ -2912,6 +2976,7 @@ fn app_and_request_url<'a>(
     heatmap_app: &'a Router,
     pls_app: &'a Router,
     plsz_app: &'a Router,
+    dr341_app: &'a Router,
 ) -> (&'a Router, String) {
     match entry.url.split_once('/') {
         Some(("content", rest)) => (content_app, format!("content/{rest}")),
@@ -2929,6 +2994,7 @@ fn app_and_request_url<'a>(
         Some(("heatmap", rest)) => (heatmap_app, format!("content/{rest}")),
         Some(("pls", rest)) => (pls_app, format!("content/{rest}")),
         Some(("plsz", rest)) => (plsz_app, format!("content/{rest}")),
+        Some(("daterange", rest)) => (dr341_app, format!("content/{rest}")),
         Some(("sortdebt", _)) => (sortdebt_app, entry.url.clone()),
         Some(("update9", _)) => (update9_app, entry.url.clone()),
         Some(("stats", _)) => (stats_app, entry.url.clone()),
@@ -2985,6 +3051,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let (heatmap_app, _heatmap_dir) = heatmap_app().await;
     let (pls_app, _pls_dir) = pls_app().await;
     let (plsz_app, _plsz_dir) = plsz_app().await;
+    let (dr341_app, _dr341_dir) = dr341_app().await;
 
     let mut ran = 0usize;
     let mut diffed = 0usize;
@@ -3017,6 +3084,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
             &heatmap_app,
             &pls_app,
             &plsz_app,
+            &dr341_app,
         );
         // `update_select_commitwithin_visible` follows a `commitWithin=500`
         // row with no settle delay in this hermetic replay, unlike

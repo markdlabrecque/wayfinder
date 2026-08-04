@@ -332,7 +332,6 @@ dr341_err_equals	500	GET	daterange/select?q=%7B%21field%20f%3Ddrs_x%20op%3DEqual
 dr341_fieldtypes	200	GET	daterange/schema/fieldtypes?wt=json		http://localhost:9341/solr
 dr341_multi_gap	200	GET	daterange/select?q=drm_x%3A%5B2021-01%20TO%202021-06%5D&fl=id&sort=id%20asc&rows=20&wt=json		http://localhost:9341/solr
 dr341_multi_no_contains	200	GET	daterange/select?q=%7B%21field%20f%3Ddrm_x%20op%3DContains%7D%5B2020-06%20TO%202022-01%5D&fl=id&sort=id%20asc&rows=20&wt=json		http://localhost:9341/solr
-dr341_multi_within	200	GET	daterange/select?q=%7B%21field%20f%3Ddrm_x%20op%3DWithin%7D%5B2020-01-01T00%3A00%3A00Z%20TO%202020-12-31T23%3A59%3A59.999Z%5D&fl=id&sort=id%20asc&rows=20&wt=json		http://localhost:9341/solr
 dr341_multi_within_one	200	GET	daterange/select?q=%7B%21field%20f%3Ddrm_x%20op%3DWithin%7D%5B2020-01-01T00%3A00%3A00Z%20TO%202020-12-31T23%3A59%3A59.999Z%5D&fl=id&sort=id%20asc&rows=20&wt=json		http://localhost:9341/solr
 dr341_multi_within_both	200	GET	daterange/select?q=%7B%21field%20f%3Ddrm_x%20op%3DWithin%7D%5B2019-01-01T00%3A00%3A00Z%20TO%202023-12-31T23%3A59%3A59.999Z%5D&fl=id&sort=id%20asc&rows=20&wt=json		http://localhost:9341/solr
 dr341_multi_contains_one	200	GET	daterange/select?q=%7B%21field%20f%3Ddrm_x%20op%3DContains%7D2020-06&fl=id&sort=id%20asc&rows=20&wt=json		http://localhost:9341/solr
