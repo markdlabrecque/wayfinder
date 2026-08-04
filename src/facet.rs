@@ -539,8 +539,18 @@ impl FacetSettings {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_FACET_LIMIT),
         };
-        let mincount = match addressed_number::<u64>(params, local, field, "facet.mincount")? {
-            Some(mincount) => mincount,
+        // Parsed signed and clamped, not as a `u64`: the bare global below is
+        // read through `u64::from_str().ok()`, so a negative `facet.mincount`
+        // is a parse *failure* there and silently becomes the default 0. A
+        // `u64` here would 400 on the same value the global path accepts --
+        // a self-inconsistency this issue would have introduced. No fixture
+        // pins the negative case in either direction, so the addressed form
+        // matches the shipped global behaviour rather than inventing a
+        // stricter one; a mincount of 0 admits every bucket, which is what a
+        // negative one means anyway. `abc` still 400s, which is the case
+        // `facet_perfield_err_bad_limit.json` does pin.
+        let mincount = match addressed_number::<i64>(params, local, field, "facet.mincount")? {
+            Some(mincount) => mincount.max(0) as u64,
             None => global_mincount,
         };
         let by_index = addressed_setting(params, local, field, "facet.sort")

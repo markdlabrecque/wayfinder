@@ -65,6 +65,23 @@ fn fixture_bucket(fixture_name: &str, label: &str) -> Vec<Value> {
     })
 }
 
+/// A flat `term, count, term, count` array as an order-independent set of
+/// `(term, count)` pairs, for the assertions that are about *which* buckets
+/// survive rather than what order they come back in.
+fn bucket_set(flat: &[Value]) -> Vec<(String, i64)> {
+    let mut pairs: Vec<(String, i64)> = flat
+        .chunks(2)
+        .map(|pair| {
+            (
+                pair[0].as_str().unwrap_or("<null>").to_string(),
+                pair[1].as_i64().expect("a bucket count must be an integer"),
+            )
+        })
+        .collect();
+    pairs.sort();
+    pairs
+}
+
 /// An app on the tracer-bullet schema/corpus but with an arbitrary server
 /// config, for the `strict_params` guards below. `common::indexed_app`
 /// always uses `ServerConfig` defaults.
@@ -716,7 +733,7 @@ async fn precedence_per_field_beats_a_conflicting_global() {
 /// `f.category.facet.limit=abc` must 400 -- Solr's own behaviour
 /// (`facet_perfield_err_bad_limit.json`), and it pins that the validation
 /// lands with the feature rather than being silently swallowed the way the
-/// bare global `facet.limit` currently is (`BucketShaping::from_params`
+/// bare global `facet.limit` currently is (`FacetSettings::resolve`
 /// defaults a non-numeric global to `DEFAULT_FACET_LIMIT` rather than
 /// erroring). The response block must still carry the base query's
 /// `numFound` (5), same convention as every other facet error
@@ -788,6 +805,152 @@ async fn strict_params_accepts_the_three_new_per_field_overrides() {
             status,
             StatusCode::OK,
             "{param} must pass strict mode, got {body}"
+        );
+    }
+}
+
+// === 10. an invalid boolean local param is a 400 ============================
+
+/// `{!facet.missing=nope}category` must 400 with the same message the bare
+/// global `facet.missing=nope` produces -- the local-param form goes through
+/// the same `parse_bool`, so it must fail the same way rather than being
+/// quietly read as `false`. Mirrors
+/// `facet_missing_nope_is_invalid_and_the_response_block_survives`
+/// (`tests/bool_params.rs`, `bool_facet_missing_invalid.json`), including
+/// the `response`-block-carrying envelope: this is read after the base query
+/// has already run. No fixture of its own -- Solr's wording for the global
+/// case is the ground truth, and this asserts the addressed form does not
+/// diverge from Wayfinder's own global behaviour.
+#[tokio::test]
+async fn local_param_invalid_boolean_400s_like_the_global() {
+    let (app, _dir) = indexed_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&rows=0&facet=true\
+         &facet.field=%7B%21facet.missing%3Dnope%7Dcategory&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an invalid boolean local param must 400, got {body}"
+    );
+    assert!(
+        body.get("response").is_some(),
+        "the error envelope must still carry the base query's response block; got {body}"
+    );
+    assert_eq!(
+        body.pointer("/error/msg").and_then(Value::as_str),
+        Some("invalid boolean value: nope"),
+        "error.msg must name the invalid raw value verbatim, same wording as the global \
+         facet.missing=nope; got {body}"
+    );
+}
+
+// === 11. a negative mincount matches the global path, it does not 400 =======
+
+/// `facet.mincount=-1` on the bare global is accepted today (the parse fails
+/// and falls back to the default 0), so neither addressed form may 400 on it.
+/// Solr's `getFieldInt` reads mincount as a signed int and never rejects a
+/// negative one; a `u64` parse in the addressed path would have made
+/// `f.category.facet.mincount=-1` a 400 while the global on the same server
+/// stayed a 200. Unfixtured in either direction -- what is asserted is that
+/// all three forms agree with each other, and that a negative mincount
+/// admits every bucket the way 0 does.
+#[tokio::test]
+async fn a_negative_mincount_behaves_like_zero_in_every_form() {
+    let (app, _dir) = indexed_app().await;
+    let baseline = {
+        let (status, body) = get(
+            &app,
+            "select?q=*:*&rows=0&facet=true&facet.field=category&wt=json",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "got {body}");
+        facet_bucket(&body, "category").expect("the baseline facet must be present")
+    };
+
+    for (label, query) in [
+        (
+            "global",
+            "select?q=*:*&rows=0&facet=true&facet.field=category&facet.mincount=-1&wt=json",
+        ),
+        (
+            "per-field",
+            "select?q=*:*&rows=0&facet=true&facet.field=category\
+             &f.category.facet.mincount=-1&wt=json",
+        ),
+        (
+            "local param",
+            "select?q=*:*&rows=0&facet=true\
+             &facet.field=%7B%21facet.mincount%3D-1%7Dcategory&wt=json",
+        ),
+    ] {
+        let (status, body) = get(&app, query).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a negative facet.mincount in the {label} form must not 400; got {body}"
+        );
+        assert_eq!(
+            facet_bucket(&body, "category").as_deref(),
+            Some(baseline.as_slice()),
+            "a negative facet.mincount in the {label} form must admit every bucket, \
+             exactly as mincount=0 does; got {body}"
+        );
+    }
+}
+
+/// The companion for `facet.limit`: `-1` is meaningful in Solr (as many as
+/// the server allows), the global path already reads it as such, and both
+/// addressed forms must agree rather than 400. The per-field form is pinned
+/// against a fixture in `per_field_limit_beats_a_conflicting_global` above;
+/// this covers the local-param form and the global on the same run.
+///
+/// Bucket *sets* are compared, not the arrays in order: `facet.sort`'s
+/// default flips to `index` when the effective limit is non-positive
+/// (`BucketShaping::for_field`), so a negative limit legitimately reorders
+/// where the unlimited baseline does not. This test is about which buckets
+/// survive; order is section 3's business.
+#[tokio::test]
+async fn a_negative_limit_is_unlimited_in_every_form() {
+    let (app, _dir) = indexed_app().await;
+    let baseline = {
+        let (status, body) = get(
+            &app,
+            "select?q=*:*&rows=0&facet=true&facet.field=category&wt=json",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "got {body}");
+        bucket_set(&facet_bucket(&body, "category").expect("the baseline facet must be present"))
+    };
+
+    for (label, query) in [
+        (
+            "global",
+            "select?q=*:*&rows=0&facet=true&facet.field=category&facet.limit=-1&wt=json",
+        ),
+        (
+            "per-field",
+            "select?q=*:*&rows=0&facet=true&facet.field=category\
+             &f.category.facet.limit=-1&wt=json",
+        ),
+        (
+            "local param",
+            "select?q=*:*&rows=0&facet=true\
+             &facet.field=%7B%21facet.limit%3D-1%7Dcategory&wt=json",
+        ),
+    ] {
+        let (status, body) = get(&app, query).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "facet.limit=-1 in the {label} form must not 400; got {body}"
+        );
+        assert_eq!(
+            facet_bucket(&body, "category").map(|b| bucket_set(&b)),
+            Some(baseline.clone()),
+            "facet.limit=-1 in the {label} form must return every bucket; got {body}"
         );
     }
 }

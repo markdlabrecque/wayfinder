@@ -330,11 +330,13 @@ mod tests {
 
     /// A base param outside the honoured list gets no shape match, however
     /// well-formed the key is -- this is what keeps unimplemented
-    /// `f.<field>.facet.limit` 400ing under `strict_params`.
+    /// `f.<field>.facet.prefix` 400ing under `strict_params`. (`.limit` was
+    /// the example here until issue #296 implemented it; `.prefix` is the
+    /// same swap `tests/facet_field_missing_override.rs` made.)
     #[test]
     fn rejects_a_base_param_outside_the_honoured_list() {
         assert_eq!(
-            split_per_field_key("f.category.facet.limit", HONOURED),
+            split_per_field_key("f.category.facet.prefix", HONOURED),
             None
         );
     }
