@@ -1707,30 +1707,52 @@ class QueryBuilderTest extends TestCase {
   }
 
   /**
-   * issue #342, MF-1 (round-2 review bounce): a NEGATED condition on a text
-   * field must combine its per-language variants with AND, not the OR the
-   * positive case above uses. With OR, `((*:* -tm_X3b_en_body:"hello") OR
-   * (*:* -tm_X3b_de_body:"hello"))` is a tautology: a document only ever
-   * carries ONE language variant of a text field
-   * (DocumentBuilder::buildAddCommand() writes exactly one `tm_X3b_<item
-   * language>_body`, never both), so whichever variant a given doc lacks
-   * always satisfies "doc does NOT have `<other-lang>_body`:hello" trivially
-   * -- the OR matches every document regardless of `body`'s actual value.
-   * AND is the correct combination: a doc must fail the negated condition on
-   * EVERY variant to be excluded, and only the one variant the doc actually
-   * carries can ever be non-vacuously true or false. Upstream picks the
-   * conjunction by operator polarity, not by variant count
-   * (SearchApiSolrBackend.php:3455-3459: `'=' === $condition->getOperator()
-   * ? 'AND' : 'OR'`, applied outside the OR at :3435-3445) -- this test pins
-   * the equivalent outcome as "negated parts join with AND" rather than
-   * "negate a positive OR once", since QueryBuilder builds each part already
-   * negated (buildConditionForFieldName()'s `<>`/`NOT IN`/`NOT BETWEEN`
-   * arms), so AND-joining already-negated parts is the natural fix here.
+   * issue #342, MF-1/MF-4 (round-2 and round-3 review bounces): a condition
+   * on a text field combines its per-language variants with AND or OR
+   * depending on the emitted per-variant clause's POLARITY, never on the
+   * operator's name alone -- both review rounds found a tautology in this
+   * exact logic, each time in a shape the previous (sampled) provider did
+   * not reach, so this provider is now exhaustive rather than sampled: all
+   * twelve shapes in the spec's truth table, on a text field under two
+   * resolved languages ([en, de]), asserting the emitted `fq` string.
+   *
+   * The governing rule, stated once here so the next change to this logic
+   * has to reckon with it: *does a document lacking this language variant
+   * satisfy the per-variant clause?* A document only ever carries ONE
+   * language variant of a text field (DocumentBuilder writes exactly one
+   * `tm_X3b_<item language>_body`, never both), so if the answer is "yes",
+   * that vacuous truth would make an OR match every document regardless of
+   * `body`'s real value -- the variants MUST combine with AND instead. If
+   * "no", OR is correct: at least one variant needs to genuinely match.
+   *
+   * Applying that rule row by row (F = the field name, `[* TO *]` = "field
+   * is present"):
+   * - `= NULL` -> `-F:[* TO *]` ("field absent"): a doc lacking the variant
+   *   IS absent in that variant -> satisfies -> AND.
+   * - `<> NULL` -> `F:[* TO *]` ("field present"): a doc lacking the variant
+   *   is NOT present in it -> does not satisfy -> OR.
+   * - `= a` -> `F:"a"`: a doc lacking the variant can't equal "a" in it ->
+   *   does not satisfy -> OR (this is the original, still-correct case).
+   * - `<> a` -> `(*:* -F:"a")`: a doc lacking the variant vacuously does NOT
+   *   have "a" in it -> satisfies -> AND (MF-1, round 2).
+   * - `BETWEEN`/`IN [a,b]` (no NULL): same shape as `= a` -> OR.
+   * - `NOT BETWEEN`/`NOT IN [a,b]` (no NULL): same shape as `<> a` -> AND.
+   * - `IN [a, NULL]` -> `(F:"a" OR -F:[* TO *])`: the `-F:[* TO *]` disjunct
+   *   alone is satisfied by a doc lacking the variant -> AND (MF-4, round
+   *   3 -- the mirror image of MF-1: `IN` normally ORs, but a NULL member
+   *   flips its per-variant clause's polarity, and the fix (round-2
+   *   framing, confirmed correct in round 3) keys the conjunction off the
+   *   emitted clause's polarity, not the operator's name).
+   * - `IN [NULL]` -> `(*:* -F:[* TO *])`: same shape as `<> a` -> AND.
+   * - `NOT IN [a, NULL]` -> `(F:[* TO *] -F:("a"))`: requires the field
+   *   present AND not "a" -- a doc lacking the variant is NOT present in it,
+   *   so does not satisfy -> OR.
+   * - `NOT IN [NULL]` -> `(F:[* TO *])`: same shape as `<> NULL` -> OR.
    *
    * @covers ::build
-   * @dataProvider negatedOperatorOnMultiLanguageTextFieldProvider
+   * @dataProvider conditionCombinationTruthTableProvider
    */
-  public function testNegatedConditionOnAMultiLanguageTextFieldCombinesVariantsWithAnd(string $operator, $value, string $expected): void {
+  public function testConditionCombinationOnAMultiLanguageTextFieldFollowsTheTruthTable(string $operator, $value, string $expected): void {
     $index = $this->mockIndex([], [
       'body' => $this->mockIndexField('body', 'text', FALSE),
       'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
@@ -1746,26 +1768,78 @@ class QueryBuilderTest extends TestCase {
     $this->assertSame($expected, $params['fq'][2]);
   }
 
-  public static function negatedOperatorOnMultiLanguageTextFieldProvider(): array {
+  public static function conditionCombinationTruthTableProvider(): array {
     return [
-      // Single-language shapes for each operator, confirmed by direct
-      // reading of buildConditionForFieldName()/notInQuery()/rangeValues()
-      // (src/QueryBuilder.php:528, :534/:544/:555, :582-593), then AND-joined
-      // per-variant for the fixed two-language ([en, de]) case.
-      'not equals' => [
+      // Shapes confirmed by direct reading of
+      // buildConditionForFieldName()/inQuery()/notInQuery()/rangeValues()
+      // (src/QueryBuilder.php:514-537, :544-557, :562-593), then combined
+      // per the truth table's "absent variant satisfies?" column for the
+      // fixed two-language ([en, de]) case.
+      '= NULL' => [
+        '=',
+        NULL,
+        '(-tm_X3b_en_body:[* TO *] AND -tm_X3b_de_body:[* TO *])',
+      ],
+      '<> NULL' => [
         '<>',
-        'hello',
-        '((*:* -tm_X3b_en_body:"hello") AND (*:* -tm_X3b_de_body:"hello"))',
+        NULL,
+        '(tm_X3b_en_body:[* TO *] OR tm_X3b_de_body:[* TO *])',
       ],
-      'not in' => [
-        'NOT IN',
-        ['hello', 'world'],
-        '((*:* -tm_X3b_en_body:("hello" "world")) AND (*:* -tm_X3b_de_body:("hello" "world")))',
+      '= a' => [
+        '=',
+        'a',
+        '(tm_X3b_en_body:"a" OR tm_X3b_de_body:"a")',
       ],
-      'not between' => [
+      '<> a' => [
+        '<>',
+        'a',
+        '((*:* -tm_X3b_en_body:"a") AND (*:* -tm_X3b_de_body:"a"))',
+      ],
+      'BETWEEN' => [
+        'BETWEEN',
+        ['a', 'b'],
+        '(tm_X3b_en_body:["a" TO "b"] OR tm_X3b_de_body:["a" TO "b"])',
+      ],
+      'NOT BETWEEN' => [
         'NOT BETWEEN',
-        ['a', 'z'],
-        '((*:* -tm_X3b_en_body:["a" TO "z"]) AND (*:* -tm_X3b_de_body:["a" TO "z"]))',
+        ['a', 'b'],
+        '((*:* -tm_X3b_en_body:["a" TO "b"]) AND (*:* -tm_X3b_de_body:["a" TO "b"]))',
+      ],
+      'IN [a,b]' => [
+        'IN',
+        ['a', 'b'],
+        '(tm_X3b_en_body:("a" "b") OR tm_X3b_de_body:("a" "b"))',
+      ],
+      // MF-4 (round 3): the ONE row that must go red against the current
+      // implementation -- today this emits ' OR ' instead of ' AND ',
+      // which is the mirror-image tautology of MF-1: for a document not
+      // indexed in German, `-tm_X3b_de_body:[* TO *]` is unconditionally
+      // true, so the OR'd clause matches every document regardless of
+      // `body`'s actual value ('body = "b"' would satisfy this clause).
+      'IN [a,NULL]' => [
+        'IN',
+        ['a', NULL],
+        '((tm_X3b_en_body:"a" OR -tm_X3b_en_body:[* TO *]) AND (tm_X3b_de_body:"a" OR -tm_X3b_de_body:[* TO *]))',
+      ],
+      'IN [NULL]' => [
+        'IN',
+        [NULL],
+        '((*:* -tm_X3b_en_body:[* TO *]) AND (*:* -tm_X3b_de_body:[* TO *]))',
+      ],
+      'NOT IN [a,b]' => [
+        'NOT IN',
+        ['a', 'b'],
+        '((*:* -tm_X3b_en_body:("a" "b")) AND (*:* -tm_X3b_de_body:("a" "b")))',
+      ],
+      'NOT IN [a,NULL]' => [
+        'NOT IN',
+        ['a', NULL],
+        '((tm_X3b_en_body:[* TO *] -tm_X3b_en_body:("a")) OR (tm_X3b_de_body:[* TO *] -tm_X3b_de_body:("a")))',
+      ],
+      'NOT IN [NULL]' => [
+        'NOT IN',
+        [NULL],
+        '((tm_X3b_en_body:[* TO *]) OR (tm_X3b_de_body:[* TO *]))',
       ],
     ];
   }
