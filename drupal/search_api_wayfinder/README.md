@@ -101,9 +101,17 @@ them again.
 Which languages a *query* uses: any `search_api_language` condition on the
 query (`=`/`IN`, including nested groups), otherwise every enabled site
 language, otherwise `und`. Full-text field lists (`qf`, `hl.fl`, `mlt.fl`,
-`terms.fl`) carry every variant; conditions OR the variants together; sorts and
-`group.sort` use the first resolved language; facets always use `und`
+`terms.fl`) carry every variant; *positive* conditions OR the variants together
+while *negated* ones (`<>`, `NOT IN`, `NOT BETWEEN`) AND them — a document
+carries only the variant it was indexed in, so OR-ing negations would match
+every document and turn an exclusion filter into a no-op (`:3455-3459`); sorts
+and `group.sort` use the first resolved language; facets always use `und`
 (`:2582-2585`).
+
+A text field's **sort copy is written for every enabled site language plus
+`und`**, all carrying the same first value (`:1469-1481`, "To allow sorted
+multilingual searches we need to fill *all* language-specific sort fields!"),
+so a German document is still sortable by a query resolved to English.
 
 ## Not supported
 
