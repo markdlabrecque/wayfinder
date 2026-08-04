@@ -3519,11 +3519,8 @@ async fn select(
     // missed. It is appended *after* the `fq` clauses so #295's positional
     // `{!tag}`/`{!ex}` alignment is untouched, and (having no tag) no
     // `{!ex=...}` can drop it.
-    if let Some(docs) = grouped.as_ref().and_then(|g| g.truncate_docs.as_deref()) {
-        base.push((
-            Occur::Must,
-            Box::new(grouping::doc_set_query(&state.index, docs)) as Box<dyn Query>,
-        ));
+    if let Some(query) = grouped.as_ref().and_then(|g| g.truncate_query.as_ref()) {
+        base.push((Occur::Must, Box::new(query.clone()) as Box<dyn Query>));
     }
     let group_facet = grouped.as_ref().and_then(|g| g.group_facet.as_ref());
     // ponytail: the ungrouped component code attaches the already-built

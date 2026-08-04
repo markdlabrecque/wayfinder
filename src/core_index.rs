@@ -23,6 +23,7 @@ use tantivy::aggregation::{
     AggContextParams, AggregationCollector, AggregationLimitsGuard, DEFAULT_BUCKET_LIMIT, Key,
 };
 use tantivy::collector::{Count, DocSetCollector};
+use tantivy::index::SegmentId;
 use tantivy::query::{
     AllQuery, BooleanQuery, BoostQuery, ConstScoreQuery, DisjunctionMaxQuery, EmptyQuery,
     ExistsQuery, Occur, PhraseQuery, Query, QueryClone, QueryParser, RangeQuery, RegexQuery,
@@ -2639,6 +2640,15 @@ impl CoreIndex {
     /// The caller (`src/grouping.rs`) validates that `group_clause`'s field is
     /// single-valued and fast, and applies `group.limit`/`group.offset`/
     /// `rows`/`start` to the fruit.
+    ///
+    /// Returns the fruit **and the `SegmentId` list of the searcher that
+    /// produced it**, indexed by the same segment ordinal the fruit's
+    /// `DocAddress`es carry (issue #338). The two are returned together
+    /// deliberately: the reader reloads on commit, so a segment list taken from
+    /// a later `self.reader.searcher()` call can resolve the same ordinal onto a
+    /// different segment, and anything that turns these addresses back into a
+    /// query (`crate::grouping::DocSetQuery`) would then silently run over the
+    /// wrong documents. One searcher, one list, handed over as a pair.
     pub fn search_grouping(
         &self,
         query: &dyn Query,
@@ -2646,13 +2656,19 @@ impl CoreIndex {
         main_clauses: Vec<SortClause>,
         within_clauses: Vec<SortClause>,
         group_clause: SortClause,
-    ) -> Result<GroupingFruit> {
+    ) -> Result<(GroupingFruit, Vec<SegmentId>)> {
         let searcher = self.reader.searcher();
+        let segment_ids: Vec<SegmentId> = searcher
+            .segment_readers()
+            .iter()
+            .map(|reader| reader.segment_id())
+            .collect();
         let collector = GroupingCollector::new(main_clauses, within_clauses, group_clause);
-        match compose_filtered(query, filter_queries) {
-            None => Ok(searcher.search(query, &collector)?),
-            Some(composed) => Ok(searcher.search(&composed, &collector)?),
-        }
+        let fruit = match compose_filtered(query, filter_queries) {
+            None => searcher.search(query, &collector)?,
+            Some(composed) => searcher.search(&composed, &collector)?,
+        };
+        Ok((fruit, segment_ids))
     }
 
     /// Renders the stored fields of `addr` as a Solr-shaped doc JSON object,
@@ -3708,29 +3724,69 @@ impl CoreIndex {
         Ok(out)
     }
 
-    /// Every document matching `query`, as an address set. The membership
-    /// primitive behind `group.facet`'s distinct-group counting (issue #338),
-    /// which needs the *identities* of a bucket's documents rather than only
-    /// how many there are.
-    pub fn doc_set(&self, query: &dyn Query) -> Result<std::collections::HashSet<DocAddress>> {
-        Ok(self.reader.searcher().search(query, &DocSetCollector)?)
-    }
-
-    /// The `SegmentId` of each segment behind the current searcher, indexed by
-    /// the same segment ordinal a `DocAddress` carries.
+    /// How many **distinct values of `group_column`** the documents matching
+    /// `query` hold, counting the documents that have *no* value there as one
+    /// further group. Solr's `group.facet=true` count for a bucket defined by a
+    /// query rather than by a term: `facet.query`, each `facet.range` bucket and
+    /// `facet.missing` (issue #338, findings 161/162/163).
     ///
-    /// `crate::grouping::DocSetQuery` needs it: a `Weight` is handed a
-    /// `&SegmentReader`, not an ordinal, so a query over a fixed set of
-    /// `DocAddress`es has to key its per-segment doc lists by the stable
-    /// `SegmentId` rather than by the ordinal the addresses were collected
-    /// under.
-    pub fn segment_ids(&self) -> Vec<tantivy::index::SegmentId> {
-        self.reader
-            .searcher()
-            .segment_readers()
-            .iter()
-            .map(|reader| reader.segment_id())
-            .collect()
+    /// Read off the group column for whatever document set `query` produces,
+    /// never from a doc -> group map built during the grouping pass: an excluded
+    /// facet (`{!ex=...}`, #295) counts over a *reduced* filter set, which is a
+    /// superset of the documents the grouping pass bucketed, and finding 163
+    /// pins that those extra documents must still be counted
+    /// (`g338_ex_groupfacet`). Since a group *is* a distinct column value, the
+    /// value is the group identity and no map is needed.
+    ///
+    /// The "no value" group is Solr's `null` group, which is a real group and
+    /// does count (finding 162, `g338n_groupfacet`); it is invisible to the
+    /// terms aggregation, so it is counted with a separate `ExistsQuery` pass
+    /// rather than by a sentinel bucket key that a real group value could
+    /// collide with.
+    ///
+    /// ponytail: same `MAX_FACET_TERMS` ceiling as [`terms_aggregation`] -- a
+    /// bucket spanning more than that many distinct group values undercounts.
+    /// Lifting it needs streaming faceting, out of issue #338's scope.
+    pub fn distinct_group_count(&self, group_column: &str, query: &dyn Query) -> Result<usize> {
+        const AGG_NAME: &str = "wf_groups";
+
+        let mut agg = terms_aggregation(group_column);
+        // `min_doc_count: 1`: a zero-count bucket is a term-dictionary fill, i.e.
+        // a group with no document in this bucket, which must not be counted.
+        if let AggregationVariants::Terms(terms) = &mut agg.agg {
+            terms.min_doc_count = Some(1);
+        }
+        let mut aggs = Aggregations::default();
+        aggs.insert(AGG_NAME.to_string(), agg);
+
+        let collector = AggregationCollector::from_aggs(
+            aggs,
+            AggContextParams::new(
+                AggregationLimitsGuard::default(),
+                self.index.tokenizers().clone(),
+            ),
+        );
+        let results = self.reader.searcher().search(query, &collector)?;
+        let Some(AggregationResult::BucketResult(BucketResult::Terms { buckets, .. })) =
+            results.0.get(AGG_NAME)
+        else {
+            return Err(anyhow!(
+                "could not count groups on field `{group_column}`: unexpected aggregation result"
+            ));
+        };
+        let mut groups = buckets.len();
+
+        let missing = BooleanQuery::from(vec![
+            (Occur::Must, query.box_clone()),
+            (
+                Occur::MustNot,
+                Box::new(ExistsQuery::new(group_column.to_string(), false)) as Box<dyn Query>,
+            ),
+        ]);
+        if self.count(&missing)? > 0 {
+            groups += 1;
+        }
+        Ok(groups)
     }
 
     /// Solr's `stats.field`: min/max/count/sum/sumOfSquares/mean/stddev over a

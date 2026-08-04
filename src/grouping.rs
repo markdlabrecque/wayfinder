@@ -31,17 +31,23 @@
 //!   rendered, deduplicated across all `group.field` blocks and all groups.
 //!   `highlighting` covers exactly that set, the way it covers `response.docs`
 //!   on the ungrouped path (`g338_hl`).
-//! - [`GroupedOutcome::truncate_docs`] — `group.truncate=true`'s *collapsed*
-//!   document set: each group's first document in `group.sort` order, from the
-//!   **first** `group.field`, taken straight off the collector's fruit and so
-//!   independent of `rows`/`start`/`group.limit`/`group.offset`. `select`
-//!   intersects it into the facet/stats base query (as a [`DocSetQuery`]), so
-//!   facets, `stats`, `facet.query` and `facet.range` are all computed over the
-//!   collapsed set while `grouped` itself stays untouched (`g338_truncate*`).
+//! - [`GroupedOutcome::truncate_query`] — `group.truncate=true`'s *collapsed*
+//!   document set as a [`DocSetQuery`]: each group's first document in
+//!   `group.sort` order, from the **first** `group.field`, taken straight off the
+//!   collector's fruit and so independent of
+//!   `rows`/`start`/`group.limit`/`group.offset`. `select` intersects it into the
+//!   facet/stats base query, so facets, `stats`, `facet.query` and `facet.range`
+//!   are all computed over the collapsed set while `grouped` itself stays
+//!   untouched (`g338_truncate*`). It is built here, not in `select`, because the
+//!   addresses only mean anything against the searcher that collected them.
 //! - [`GroupedOutcome::group_facet`] — `group.facet=true`'s counting context:
 //!   every facet count becomes a count of *distinct matching groups* of the
 //!   first `group.field`, for field facets, `facet.query` and `facet.range`
-//!   alike. `stats` is deliberately unaffected (`g338_groupfacet_stats`).
+//!   alike. `stats` is deliberately unaffected (`g338_groupfacet_stats`). A group
+//!   is just a distinct value of the group column, so the counts are read off
+//!   that column over each facet's own base query — including an excluded
+//!   facet's *reduced* base, whose document set is a superset of what the
+//!   grouping pass bucketed (finding 163, `g338_ex_groupfacet`).
 //!
 //! The two flags compose without a special case: `group.truncate` restricts the
 //! base query, `group.facet` counts groups over whatever base it is given, and
@@ -58,7 +64,9 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 use tantivy::index::SegmentId;
-use tantivy::query::{BooleanQuery, EnableScoring, Explanation, Occur, Query, Scorer, Weight};
+use tantivy::query::{
+    BooleanQuery, EnableScoring, ExistsQuery, Explanation, Occur, Query, Scorer, Weight,
+};
 use tantivy::{DocAddress, DocId, DocSet, Score, SegmentReader, TERMINATED, TantivyError, Term};
 
 use crate::collector::{GroupingFruit, SortClause, SortKey, SortValue};
@@ -81,9 +89,15 @@ pub struct GroupedOutcome {
     /// Every document the rendered doclists returned, deduplicated, in
     /// first-rendered order. `highlighting`'s doc set.
     pub rendered: Vec<(Score, DocAddress)>,
-    /// `group.truncate=true`: the collapsed document set (one per group of the
-    /// first `group.field`). `None` when the flag is off or false.
-    pub truncate_docs: Option<Vec<DocAddress>>,
+    /// `group.truncate=true`: a query over the collapsed document set (one
+    /// document per group of the first `group.field`). `None` when the flag is
+    /// off or false.
+    ///
+    /// Already a [`DocSetQuery`] rather than a `Vec<DocAddress>`: the addresses
+    /// are only meaningful against the searcher that collected them, so they are
+    /// resolved to stable `SegmentId`s here, inside the grouping pass, where
+    /// that searcher's segment list is still in hand.
+    pub truncate_query: Option<DocSetQuery>,
     /// `group.facet=true`: the distinct-group counting context. `None` when the
     /// flag is off or false.
     pub group_facet: Option<GroupFacet>,
@@ -159,17 +173,23 @@ pub(crate) fn grouping(
     let mut grouped = Map::new();
     let mut rendered: Vec<(Score, DocAddress)> = Vec::new();
     let mut rendered_seen: HashSet<DocAddress> = HashSet::new();
-    let mut truncate_docs = None;
+    let mut truncate_query = None;
     let mut group_facet = None;
     for (position, field) in fields.iter().enumerate() {
         let group_clause = validate_group_field(schema, params, field)?;
         // No `q` matches nothing, so every group is empty -- same empty-fruit
-        // shortcut `select` takes for the ungrouped `response` block.
-        let fruit = match parsed {
-            None => GroupingFruit {
-                matches: 0,
-                groups: Vec::new(),
-            },
+        // shortcut `select` takes for the ungrouped `response` block. The
+        // segment list comes back with the fruit, from the one searcher that
+        // collected it (see `CoreIndex::search_grouping`); an empty fruit has no
+        // addresses to resolve, so its list is empty too.
+        let (fruit, segment_ids) = match parsed {
+            None => (
+                GroupingFruit {
+                    matches: 0,
+                    groups: Vec::new(),
+                },
+                Vec::new(),
+            ),
             Some((query, fqs)) => index
                 .search_grouping(
                     query,
@@ -190,13 +210,13 @@ pub(crate) fn grouping(
         // `g338_groupfacet_rows`).
         if position == 0 {
             if truncate {
-                truncate_docs = Some(collapsed_docs(&fruit));
+                truncate_query = Some(DocSetQuery::new(&segment_ids, &collapsed_docs(&fruit)));
             }
             if group_facet_requested {
                 let column = schema
                     .resolved_fast_column(field)
                     .expect("validate_group_field confirmed this name resolves");
-                group_facet = Some(GroupFacet::from_fruit(&fruit, column));
+                group_facet = Some(GroupFacet::new(column));
             }
         }
         let (block, block_docs) = build_group_block(
@@ -225,7 +245,7 @@ pub(crate) fn grouping(
     Ok(Some(GroupedOutcome {
         block: Value::Object(grouped),
         rendered,
-        truncate_docs,
+        truncate_query,
         group_facet,
     }))
 }
@@ -241,64 +261,39 @@ fn collapsed_docs(fruit: &GroupingFruit) -> Vec<DocAddress> {
         .collect()
 }
 
-/// `group.facet=true`'s counting context, derived from the first
-/// `group.field`'s fruit: which group each matching document belongs to, plus
-/// what is needed to count *distinct groups* per facet bucket.
+/// `group.facet=true`'s counting context: the first `group.field`'s column, and
+/// nothing else.
+///
+/// It is deliberately *not* derived from the fruit. A group is exactly a
+/// distinct value of the group column, so every count here is answered by
+/// reading that column over whatever document set the facet's own base query
+/// produces. A doc -> group map built during the grouping pass would be wrong
+/// for an excluded facet (`{!ex=...}`, #295), whose reduced filter set is a
+/// superset of the documents the grouping pass ever saw — finding 163 pins that
+/// those extra documents still count (`g338_ex_groupfacet`).
 pub struct GroupFacet {
-    /// Matching document -> its group's index in the fruit. Drives
-    /// `facet.query` / `facet.range` (and `facet.missing`), where the bucket is
-    /// defined by a query and the answer is "how many distinct groups do the
-    /// matching documents fall into?".
-    doc_group: HashMap<DocAddress, usize>,
-    /// The Tantivy column of the group field, for the terms sub-aggregation
-    /// that answers the same question for a field facet without walking
-    /// documents in Wayfinder.
+    /// The Tantivy column of the group field. Both counting paths read it: the
+    /// terms sub-aggregation for a field facet, and
+    /// [`CoreIndex::distinct_group_count`] for a query-defined bucket.
     group_column: String,
-    /// The documents of the "field is absent" group. Solr's `null` group is a
-    /// real group and counts, but a terms sub-aggregation on the group column
-    /// cannot see documents with no value there, so these are counted
-    /// separately (see [`GroupFacet::term_facet`]).
-    null_docs: Vec<DocAddress>,
 }
 
 impl GroupFacet {
-    fn from_fruit(fruit: &GroupingFruit, group_column: String) -> GroupFacet {
-        let mut doc_group = HashMap::new();
-        let mut null_docs = Vec::new();
-        for (index, group) in fruit.groups.iter().enumerate() {
-            for (_, addr) in &group.docs {
-                doc_group.insert(*addr, index);
-                if group.value.is_none() {
-                    null_docs.push(*addr);
-                }
-            }
-        }
-        GroupFacet {
-            doc_group,
-            group_column,
-            null_docs,
-        }
+    fn new(group_column: String) -> GroupFacet {
+        GroupFacet { group_column }
     }
 
     /// How many distinct groups the documents matching `query` fall into — the
     /// group-counting replacement for `CoreIndex::count` behind `facet.query`,
-    /// each `facet.range` bucket and `facet.missing`.
+    /// each `facet.range` bucket and `facet.missing`. Includes the `null` group
+    /// (documents with no value in the group column) when `query` matches any of
+    /// its documents, because Solr counts it like any other group (finding 162).
     pub(crate) fn distinct_groups(
         &self,
         index: &CoreIndex,
         query: &dyn Query,
     ) -> anyhow::Result<usize> {
-        let mut seen: HashSet<usize> = HashSet::new();
-        for addr in index.doc_set(query)? {
-            // Every document matching `query` also matches the base query (`q`
-            // AND every `fq`), which is exactly the set the fruit bucketed, so
-            // this always hits. Skipping a miss is the conservative answer if
-            // the two ever disagreed.
-            if let Some(group) = self.doc_group.get(&addr) {
-                seen.insert(*group);
-            }
-        }
-        Ok(seen.len())
+        index.distinct_group_count(&self.group_column, query)
     }
 
     /// One field facet's buckets, counted in distinct groups instead of
@@ -309,14 +304,12 @@ impl GroupFacet {
     /// still-matching `null`-group document gains exactly +1, because those
     /// documents are all one group.
     ///
-    /// ponytail: the `null`-group correction below is unfixtured. The g338
-    /// `group.facet` corpus has exactly one `null`-group document (`g6`), and it
-    /// carries neither a `type` nor a `category` value, so no captured field
-    /// facet has a term on a `null`-group document and mutating this branch away
-    /// keeps the suite green. It is kept because the `null` group demonstrably
-    /// *is* a group elsewhere in the same fixtures (`g338_groupfacet_blog`'s
-    /// 0-25 range bucket counts 3, including `g6`'s group), so dropping it would
-    /// undercount by one on any corpus where such a document has a facet value.
+    /// The `null` group is read off the group column too — the documents with no
+    /// value there, among whatever `query` matches — rather than from a document
+    /// list captured during the grouping pass, so an excluded facet's reduced set
+    /// gets the same correction (finding 163). Captured: `g338n_groupfacet`'s
+    /// `category` is `news=3` where the document count is 4, the third group
+    /// being h4/h5's `null` group (finding 162).
     pub(crate) fn term_facet(
         &self,
         index: &CoreIndex,
@@ -325,14 +318,11 @@ impl GroupFacet {
         query: &dyn Query,
     ) -> anyhow::Result<Vec<(String, FacetOrderKey, u64)>> {
         let mut buckets = index.term_facet_grouped(column, kind, &self.group_column, query)?;
-        if self.null_docs.is_empty() {
-            return Ok(buckets);
-        }
         let null_only = BooleanQuery::from(vec![
             (Occur::Must, query.box_clone()),
             (
-                Occur::Must,
-                Box::new(doc_set_query(index, &self.null_docs)) as Box<dyn Query>,
+                Occur::MustNot,
+                Box::new(ExistsQuery::new(self.group_column.clone(), false)) as Box<dyn Query>,
             ),
         ]);
         let in_null_group: HashSet<String> = index
@@ -350,13 +340,6 @@ impl GroupFacet {
     }
 }
 
-/// A [`DocSetQuery`] over `docs`, resolved against the index's current segment
-/// ordinals. The one construction path, so no caller has to know that the
-/// query keys its doc lists by `SegmentId` rather than by ordinal.
-pub(crate) fn doc_set_query(index: &CoreIndex, docs: &[DocAddress]) -> DocSetQuery {
-    DocSetQuery::new(&index.segment_ids(), docs)
-}
-
 /// A query matching exactly a fixed set of documents.
 ///
 /// `group.truncate` needs the facet/stats base query restricted to the
@@ -369,8 +352,14 @@ pub(crate) fn doc_set_query(index: &CoreIndex, docs: &[DocAddress]) -> DocSetQue
 /// Doc lists are keyed by `SegmentId`, not by the segment ordinal the
 /// `DocAddress`es carry: a `Weight` is handed a `&SegmentReader`, and the
 /// ordinal is only meaningful relative to the exact searcher the addresses came
-/// from. `SegmentId` is stable, so a searcher taken between collection and
-/// counting cannot silently shift the doc set onto the wrong segment.
+/// from. `SegmentId` is stable, so a searcher taken later — the reader reloads
+/// on commit, so a commit landing mid-request is enough — cannot silently shift
+/// the doc set onto the wrong segment.
+///
+/// That only holds if `segment_ids` is the list of the searcher the addresses
+/// were collected under, which is why `CoreIndex::search_grouping` returns the
+/// two together and this is built inside the grouping pass rather than from a
+/// fresh `CoreIndex::segment_ids()` call.
 #[derive(Clone, Debug)]
 pub struct DocSetQuery {
     docs: Arc<HashMap<SegmentId, Vec<DocId>>>,
@@ -610,5 +599,231 @@ fn group_value_json(value: &Option<SortValue>) -> Value {
         Some(SortValue::Str(s)) => Value::String(s.clone()),
         Some(SortValue::I64(i)) => json!(i),
         Some(SortValue::F64(f)) => json!(f),
+    }
+}
+
+/// White-box tests for the one thing the HTTP surface cannot reach: that a
+/// [`DocSetQuery`] built from a *different* reader generation's segment list
+/// would silently run over the wrong documents, and that
+/// `CoreIndex::search_grouping` therefore hands its segment list back together
+/// with the fruit.
+///
+/// The race itself — a commit landing between two `self.reader.searcher()` calls
+/// inside one request — is not reproducible from outside: the reader is
+/// `ReloadPolicy::Manual` and reloads on commit, so forcing it needs a commit
+/// interleaved *between* two statements of one function, with no seam to inject
+/// it at. What is testable, and is what makes the structural fix load-bearing, is
+/// that address resolution goes through the supplied list: give it the wrong
+/// generation's list and it matches the wrong documents
+/// (`doc_set_query_resolves_addresses_through_the_supplied_segment_list`), which
+/// is exactly the corruption a second searcher could introduce.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collector::SortKey;
+    use crate::config::ServerConfig;
+    use tantivy::query::AllQuery;
+    use tempfile::TempDir;
+
+    const SCHEMA_TOML: &str = r#"
+[core]
+name = "grouping"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "kind"
+type = "string"
+stored = true
+fast = true
+"#;
+
+    /// A core whose every commit becomes its own segment (`no_merge`), so the
+    /// segment list and the ordinals inside it are under the test's control.
+    fn open_multi_segment_index() -> (TempDir, CoreIndex) {
+        let dir = TempDir::new().expect("create temp dir");
+        let schema_path = dir.path().join("schema.toml");
+        std::fs::write(&schema_path, SCHEMA_TOML).expect("write schema.toml");
+        let data_dir = dir.path().join("data");
+        let mut config = ServerConfig::default();
+        config.indexing.merge_policy = "no_merge".to_string();
+        let index = CoreIndex::open(&schema_path, &data_dir, &config).expect("open test index");
+        (dir, index)
+    }
+
+    /// Indexes each document in its own commit, so document `n` lands in segment
+    /// ordinal `n` of the resulting searcher.
+    fn index_one_per_segment(index: &CoreIndex, ids: &[&str]) {
+        for id in ids {
+            index
+                .add_documents(
+                    &[json!({"id": *id, "body": "shared text", "kind": "k"})],
+                    true,
+                )
+                .expect("add_documents");
+            index.commit().expect("commit");
+        }
+    }
+
+    fn group_clause() -> SortClause {
+        SortClause::new(
+            SortKey::Field("kind".to_string()),
+            false,
+            Some(ValueKind::Text),
+        )
+    }
+
+    /// Every matching document's `id`, via a real search of `query`.
+    fn matched_ids(index: &CoreIndex, query: &dyn Query) -> Vec<String> {
+        let fl = vec!["id".to_string()];
+        let mut ids: Vec<String> = index
+            .search(query, &[], &[])
+            .expect("search")
+            .into_iter()
+            .map(|(_, addr)| {
+                index
+                    .render_doc(addr, Some(&fl), None)
+                    .expect("render_doc")
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .expect("id is stored")
+                    .to_string()
+            })
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn doc_set_query_resolves_addresses_through_the_supplied_segment_list() {
+        let (_dir, index) = open_multi_segment_index();
+        index_one_per_segment(&index, &["a", "b"]);
+
+        let query = AllQuery;
+        let (fruit, segment_ids) = index
+            .search_grouping(&query, &[], Vec::new(), Vec::new(), group_clause())
+            .expect("search_grouping");
+        assert_eq!(
+            segment_ids.len(),
+            2,
+            "one commit per doc under no_merge must leave two segments"
+        );
+
+        // `a`'s address, as the grouping pass collected it. Which ordinal that is
+        // is Tantivy's business (segment order is not commit order), so it is
+        // looked up rather than assumed.
+        let fl = vec!["id".to_string()];
+        let a_addr = fruit
+            .groups
+            .iter()
+            .flat_map(|g| g.docs.iter().map(|(_, addr)| *addr))
+            .find(|addr| {
+                index
+                    .render_doc(*addr, Some(&fl), None)
+                    .expect("render_doc")
+                    .get("id")
+                    .and_then(Value::as_str)
+                    == Some("a")
+            })
+            .expect("`a` is in the fruit");
+
+        // The list the fruit came with resolves the address to the document it
+        // actually denotes.
+        let same_generation = DocSetQuery::new(&segment_ids, &[a_addr]);
+        assert_eq!(matched_ids(&index, &same_generation), vec!["a".to_string()]);
+
+        // A list from any other generation resolves the SAME ordinal onto a
+        // different segment, and the query then matches a different document
+        // entirely. This is the corruption a second `self.reader.searcher()` call
+        // can introduce when a commit reloads the reader mid-request, and the
+        // reason `search_grouping` returns fruit and segment list as one pair.
+        let other_generation: Vec<SegmentId> = segment_ids.iter().rev().copied().collect();
+        let stale = DocSetQuery::new(&other_generation, &[a_addr]);
+        assert_eq!(matched_ids(&index, &stale), vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn search_grouping_returns_the_segment_list_of_its_own_searcher() {
+        let (_dir, index) = open_multi_segment_index();
+        index_one_per_segment(&index, &["a", "b"]);
+
+        let query = AllQuery;
+        let (fruit, segment_ids) = index
+            .search_grouping(&query, &[], Vec::new(), Vec::new(), group_clause())
+            .expect("search_grouping");
+        // Every collected address indexes into the list returned alongside it.
+        for group in &fruit.groups {
+            for (_, addr) in &group.docs {
+                assert!(
+                    (addr.segment_ord as usize) < segment_ids.len(),
+                    "address {addr:?} is not resolvable against its own searcher's segments"
+                );
+            }
+        }
+
+        // A later commit reloads the reader: the next call sees a longer list
+        // holding the same two segments plus the new one, and — crucially — an
+        // ordinal in the old list is not guaranteed to name the same segment in
+        // the new one, which is what makes reusing a list across generations
+        // unsound. The list already handed out still describes its own
+        // generation.
+        index_one_per_segment(&index, &["c"]);
+        let (_fruit, later) = index
+            .search_grouping(&query, &[], Vec::new(), Vec::new(), group_clause())
+            .expect("search_grouping");
+        assert_eq!(segment_ids.len(), 2);
+        assert_eq!(later.len(), 3);
+        for id in &segment_ids {
+            assert!(later.contains(id), "segment {id:?} survived the commit");
+        }
+    }
+
+    #[test]
+    fn distinct_groups_counts_documents_outside_the_grouping_pass() {
+        // Finding 163 in miniature: the grouping pass runs over `id:a`, and the
+        // count is asked for the whole index. A doc -> group map from the pass
+        // would answer 1; reading the group column answers 2, because `b`'s group
+        // is a group too.
+        let (_dir, index) = open_multi_segment_index();
+        index
+            .add_documents(
+                &[
+                    json!({"id": "a", "body": "shared text", "kind": "k1"}),
+                    json!({"id": "b", "body": "shared text", "kind": "k2"}),
+                    // No `kind` at all: Solr's `null` group, which counts
+                    // (finding 162).
+                    json!({"id": "c", "body": "shared text"}),
+                ],
+                true,
+            )
+            .expect("add_documents");
+        index.commit().expect("commit");
+
+        let narrow = index.parse_query("id:a", "body").expect("parse_query");
+        let (fruit, _segments) = index
+            .search_grouping(narrow.as_ref(), &[], Vec::new(), Vec::new(), group_clause())
+            .expect("search_grouping");
+        assert_eq!(fruit.groups.len(), 1, "the pass only ever saw `a`'s group");
+
+        let facet = GroupFacet::new("kind".to_string());
+        assert_eq!(
+            facet
+                .distinct_groups(&index, &AllQuery)
+                .expect("distinct_groups"),
+            3,
+            "k1, k2 and the null group, none of them from the grouping pass"
+        );
     }
 }

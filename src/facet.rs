@@ -218,8 +218,13 @@ fn facet_counts_inner(
     let facet_ranges = facet_ranges(index, params, base, nl, group)
         .map_err(|e| anyhow::Error::new(PreQueryFacetError(e)))?;
     // #295: the `{!tag=...}` each `fq` carries, so a facet's `{!ex=...}` can
-    // drop the clauses it names. Aligned positionally with `base`'s trailing
-    // fq clauses (index 0 is the main query).
+    // drop the clauses it names. Aligned positionally with `base`'s fq clauses
+    // (index 0 is the main query). `base` may end with one further *untagged*
+    // clause -- `group.truncate` appends its collapsed-set `DocSetQuery` there
+    // (issue #338) -- which is fine, and is the property
+    // `excluded_base_clauses` relies on: it walks `fq_tags` positionally from
+    // index 1, so a trailing clause with no `fq_tags` entry is never excludable
+    // and survives every `{!ex=...}` (`g338_ex_truncate`).
     let fq_tags = fq_tag_lists(params);
     let facet_queries = facet_queries(index, params, default_field, base, &fq_tags, group)?;
     // #334: `facet.heatmap` is a post-query facet (the base query has already
@@ -305,6 +310,11 @@ fn fq_tag_lists(params: &Params) -> Vec<Vec<String>> {
 /// `fq_tags`. An `excluded` entry naming no set tag drops nothing, which is
 /// the silent no-op finding 136 requires; matching is set-intersection, so a
 /// single `{!tag=a,b}` fq is dropped by `{!ex=b}` (finding 137).
+///
+/// A clause past the `fq`s — `group.truncate`'s collapsed-set `DocSetQuery`,
+/// appended last by `select` (issue #338) — has no `fq_tags` entry, so it is
+/// never dropped: `g338_ex_truncate`'s excluded facet still counts over the
+/// collapsed set.
 fn excluded_base_clauses(
     base: &BaseClauses,
     fq_tags: &[Vec<String>],
@@ -883,11 +893,11 @@ fn shape_field(
         // field column (`ExistsQuery`), never from stored values.
         let has_value = ExistsQuery::new(field.column.clone(), false);
         let bucket = narrowed(base, Occur::MustNot, Box::new(has_value));
-        // ponytail: under `group.facet=true` the `null` bucket counts distinct
-        // groups too, for consistency with every other bucket in the same
-        // block. No g338 fixture combines `facet.missing` with `group.facet`,
-        // so this is a consistency choice, not a captured fact -- capture
-        // before relying on it.
+        // Under `group.facet=true` the `null` bucket counts distinct groups too,
+        // like every other bucket in the same block. Captured:
+        // `g338n_facet_missing` vs `g338n_groupfacet_missing` (finding 162) --
+        // `type`'s `null` bucket is 2 documents (h4/h5) but 1 group, and
+        // `category`'s is 0 either way.
         let absent = match group {
             Some(group) => group.distinct_groups(index, &bucket)?,
             None => index.count(&bucket)?,
