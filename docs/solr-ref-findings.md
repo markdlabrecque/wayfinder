@@ -3121,3 +3121,72 @@ the only way the four payload functions are distinguishable from each other.
       (finding 171), so `["bird|2.0","bird|2.0"]` aggregates `[2.0, 2.0]`:
       `sum` 4.0 and `average` 2.0, not 2.0 and 2.0 (`plsz_dup_sum`,
       `plsz_dup_average`).
+175. **The JSON Facet API's `facets` block is a top-level sibling emitted between
+      `facet_counts` and `stats`, and it needs no `facet=true`.** Captured (#343,
+      the `jf343_*` rows). `json.facet` is a single param whose value is a JSON
+      object; Solr answers it under a top-level `facets` key, entirely separate
+      from the classic `facet_counts` envelope. `jf343_with_classic_stats` sends
+      `json.facet`, `facet=true&facet.field=hash` and
+      `stats=true&stats.field=popularity` together and the top-level order is
+      `responseHeader, response, facet_counts, facets, stats` -- so `facets`
+      slots between the two, and both faceting envelopes coexist with no
+      interaction. Solarium never sends `facet=true` for a JSON-only facet set
+      (`Component/RequestBuilder/FacetSet.php` sets it only when a non-JSON facet
+      is present), so `json.facet` has to be honoured entirely on its own.
+
+176. **`facets.count` is implicit, mandatory, and scoped to `q`+`fq`.** Every
+      `facets` block carries a scalar `count` even when nothing asked for one:
+      `json.facet={}` returns `{"count":6}` (`jf343_empty_object`). It is the
+      numFound of the filtered set, not of the index -- `jf343_terms_fq` (the
+      client's own `fq={!key=search_api}+hash:* +index_id:*`) gives 5 and
+      `jf343_terms_q` gives 3, against a 6-document corpus, and the terms buckets
+      narrow with it. This matters more than a default usually would because
+      `search_api_solr` reads it **unguarded**
+      (`SearchApiSolrBackend.php:4961-4964`, `$count->getValue()` with no null
+      check), so omitting it is a fatal error on the client's status page rather
+      than a missing value.
+
+177. **A JSON facet aggregation is a bare string on the wire and returns a raw
+      integer, unlike the stats component.** Solarium's
+      `JsonAggregation::serialize()` returns `$this->getFunction()` -- the string
+      itself -- so the client's `createJsonFacetAggregation(['local_key' =>
+      'maxVersion', 'function' => 'max(_version_)'])` reaches Solr as
+      `{"maxVersion":"max(_version_)"}`, never `{"function":...}` and never
+      `{"type":"func","func":...}`. The response value is the raw long
+      (`"maxVersion":1872604773983715328`, `jf343_agg_max_version`), whereas
+      `stats.field=_version_` renders min/max as JSON floats
+      (`stats_version_max`). Same field, same aggregate, two different JSON
+      number types depending on which component answers -- so the two paths
+      cannot share a renderer.
+
+      Terms facets nest via a `facet` key and their children render **inline
+      inside each bucket**, as siblings of `val`/`count`
+      (`jf343_terms_nested`, and the four-level client topology in
+      `jf343_deep_max`). Bucket defaults are sort `count desc`, `mincount` 1, and
+      `limit: -1` for unlimited; `"sort":"index asc"` gives lexicographic order
+      (`jf343_terms_sort_index`). `mincount: 0` adds no bucket for a document
+      that simply lacks the field (`jf343_terms_mincount0` is identical to
+      `jf343_terms`) -- absent is not the same as zero-valued.
+
+178. **Solr does not treat two malformed-looking JSON facets as errors, and
+      Wayfinder deliberately does.** A `type: terms` facet naming a field with no
+      docValues returns 200 with `{"buckets":[]}` rather than a 400
+      (`jf343_err_no_docvalues`, on an indexed-and-stored `text_en` field), and
+      `max()` over a text field returns the **lexicographic** maximum term
+      (`{"x":"zeta"}`, `jf343_err_agg_text`) rather than failing. Wayfinder 400s
+      on both: the first for consistency with finding 105's existing
+      classic-facet divergence, the second because handing the client a string
+      where it expects a number is worse than failing loudly, and no captured
+      client ever aggregates over text. Both are documented divergences, not
+      bugs; the fixtures record what Solr actually does.
+
+      What Solr *does* reject with a 400: malformed JSON in the param value
+      (`org.noggit.JSONParser$ParseException`, `jf343_err_bad_json`), an unknown
+      facet type (`Unknown facet or stat. key=... type=nosuchtype`,
+      `jf343_err_bad_type`), an unknown aggregation function
+      (`Unknown aggregation 'nosuchfunc'`, `jf343_err_bad_func`), and an
+      undefined field (`undefined field: "no_such_field"`,
+      `jf343_err_unknown_field`). The error envelopes split exactly the way
+      `facet.rs`'s `PreQueryFacetError` already models: the two parse-time
+      failures emit `responseHeader, error` with **no `response` block**, while
+      the field-resolution failure emits `responseHeader, response, error`.
