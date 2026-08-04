@@ -1,7 +1,7 @@
 # #357 — `online_snapshot` flakes under parallel test load
 
 Branch: `357-online-snapshot-flake`. **Lands on `main` immediately after
-PREP-1, before any feature branch in this batch fans out.**
+PREP-1 (#368), before any feature branch in this batch fans out.**
 
 ## Why this is first
 

@@ -4,7 +4,7 @@ Branch: `354-admin-endpoints`. **Group C, lands last** — it owns the coverage
 denominator and must recompute against the final endpoint set.
 
 These come from `modules/search_api_solr_admin/`, a shipped submodule the
-three-file snapshot did not include (now vendored by PREP-1). All three are on
+three-file snapshot did not include (now vendored by PREP-1, #368). All three are on
 the **standard, non-cloud connector**, so the SolrCloud non-goal does not excuse
 them.
 
