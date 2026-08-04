@@ -7,6 +7,8 @@ namespace Drupal\Tests\search_api_wayfinder\Unit;
 use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\Field\FieldStorageDefinitionInterface;
 use Drupal\Core\Form\FormState;
+use Drupal\Core\Language\LanguageInterface;
+use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\Core\Messenger\MessengerInterface;
 use Drupal\Core\StringTranslation\TranslatableMarkup;
 use Drupal\Core\StringTranslation\TranslationInterface;
@@ -290,6 +292,19 @@ class WayfinderBackendTest extends TestCase {
   }
 
   /**
+   * issue #342: getSupportedFeatures() adds 'search_api_spellcheck', matching
+   * search_api_solr's own advertised feature set
+   * (SearchApiSolrBackend.php:777).
+   *
+   * @covers ::getSupportedFeatures
+   */
+  public function testGetSupportedFeaturesIncludesSearchApiSpellcheck(): void {
+    $backend = new WayfinderBackend([], 'wayfinder', []);
+
+    $this->assertContains('search_api_spellcheck', $backend->getSupportedFeatures());
+  }
+
+  /**
    * issue #300: supportsDataType() accepts the six default Search API types
    * plus the five search_api_solr non-default types that round-trip through
    * FieldMapper + presets/search-api.toml on Wayfinder's existing schema
@@ -329,9 +344,12 @@ class WayfinderBackendTest extends TestCase {
       'solr_text_omit_norms' => ['solr_text_omit_norms', TRUE],
       'solr_text_wstoken' => ['solr_text_wstoken', TRUE],
       'solr_text_suggester' => ['solr_text_suggester', TRUE],
+      // issue #342: solr_text_spellcheck is no longer descoped now that
+      // FieldMapper is language-aware and maps it to the spellcheck_<lang>
+      // fixed sink (SearchApiSolrBackend.php:2440-2446).
+      'solr_text_spellcheck maps to the spellcheck_<lang> sink' => ['solr_text_spellcheck', TRUE],
       // Descoped types: refused, with a README reason.
       'solr_date_range needs a server-side range type' => ['solr_date_range', FALSE],
-      'solr_text_spellcheck needs language-aware naming' => ['solr_text_spellcheck', FALSE],
       'solr_text_custom is a site escape hatch' => ['solr_text_custom', FALSE],
       'solr_text_custom_omit_norms is a site escape hatch' => ['solr_text_custom_omit_norms', FALSE],
       // Spatial types belong to #292, not here.
@@ -708,13 +726,18 @@ class WayfinderBackendTest extends TestCase {
     $client->expects($this->once())
       ->method('terms')
       ->with($this->callback(function (array $params): bool {
+        // #342: 'title' is a text field, no search_api_language condition
+        // and no injected language manager on this bare
+        // `new WayfinderBackend(...)`, so the resolved language is the
+        // 'und' fallback -> tm_X3b_und_title (SearchApiSolrBackend.php:
+        // 2450-2473).
         return $params['terms'] === 'true'
-          && $params['terms.fl'] === 'ts_title'
+          && $params['terms.fl'] === 'tm_X3b_und_title'
           && $params['terms.prefix'] === 'roc'
           && $params['terms.limit'] === 10
           && $params['omitHeader'] === 'true';
       }))
-      ->willReturn(['terms' => ['ts_title' => ['rocket', 5, 'rocker', 2]]]);
+      ->willReturn(['terms' => ['tm_X3b_und_title' => ['rocket', 5, 'rocker', 2]]]);
 
     $backend = $this->backendWithClient($client);
     $suggestions = $backend->getAutocompleteSuggestions($query, $search, 'roc', 'roc');
@@ -808,6 +831,72 @@ class WayfinderBackendTest extends TestCase {
       'no terms key' => [['responseHeader' => ['status' => 0]]],
       'empty body' => [[]],
     ];
+  }
+
+  /**
+   * issue #342: create() injects the container's language_manager service so
+   * QueryBuilder can resolve "all enabled site languages" (step 2 of the
+   * language-resolution order) when the query carries no
+   * search_api_language condition. Proven end-to-end through search(): a
+   * text field's qf expands to one variant per enabled language, in the
+   * language manager's order, exactly as if the injected manager had been
+   * passed to `new QueryBuilder($fieldMapper, $languageManager)` directly
+   * (mirrors QueryBuilderTest::
+   * testLanguageResolvesFromTheInjectedLanguageManagerWhenNoConditionIsPresent).
+   *
+   * @covers ::create
+   * @covers ::search
+   */
+  public function testCreateInjectsLanguageManagerSoSearchExpandsEnabledLanguages(): void {
+    $index = $this->mockIndex();
+    $query = $this->mockQuery($index);
+
+    $languageManager = $this->createMock(LanguageManagerInterface::class);
+    $en = $this->createMock(LanguageInterface::class);
+    $en->method('getId')->willReturn('en');
+    $de = $this->createMock(LanguageInterface::class);
+    $de->method('getId')->willReturn('de');
+    $languageManager->method('getLanguages')->willReturn(['en' => $en, 'de' => $de]);
+
+    $selectResponse = new Response(200, [], (string) json_encode([
+      'response' => ['numFound' => 0, 'start' => 0, 'docs' => []],
+    ]));
+    $mock = new MockHandler([$selectResponse]);
+    $handlerStack = HandlerStack::create($mock);
+    $httpClient = new Client(['handler' => $handlerStack]);
+
+    $stringTranslation = $this->createMock(TranslationInterface::class);
+    $stringTranslation->method('translate')
+      ->willReturnCallback(fn (string $string, array $args = []) => strtr($string, $args));
+
+    $container = $this->createMock(ContainerInterface::class);
+    $container->method('get')->willReturnMap([
+      ['http_client', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE, $httpClient],
+      ['search_api.fields_helper', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE, $this->createMock(FieldsHelper::class)],
+      ['messenger', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE, $this->createMock(MessengerInterface::class)],
+      ['string_translation', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE, $stringTranslation],
+      ['language_manager', ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE, $languageManager],
+    ]);
+
+    $configuration = [
+      'scheme' => 'http',
+      'host' => 'localhost',
+      'port' => 8983,
+      'path' => '/wayfinder',
+      'core' => 'mycore',
+      'timeout' => 5,
+      'commitWithin' => 1000,
+    ];
+
+    /** @var \Drupal\search_api_wayfinder\Plugin\search_api\backend\WayfinderBackend $backend */
+    $backend = WayfinderBackend::create($container, $configuration, 'wayfinder', ['id' => 'wayfinder']);
+    $backend->search($query);
+
+    $sentRequest = $mock->getLastRequest();
+    $this->assertNotNull($sentRequest, 'search() must have sent a request through the real WayfinderClient.');
+    parse_str($sentRequest->getUri()->getQuery(), $sentParams);
+
+    $this->assertSame('tm_X3b_en_title tm_X3b_de_title', $sentParams['qf'] ?? NULL);
   }
 
 }

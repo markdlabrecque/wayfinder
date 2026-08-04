@@ -6,10 +6,13 @@ namespace Drupal\Tests\search_api_wayfinder\Unit;
 
 use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\Field\FieldStorageDefinitionInterface;
+use Drupal\Core\Language\LanguageInterface;
+use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Item\FieldInterface;
 use Drupal\search_api\Query\ConditionGroup;
 use Drupal\search_api\Query\QueryInterface;
+use Drupal\search_api_wayfinder\FieldMapper;
 use Drupal\search_api_wayfinder\QueryBuilder;
 use PHPUnit\Framework\TestCase;
 
@@ -120,9 +123,12 @@ class QueryBuilderTest extends TestCase {
 
     $this->assertSame('rocket', $params['q']);
     $this->assertSame('edismax', $params['defType']);
-    // "body" is multi-valued on the index (per mockIndexField's TRUE arg
-    // above), so qf must use the 'm' dynamic-field name for it, not 's'.
-    $this->assertSame('ts_title tm_body', $params['qf']);
+    // issue #342: every text field is now always tm_X3b_<lang>_<id> --
+    // cardinality no longer distinguishes 'title' from 'body' in the mapped
+    // name -- and with no search_api_language condition and no injected
+    // LanguageManagerInterface, the resolved language defaults to 'und'
+    // (LanguageInterface::LANGCODE_NOT_SPECIFIED).
+    $this->assertSame('tm_X3b_und_title tm_X3b_und_body', $params['qf']);
     $this->assertSame('index_id:"my_index"', $params['fq']);
   }
 
@@ -238,7 +244,7 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    $this->assertSame('ts_title', $params['qf']);
+    $this->assertSame('tm_X3b_und_title', $params['qf']);
   }
 
   /**
@@ -253,7 +259,7 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    $this->assertSame('ts_title^2 tm_body', $params['qf']);
+    $this->assertSame('tm_X3b_und_title^2 tm_X3b_und_body', $params['qf']);
   }
 
   /**
@@ -353,7 +359,10 @@ class QueryBuilderTest extends TestCase {
 
     $this->assertSame([
       'index_id:"my_index"',
-      'ts_text:"space + - && || ! ( ) { } [ ] ^ \\" ~ * ? : \\\\ / OR *:*"',
+      // issue #342: text conditions map through the same _X3b_<lang>_ name
+      // as everywhere else; single resolved language ('und', the default)
+      // means no OR-across-variants parens are added.
+      'tm_X3b_und_text:"space + - && || ! ( ) { } [ ] ^ \\" ~ * ? : \\\\ / OR *:*"',
       'ds_date:1970-01-01T00:00:00Z',
       'bs_boolean:"true"',
       'its_integer:42',
@@ -378,7 +387,9 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    $this->assertSame('score desc,id asc,sort_title asc,its_weight desc', $params['sort']);
+    // issue #342: a text sort field now carries the resolved language
+    // (default 'und' here) -- non-text sorts (its_weight) are unaffected.
+    $this->assertSame('score desc,id asc,sort_X3b_und_title asc,its_weight desc', $params['sort']);
     $this->assertSame(20, $params['start']);
     $this->assertSame(10, $params['rows']);
   }
@@ -1124,7 +1135,8 @@ class QueryBuilderTest extends TestCase {
     $params = (new QueryBuilder())->buildMlt($query);
 
     $this->assertSame('id:"my_index-entity:node/1:en"', $params['q']);
-    $this->assertSame('ts_title,tm_body', $params['mlt.fl']);
+    // issue #342: mapped text field names now default to the 'und' language.
+    $this->assertSame('tm_X3b_und_title,tm_X3b_und_body', $params['mlt.fl']);
   }
 
   /**
@@ -1250,7 +1262,8 @@ class QueryBuilderTest extends TestCase {
     $params = (new QueryBuilder())->build($query, TRUE);
 
     $this->assertSame('true', $params['hl']);
-    $this->assertSame('ts_title,tm_body', $params['hl.fl']);
+    // issue #342: mapped text field names now default to the 'und' language.
+    $this->assertSame('tm_X3b_und_title,tm_X3b_und_body', $params['hl.fl']);
   }
 
   /**
@@ -1417,7 +1430,8 @@ class QueryBuilderTest extends TestCase {
     $params = (new QueryBuilder())->buildAutocompleteTerms($query, 'roc');
 
     $this->assertSame('true', $params['terms']);
-    $this->assertSame('ts_title', $params['terms.fl']);
+    // issue #342: mapped text field names now default to the 'und' language.
+    $this->assertSame('tm_X3b_und_title', $params['terms.fl']);
     $this->assertSame('roc', $params['terms.prefix']);
     $this->assertSame(5, $params['terms.limit']);
     $this->assertSame('true', $params['omitHeader']);
@@ -1473,7 +1487,8 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->buildAutocompleteTerms($query, 'r');
 
-    $this->assertSame(['ts_title', 'tm_body'], $params['terms.fl']);
+    // issue #342: mapped text field names now default to the 'und' language.
+    $this->assertSame(['tm_X3b_und_title', 'tm_X3b_und_body'], $params['terms.fl']);
   }
 
   /**
@@ -1492,7 +1507,549 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->buildAutocompleteTerms($query, 'r');
 
-    $this->assertSame('ts_title', $params['terms.fl']);
+    // issue #342: mapped text field names now default to the 'und' language.
+    $this->assertSame('tm_X3b_und_title', $params['terms.fl']);
+  }
+
+  // ------------------------------------------------------------------
+  // issue #342: language-aware field naming -- language resolution and
+  // its application to qf/fl/hl.fl, conditions, sorts, facets, and the
+  // spellcheck request params.
+  // ------------------------------------------------------------------
+
+  /**
+   * Builds a LanguageManagerInterface mock whose getLanguages() returns one
+   * LanguageInterface per given langcode, in the given order -- the order
+   * QueryBuilder must preserve when the language manager is the resolution
+   * source (step 2 of the algorithm in the spec's "Where the language comes
+   * from" section).
+   */
+  private function mockLanguageManager(array $langcodes): LanguageManagerInterface {
+    $languages = [];
+    foreach ($langcodes as $langcode) {
+      $language = $this->createMock(LanguageInterface::class);
+      $language->method('getId')->willReturn($langcode);
+      $languages[$langcode] = $language;
+    }
+    $manager = $this->createMock(LanguageManagerInterface::class);
+    $manager->method('getLanguages')->willReturn($languages);
+    return $manager;
+  }
+
+  /**
+   * issue #342: with a `search_api_language` `=` condition on the query, the
+   * resolved language set is that single value -- not 'und' -- and every
+   * text field in qf picks it up. Mirrors Utility::ensureLanguageCondition()
+   * (used at SearchApiSolrBackend.php:3385 et al.).
+   *
+   * @covers ::build
+   */
+  public function testLanguageResolvesFromAnEqualsConditionOnSearchApiLanguage(): void {
+    $index = $this->mockIndex(['title'], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+      'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
+    ]);
+    $conditions = (new ConditionGroup())->addCondition('search_api_language', 'de', '=');
+    $query = $this->mockQuery('rocket', NULL, $index, $conditions);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('tm_X3b_de_title', $params['qf']);
+  }
+
+  /**
+   * issue #342: an `IN` condition on `search_api_language` resolves to
+   * MULTIPLE languages, in the values' own order, and qf emits every
+   * variant.
+   *
+   * @covers ::build
+   */
+  public function testLanguageResolvesFromAnInConditionWithMultipleValues(): void {
+    $index = $this->mockIndex(['title'], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+      'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
+    ]);
+    $conditions = (new ConditionGroup())->addCondition('search_api_language', ['de', 'fr'], 'IN');
+    $query = $this->mockQuery('rocket', NULL, $index, $conditions);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('tm_X3b_de_title tm_X3b_fr_title', $params['qf']);
+  }
+
+  /**
+   * issue #342: "recursing into nested condition groups" -- a
+   * `search_api_language` condition nested inside another condition group
+   * (of either conjunction) must still be found.
+   *
+   * @covers ::build
+   */
+  public function testLanguageResolutionRecursesIntoNestedConditionGroups(): void {
+    $index = $this->mockIndex(['title'], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+      'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
+      'status' => $this->mockIndexField('status', 'string', FALSE),
+    ]);
+    $nested = (new ConditionGroup('OR'))
+      ->addCondition('search_api_language', 'de', '=')
+      ->addCondition('status', 'published');
+    $conditions = (new ConditionGroup('AND'))->addConditionGroup($nested);
+    $query = $this->mockQuery('rocket', NULL, $index, $conditions);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('tm_X3b_de_title', $params['qf']);
+  }
+
+  /**
+   * issue #342: with no `search_api_language` condition, an injected
+   * `LanguageManagerInterface` supplies every enabled site language, in
+   * order, as the resolved set.
+   *
+   * @covers ::build
+   */
+  public function testLanguageResolvesFromTheInjectedLanguageManagerWhenNoConditionIsPresent(): void {
+    $index = $this->mockIndex(['title'], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+    ]);
+    $query = $this->mockQuery('rocket', NULL, $index);
+    $languageManager = $this->mockLanguageManager(['en', 'de']);
+
+    $params = (new QueryBuilder(new FieldMapper(), $languageManager))->build($query);
+
+    $this->assertSame('tm_X3b_en_title tm_X3b_de_title', $params['qf']);
+  }
+
+  /**
+   * issue #342: a `search_api_language` condition takes priority over an
+   * injected language manager -- step 1 of the resolution order wins over
+   * step 2.
+   *
+   * @covers ::build
+   */
+  public function testLanguageConditionTakesPriorityOverTheLanguageManager(): void {
+    $index = $this->mockIndex(['title'], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+      'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
+    ]);
+    $conditions = (new ConditionGroup())->addCondition('search_api_language', 'fr', '=');
+    $query = $this->mockQuery('rocket', NULL, $index, $conditions);
+    $languageManager = $this->mockLanguageManager(['en', 'de']);
+
+    $params = (new QueryBuilder(new FieldMapper(), $languageManager))->build($query);
+
+    $this->assertSame('tm_X3b_fr_title', $params['qf']);
+  }
+
+  /**
+   * issue #342: no condition and no injected language manager (the default,
+   * `NULL`, per the ~20 existing `new QueryBuilder(...)` call sites in this
+   * class) resolves to `['und']`.
+   *
+   * @covers ::build
+   */
+  public function testLanguageFallsBackToUndWithNoConditionAndNoLanguageManager(): void {
+    $index = $this->mockIndex(['title'], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+    ]);
+    $query = $this->mockQuery('rocket', NULL, $index);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('tm_X3b_und_title', $params['qf']);
+  }
+
+  /**
+   * issue #342: "Also fall back to ['und'] if 1 and 2 both yield an empty
+   * set" -- a language manager that reports zero enabled languages must not
+   * leave the resolved set empty.
+   *
+   * @covers ::build
+   */
+  public function testLanguageFallsBackToUndWhenTheLanguageManagerReportsNoLanguages(): void {
+    $index = $this->mockIndex(['title'], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+    ]);
+    $query = $this->mockQuery('rocket', NULL, $index);
+    $languageManager = $this->mockLanguageManager([]);
+
+    $params = (new QueryBuilder(new FieldMapper(), $languageManager))->build($query);
+
+    $this->assertSame('tm_X3b_und_title', $params['qf']);
+  }
+
+  /**
+   * issue #342: a condition on a text field ORs across every resolved
+   * language variant, mirroring createFilterQuery() (:3392). Single
+   * language (asserted throughout the rest of this class, e.g.
+   * testFilterValuesUsePinnedUpstreamPhraseEscapingAndTypeFormatting) adds
+   * no parens; two or more languages do.
+   *
+   * @covers ::build
+   */
+  public function testMultiLanguageConditionOnATextFieldIsOredAcrossVariants(): void {
+    $index = $this->mockIndex([], [
+      'body' => $this->mockIndexField('body', 'text', FALSE),
+      'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
+    ]);
+    $languageCondition = (new ConditionGroup())->addCondition('search_api_language', ['en', 'de'], 'IN');
+    $conditions = (new ConditionGroup('AND'))
+      ->addConditionGroup($languageCondition)
+      ->addCondition('body', 'hello');
+    $query = $this->mockQuery(NULL, NULL, $index, $conditions);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame(
+      '(tm_X3b_en_body:"hello" OR tm_X3b_de_body:"hello")',
+      $params['fq'][2],
+    );
+  }
+
+  /**
+   * issue #342, MF-1/MF-4 (round-2 and round-3 review bounces): a condition
+   * on a text field combines its per-language variants with AND or OR
+   * depending on the emitted per-variant clause's POLARITY, never on the
+   * operator's name alone -- both review rounds found a tautology in this
+   * exact logic, each time in a shape the previous (sampled) provider did
+   * not reach, so this provider is now exhaustive rather than sampled: all
+   * twelve shapes in the spec's truth table, on a text field under two
+   * resolved languages ([en, de]), asserting the emitted `fq` string.
+   *
+   * The governing rule, stated once here so the next change to this logic
+   * has to reckon with it: *does a document lacking this language variant
+   * satisfy the per-variant clause?* A document only ever carries ONE
+   * language variant of a text field (DocumentBuilder writes exactly one
+   * `tm_X3b_<item language>_body`, never both), so if the answer is "yes",
+   * that vacuous truth would make an OR match every document regardless of
+   * `body`'s real value -- the variants MUST combine with AND instead. If
+   * "no", OR is correct: at least one variant needs to genuinely match.
+   *
+   * Applying that rule row by row (F = the field name, `[* TO *]` = "field
+   * is present"):
+   * - `= NULL` -> `-F:[* TO *]` ("field absent"): a doc lacking the variant
+   *   IS absent in that variant -> satisfies -> AND.
+   * - `<> NULL` -> `F:[* TO *]` ("field present"): a doc lacking the variant
+   *   is NOT present in it -> does not satisfy -> OR.
+   * - `= a` -> `F:"a"`: a doc lacking the variant can't equal "a" in it ->
+   *   does not satisfy -> OR (this is the original, still-correct case).
+   * - `<> a` -> `(*:* -F:"a")`: a doc lacking the variant vacuously does NOT
+   *   have "a" in it -> satisfies -> AND (MF-1, round 2).
+   * - `BETWEEN`/`IN [a,b]` (no NULL): same shape as `= a` -> OR.
+   * - `NOT BETWEEN`/`NOT IN [a,b]` (no NULL): same shape as `<> a` -> AND.
+   * - `IN [a, NULL]` -> `(F:"a" OR -F:[* TO *])`: the `-F:[* TO *]` disjunct
+   *   alone is satisfied by a doc lacking the variant -> AND (MF-4, round
+   *   3 -- the mirror image of MF-1: `IN` normally ORs, but a NULL member
+   *   flips its per-variant clause's polarity, and the fix (round-2
+   *   framing, confirmed correct in round 3) keys the conjunction off the
+   *   emitted clause's polarity, not the operator's name).
+   * - `IN [NULL]` -> `(*:* -F:[* TO *])`: same shape as `<> a` -> AND.
+   * - `NOT IN [a, NULL]` -> `(F:[* TO *] -F:("a"))`: requires the field
+   *   present AND not "a" -- a doc lacking the variant is NOT present in it,
+   *   so does not satisfy -> OR.
+   * - `NOT IN [NULL]` -> `(F:[* TO *])`: same shape as `<> NULL` -> OR.
+   *
+   * @covers ::build
+   * @dataProvider conditionCombinationTruthTableProvider
+   */
+  public function testConditionCombinationOnAMultiLanguageTextFieldFollowsTheTruthTable(string $operator, $value, string $expected): void {
+    $index = $this->mockIndex([], [
+      'body' => $this->mockIndexField('body', 'text', FALSE),
+      'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
+    ]);
+    $languageCondition = (new ConditionGroup())->addCondition('search_api_language', ['en', 'de'], 'IN');
+    $conditions = (new ConditionGroup('AND'))
+      ->addConditionGroup($languageCondition)
+      ->addCondition('body', $value, $operator);
+    $query = $this->mockQuery(NULL, NULL, $index, $conditions);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame($expected, $params['fq'][2]);
+  }
+
+  public static function conditionCombinationTruthTableProvider(): array {
+    return [
+      // Shapes confirmed by direct reading of
+      // buildConditionForFieldName()/inQuery()/notInQuery()/rangeValues()
+      // (src/QueryBuilder.php:514-537, :544-557, :562-593), then combined
+      // per the truth table's "absent variant satisfies?" column for the
+      // fixed two-language ([en, de]) case.
+      '= NULL' => [
+        '=',
+        NULL,
+        '(-tm_X3b_en_body:[* TO *] AND -tm_X3b_de_body:[* TO *])',
+      ],
+      '<> NULL' => [
+        '<>',
+        NULL,
+        '(tm_X3b_en_body:[* TO *] OR tm_X3b_de_body:[* TO *])',
+      ],
+      '= a' => [
+        '=',
+        'a',
+        '(tm_X3b_en_body:"a" OR tm_X3b_de_body:"a")',
+      ],
+      '<> a' => [
+        '<>',
+        'a',
+        '((*:* -tm_X3b_en_body:"a") AND (*:* -tm_X3b_de_body:"a"))',
+      ],
+      'BETWEEN' => [
+        'BETWEEN',
+        ['a', 'b'],
+        '(tm_X3b_en_body:["a" TO "b"] OR tm_X3b_de_body:["a" TO "b"])',
+      ],
+      'NOT BETWEEN' => [
+        'NOT BETWEEN',
+        ['a', 'b'],
+        '((*:* -tm_X3b_en_body:["a" TO "b"]) AND (*:* -tm_X3b_de_body:["a" TO "b"]))',
+      ],
+      'IN [a,b]' => [
+        'IN',
+        ['a', 'b'],
+        '(tm_X3b_en_body:("a" "b") OR tm_X3b_de_body:("a" "b"))',
+      ],
+      // MF-4 (round 3): the ONE row that must go red against the current
+      // implementation -- today this emits ' OR ' instead of ' AND ',
+      // which is the mirror-image tautology of MF-1: for a document not
+      // indexed in German, `-tm_X3b_de_body:[* TO *]` is unconditionally
+      // true, so the OR'd clause matches every document regardless of
+      // `body`'s actual value ('body = "b"' would satisfy this clause).
+      'IN [a,NULL]' => [
+        'IN',
+        ['a', NULL],
+        '((tm_X3b_en_body:"a" OR -tm_X3b_en_body:[* TO *]) AND (tm_X3b_de_body:"a" OR -tm_X3b_de_body:[* TO *]))',
+      ],
+      'IN [NULL]' => [
+        'IN',
+        [NULL],
+        '((*:* -tm_X3b_en_body:[* TO *]) AND (*:* -tm_X3b_de_body:[* TO *]))',
+      ],
+      'NOT IN [a,b]' => [
+        'NOT IN',
+        ['a', 'b'],
+        '((*:* -tm_X3b_en_body:("a" "b")) AND (*:* -tm_X3b_de_body:("a" "b")))',
+      ],
+      'NOT IN [a,NULL]' => [
+        'NOT IN',
+        ['a', NULL],
+        '((tm_X3b_en_body:[* TO *] -tm_X3b_en_body:("a")) OR (tm_X3b_de_body:[* TO *] -tm_X3b_de_body:("a")))',
+      ],
+      'NOT IN [NULL]' => [
+        'NOT IN',
+        [NULL],
+        '((tm_X3b_en_body:[* TO *]) OR (tm_X3b_de_body:[* TO *]))',
+      ],
+    ];
+  }
+
+  /**
+   * issue #342: sorting on a text field uses only the FIRST language of the
+   * resolved set, never every variant -- unlike qf/fl/hl.fl.
+   *
+   * @covers ::build
+   */
+  public function testSortOnATextFieldUsesOnlyTheFirstResolvedLanguage(): void {
+    $index = $this->mockIndex([], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+      'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
+    ]);
+    $conditions = (new ConditionGroup())->addCondition('search_api_language', ['de', 'fr'], 'IN');
+    $query = $this->mockQuery(NULL, NULL, $index, $conditions, ['title' => 'ASC']);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('sort_X3b_de_title asc', $params['sort']);
+  }
+
+  /**
+   * issue #342: a facet on a text field is language-UNSPECIFIC, i.e. always
+   * targets the 'und' variant, regardless of the query's resolved
+   * language(s). Mirrors search_api_solr's facet path
+   * (getLanguageSpecificSolrFieldNames(LANGCODE_NOT_SPECIFIED, ...),
+   * :2582-2585, reached via :4424/:4524).
+   *
+   * @covers ::build
+   */
+  public function testFacetOnATextFieldIsAlwaysLanguageUnspecific(): void {
+    $index = $this->mockIndex([], [
+      'body' => $this->mockIndexField('body', 'text', FALSE),
+      'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
+    ]);
+    $conditions = (new ConditionGroup())->addCondition('search_api_language', ['de', 'fr'], 'IN');
+    $facets = [
+      'body' => [
+        'field' => 'body',
+        'limit' => 10,
+        'min_count' => 1,
+        'missing' => FALSE,
+      ],
+    ];
+    $query = $this->mockQuery(NULL, NULL, $index, $conditions, [], ['search_api_facets' => $facets]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame(
+      '{!key=body facet.limit=10 facet.mincount=1 facet.missing=false}tm_X3b_und_body',
+      $params['facet.field'],
+    );
+  }
+
+  /**
+   * issue #342: `spellcheck=true`, `spellcheck.q` from the option's `keys`
+   * (space-joined), and `spellcheck.collate=true` when requested. The
+   * option shape is search_api_solr's (SearchApiSolrBackend.php:4639-4670).
+   *
+   * `spellcheck.count` is deliberately asserted ABSENT even though
+   * requested: `src/lib.rs:198-292` (SELECT_PARAMS) does not include
+   * `spellcheck.count`, and `strict_params = true` would 400 the whole
+   * query if it were sent. See the spec's "Out of scope" section --
+   * `SELECT_PARAMS` additions are not part of this task.
+   *
+   * @covers ::build
+   */
+  public function testSpellcheckParamsAreEmittedWhenTheOptionIsSet(): void {
+    $index = $this->mockIndex([], []);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], [
+      'search_api_spellcheck' => [
+        'keys' => ['qwick', 'roket'],
+        'collate' => TRUE,
+        'count' => 5,
+      ],
+    ]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('true', $params['spellcheck']);
+    $this->assertSame('qwick roket', $params['spellcheck.q']);
+    $this->assertSame('true', $params['spellcheck.collate']);
+    $this->assertArrayNotHasKey('spellcheck.count', $params);
+  }
+
+  /**
+   * issue #342: `spellcheck.dictionary` follows the SAME repeated-value
+   * convention `fq`/`facet.field`/`terms.fl` already use in this class
+   * (`count($x) === 1 ? $x[0] : $x`): a single resolved language is sent as
+   * a scalar.
+   *
+   * @covers ::build
+   */
+  public function testSpellcheckDictionaryIsASingleValueForOneResolvedLanguage(): void {
+    $index = $this->mockIndex([], []);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], [
+      'search_api_spellcheck' => ['keys' => ['qwick']],
+    ]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('und', $params['spellcheck.dictionary']);
+  }
+
+  /**
+   * issue #342: `spellcheck.dictionary` becomes a repeated (array) value --
+   * one per resolved language, in resolved order -- exactly the shape `fq`
+   * and `facet.field` already use for more than one value.
+   *
+   * @covers ::build
+   */
+  public function testSpellcheckDictionaryRepeatsOnePerResolvedLanguage(): void {
+    $index = $this->mockIndex([], [
+      'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
+    ]);
+    $conditions = (new ConditionGroup())->addCondition('search_api_language', ['de', 'fr'], 'IN');
+    $query = $this->mockQuery(NULL, NULL, $index, $conditions, [], [
+      'search_api_spellcheck' => ['keys' => ['qwick']],
+    ]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame(['de', 'fr'], $params['spellcheck.dictionary']);
+  }
+
+  /**
+   * issue #342: `spellcheck.q` is omitted entirely when `keys` is empty or
+   * absent -- it is not sent as an empty string.
+   *
+   * @covers ::build
+   */
+  public function testSpellcheckQIsOmittedWhenKeysIsEmpty(): void {
+    $index = $this->mockIndex([], []);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], [
+      'search_api_spellcheck' => ['keys' => []],
+    ]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('true', $params['spellcheck']);
+    $this->assertArrayNotHasKey('spellcheck.q', $params);
+  }
+
+  /**
+   * issue #342: `spellcheck.collate` is omitted (not sent as 'false') when
+   * `collate` is not truthy on the option.
+   *
+   * @covers ::build
+   */
+  public function testSpellcheckCollateIsOmittedWhenNotRequested(): void {
+    $index = $this->mockIndex([], []);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], [
+      'search_api_spellcheck' => ['keys' => ['qwick']],
+    ]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertArrayNotHasKey('spellcheck.collate', $params);
+  }
+
+  /**
+   * Regression: with no `search_api_spellcheck` option at all, none of the
+   * spellcheck params are emitted.
+   *
+   * @covers ::build
+   */
+  public function testNoSpellcheckOptionProducesNoSpellcheckParams(): void {
+    $index = $this->mockIndex([], []);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], []);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertArrayNotHasKey('spellcheck', $params);
+    $this->assertArrayNotHasKey('spellcheck.q', $params);
+    $this->assertArrayNotHasKey('spellcheck.dictionary', $params);
+    $this->assertArrayNotHasKey('spellcheck.collate', $params);
+    $this->assertArrayNotHasKey('spellcheck.count', $params);
+  }
+
+  /**
+   * issue #342, MF-2 (round-2 review bounce): `spellcheck.dictionary` must
+   * send the SAME hyphen-to-underscore transform the indexed sink name uses
+   * (FieldMapper::fieldName()'s `solr_text_spellcheck` branch:
+   * `'spellcheck_' . str_replace('-', '_', $language)`), not the raw
+   * langcode. Today `buildSpellcheck()` sends `$this->languages` verbatim
+   * (src/QueryBuilder.php:167-169), so for a hyphenated Drupal langcode like
+   * 'de-AT' the two sides disagree: indexing writes the sink
+   * `spellcheck_de_AT`, but this param would send the raw 'de-AT', and the
+   * server's `format!("spellcheck_{dictionary}")` (src/lib.rs:2963) then
+   * looks up `spellcheck_de-AT`, a field no document carries -- a silently
+   * empty spellcheck envelope, no error. Every OTHER spellcheck test in this
+   * class uses 'und'/'de'/'fr' (no hyphen), which is exactly why this bug
+   * survived: those langcodes are unchanged by the transform either way.
+   *
+   * @covers ::build
+   */
+  public function testSpellcheckDictionaryTransformsAHyphenatedLanguageLikeTheIndexedSink(): void {
+    $index = $this->mockIndex([], [
+      'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
+    ]);
+    $conditions = (new ConditionGroup())->addCondition('search_api_language', 'de-AT', '=');
+    $query = $this->mockQuery(NULL, NULL, $index, $conditions, [], [
+      'search_api_spellcheck' => ['keys' => ['qwick']],
+    ]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('de_AT', $params['spellcheck.dictionary']);
   }
 
 }

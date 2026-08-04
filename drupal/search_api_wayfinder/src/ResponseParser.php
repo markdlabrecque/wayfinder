@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Drupal\search_api_wayfinder;
 
+use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Item\Item;
 use Drupal\search_api\Query\QueryInterface;
@@ -20,9 +21,19 @@ use Drupal\search_api\Query\ResultSet;
  */
 class ResponseParser {
 
+  private readonly LanguageResolver $languageResolver;
+
+  /**
+   * The language manager is optional, exactly as in QueryBuilder: without it
+   * (a plain `new ResponseParser()`) the resolved set comes from the query's
+   * own search_api_language condition, or falls back to 'und'.
+   */
   public function __construct(
     private readonly FieldMapper $fieldMapper = new FieldMapper(),
-  ) {}
+    ?LanguageManagerInterface $languageManager = NULL,
+  ) {
+    $this->languageResolver = new LanguageResolver($languageManager);
+  }
 
   /**
    * Parses a decoded /select response body into the query's existing
@@ -50,7 +61,7 @@ class ResponseParser {
     $highlighting = isset($response['highlighting']) && is_array($response['highlighting'])
       ? $response['highlighting']
       : NULL;
-    $fieldIdByName = $highlighting === NULL ? [] : $this->fieldIdsByFieldName($index);
+    $fieldNamesById = $highlighting === NULL ? [] : $this->fieldNamesByFieldId($index, $query);
 
     $items = [];
     foreach ($docs as $doc) {
@@ -61,7 +72,7 @@ class ResponseParser {
       $item->setScore((float) ($doc['score'] ?? 1.0));
 
       if ($highlighting !== NULL) {
-        $snippets = $this->highlightedFields($highlighting[$docId] ?? [], $fieldIdByName);
+        $snippets = $this->highlightedFields($highlighting[$docId] ?? [], $fieldNamesById);
         if ($snippets !== []) {
           $item->setExtraData('highlighted_fields', $snippets);
         }
@@ -77,7 +88,89 @@ class ResponseParser {
       $resultSet->setExtraData('search_api_facets', $facets);
     }
 
+    $spellcheck = $this->parseSpellcheck($response);
+    if ($spellcheck !== NULL) {
+      $resultSet->setExtraData('search_api_spellcheck', $spellcheck);
+    }
+
     return $resultSet;
+  }
+
+  /**
+   * Translates the response's `spellcheck` block into `search_api_spellcheck`
+   * extra data (issue #342).
+   *
+   * The client-side contract is search_api_solr's
+   * SolrSpellcheckBackendTrait.php:24-42 plus
+   * SearchApiSolrBackend.php:2022-2034:
+   * ['suggestions' => [<original term> => [<word>, ...]], 'collation' =>
+   * <string>]. A term whose suggestion list is empty is dropped entirely --
+   * the trait's own `if ($keys)` guard -- and `collation` is a single string,
+   * the first collation only, so it is absent when none was returned.
+   *
+   * The wire shape read here is the FLAT named-list form: `suggestions` is an
+   * interleaved [term, {...}, term, {...}] list and `collations` an
+   * interleaved ['collation', <string>, ...] one. That is ground truth from
+   * solr-ref/responses/spellcheck_flat.json, and it is the form this module
+   * actually receives: only json.nl=map produces the object form
+   * (spellcheck_map.json), and neither QueryBuilder nor WayfinderClient ever
+   * sends json.nl (the same reasoning as the Terms response in
+   * WayfinderBackend::getAutocompleteSuggestions(), finding 142).
+   *
+   * @return array{suggestions: array<string, array<int, string>>,
+   *   collation?: string}|null
+   *   NULL when the response carries no spellcheck block at all, so no extra
+   *   data is set -- the same "absent means absent" convention as
+   *   search_api_facets and highlighted_fields.
+   */
+  private function parseSpellcheck(array $response): ?array {
+    $spellcheck = $response['spellcheck'] ?? NULL;
+    if (!is_array($spellcheck)) {
+      return NULL;
+    }
+
+    $suggestions = [];
+    $flat = array_values(is_array($spellcheck['suggestions'] ?? NULL) ? $spellcheck['suggestions'] : []);
+    for ($i = 0, $n = count($flat); $i + 1 < $n; $i += 2) {
+      $term = $flat[$i];
+      $info = $flat[$i + 1];
+      if (!is_string($term) || !is_array($info)) {
+        continue;
+      }
+      // ponytail: only SCALAR suggestion members survive. With
+      // spellcheck.extendedResults=true Solr returns each suggestion as a
+      // {word, freq} object instead, and those are silently dropped here
+      // rather than reduced to their 'word' -- so the ceiling is
+      // "extendedResults yields an empty suggestion list". Nothing in this
+      // module sets that param today (it is not in the server's SELECT_PARAMS
+      // either, src/lib.rs:286-292), so the case is unreachable from here;
+      // handling it is a follow-up, deliberately out of scope for #342.
+      $words = array_values(array_map('strval', array_filter(
+        (array) ($info['suggestion'] ?? []),
+        static fn ($word): bool => is_scalar($word)
+      )));
+      // The trait drops a term it has no correction for rather than passing
+      // an empty list on to the client.
+      if ($words === []) {
+        continue;
+      }
+      $suggestions[$term] = $words;
+    }
+
+    $data = ['suggestions' => $suggestions];
+
+    // collations is the same interleaved form: ['collation', <string>, ...],
+    // one pair per collation when spellcheck.maxCollations > 1. Only the
+    // first surfaces, because the client contract is a single string.
+    $collations = array_values(is_array($spellcheck['collations'] ?? NULL) ? $spellcheck['collations'] : []);
+    for ($i = 0, $n = count($collations); $i + 1 < $n; $i += 2) {
+      if ($collations[$i] === 'collation' && is_scalar($collations[$i + 1])) {
+        $data['collation'] = (string) $collations[$i + 1];
+        break;
+      }
+    }
+
+    return $data;
   }
 
   /**
@@ -234,18 +327,27 @@ class ResponseParser {
    * fields, or fields dropped from the index since the query ran) are
    * skipped rather than leaked through under their raw dynamic name.
    *
+   * issue #342: a text field can answer under several names (one per
+   * language), so the lookup is driven by the field ids and their ordered
+   * name variants, not by the response's own key order: the FIRST resolved
+   * language present on the doc wins, whatever order the response lists its
+   * keys in.
+   *
    * @param array<string, mixed> $entry
-   * @param array<string, string> $fieldIdByName
+   * @param array<string, array<int, string>> $fieldNamesById
    *
    * @return array<string, array<int, string>>
    */
-  private function highlightedFields(array $entry, array $fieldIdByName): array {
+  private function highlightedFields(array $entry, array $fieldNamesById): array {
     $highlighted = [];
-    foreach ($entry as $fieldName => $snippets) {
-      if (!isset($fieldIdByName[$fieldName]) || !is_array($snippets)) {
-        continue;
+    foreach ($fieldNamesById as $fieldId => $fieldNames) {
+      foreach ($fieldNames as $fieldName) {
+        if (!isset($entry[$fieldName]) || !is_array($entry[$fieldName])) {
+          continue;
+        }
+        $highlighted[$fieldId] = array_values(array_map('strval', $entry[$fieldName]));
+        break;
       }
-      $highlighted[$fieldIdByName[$fieldName]] = array_values(array_map('strval', $snippets));
     }
     return $highlighted;
   }
@@ -255,14 +357,35 @@ class ResponseParser {
    * Search API field id, using the same FieldMapper mapping QueryBuilder
    * used on the way out.
    *
-   * @return array<string, string>
+   * issue #342: a text field answers under one name per language, and a
+   * document carries whichever variant it was indexed in, so each field id
+   * maps to a LIST of names -- the query's resolved languages in order, then
+   * 'und' as a final fall-back, which is the language-unspecific variant
+   * search_api_solr itself falls back to
+   * (SearchApiSolrBackend.php:2582-2585). Non-text fields keep their single
+   * language-free name.
+   *
+   * @return array<string, array<int, string>>
    */
-  private function fieldIdsByFieldName(IndexInterface $index): array {
+  private function fieldNamesByFieldId(IndexInterface $index, QueryInterface $query): array {
+    $languages = $this->languageResolver->resolve($query);
+    if (!in_array(FieldMapper::LANGUAGE_UNSPECIFIED, $languages, TRUE)) {
+      $languages[] = FieldMapper::LANGUAGE_UNSPECIFIED;
+    }
+
     $map = [];
     foreach ($index->getFields() as $fieldId => $field) {
       $fieldId = (string) $fieldId;
-      $fieldName = $this->fieldMapper->fieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
-      $map[$fieldName] = $fieldId;
+      $type = $field->getType();
+      $multiValued = $this->fieldMapper->isMultiValued($field);
+      if (!$this->fieldMapper->isLanguageSpecificTextType($type)) {
+        $map[$fieldId] = [$this->fieldMapper->fieldName($fieldId, $type, $multiValued)];
+        continue;
+      }
+      $map[$fieldId] = array_map(
+        fn (string $language): string => $this->fieldMapper->fieldName($fieldId, $type, $multiValued, $language),
+        $languages
+      );
     }
     return $map;
   }

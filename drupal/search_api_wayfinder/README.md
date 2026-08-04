@@ -79,6 +79,53 @@ configset at `solr-ref/search-api/configset/schema.xml`. This module's
 `FieldMapper` emits exactly those names, so a core built from any other schema
 will silently fail to match the fields the module writes and queries.
 
+### Language-aware text field names (issue #342)
+
+Text-family fields are named **per language**, exactly as `search_api_solr`
+names them (`SearchApiSolrBackend::formatSolrFieldNames()`, `:2450-2473`):
+the type prefix is followed by a forced `m` (cardinality is ignored for text),
+then the language separator `;`, then the langcode, and the whole name is run
+through `encodeSolrName()`, which replaces every character outside
+`[a-zA-Z0-9_]` with `_X<lowercase hex>_`. So `title`/`text` in English is
+**`tm_X3b_en_title`**, and its sort copy is `sort_X3b_en_title`. Non-text
+fields are unchanged (`its_count`, `sm_tags`, …). Two fixed sinks are named
+without the `;` encoding: `twm_suggest` (`solr_text_suggester`) and
+`spellcheck_<lang>` with `-` replaced by `_` (`solr_text_spellcheck`,
+`:2440-2446` — "Don't use the language separator here!").
+
+**This renames every text field on the wire, so it is a breaking change: a site
+upgrading past this release must reindex in full.** Documents written under the
+old names (`ts_title`, `tm_body`) are still in the core but no query will match
+them again.
+
+Which languages a *query* uses: any `search_api_language` condition on the
+query (`=`/`IN`, including nested groups), otherwise every enabled site
+language, otherwise `und`. Full-text field lists (`qf`, `hl.fl`, `mlt.fl`,
+`terms.fl`) carry every variant; sorts and `group.sort` use the first resolved
+language; facets always use `und` (`:2582-2585`).
+
+How a *condition* combines its variants is decided by one question, asked of
+the clause the condition emits, never by the operator's name: **does a document
+lacking that language variant satisfy the clause?** If yes the variants are
+`AND`ed, if no they are `OR`ed. A document carries only the variant it was
+indexed in, so getting this backwards makes the condition match every document.
+`= NULL`, `<>`, `NOT BETWEEN`, `NOT IN` without a NULL member, and `IN` *with*
+one (its missing-field alternative is true for every absent variant) all `AND`;
+`=`, `BETWEEN`, plain `IN`, `<> NULL`, and `NOT IN` with a NULL member (which
+keeps a field-exists requirement) all `OR`. `search_api_solr` states the same
+rule for its own NULL case at `:3450-3459`.
+
+A text field's **sort copy is written for every enabled site language plus
+`und`**, all carrying the same first value (`:1469-1481`, "To allow sorted
+multilingual searches we need to fill *all* language-specific sort fields!"),
+so a German document is still sortable by a query resolved to English. Follow-up
+worth knowing before sizing an index: with N enabled languages every text field
+therefore carries N+1 identical sort copies (a 5-language site stores each
+sortable text value six times). That is `search_api_solr`'s behaviour exactly,
+not a Wayfinder amplification, and narrowing it would need upstream's
+per-index `use_universal_collation` / language-narrowing config, which
+Wayfinder has no counterpart for.
+
 ## Not supported
 
 Deliberate descopes, each with its reason. (Each is also marked with a
@@ -104,7 +151,9 @@ Deliberate descopes, each with its reason. (Each is also marked with a
   indexes into the fixed sink field `twm_suggest` that the autocomplete path
   reads through the *terms* component, `terms.fl=twm_suggest` — issue #291,
   finding 154: the SuggestComponent `/suggest` is not on any evidenced client
-  path).
+  path), and `solr_text_spellcheck` (which indexes into the language-specific
+  fixed sink `spellcheck_<lang>` that the `spellcheck` component reads —
+  issue #342).
 
   Two indexability divergences on the newly-supported types are accepted and
   documented at their `ponytail:` sites, not silently papered over:
@@ -121,9 +170,6 @@ Deliberate descopes, each with its reason. (Each is also marked with a
   Still **not** supported, each with its reason rather than a silent omission:
   - `solr_date_range` — Wayfinder's `date` type holds a single instant, not a
     `[start TO end]` range; needs a new server-side date-range type.
-  - `solr_text_spellcheck` — indexes into the language-specific fixed sink
-    `spellcheck_<lang>`; the `FieldMapper` has no language-aware naming yet.
-    Lands with the spellcheck work.
   - `solr_text_custom` / `solr_text_custom_omit_norms` — `search_api_solr`'s
     escape hatch for site-defined analyzer chains (`SolrFieldType` entities);
     the preset has no equivalent.

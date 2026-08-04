@@ -34,23 +34,39 @@ use PHPUnit\Framework\TestCase;
 class FieldMapperTest extends TestCase {
 
   /**
+   * issue #342: fieldName() gains a 4th optional `$language` argument.
+   * search_api_solr's formatSolrFieldNames()
+   * (coverage/search_api_solr_4.4.0_source/src/Plugin/search_api/backend/SearchApiSolrBackend.php:2398-2538)
+   * tags every field whose *prefix* starts with 't' with
+   * `_X3b_<enc-lang>_` and forces the infix to 'm' regardless of
+   * cardinality (:2450-2473); every other prefix is unaffected (:2474-2506).
+   * `$language` defaults to 'und' (LanguageInterface::LANGCODE_NOT_SPECIFIED)
+   * so non-language-aware callers keep working.
+   *
    * @covers ::fieldName
    * @dataProvider fieldNameProvider
    */
-  public function testFieldName(string $fieldId, string $type, bool $multiValued, string $expected): void {
+  public function testFieldName(string $fieldId, string $type, bool $multiValued, string $expected, string $language = 'und'): void {
     $mapper = new FieldMapper();
-    $this->assertSame($expected, $mapper->fieldName($fieldId, $type, $multiValued));
+    $this->assertSame($expected, $mapper->fieldName($fieldId, $type, $multiValued, $language));
   }
 
   public static function fieldNameProvider(): array {
     return [
-      // string -> ss_ / sm_ (presets/search-api.toml lines 78-90).
+      // string -> ss_ / sm_ (presets/search-api.toml lines 78-90). Prefix 's'
+      // does not start with 't', so formatSolrFieldNames() never tags it with
+      // a language (SearchApiSolrBackend.php:2474-2506) -- language argument
+      // omitted here, defaulting to 'und', to prove that too.
       'string single' => ['field_tags', 'string', FALSE, 'ss_field_tags'],
       'string multi' => ['field_tags', 'string', TRUE, 'sm_field_tags'],
-      // text -> ts_ / tm_ (presets/search-api.toml lines 93-103).
-      'text single' => ['title', 'text', FALSE, 'ts_title'],
-      'text multi' => ['title', 'text', TRUE, 'tm_title'],
-      // integer -> its_ / itm_ (search_api_solr prefix 'it' + s|m; preset lines 135-147).
+      // issue #342 testing requirement: "every non-text type unchanged by
+      // language" -- an explicit non-'und' language must make no difference
+      // for a prefix ('s') that doesn't start with 't'.
+      'string is unaffected by a non-default language' => ['field_sku', 'string', FALSE, 'ss_field_sku', 'de'],
+      // integer -> its_ / itm_ (search_api_solr prefix 'it' + s|m; preset
+      // lines 135-147). 'it' does not start with 't' either -- only a prefix
+      // whose *first character* is 't' qualifies (:2450 checks
+      // `$prefix[0] === 't'`), so 'it*' text-lookalikes are unaffected too.
       'integer single' => ['weight', 'integer', FALSE, 'its_weight'],
       'integer multi' => ['weight', 'integer', TRUE, 'itm_weight'],
       // decimal -> fts_ / ftm_ (search_api_solr prefix 'ft' + s|m).
@@ -64,45 +80,171 @@ class FieldMapperTest extends TestCase {
       'boolean single' => ['status', 'boolean', FALSE, 'bs_status'],
       'boolean multi' => ['status', 'boolean', TRUE, 'bm_status'],
       // --- issue #300: the search_api_solr non-default data types -------
-      // Prefixes are ground truth from search_api_solr 4.4.0's
-      // Utility::getDataTypeInfo() (the six defaults) and the
-      // search_api_data_type_info_alter hook in src/Hook/SearchApiSolrHooks.php
-      // (the solr_* types): solr_string_storage=>'z',
-      // solr_string_docvalues=>'zdv', solr_text_unstemmed=>'tu',
-      // solr_text_omit_norms=>'to', solr_text_wstoken=>'tw'. Each prefix +
-      // s|m infix + '_' + field id, exactly like the six defaults.
-      // solr_string_storage -> zs_ / zm_ (Solr: string, indexed=false,
-      // stored=true; Wayfinder has no unindexed field so the preset maps it
-      // to 'string' and the indexability divergence is recorded in README).
+      // solr_string_storage -> zs_ / zm_, unaffected by language ('z' prefix).
       'solr_string_storage single' => ['field_notes', 'solr_string_storage', FALSE, 'zs_field_notes'],
       'solr_string_storage multi' => ['field_notes', 'solr_string_storage', TRUE, 'zm_field_notes'],
-      // solr_string_docvalues -> zdvs_ / zdvm_ (Solr: string, indexed=false,
-      // stored=true, docValues=true; maps to Wayfinder 'string' + fast).
+      // solr_string_docvalues -> zdvs_ / zdvm_, unaffected by language.
       'solr_string_docvalues single' => ['field_uuid', 'solr_string_docvalues', FALSE, 'zdvs_field_uuid'],
       'solr_string_docvalues multi' => ['field_uuid', 'solr_string_docvalues', TRUE, 'zdvm_field_uuid'],
-      // solr_text_unstemmed -> tus_ / tum_ (Solr text_unstemmed_en; Wayfinder
-      // text_general is unstemmed too, so this is the faithful mapping).
-      'solr_text_unstemmed single' => ['title', 'solr_text_unstemmed', FALSE, 'tus_title'],
-      'solr_text_unstemmed multi' => ['title', 'solr_text_unstemmed', TRUE, 'tum_title'],
-      // solr_text_omit_norms -> tos_ / tom_ (Solr text_en/text_und with
-      // omitNorms=true; Wayfinder keeps length norms on -- documented
-      // divergence, the field still round-trips and is queryable).
-      'solr_text_omit_norms single' => ['title', 'solr_text_omit_norms', FALSE, 'tos_title'],
-      'solr_text_omit_norms multi' => ['title', 'solr_text_omit_norms', TRUE, 'tom_title'],
-      // solr_text_wstoken -> tws_ / twm_ (Solr text_ws: whitespace tokenizer,
-      // omitNorms; Wayfinder text_general -- documented tokenizer+norms
-      // divergence).
-      'solr_text_wstoken single' => ['title', 'solr_text_wstoken', FALSE, 'tws_title'],
-      'solr_text_wstoken multi' => ['title', 'solr_text_wstoken', TRUE, 'twm_title'],
+      // --- issue #342: text-family prefixes (start with 't') now always ---
+      // --- carry `_X3b_<enc-lang>_` and infix 'm', cardinality ignored ----
+      // Plain 'text', trace-confirmed name and field id
+      // (solr-ref/search-api/trace/*.json: tm_X3b_en_body appears for the
+      // item-language-'en' indexing traces). Both single- and multi-valued
+      // 'body' produce the SAME name -- proving cardinality is ignored
+      // (SearchApiSolrBackend.php:2450-2473, "$pref .= 'm' . SEPARATOR
+      // . $language_id" runs unconditionally, no single/multi branch).
+      'text single, language en' => ['body', 'text', FALSE, 'tm_X3b_en_body', 'en'],
+      'text multi, language en' => ['body', 'text', TRUE, 'tm_X3b_en_body', 'en'],
+      // Default language is 'und' when the caller passes none -- also
+      // trace-confirmed (tm_X3b_und_title appears query-time in
+      // solr-ref/search-api/trace/*.json for a multi-language site with no
+      // language condition). 4-tuple: $language omitted, exercising the
+      // 'und' default.
+      'text default language is und' => ['title', 'text', FALSE, 'tm_X3b_und_title'],
+      // de-AT: the one pair that proves _X3b_ encoding and
+      // solr_text_spellcheck's own encoding genuinely differ. encodeSolrName()
+      // replaces every non-[a-zA-Z0-9_] byte with 'X' + lowercase hex: '-' ->
+      // 'X2d' (SearchApiSolrBackend.php:2466-2468 spells this exact example
+      // out: "de-AT" -> "de_X2d_AT" inside the encoded language segment).
+      'text with de-AT encodes the hyphen as X2d' => ['body', 'text', FALSE, 'tm_X3b_de_X2d_AT_body', 'de-AT'],
+      // solr_text_unstemmed/_omit_norms/_wstoken ('tu'/'to'/'tw' all start
+      // with 't') -> same _X3b_<lang>_ + forced 'm' infix treatment as plain
+      // text (SearchApiSolrBackend.php:2450-2473 keys off the prefix's first
+      // character, not the type name).
+      'solr_text_unstemmed, language en' => ['title', 'solr_text_unstemmed', FALSE, 'tum_X3b_en_title', 'en'],
+      'solr_text_omit_norms, language en' => ['title', 'solr_text_omit_norms', FALSE, 'tom_X3b_en_title', 'en'],
+      'solr_text_wstoken, language en' => ['title', 'solr_text_wstoken', FALSE, 'twm_X3b_en_title', 'en'],
       // solr_text_suggester -> the FIXED sink field 'twm_suggest', regardless
-      // of field id or cardinality. search_api_solr special-cases this type
-      // before its generic prefix logic (SearchApiSolrBackend.php:2433-2437):
-      // every solr_text_suggester field indexes into the one field the
-      // SuggestComponent reads. The SuggestComponent query itself is #291;
-      // #300 lands only the field type so the field stops being dropped at
-      // config time.
+      // of field id, cardinality, OR language. search_api_solr special-cases
+      // this type before its generic prefix logic
+      // (SearchApiSolrBackend.php:2433-2437): every solr_text_suggester field
+      // indexes into the one field the SuggestComponent reads.
       'solr_text_suggester single' => ['field_suggest', 'solr_text_suggester', FALSE, 'twm_suggest'],
       'solr_text_suggester multi' => ['field_suggest', 'solr_text_suggester', TRUE, 'twm_suggest'],
+      'solr_text_suggester is unaffected by a non-default language' => ['field_suggest', 'solr_text_suggester', FALSE, 'twm_suggest', 'de'],
+      // solr_text_spellcheck -> 'spellcheck_' . str_replace('-', '_',
+      // $language) -- explicitly NOT the _X3b_ encoding every other
+      // text-family type gets (SearchApiSolrBackend.php:2440-2446, "Don't use
+      // the language separator here!"). Field id and cardinality play no
+      // part at all: the language alone determines the sink.
+      'solr_text_spellcheck, language en' => ['field_x', 'solr_text_spellcheck', FALSE, 'spellcheck_en', 'en'],
+      'solr_text_spellcheck with de-AT uses an underscore, not X3b' => ['field_x', 'solr_text_spellcheck', FALSE, 'spellcheck_de_AT', 'de-AT'],
+      'solr_text_spellcheck is unaffected by field id' => ['field_y', 'solr_text_spellcheck', TRUE, 'spellcheck_en', 'en'],
+    ];
+  }
+
+  /**
+   * issue #342, MF-2 (round-2 review bounce): the hyphen-to-underscore
+   * transform `fieldName()`'s `solr_text_spellcheck` branch applies
+   * (`'spellcheck_' . str_replace('-', '_', $language)`) must live in its own
+   * method, `spellcheckDictionary()`, so `QueryBuilder`'s
+   * `spellcheck.dictionary` param can call the SAME transform rather than
+   * sending the raw langcode -- see QueryBuilderTest's
+   * testSpellcheckDictionaryTransformsAHyphenatedLanguageLikeTheIndexedSink()
+   * for why the two sides silently disagreeing today is a real bug.
+   * `spellcheckDictionary()` itself returns just the transformed language
+   * ('de_AT'), not the full sink name -- `fieldName()`'s branch still
+   * prepends 'spellcheck_' itself, exercised directly by the next test.
+   *
+   * @covers ::spellcheckDictionary
+   */
+  public function testSpellcheckDictionaryTransformsHyphenToUnderscore(): void {
+    $mapper = new FieldMapper();
+    $this->assertSame('de_AT', $mapper->spellcheckDictionary('de-AT'));
+  }
+
+  /**
+   * issue #342, MF-2 (round-2 review bounce): pins that `fieldName()`'s
+   * `solr_text_spellcheck` sink name is built FROM `spellcheckDictionary()`
+   * (`'spellcheck_' . $this->spellcheckDictionary($language)`), not a
+   * second, independent copy of the same transform -- so the two can never
+   * drift apart again the way index-time and query-time did before this
+   * fix.
+   *
+   * @covers ::spellcheckDictionary
+   * @covers ::fieldName
+   */
+  public function testFieldNameSpellcheckSinkAgreesWithSpellcheckDictionary(): void {
+    $mapper = new FieldMapper();
+    $this->assertSame(
+      'spellcheck_' . $mapper->spellcheckDictionary('de-AT'),
+      $mapper->fieldName('field_x', 'solr_text_spellcheck', FALSE, 'de-AT')
+    );
+  }
+
+  /**
+   * issue #342 testing requirement: "the full trace-derived name list above,
+   * as a single regression case pinning the module's output against real
+   * captured client behaviour." Field id/type/cardinality pairs and their
+   * expected mapped names are read directly from
+   * solr-ref/search-api/trace/*.json (indexing traces 00001, 00010-00017,
+   * 00024, 00028 for the single-language 'en' names; query-time traces
+   * 00002-00009/00021/00022 additionally show the 'und' text names for a
+   * multi-language site with no language condition).
+   *
+   * @covers ::fieldName
+   * @dataProvider traceDerivedFieldNameProvider
+   */
+  public function testFieldNameMatchesTraceDerivedNames(string $fieldId, string $type, bool $multiValued, string $expected, string $language = 'und'): void {
+    $mapper = new FieldMapper();
+    $this->assertSame($expected, $mapper->fieldName($fieldId, $type, $multiValued, $language));
+  }
+
+  public static function traceDerivedFieldNameProvider(): array {
+    return [
+      'trace: field_archived (boolean)' => ['field_archived', 'boolean', FALSE, 'bs_field_archived'],
+      'trace: field_featured (boolean)' => ['field_featured', 'boolean', FALSE, 'bs_field_featured'],
+      'trace: sticky (boolean)' => ['sticky', 'boolean', FALSE, 'bs_sticky'],
+      'trace: created (date)' => ['created', 'date', FALSE, 'ds_created'],
+      'trace: field_event_date (date)' => ['field_event_date', 'date', FALSE, 'ds_field_event_date'],
+      'trace: field_published_on (date)' => ['field_published_on', 'date', FALSE, 'ds_field_published_on'],
+      'trace: field_priority (integer)' => ['field_priority', 'integer', FALSE, 'its_field_priority'],
+      'trace: field_rating (integer)' => ['field_rating', 'integer', FALSE, 'its_field_rating'],
+      'trace: nid (integer)' => ['nid', 'integer', FALSE, 'its_nid'],
+      'trace: context_tags (string, multi)' => ['context_tags', 'string', TRUE, 'sm_context_tags'],
+      'trace: field_keywords (string, multi)' => ['field_keywords', 'string', TRUE, 'sm_field_keywords'],
+      'trace: field_topics (string, multi)' => ['field_topics', 'string', TRUE, 'sm_field_topics'],
+      'trace: field_sku (string)' => ['field_sku', 'string', FALSE, 'ss_field_sku'],
+      'trace: search_api_datasource (string)' => ['search_api_datasource', 'string', FALSE, 'ss_search_api_datasource'],
+      'trace: search_api_id (string)' => ['search_api_id', 'string', FALSE, 'ss_search_api_id'],
+      'trace: search_api_language (string)' => ['search_api_language', 'string', FALSE, 'ss_search_api_language'],
+      'trace: type (string)' => ['type', 'string', FALSE, 'ss_type'],
+      // Text fields, item language 'en' (indexing traces): cardinality is
+      // irrelevant to the name (see fieldNameProvider above), so a single
+      // 'FALSE' representative per field id is enough to pin the trace name.
+      'trace: body (text, en)' => ['body', 'text', FALSE, 'tm_X3b_en_body', 'en'],
+      'trace: title (text, en)' => ['title', 'text', FALSE, 'tm_X3b_en_title', 'en'],
+      // Text fields, query-time on a multi-language site with no
+      // search_api_language condition -> language resolves to 'und'.
+      'trace: body (text, und)' => ['body', 'text', FALSE, 'tm_X3b_und_body'],
+      'trace: title (text, und)' => ['title', 'text', FALSE, 'tm_X3b_und_title'],
+    ];
+  }
+
+  /**
+   * issue #342: sortFieldName() gains the same optional `$language`
+   * argument as fieldName(). A text-type field sorts through
+   * `sort_X3b_<enc-lang>_<id>` (encodeSolrName('sort' . SEPARATOR
+   * . $sort_language_id . '_' . $name), :1483); every other type is
+   * unaffected and keeps sorting on its ordinary mapped field name (current
+   * FieldMapper::sortFieldName() behaviour, unchanged for non-text).
+   *
+   * @covers ::sortFieldName
+   * @dataProvider sortFieldNameProvider
+   */
+  public function testSortFieldName(string $fieldId, string $type, bool $multiValued, string $expected, string $language = 'und'): void {
+    $mapper = new FieldMapper();
+    $this->assertSame($expected, $mapper->sortFieldName($fieldId, $type, $multiValued, $language));
+  }
+
+  public static function sortFieldNameProvider(): array {
+    return [
+      'text sort field carries the language, en' => ['title', 'text', FALSE, 'sort_X3b_en_title', 'en'],
+      'text sort field defaults to und' => ['title', 'text', FALSE, 'sort_X3b_und_title'],
+      // Non-text: unaffected by language, unchanged from today -- the mapped
+      // field name itself (current FieldMapper::sortFieldName() behaviour).
+      'non-text sort field is the mapped field name, unaffected by language' => ['weight', 'integer', FALSE, 'its_weight', 'en'],
     ];
   }
 
