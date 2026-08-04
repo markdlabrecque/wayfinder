@@ -2884,7 +2884,14 @@ as *grid math*, not storage).
      a descope with a guard. The `<field>:<geom>` `fq` is a rectangle-containment
      filter over the point (`heatmap_fq_rect`): it restricts the doc set, and the
      heatmap then counts only surviving docs.
-159. **A grouped response carries `facet_counts`, `stats` and `highlighting`
+
+## Findings from the #338 grouping-components capture (`group.truncate`, `group.facet`)
+
+Captured against real `solr:9` via `capture.sh --only '^g338_'` / `'^g338n_'`
+(cores `grouping` -- the #290 `g1..g6` corpus -- and `g338null`). Rows are in
+`manifest-errors.tsv` (own cores).
+
+160. **A grouped response carries `facet_counts`, `stats` and `highlighting`
       alongside `grouped` — the `grouped` block does not replace them.**
       Captured against real `solr:9` (the `g338_*` block, #338) on the same
       `grouping` core/corpus as #290. `group=true&facet=true` returns
@@ -2900,7 +2907,7 @@ as *grid math*, not storage).
       What #290 shipped — `grouped` alone, no other component block — is a
       divergence, not the Solr shape.
 
-160. **`group.truncate=true` recomputes facets AND stats over the collapsed
+161. **`group.truncate=true` recomputes facets AND stats over the collapsed
       group set (one document per group), not over the matching document
       set.** Captured (#338, `sort=id asc` so each group's top document is
       deterministic: g1/article, g2/page, g6/null). Over the full 6-doc match
@@ -2925,7 +2932,7 @@ as *grid math*, not storage).
       and the `category` facet becomes `blog=1, news=0`
       (`g338_truncate_groupsort`).
 
-161. **`group.facet=true` turns every facet count into a count of matching
+162. **`group.facet=true` turns every facet count into a count of matching
       GROUPS, including `facet.query` and `facet.range` — the "field facets
       only" reading is wrong.** Captured (#338). With `group.field=type`,
       `facet.field=category` goes from the document counts `blog=2, news=2` to
@@ -2948,7 +2955,7 @@ as *grid math*, not storage).
       paging-independent: `rows=1` returns one group and still counts over all
       of them (`g338_groupfacet_rows`).
 
-162. **Under `group.facet=true` the group of documents *missing* the
+163. **Under `group.facet=true` the group of documents *missing* the
       `group.field` counts as one group like any other, including in
       `facet.missing`.** Captured against real `solr:9` (the `g338n_*` block,
       #338, own core `g338null`) on a corpus built for exactly this: h1/h2 are
@@ -2968,7 +2975,7 @@ as *grid math*, not storage).
       collapses to {h1, h3, h4} under `sort=id asc` -> `news=3, blog=0`
       (`g338n_truncate`).
 
-163. **`{!ex=...}` multi-select faceting and `group.facet` compose: the excluded
+164. **`{!ex=...}` multi-select faceting and `group.facet` compose: the excluded
       facet counts GROUPS over the reduced filter set, which is a superset of the
       documents the grouping pass bucketed.** Captured (#338, the `g338_ex_*`
       rows). With `fq={!tag=t}category:news` the grouped result holds 2 documents

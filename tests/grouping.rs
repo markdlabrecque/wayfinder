@@ -755,7 +755,7 @@ async fn strict_grouping_app_rejects_a_truly_unknown_param() {
 /// `group.truncate` and `group.facet` ARE sent by `setGrouping()` (finding
 /// 130), so unlike `group.format`/`group.main` they must NOT 400 under
 /// `strict_params` -- a real module request would otherwise break. Their TRUE
-/// semantics are now fixture-backed (findings 159/160/161, issue #338): this
+/// semantics are now fixture-backed (findings 160/161/162, issue #338): this
 /// replaces the old "accepted but no-op" parity guard with a real assertion
 /// against `g338_groupfacet_truncate` (`group.truncate=true&group.facet=true`
 /// together, with `facet=true`), so a dropped-from-`SELECT_PARAMS` regression
@@ -784,7 +784,7 @@ async fn grouping_truncate_and_facet_params_are_accepted_under_strict_params() {
 // real `group.truncate` / `group.facet` semantics.
 //
 // Every expected value below comes from a committed `solr-ref/responses/
-// g338_*.json` fixture (findings 159/160/161) -- named in each test's doc
+// g338_*.json` fixture (findings 160/161/162) -- named in each test's doc
 // comment -- never from what Wayfinder happens to produce. Two exceptions
 // (explicitly marked) assert a structural self-consistency property named by
 // the task spec rather than a captured Solr number, because no g338 fixture
@@ -1339,7 +1339,7 @@ async fn grouping_group_facet_combined_with_truncate_matches_truncate_only_count
 }
 
 // --- section 4: {!ex=...} multi-select faceting + group.facet (#338, ------
-// finding 163) --------------------------------------------------------------
+// finding 164) --------------------------------------------------------------
 //
 // `fq={!tag=t}category:news` filters the grouped hit list down to {g1, g2}
 // (article, page), but `facet.field={!ex=t}category` / `facet.query=
@@ -1406,7 +1406,7 @@ async fn grouping_excluded_facet_counts_documents_against_the_unfiltered_set() {
 /// (`article=1, page=1`), because it is on the group field itself.
 /// `g338_ex_groupfacet`.
 ///
-/// This is the defect finding 163 names: `GroupFacet::distinct_groups` looks
+/// This is the defect finding 164 names: `GroupFacet::distinct_groups` looks
 /// each excluded-facet document up in a `doc_group` map built only from
 /// documents the grouping pass actually bucketed (the filtered set), so g3/g4
 /// are silently absent from the map and dropped from the count instead of
@@ -1770,7 +1770,7 @@ async fn grouping_hl_unions_doclists_across_multiple_group_fields() {
     );
 }
 
-// --- group.facet over a null group with facet values (#338, finding 162) --
+// --- group.facet over a null group with facet values (#338, finding 163) --
 
 /// Same schema shape as `GROUPING_SCHEMA_TOML` but named `content` for the
 /// same reason (`common::get`/`post_docs` address `CORE` unchanged). A

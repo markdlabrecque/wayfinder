@@ -1235,7 +1235,7 @@ async fn grouping_app() -> (Router, TempDir) {
 }
 
 // --- duplicated schema/corpus for manifest-errors.tsv's `g338n_` rows ------
-// (issue #338, finding 162). The `grouping` corpus above cannot exercise the
+// (issue #338, finding 163). The `grouping` corpus above cannot exercise the
 // half of `group.facet` where a document missing the group field still
 // carries a facetable value: its only null-group document (g6) carries
 // neither `type` nor `category`. This corpus's h4/h5 have no `type` but do

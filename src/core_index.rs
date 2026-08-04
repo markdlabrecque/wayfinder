@@ -3636,7 +3636,7 @@ impl CoreIndex {
 
     /// [`term_facet`](Self::term_facet) with every bucket's count replaced by
     /// the number of **distinct values of `group_column`** among the documents
-    /// in that bucket — Solr's `group.facet=true` (issue #338, finding 161).
+    /// in that bucket — Solr's `group.facet=true` (issue #338, finding 162).
     ///
     /// One pass, no per-document work in Wayfinder: a terms sub-aggregation on
     /// the group column inside each outer bucket makes the distinct-group count
@@ -3728,18 +3728,18 @@ impl CoreIndex {
     /// `query` hold, counting the documents that have *no* value there as one
     /// further group. Solr's `group.facet=true` count for a bucket defined by a
     /// query rather than by a term: `facet.query`, each `facet.range` bucket and
-    /// `facet.missing` (issue #338, findings 161/162/163).
+    /// `facet.missing` (issue #338, findings 162/163/164).
     ///
     /// Read off the group column for whatever document set `query` produces,
     /// never from a doc -> group map built during the grouping pass: an excluded
     /// facet (`{!ex=...}`, #295) counts over a *reduced* filter set, which is a
-    /// superset of the documents the grouping pass bucketed, and finding 163
+    /// superset of the documents the grouping pass bucketed, and finding 164
     /// pins that those extra documents must still be counted
     /// (`g338_ex_groupfacet`). Since a group *is* a distinct column value, the
     /// value is the group identity and no map is needed.
     ///
     /// The "no value" group is Solr's `null` group, which is a real group and
-    /// does count (finding 162, `g338n_groupfacet`); it is invisible to the
+    /// does count (finding 163, `g338n_groupfacet`); it is invisible to the
     /// terms aggregation, so it is counted with a separate `ExistsQuery` pass
     /// rather than by a sentinel bucket key that a real group value could
     /// collide with.

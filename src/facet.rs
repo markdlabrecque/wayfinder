@@ -135,7 +135,7 @@ pub fn facet_counts(
 }
 
 /// [`facet_counts`] with every count expressed in **distinct matching groups**
-/// instead of documents — Solr's `group.facet=true` (issue #338, finding 161).
+/// instead of documents — Solr's `group.facet=true` (issue #338, finding 162).
 /// Applies to field facets, `facet.query` and `facet.range` alike (the ticket
 /// and Solr's own docs claim field-facet-only; `g338_groupfacet_blog` shows
 /// otherwise). `stats` is untouched, which is why this is a `facet` concern and
@@ -895,7 +895,7 @@ fn shape_field(
         let bucket = narrowed(base, Occur::MustNot, Box::new(has_value));
         // Under `group.facet=true` the `null` bucket counts distinct groups too,
         // like every other bucket in the same block. Captured:
-        // `g338n_facet_missing` vs `g338n_groupfacet_missing` (finding 162) --
+        // `g338n_facet_missing` vs `g338n_groupfacet_missing` (finding 163) --
         // `type`'s `null` bucket is 2 documents (h4/h5) but 1 group, and
         // `category`'s is 0 either way.
         let absent = match group {

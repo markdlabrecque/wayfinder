@@ -3285,7 +3285,7 @@ async fn select(
     // whole ungrouped middle section below is skipped, and everything after it
     // (`facet_counts`, `stats`, `highlighting`, `spellcheck`, the header) is
     // shared — a grouped response carries those blocks exactly as an ungrouped
-    // one does (issue #338, findings 159/160/161).
+    // one does (issue #338, findings 160/161/162).
     //
     // `fl`/`wants_score` are derived the same way the ungrouped path derives
     // them below; duplicated locally so this call is self-contained and leaves
@@ -3511,7 +3511,7 @@ async fn select(
             )
             .collect(),
     };
-    // `group.truncate=true` (issue #338, finding 160): facets, `stats`,
+    // `group.truncate=true` (issue #338, finding 161): facets, `stats`,
     // `facet.query` and `facet.range` are all computed over the *collapsed*
     // group set rather than every matching document, so the restriction goes
     // into the one base both components share — one place, and `stats` follows

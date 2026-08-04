@@ -22,7 +22,7 @@
 //! A grouped response is not `grouped`-only: it carries `facet_counts`,
 //! `stats`, `highlighting` and `spellcheck` exactly as an ungrouped one does,
 //! each gated by its own `facet`/`stats`/`hl`/`spellcheck` param, with
-//! `grouped` standing where `response` would (findings 159/160/161). `select`
+//! `grouped` standing where `response` would (findings 160/161/162). `select`
 //! therefore *falls through* into the shared component code rather than
 //! returning early, and this module hands it back the pieces only the grouping
 //! pass can know:
@@ -47,7 +47,7 @@
 //!   is just a distinct value of the group column, so the counts are read off
 //!   that column over each facet's own base query — including an excluded
 //!   facet's *reduced* base, whose document set is a superset of what the
-//!   grouping pass bucketed (finding 163, `g338_ex_groupfacet`).
+//!   grouping pass bucketed (finding 164, `g338_ex_groupfacet`).
 //!
 //! The two flags compose without a special case: `group.truncate` restricts the
 //! base query, `group.facet` counts groups over whatever base it is given, and
@@ -269,7 +269,7 @@ fn collapsed_docs(fruit: &GroupingFruit) -> Vec<DocAddress> {
 /// reading that column over whatever document set the facet's own base query
 /// produces. A doc -> group map built during the grouping pass would be wrong
 /// for an excluded facet (`{!ex=...}`, #295), whose reduced filter set is a
-/// superset of the documents the grouping pass ever saw — finding 163 pins that
+/// superset of the documents the grouping pass ever saw — finding 164 pins that
 /// those extra documents still count (`g338_ex_groupfacet`).
 pub struct GroupFacet {
     /// The Tantivy column of the group field. Both counting paths read it: the
@@ -287,7 +287,7 @@ impl GroupFacet {
     /// group-counting replacement for `CoreIndex::count` behind `facet.query`,
     /// each `facet.range` bucket and `facet.missing`. Includes the `null` group
     /// (documents with no value in the group column) when `query` matches any of
-    /// its documents, because Solr counts it like any other group (finding 162).
+    /// its documents, because Solr counts it like any other group (finding 163).
     pub(crate) fn distinct_groups(
         &self,
         index: &CoreIndex,
@@ -307,9 +307,9 @@ impl GroupFacet {
     /// The `null` group is read off the group column too — the documents with no
     /// value there, among whatever `query` matches — rather than from a document
     /// list captured during the grouping pass, so an excluded facet's reduced set
-    /// gets the same correction (finding 163). Captured: `g338n_groupfacet`'s
+    /// gets the same correction (finding 164). Captured: `g338n_groupfacet`'s
     /// `category` is `news=3` where the document count is 4, the third group
-    /// being h4/h5's `null` group (finding 162).
+    /// being h4/h5's `null` group (finding 163).
     pub(crate) fn term_facet(
         &self,
         index: &CoreIndex,
@@ -803,7 +803,7 @@ fast = true
                     json!({"id": "a", "body": "shared text", "kind": "k1"}),
                     json!({"id": "b", "body": "shared text", "kind": "k2"}),
                     // No `kind` at all: Solr's `null` group, which counts
-                    // (finding 162).
+                    // (finding 163).
                     json!({"id": "c", "body": "shared text"}),
                 ],
                 true,
