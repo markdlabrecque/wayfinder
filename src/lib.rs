@@ -143,8 +143,9 @@ impl AppServer {
     ///
     /// Additive: it hands back the *same* [`extract::ExtractionRuntime`] the
     /// route uses, so a slot reserved through
-    /// [`extract::ExtractionRuntime::try_acquire_permit`] on it is a slot
-    /// the route can no longer hand out.
+    /// [`extract::ExtractionRuntime::try_acquire_permit`] (parse pool) or
+    /// [`extract::ExtractionRuntime::try_acquire_inflight`] (in-flight-upload
+    /// budget, issue #273) on it is a slot the route can no longer hand out.
     ///
     /// The returned [`Arc`] carries two hazards the signature does not show:
     ///
@@ -152,9 +153,11 @@ impl AppServer {
     ///    runtime alive, deferring [`extract::ExtractionRuntime`]'s `Drop`
     ///    and so keeping its `max_concurrency` dedicated OS threads alive for
     ///    as long as any clone is held.
-    /// 2. An [`extract::ExtractionPermit`] obtained through it and then
-    ///    leaked (e.g. with `mem::forget`) permanently burns a concurrency
-    ///    slot — the same burnt-slot failure `ExtractionRuntime` documents
+    /// 2. An [`extract::ExtractionPermit`] or
+    ///    [`extract::InflightUploadPermit`] obtained through it and then
+    ///    leaked (e.g. with `mem::forget`) permanently burns a slot — a
+    ///    concurrency slot for the former, an in-flight-upload slot for the
+    ///    latter — the same burnt-slot failure `ExtractionRuntime` documents
     ///    for a wedged parser, but reachable by accident from outside the
     ///    module.
     ///
@@ -2511,16 +2514,22 @@ async fn extract_cell_index(
 ///
 /// 1. Params and core, exactly as `/update` validates them (`Envelope::NoParams` —
 ///    this is an `/update` path and Solr never echoes params on one).
-/// 2. Multipart intake: the **first part with a non-empty filename** is the
+/// 2. In-flight-upload admission (issue #273): an `ExtractionRuntime`
+///    in-flight slot is acquired *before* any of the body is consumed and
+///    held across steps 3–4 (intake, read-back, and parse — the window the
+///    uploaded bytes are resident), then released. This — not the parse
+///    permit — is what bounds total resident upload memory
+///    (`max_inflight_uploads × max_body_bytes`).
+/// 3. Multipart intake: the **first part with a non-empty filename** is the
 ///    document. Streamed to a temp file through `stream_to_tempfile`, which
 ///    fails with `BodyTooLarge` at the first chunk that crosses
 ///    `extraction.max_body_bytes` — before the whole body is buffered, and
 ///    without trusting `Content-Length`.
-/// 3. The parse, and only the parse, runs under an `ExtractionRuntime` permit.
+/// 4. The parse, and only the parse, runs under an `ExtractionRuntime` permit.
 ///    Holding a concurrency slot across the body read would let a slow client
 ///    occupy an extraction slot without extracting anything, which is a
 ///    trivially cheap way to hold the pool down.
-/// 4. Rendering, back on the request task.
+/// 5. Rendering, back on the request task.
 ///
 /// The `Budget` is constructed *inside* the closure because it is `!Sync` by
 /// design (its counters are `Cell`s) — it must never be held across an
@@ -2608,6 +2617,25 @@ async fn update_extract(
         WfError::from(e).with_params(&params)
     };
 
+    // Issue #273: bound total resident upload memory, not just the parse
+    // slots. The extraction permit (`max_concurrency`) is acquired only
+    // around the parse — *after* this body has been streamed in and read
+    // back resident — so without an intake bound the resident-RAM ceiling is
+    // `max_body_bytes × HTTP concurrency`, set by the (unbounded) connection
+    // count. This separate admission count is acquired *before* any of the
+    // body is consumed and held across the multipart intake, the resident
+    // read-back, and the parse (the uploaded `bytes` stay resident for all
+    // three), so total resident upload memory is `max_inflight_uploads ×
+    // max_body_bytes`. Released by `Drop` at every return path below,
+    // including the indexing-path early return. See
+    // `ExtractionRuntime::try_acquire_inflight` and
+    // `ExtractLimits::max_inflight_uploads`.
+    let inflight = state.extraction.try_acquire_inflight().ok_or_else(|| {
+        WfError::from(extract::ExtractError::InflightUploadsBusy)
+            .with_params(&params)
+            .envelope(Envelope::NoParams)
+    })?;
+
     let mut found: Option<(String, String, String, u64)> = None;
     loop {
         let field = multipart.next_field().await.map_err(|e| {
@@ -2676,20 +2704,18 @@ async fn update_extract(
     // ponytail: the document is streamed to a temp file and then read back
     // whole, because `Extractor::extract` takes `&[u8]`. Bounded by
     // `extraction.max_body_bytes` (32 MiB by default), so it is a real
-    // ceiling rather than an unbounded one — but it is still a full copy in
-    // RAM, and the temp file is currently only buying the streaming *count*.
-    // The ceiling is per request, not per server: nothing bounds how many
-    // requests are in this read at once, so resident bytes here are
-    // `max_body_bytes` x (HTTP concurrency), not `max_body_bytes` x
-    // `max_concurrency` — the extraction permit is acquired *after* this
-    // point, deliberately (see `ExtractLimits::max_body_bytes`), so it does
-    // not cap this. At the defaults that is 32 MiB per concurrent upload.
-    // Trigger: the first extractor that can work incrementally (the phase-2a
-    // ZIP walker, per `ZipBudget`'s documented call sequence) wants a reader,
-    // at which point `ExtractInput` grows a stream variant and this read
-    // goes away — *or* sooner, if in-flight-upload bytes are ever bounded
-    // globally (item 1 of the route-side design on `max_body_bytes`), which
-    // is the same knob.
+    // ceiling per request rather than an unbounded one — and bounded across
+    // requests by the in-flight-upload count acquired above (issue #273), so
+    // total resident bytes are `max_inflight_uploads × max_body_bytes`, not
+    // `max_body_bytes × HTTP concurrency`. The `_inflight` slot is held
+    // across this read and the parse because the `bytes` it bounds stay
+    // resident for both.
+    //
+    // What remains is that this is still a *full copy* in RAM, and the temp
+    // file is currently only buying the streaming *count*. Trigger: the
+    // first extractor that can work incrementally (the phase-2a ZIP walker,
+    // per `ZipBudget`'s documented call sequence) wants a reader, at which
+    // point `ExtractInput` grows a stream variant and this read goes away.
     let bytes = std::fs::read(temp.path()).map_err(|e| {
         WfError::internal(
             "wayfinder::ExtractionIo",
@@ -2711,6 +2737,13 @@ async fn update_extract(
         .await
         .and_then(|inner| inner)
         .map_err(|e| WfError::from(e).with_params(&params))?;
+
+    // The in-flight slot bounds resident *upload* bytes, and the parse above
+    // is the last thing that holds them — `bytes` is moved into the closure
+    // and freed once it resolves. Release the slot here, before indexing or
+    // rendering, so an intake slot is not held across the (potentially slow)
+    // commit on the indexing path while the upload's bytes are already gone.
+    drop(inflight);
 
     if !extract_only {
         // Indexing path (issue #259): apply Solr-Cell field mapping to the

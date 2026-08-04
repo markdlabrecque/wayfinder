@@ -61,6 +61,10 @@ fn permissive_limits() -> ExtractLimits {
         // unit of concurrency. Kept small deliberately; the concurrency
         // tests override it with the exact value they need anyway.
         max_concurrency: 4,
+        // Permissive for the same reason as the rest: the inflight budget is
+        // not what these tests exercise (only the dedicated inflight/
+        // concurrency tests below override it).
+        max_inflight_uploads: 1_000_000,
         max_output_scalars: 1_000_000,
         max_output_bytes: 1_000_000,
         deadline: Duration::from_secs(60),
@@ -306,7 +310,74 @@ async fn extraction_runtime_contains_a_panicking_parser_and_keeps_the_pool_at_fu
     }
 }
 
-/// Review round 1, item 11. The isolation claim in the module docs is that
+/// Issue #273. The in-flight-upload budget (`max_inflight_uploads`) must be
+/// a *separate* counter from the parse-pool budget (`max_concurrency`): the
+/// whole point of bounding intake on its own is that the parse permit is
+/// acquired only around the parse, after the body is already resident, so a
+/// coupled budget would reintroduce the slowloris-on-parse trap the
+/// `max_body_bytes` doc comment warns about. This holds the budgets apart
+/// at the runtime level — purely synchronous, no races, no timing.
+///
+/// The route-level enforcement (the intake saturation 503) is covered in
+/// `tests/extract_route.rs::extract_inflight_uploads_over_configured_max_is_503`;
+/// this test is the independence invariant that route test depends on.
+#[test]
+fn inflight_upload_budget_is_independent_of_the_parse_pool() {
+    let mut limits = permissive_limits();
+    limits.max_inflight_uploads = 1;
+    // `max_concurrency` stays at permissive_limits()'s 4, so the parse pool
+    // has plenty of free slots to prove the inflight budget ignores them.
+    let runtime = wayfinder::extract::ExtractionRuntime::new(&limits);
+
+    // The single in-flight slot is free; taking it leaves none.
+    let inflight = runtime
+        .try_acquire_inflight()
+        .expect("the one configured in-flight slot must be free initially");
+    assert!(
+        runtime.try_acquire_inflight().is_none(),
+        "with max_inflight_uploads=1 a second acquire must return None"
+    );
+
+    // Independence, strengthened after review round 1: prove holding the one
+    // in-flight slot burns *no* parse slot by acquiring the *entire* parse
+    // pool (all max_concurrency permits) while it is held. The original test
+    // acquired only two of the four, which left a coupled implementation that
+    // quietly consumed one parse slot still passing — exactly the gap a
+    // bound-named-bug would slip through.
+    let mut permits: Vec<_> = Vec::new();
+    for i in 0..limits.max_concurrency {
+        permits.push(runtime.try_acquire_permit().unwrap_or_else(|| {
+            panic!(
+                "parse permit {}/{} must be free: the in-flight budget is a separate \
+                 counter, so holding an in-flight slot must burn no parse slot",
+                i + 1,
+                limits.max_concurrency
+            )
+        }));
+    }
+    assert!(
+        runtime.try_acquire_permit().is_none(),
+        "with all {} parse permits held, one more must fail — this also rules out the \
+         in-flight mechanism *inflating* the parse pool (max_concurrency stays {})",
+        limits.max_concurrency,
+        limits.max_concurrency
+    );
+    // And holding all those parse slots must not have returned the in-flight
+    // slot early, nor inflated it.
+    assert!(
+        runtime.try_acquire_inflight().is_none(),
+        "a second in-flight slot must still be unavailable while the first is held"
+    );
+    drop(permits);
+
+    // Releasing the in-flight slot returns it and only it.
+    drop(inflight);
+    assert!(
+        runtime.try_acquire_inflight().is_some(),
+        "dropping the in-flight permit must return the slot"
+    );
+}
+
 /// extraction runs on *its own* threads, not tokio's shared blocking pool.
 /// Nothing else in this suite would notice if `spawn_extraction` were
 /// quietly reimplemented on `tokio::task::spawn_blocking`; the thread name

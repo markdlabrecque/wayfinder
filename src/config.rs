@@ -250,6 +250,15 @@ pub struct Extraction {
     /// Concurrent extractions. Over the limit sheds load with a 503 rather
     /// than queueing.
     pub max_concurrency: usize,
+    /// Concurrent in-flight upload bodies for `/update/extract`. Bounds total
+    /// resident upload memory to `max_inflight_uploads × max_body_bytes` —
+    /// the multiplier the parse-pool limit (`max_concurrency`) cannot cap on
+    /// its own, since the parse permit is acquired only around the parse,
+    /// after the body is already resident. Over the limit the route sheds
+    /// load with a 503 before any of the body is streamed. `0` rejects every
+    /// upload (each extract 503s at intake); there is no "unlimited"
+    /// spelling. See issue #273.
+    pub max_inflight_uploads: usize,
     /// Unicode scalars of extracted text per document.
     pub max_output_scalars: usize,
     /// Bytes of extracted text per document.
@@ -267,6 +276,7 @@ impl Default for Extraction {
         Extraction {
             max_body_bytes: limits.max_body_bytes,
             max_concurrency: limits.max_concurrency,
+            max_inflight_uploads: limits.max_inflight_uploads,
             max_output_scalars: limits.max_output_scalars,
             max_output_bytes: limits.max_output_bytes,
             deadline_secs: limits.deadline.as_secs(),
@@ -281,6 +291,7 @@ impl Extraction {
         crate::extract::ExtractLimits {
             max_body_bytes: self.max_body_bytes,
             max_concurrency: self.max_concurrency,
+            max_inflight_uploads: self.max_inflight_uploads,
             max_output_scalars: self.max_output_scalars,
             max_output_bytes: self.max_output_bytes,
             deadline: std::time::Duration::from_secs(self.deadline_secs),

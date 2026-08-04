@@ -3274,24 +3274,32 @@ pub struct ExtractLimits {
     /// 1000 open descriptors before the extraction pool is ever asked for a
     /// slot. Nor does it bound memory: see `ExtractInput::bytes`.
     ///
-    /// Required route-side design when `/update/extract` lands (documented
-    /// here rather than built now — phase 0 has no route, and a route-shaped
-    /// abstraction guessed at in advance is worse than none):
+    /// Route-side design, recorded while phase 0 had no route and kept as
+    /// the contract the route had to meet when it landed (#258) and then
+    /// tightened (#273):
     ///
     /// 1. Bound in-flight uploads **separately** from extraction — their own
-    ///    semaphore, or a global counter of temp-file bytes currently
-    ///    allocated, sized against the host's disk.
+    ///    admission count, distinct from the parse-pool permit. **Landed in
+    ///    #273** as `max_inflight_uploads` (see below): the route acquires an
+    ///    in-flight slot before streaming and holds it across the resident
+    ///    read-back and the parse, so total resident upload memory is
+    ///    `max_inflight_uploads × max_body_bytes` rather than
+    ///    `max_body_bytes × HTTP concurrency`. (A finer bytes-counter that
+    ///    reserves the *actual* streamed size rather than the per-request
+    ///    ceiling remains a ponytail — the count cap fully bounds the
+    ///    multiplier the issue names, and is the simpler shape.)
     /// 2. Acquire the extraction permit **only around the parse**, and
     ///    **never across a body read**.
     ///
     /// Point 2 is the trap, and it is the shape someone fixing point 1 the
     /// obvious way reaches for first: acquire-then-stream holds an extraction
-    /// permit for the whole upload, so with the default `max_concurrency` of
-    /// 4, *four* slowloris connections dribbling one byte per second take
-    /// extraction offline indefinitely for everyone else. The deadline does
-    /// not save it — `Budget` is only consulted inside the job, which has not
-    /// started. Read the body to the temp file under the upload bound, then
-    /// acquire the extraction slot.
+    ///    permit for the whole upload, so with the default `max_concurrency` of
+    ///    4, *four* slowloris connections dribbling one byte per second take
+    ///    extraction offline indefinitely for everyone else. The deadline does
+    ///    not save it — `Budget` is only consulted inside the job, which has not
+    ///    started. Read the body to the temp file under the upload bound, then
+    ///    acquire the extraction slot. (#273's in-flight count is the *separate*
+    ///    budget point 1 asks for precisely so that point 2 can hold.)
     pub max_body_bytes: u64,
     /// Four slots. Sized to the *dedicated* pool, not to the machine:
     /// extraction is CPU-bound blocking work, and the reason to bound it is
@@ -3301,6 +3309,26 @@ pub struct ExtractLimits {
     /// `TooBusy` rather than queueing, so an overloaded server sheds load
     /// instead of accumulating unbounded latency.
     pub max_concurrency: usize,
+    /// Eight concurrent in-flight upload bodies. The bound issue #273 added:
+    /// without it, total resident upload memory is `max_body_bytes × HTTP
+    /// concurrency`, because the parse permit (`max_concurrency`) is acquired
+    /// only around the parse — *after* the body has been streamed in and read
+    /// back resident. This count is acquired *before* the body is streamed
+    /// and held across the resident read-back and the parse, so the worst
+    /// case is `max_inflight_uploads × max_body_bytes` (8 × 32 MiB = 256 MiB
+    /// at the defaults), a containment number rather than a capacity plan.
+    ///
+    /// Sized above `max_concurrency` on purpose: the intake phase (stream +
+    /// read-back) is far cheaper than the parse, so a budget equal to the
+    /// parse pool would starve it — every resident request would be a parse
+    /// in flight, leaving no room for the next upload to stream in. Roughly
+    /// doubling the parse pool keeps it fed while still bounding the
+    /// multiplier. Over the limit the route sheds load with a 503 before any
+    /// of the body is consumed. `0` rejects every upload (each extract 503s
+    /// at intake); there is no "unlimited" spelling, because an unlimited
+    /// in-flight count is exactly the unbounded-RAM condition this exists to
+    /// prevent.
+    pub max_inflight_uploads: usize,
     /// 10 million Unicode scalars, roughly a 2-3 million word document —
     /// far past any document a human wrote, and the point at which "this is
     /// a decompression bomb" is a better explanation than "this is a long
@@ -3367,6 +3395,7 @@ impl Default for ExtractLimits {
         ExtractLimits {
             max_body_bytes: 32 * 1024 * 1024,
             max_concurrency: 4,
+            max_inflight_uploads: 8,
             max_output_scalars: 10_000_000,
             max_output_bytes: 40_000_000,
             deadline: Duration::from_secs(30),
@@ -3801,16 +3830,42 @@ impl Budget {
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
-/// An in-flight extraction slot, reserved out of an
+/// An in-flight extraction (parse) slot, reserved out of an
 /// [`ExtractionRuntime`]'s `max_concurrency` budget.
 ///
 /// Releasing is `Drop`, so every early return and every panicking parser
 /// gives its slot back. Holding one reduces the slots available to
 /// [`ExtractionRuntime::spawn_extraction`] by one for as long as it lives;
 /// dropping it returns the slot immediately.
+///
+/// `ExtractionPermit` and [`InflightUploadPermit`] share the same shape — a
+/// counted admission slot released on drop by incrementing a shared counter
+/// — but back two *independent* budgets, so the release logic is duplicated
+/// across the two `Drop` impls rather than shared through a wrapper type: a
+/// newtype around a `Drop` carrier would never *read* its field (it owns it
+/// only for its drop) and so trips `dead_code` under `-D warnings`, and the
+/// three-line duplication is the lesser cost than two `#[allow]`s would be.
 pub struct ExtractionPermit(Arc<AtomicUsize>);
 
 impl Drop for ExtractionPermit {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// An in-flight **upload** slot, reserved out of an
+/// [`ExtractionRuntime`]'s `max_inflight_uploads` budget — the bound on
+/// `max_body_bytes × HTTP concurrency` that the parse permit cannot supply
+/// on its own. The parse permit is acquired only around the parse, *after*
+/// the body has already been streamed in and read back resident, so without
+/// this separate intake count the resident-RAM ceiling is set by the
+/// (unbounded) connection count, not by `max_concurrency`. Holding one
+/// reduces the in-flight-upload slots available to
+/// [`ExtractionRuntime::try_acquire_inflight`] by one for as long as it
+/// lives; dropping it returns the slot. See issue #273.
+pub struct InflightUploadPermit(Arc<AtomicUsize>);
+
+impl Drop for InflightUploadPermit {
     fn drop(&mut self) {
         self.0.fetch_add(1, Ordering::AcqRel);
     }
@@ -3842,6 +3897,14 @@ impl Drop for ExtractionPermit {
 /// decision when PDF lands.
 pub struct ExtractionRuntime {
     available: Arc<AtomicUsize>,
+    /// Admission count for in-flight upload bodies (issue #273), separate
+    /// from the parse-pool `available` counter above. Sized from
+    /// `ExtractLimits::max_inflight_uploads`; acquired before the body is
+    /// streamed and held across the resident read-back and the parse, so it
+    /// is what bounds total resident upload memory. Independent of the parse
+    /// pool by construction: a held in-flight slot burns no parse slot, and a
+    /// held parse slot burns no in-flight slot.
+    available_inflight: Arc<AtomicUsize>,
     jobs: Mutex<Option<mpsc::Sender<Job>>>,
 }
 
@@ -3901,12 +3964,14 @@ impl ExtractionRuntime {
                 let jobs = if i == 0 { None } else { Some(tx) };
                 return ExtractionRuntime {
                     available: Arc::new(AtomicUsize::new(i)),
+                    available_inflight: Arc::new(AtomicUsize::new(limits.max_inflight_uploads)),
                     jobs: Mutex::new(jobs),
                 };
             }
         }
         ExtractionRuntime {
             available: Arc::new(AtomicUsize::new(workers)),
+            available_inflight: Arc::new(AtomicUsize::new(limits.max_inflight_uploads)),
             jobs: Mutex::new(Some(tx)),
         }
     }
@@ -3935,6 +4000,35 @@ impl ExtractionRuntime {
                 Ordering::Acquire,
             ) {
                 Ok(_) => return Some(ExtractionPermit(Arc::clone(available))),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Reserves one in-flight-upload slot if the intake budget is not already
+    /// at `max_inflight_uploads`, returning `None` rather than waiting when
+    /// it is. This is the route-side admission gate issue #273 asked for:
+    /// acquired *before* the multipart body is streamed and held across the
+    /// resident read-back and the parse, so total resident upload memory is
+    /// `max_inflight_uploads × max_body_bytes` rather than
+    /// `max_body_bytes × HTTP concurrency`. Independent of
+    /// [`Self::try_acquire_permit`]: the two counters do not share state, so
+    /// a held in-flight slot reduces no parse slot and vice versa. Dropping
+    /// the returned [`InflightUploadPermit`] returns the slot.
+    pub fn try_acquire_inflight(&self) -> Option<InflightUploadPermit> {
+        let available = &self.available_inflight;
+        let mut current = available.load(Ordering::Acquire);
+        loop {
+            if current == 0 {
+                return None;
+            }
+            match available.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(InflightUploadPermit(Arc::clone(available))),
                 Err(actual) => current = actual,
             }
         }
@@ -4584,6 +4678,13 @@ pub enum ExtractError {
         content_type: ContentType,
     },
     TooBusy,
+    /// Issue #273. The in-flight-upload admission count (`max_inflight_uploads`)
+    /// is full, so the route rejected the request *before* streaming any of
+    /// the body. Capacity, not content — same family as [`TooBusy`] (the parse
+    /// pool), but a distinct budget with a distinct ceiling, so it carries its
+    /// own message and error code for operators rather than being muddled with
+    /// parse-pool saturation.
+    InflightUploadsBusy,
     BodyTooLarge {
         limit: u64,
     },
@@ -4609,6 +4710,10 @@ impl fmt::Display for ExtractError {
             }
             ExtractError::TooBusy => f.write_str(
                 "too many extractions in flight; the extraction concurrency limit was reached",
+            ),
+            ExtractError::InflightUploadsBusy => f.write_str(
+                "too many uploads in flight; the in-flight upload limit (max_inflight_uploads) \
+                 was reached",
             ),
             ExtractError::BodyTooLarge { limit } => {
                 write!(f, "uploaded document exceeds the {limit} byte limit")
@@ -4694,6 +4799,16 @@ impl From<ExtractError> for crate::error::WfError {
             // is the status load balancers and clients already understand as
             // "shed load, back off".
             ExtractError::TooBusy => (StatusCode::SERVICE_UNAVAILABLE, "extraction-too-busy"),
+            // 503 for the same reason as `TooBusy`: this is a server-capacity
+            // condition (the in-flight-upload budget is full), not something
+            // wrong with the document, so retry later may succeed and 503 is
+            // the status load balancers already understand as "back off".
+            // Distinct code from `TooBusy` so an operator can tell intake
+            // saturation apart from parse-pool saturation in logs. No captured
+            // fixture (Solr has no such bound; this is Wayfinder's containment).
+            ExtractError::InflightUploadsBusy => {
+                (StatusCode::SERVICE_UNAVAILABLE, "extraction-inflight-busy")
+            }
             // 503 rather than 504: 504 asserts an *upstream* gateway timed
             // out, and there is no upstream here — extraction is in-process.
             // The honest statement is that this server could not complete
@@ -4872,7 +4987,8 @@ mod tests {
             found, CAPTURED_EXTRACT_FIXTURES,
             "the set of captured extraction fixtures changed. The budget-violation status \
              mapping in `impl From<ExtractError> for WfError` (413 BodyTooLarge, 503 TooBusy, \
-             503 DeadlineExceeded, 415 UnsupportedFormat, 400 OutputTooLarge/ZipBudget/\
+             503 DeadlineExceeded, 503 InflightUploadsBusy, 415 UnsupportedFormat, \
+             400 OutputTooLarge/ZipBudget/\
              StructuralLimit) was chosen with no captured Solr evidence. If the new fixture \
              covers any of those cases, verify the mapping against it and either fix the \
              mapping or record a deliberate divergence; then update \

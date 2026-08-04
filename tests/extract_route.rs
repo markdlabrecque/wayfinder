@@ -19,7 +19,8 @@
 //! errors; the resource budgets from the
 //! `[extraction]` config section (`max_body_bytes` — including its exact
 //! boundary and the request-wide accounting across parts —
-//! `max_concurrency`, `max_output_bytes`, `deadline_secs`) and the
+//! `max_concurrency`, `max_inflight_uploads` (the issue #273 intake bound,
+//! separate from the parse pool), `max_output_bytes`, `deadline_secs`) and the
 //! route-level transport ceiling that bounds part headers the handler never
 //! sees; and charset precedence (BOM > declared > detected), including the
 //! 64 KiB detection window's boundary.
@@ -846,6 +847,95 @@ async fn extract_concurrency_over_configured_max_concurrency_is_503() {
         "dropping the held permit must return the slot, so the same request now \
          succeeds, got {status}: {body}"
     );
+}
+
+/// Issue #273. `max_body_bytes × HTTP concurrency` was an unbounded RAM
+/// multiplier: the parse permit (`max_concurrency`) is acquired *after* the
+/// body is streamed in and read back resident, so it never capped intake —
+/// the real resident ceiling was set by the connection count. The
+/// in-flight-upload budget (`max_inflight_uploads`) fixes that: a separate
+/// admission count acquired *before* any of the body is streamed.
+///
+/// Saturation is deterministic, not a race — the exact lesson from
+/// [`extract_concurrency_over_configured_max_concurrency_is_503`], which
+/// fired two overlapping requests and flunked ~1 run in 5 before
+/// `6b88dcc` made saturation a fact. Here the test holds the single
+/// configured in-flight slot itself, via `try_acquire_inflight` on the very
+/// runtime the route admits against, so zero intake capacity remains while
+/// the request runs. No second in-flight request, no sleeps, no timing
+/// tolerance.
+///
+/// `max_concurrency` is left at its default, so the parse pool is
+/// completely free during the 503 assertion — a 503 here can only mean the
+/// *intake* budget bit, proving the two budgets are independent at the route
+/// (not just at the runtime, which `tests/extraction.rs::
+/// inflight_upload_budget_is_independent_of_the_parse_pool` covers).
+///
+/// The second half — drop the slot, repeat the request, expect `200` — is
+/// what stops this passing trivially: without it a route that never enforces
+/// intake would satisfy the `503` assertion just as well.
+#[tokio::test]
+async fn extract_inflight_uploads_over_configured_max_is_503() {
+    let config_toml = "[extraction]\nmax_inflight_uploads = 1\n";
+    let (app, extraction, _dir) = build_app_with_extraction(config_toml)
+        .expect("extraction.max_inflight_uploads must be a valid config knob");
+
+    let inflight = extraction.try_acquire_inflight();
+    assert!(
+        inflight.is_some(),
+        "the single configured in-flight slot must be free before the test holds it"
+    );
+
+    let bytes = input_bytes("sample.txt");
+    let url = format!("{CORE}/update/extract?extractOnly=true&wt=json");
+    let (status, body) = request_multipart(&app, &url, "file", "sample.txt", "", &bytes).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "with extraction.max_inflight_uploads=1 and its only slot held, an upload must 503 \
+         (intake saturated) even though the parse pool is free, got {status}: {body}"
+    );
+    assert_eq!(body["error"]["code"].as_i64(), Some(503), "body: {body}");
+
+    drop(inflight);
+
+    let (status, body) = request_multipart(&app, &url, "file", "sample.txt", "", &bytes).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "dropping the held in-flight slot must return it, so the same upload now succeeds, \
+         got {status}: {body}"
+    );
+}
+
+/// Issue #273 edge. `max_inflight_uploads = 0` is the blunt shutoff: no
+/// in-flight slot is ever available, so every upload is rejected at intake
+/// with a 503 before any of the body is consumed. The parse pool is at its
+/// default (free), so a 503 here can only be the intake budget — pinning the
+/// documented `0 = reject all` behaviour at the route.
+#[tokio::test]
+async fn extract_inflight_uploads_zero_rejects_every_upload_at_intake() {
+    let config_toml = "[extraction]\nmax_inflight_uploads = 0\n";
+    let (app, _extraction, _dir) = build_app_with_extraction(config_toml)
+        .expect("extraction.max_inflight_uploads = 0 must be a valid config knob");
+
+    let bytes = input_bytes("sample.txt");
+    let (status, body) = request_multipart(
+        &app,
+        &format!("{CORE}/update/extract?extractOnly=true&wt=json"),
+        "file",
+        "sample.txt",
+        "",
+        &bytes,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "with extraction.max_inflight_uploads=0 every upload must 503 at intake, \
+         got {status}: {body}"
+    );
+    assert_eq!(body["error"]["code"].as_i64(), Some(503), "body: {body}");
 }
 
 #[tokio::test]
