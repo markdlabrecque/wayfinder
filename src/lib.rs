@@ -134,10 +134,32 @@ impl AppServer {
     /// Returns the extraction thread pool this router's `/update/extract`
     /// route admits against.
     ///
-    /// Additive: it hands back the *same* `ExtractionRuntime` the route
-    /// uses, so a slot reserved through
+    /// **Test support only.** This accessor exists so a single test can
+    /// hold the only extraction permit and make saturation deterministic
+    /// instead of racy (it has exactly one in-tree caller today). Production
+    /// code should go through
+    /// [`extract::ExtractionRuntime::spawn_extraction`] rather than holding
+    /// a permit directly.
+    ///
+    /// Additive: it hands back the *same* [`extract::ExtractionRuntime`] the
+    /// route uses, so a slot reserved through
     /// [`extract::ExtractionRuntime::try_acquire_permit`] on it is a slot
     /// the route can no longer hand out.
+    ///
+    /// The returned [`Arc`] carries two hazards the signature does not show:
+    ///
+    /// 1. It can outlive the `AppState` it came from. Each clone keeps the
+    ///    runtime alive, deferring [`extract::ExtractionRuntime`]'s `Drop`
+    ///    and so keeping its `max_concurrency` dedicated OS threads alive for
+    ///    as long as any clone is held.
+    /// 2. An [`extract::ExtractionPermit`] obtained through it and then
+    ///    leaked (e.g. with `mem::forget`) permanently burns a concurrency
+    ///    slot — the same burnt-slot failure `ExtractionRuntime` documents
+    ///    for a wedged parser, but reachable by accident from outside the
+    ///    module.
+    ///
+    /// Both are harmless in-tree; the only caller today is a test that drops
+    /// the permit on scope exit.
     pub fn extraction(&self) -> Arc<extract::ExtractionRuntime> {
         Arc::clone(&self.shutdown.0.extraction)
     }
