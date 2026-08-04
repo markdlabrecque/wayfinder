@@ -12,8 +12,10 @@ use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Item\FieldInterface;
 use Drupal\search_api\Query\ConditionGroup;
 use Drupal\search_api\Query\QueryInterface;
+use Drupal\search_api\Query\ResultSet;
 use Drupal\search_api_wayfinder\FieldMapper;
 use Drupal\search_api_wayfinder\QueryBuilder;
+use Drupal\search_api_wayfinder\ResponseParser;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -106,7 +108,90 @@ class QueryBuilderTest extends TestCase {
     $query->method('getOption')->willReturnCallback(
       static fn (string $name, $default = NULL) => $options[$name] ?? $default
     );
+    $query->method('getResults')->willReturn(new ResultSet($query));
     return $query;
+  }
+
+  /**
+   * The select projection is the v1 result-item contract from
+   * docs/plans/57-search-api-wayfinder-backend.md: Search API reloads the
+   * entity from its composite id, so stored index fields are not result data.
+   * Keeping the exact list here makes an accidental widening visible.
+   *
+   * @covers ::build
+   */
+  public function testBuildSelectsOnlyResultItemFields(): void {
+    $index = $this->mockIndex([], []);
+
+    $params = (new QueryBuilder())->build($this->mockQuery(NULL, NULL, $index));
+
+    $this->assertSame('id,index_id,score', $params['fl']);
+    $fields = explode(',', $params['fl']);
+    $this->assertNotContains('twm_suggest', $fields);
+    $this->assertSame([], array_values(array_filter(
+      $fields,
+      static fn (string $field): bool => str_starts_with($field, 'spellcheck_')
+    )));
+  }
+
+  /**
+   * ResponseParser::parse() reads exactly these keys from each response doc.
+   * This assertion names those consumer reads directly, while the round-trip
+   * test below proves the same projection still constructs a real Item.
+   *
+   * @covers ::build
+   * @dataProvider responseParserDocumentFieldProvider
+   */
+  public function testBuildIncludesEveryResponseParserDocumentField(string $field): void {
+    $index = $this->mockIndex([], []);
+
+    $params = (new QueryBuilder())->build($this->mockQuery(NULL, NULL, $index));
+
+    $this->assertContains($field, explode(',', $params['fl']));
+  }
+
+  public static function responseParserDocumentFieldProvider(): array {
+    return [
+      'composite item id' => ['id'],
+      'result score' => ['score'],
+    ];
+  }
+
+  /**
+   * Exercises the failure mode, not just the parameter string: model
+   * Wayfinder's literal fl projection over a stored document containing both
+   * plumbing sinks, then pass that response through ResponseParser and assert
+   * the Search API result item still has its identity and score.
+   *
+   * @covers ::build
+   */
+  public function testSelectProjectionRoundTripsThroughResponseParser(): void {
+    $index = $this->mockIndex([], []);
+    $query = $this->mockQuery(NULL, NULL, $index);
+    $params = (new QueryBuilder())->build($query);
+    $selected = array_fill_keys(explode(',', $params['fl']), TRUE);
+    $stored = [
+      'id' => 'my_index-entity:node/1:en',
+      'index_id' => 'my_index',
+      'score' => 0.75,
+      'ss_title' => 'Visible content',
+      'twm_suggest' => ['visible', 'content'],
+      'spellcheck_en' => 'visible content',
+    ];
+    $doc = array_intersect_key($stored, $selected);
+
+    $this->assertSame(['id', 'index_id', 'score'], array_keys($doc));
+    $resultSet = (new ResponseParser())->parse([
+      'response' => [
+        'numFound' => 1,
+        'start' => 0,
+        'docs' => [$doc],
+      ],
+    ], $query);
+
+    $item = $resultSet->getResultItems()['entity:node/1:en'];
+    $this->assertSame('entity:node/1:en', $item->getId());
+    $this->assertSame(0.75, $item->getScore());
   }
 
   /**
