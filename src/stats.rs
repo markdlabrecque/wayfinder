@@ -18,6 +18,8 @@
 //!   `null` and not a bare `NaN` token (`serde_json` would render a native
 //!   `f64::NAN` as `null`, which is a real, silent divergence).
 
+use std::fmt;
+
 use anyhow::{Result, bail};
 use serde_json::{Map, Value, json};
 use tantivy::query::{BooleanQuery, ExistsQuery, Occur};
@@ -26,6 +28,27 @@ use crate::core_index::CoreIndex;
 use crate::facet::{self, BaseClauses};
 use crate::params::Params;
 use crate::schema::{VERSION_FIELD, ValueKind, WayfinderSchema};
+
+/// Marks a `stats` error as one Solr raises *before* running the base query, so
+/// its response envelope carries no `response` block — the exact same
+/// distinction `facet::PreQueryFacetError` draws, and wired the same way in
+/// `select`.
+///
+/// Only the `date_range` refusal is marked (#341, `dr341_err_stats`, which is
+/// the sole captured stats-error fixture and has no `response` key). The three
+/// generic refusals in `check_statable` stay unmarked: no fixture says which
+/// side of the base query they fall on, so their existing behaviour is left
+/// alone rather than changed on a guess.
+#[derive(Debug)]
+pub struct PreQueryStatsError(anyhow::Error);
+
+impl fmt::Display for PreQueryStatsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for PreQueryStatsError {}
 
 /// Builds the whole `stats` block: `{"stats_fields": {...}}`, one entry per
 /// `stats.field`. Returns `None` when `stats.field` was not given at all —
@@ -112,6 +135,24 @@ fn check_statable(schema: &WayfinderSchema, field_name: &str) -> Result<()> {
     // `json.facet` aggregation, never the stats component.
     if field_name == VERSION_FIELD {
         return Ok(());
+    }
+    // #341/finding 172: `stats.field` on a `date_range` field is Solr's own
+    // "not currently supported" refusal, naming the field TYPE rather than the
+    // field. Checked before the three generic paths below because it must fire
+    // identically for a declared static `date_range` (which is not `fast`, so it
+    // would otherwise hit the docValues message) and for a dynamic one (which
+    // has no `field_config` at all, so it would hit "undefined field").
+    //
+    // The Java class names inside the message are reproduced verbatim because
+    // `dr341_err_stats` pins the whole string and finding 170 makes these `msg`
+    // values part of the contract -- deliberately inconsistent with
+    // `/schema/fieldtypes`, which honestly reports `wayfinder.DateRangeField`.
+    if schema.resolved_value_kind(field_name) == Some(ValueKind::DateRange) {
+        return Err(anyhow::Error::new(PreQueryStatsError(anyhow::anyhow!(
+            "Field type date_range{{class=org.apache.solr.schema.DateRangeField,\
+             analyzer=org.apache.solr.schema.FieldType$DefaultAnalyzer,\
+             args={{class=solr.DateRangeField}}}} is not currently supported"
+        ))));
     }
     match schema.field_config(field_name) {
         None => bail!("can not compute stats on undefined field: {field_name}"),

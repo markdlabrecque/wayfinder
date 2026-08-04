@@ -238,6 +238,24 @@ multi_valued = true
 stored = true
 fast = true
 
+# single-valued date range (#341). The captured configset
+# (`solr-ref/search-api/configset/schema.xml:199-200`) declares drs_*/drm_* as
+# indexed + stored with NO docValues, unlike every other dynamic prefix here,
+# so `fast` stays off: a date_range is queried through its own interval
+# predicate over the endpoint sub-columns, never as a sortable/facetable value
+# (finding 172).
+[[dynamic_fields]]
+pattern = "drs_*"
+type = "date_range"
+stored = true
+
+# multi-valued date range
+[[dynamic_fields]]
+pattern = "drm_*"
+type = "date_range"
+multi_valued = true
+stored = true
+
 # single-valued boolean -> string (Wayfinder has no boolean type; see header)
 [[dynamic_fields]]
 pattern = "bs_*"

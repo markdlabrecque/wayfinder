@@ -44,6 +44,7 @@ use crate::collector::{
     AllScoredHits, GroupingCollector, GroupingFruit, SortClause, TopOutcome, TopScoredHits,
 };
 use crate::config::ServerConfig;
+use crate::date_range;
 use crate::edismax;
 use crate::function_query;
 use crate::local_params;
@@ -351,6 +352,29 @@ fn as_location(field: &str, v: &Value) -> Result<(f64, f64)> {
     Ok((lat, lon))
 }
 
+/// Pulls the verbatim `raw` string back out of the `{start,end,raw}` object (or
+/// array of them) `coerce_json` builds for a dynamic `date_range` value, so `fl`
+/// returns exactly what was sent (finding 165) and the synthetic endpoints stay
+/// invisible.
+///
+/// ponytail: an RFC3339-shaped `raw` is re-detected as a date by Tantivy's JSON
+/// value coercion and comes back as a `Date`, which serialises to RFC3339 —
+/// identical to the input for every form the corpus and the presets use
+/// (`...THH:MM:SSZ`, `...THH:MM:SS.mmmZ`). A value written with a numeric offset
+/// (`+00:00`) or sub-millisecond digits would be normalised rather than
+/// preserved byte-for-byte; no capture sends one. A non-object value (nothing
+/// writes one today) is passed through untouched rather than dropped.
+fn unwrap_date_range_raw(v: Value) -> Value {
+    match v {
+        Value::Array(vs) => Value::Array(vs.into_iter().map(unwrap_date_range_raw).collect()),
+        Value::Object(mut o) => match o.remove("raw") {
+            Some(raw) => raw,
+            None => Value::Object(o),
+        },
+        other => other,
+    }
+}
+
 /// Coerces a value destined for a catch-all JSON field, so a dynamic rule's
 /// declared type still governs how the value is indexed (`*_i` gets an integer,
 /// not the string `"7"`).
@@ -380,6 +404,25 @@ fn coerce_json(field: &str, kind: ValueKind, value: &Value) -> Result<Value> {
         ValueKind::Location => {
             as_location(field, value)?;
             value.clone()
+        }
+        // A dynamic `date_range` value (from a `drs_*`/`drm_*` rule) has no
+        // synthetic `__start`/`__end` fields, so it carries its own endpoints
+        // as a nested object inside the catch-all JSON: `start`/`end` become
+        // date sub-columns (`_dynamic.<name>.start`, `.end`) that the interval
+        // predicates read, and `raw` preserves the verbatim string finding 165
+        // requires `fl` to return. A multiValued value arrives here one member
+        // at a time (the array arm above), so it becomes an array of these
+        // objects, which Tantivy flattens into two same-order value lists and
+        // so keeps member pairing (finding 168).
+        ValueKind::DateRange => {
+            let raw = as_text(field, value)?;
+            let interval = date_range::parse_interval(raw)
+                .map_err(|e| anyhow!("field `{field}` value `{raw}` is not a date range: {e}"))?;
+            let start = date_range::millis_to_rfc3339(interval.start_ms)
+                .ok_or_else(|| anyhow!("field `{field}` value `{raw}` starts out of range"))?;
+            let end = date_range::millis_to_rfc3339(interval.end_ms)
+                .ok_or_else(|| anyhow!("field `{field}` value `{raw}` ends out of range"))?;
+            json!({ "start": start, "end": end, "raw": raw })
         }
     })
 }
@@ -1224,6 +1267,33 @@ impl CoreIndex {
             }
             return Ok(());
         }
+        // A `date_range` field is the verbatim string (finding 165) PLUS two
+        // synthetic ms-precision date columns holding the interval it denotes
+        // (finding 166), appended in value order so member pairing survives for
+        // the hole-sensitive predicates (finding 168).
+        if kind == ValueKind::DateRange {
+            let raw_field = self
+                .wf_schema
+                .field(field_name)
+                .expect("caller passes a declared field name");
+            let (start_field, end_field) = self
+                .wf_schema
+                .date_range_fields(field_name)
+                .expect("caller passes a declared date_range field name");
+            for v in values {
+                let raw = as_text(field_name, v)?;
+                let interval = date_range::parse_interval(raw).map_err(|e| {
+                    anyhow!("field `{field_name}` value `{raw}` is not a date range: {e}")
+                })?;
+                doc.add_text(raw_field, raw);
+                doc.add_date(
+                    start_field,
+                    DateTime::from_timestamp_millis(interval.start_ms),
+                );
+                doc.add_date(end_field, DateTime::from_timestamp_millis(interval.end_ms));
+            }
+            return Ok(());
+        }
         let field = self
             .wf_schema
             .field(field_name)
@@ -1237,7 +1307,7 @@ impl CoreIndex {
                 // Reached only for a dynamic `location` field routed here by a
                 // caller mistake; the static path returns above, and the dynamic
                 // path keeps the string via `coerce_json`.
-                ValueKind::Location => unreachable!(),
+                ValueKind::Location | ValueKind::DateRange => unreachable!(),
             }
         }
         Ok(())
@@ -1286,6 +1356,12 @@ impl CoreIndex {
         // must be intercepted before the grammar sees it.
         if let Some(rect) = self.try_location_rect(query_str) {
             return rect;
+        }
+        // #341: a standalone `<date_range_field>:<interval>` leaf is an
+        // Intersects interval query (finding 167), not the term/range query the
+        // Lucene grammar would make of it.
+        if let Some(dr) = self.try_date_range(query_str) {
+            return dr;
         }
         let default_field = self
             .wf_schema
@@ -1565,8 +1641,81 @@ impl CoreIndex {
                     shape, sfield, pt, d,
                 ))))
             }
+            // `{!field f=<field> op=<op>}<interval>` (issue #341, finding 167):
+            // Solr's `FieldQParser`, whose only client-evidenced use is the
+            // `DateRangeField` interval predicate. `op` defaults to
+            // `Intersects` and is case-insensitive; `IsWithin` aliases
+            // `Within`; an unimplemented or unknown op is a 500 and an
+            // unparseable body a 400 (finding 170).
+            //
+            // ponytail: `date_range` fields only. Solr's `{!field}` is generic
+            // -- on any other field type it is an exact single-term query
+            // through that type's analyzer -- but no capture, preset or Drupal
+            // request in this repo sends `{!field}` for anything else, so the
+            // other types are a 400 naming the requirement rather than a
+            // silently wrong term query.
+            Some("field") => {
+                let field = local.get("f").ok_or_else(|| {
+                    QueryError::Syntax("`{!field}` requires an `f` field name".to_string())
+                })?;
+                let op = match local.get("op") {
+                    None => date_range::Op::Intersects,
+                    Some(raw) => date_range::parse_op(raw).map_err(Self::date_range_error)?,
+                };
+                let Some((start_col, end_col)) = self.wf_schema.resolved_date_range_columns(field)
+                else {
+                    return Err(QueryError::Syntax(format!(
+                        "`{{!field}}` is only supported on a date_range field, `{field}` is not one"
+                    )));
+                };
+                let interval = date_range::parse_interval(rest).map_err(Self::date_range_error)?;
+                Ok(Some(Box::new(date_range::DateRangeQuery::new(
+                    start_col, end_col, op, interval,
+                ))))
+            }
             _ => Ok(None),
         }
+    }
+
+    /// Maps a `date_range` failure onto the status split finding 170 pins: a
+    /// parse failure is a 400 (`QueryError::Syntax`), a valid-but-unsupported
+    /// op or a reversed interval a 500 (`QueryError::Internal`). The `msg` is
+    /// the error's own `Display`, which is the fixture string verbatim.
+    fn date_range_error(e: date_range::DateRangeError) -> QueryError {
+        match e {
+            date_range::DateRangeError::Parse(msg) => QueryError::Syntax(msg),
+            date_range::DateRangeError::Unsupported(msg) => QueryError::Internal(msg),
+        }
+    }
+
+    /// If `query_str` is a standalone `<date_range_field>:<interval-or-literal>`
+    /// leaf, parses it into the finding-167 default `Intersects` predicate.
+    /// Returns `None` for anything that is not exactly that shape, so every
+    /// other query takes the normal grammar path -- which could not handle this
+    /// one: a `date_range` field is two synthetic columns plus a raw text field,
+    /// so Tantivy would parse `drs_x:2020` as a term query against the raw text
+    /// and `drs_x:[a TO b]` as a text range, both silently wrong.
+    fn try_date_range(&self, query_str: &str) -> Option<Result<Box<dyn Query>>> {
+        let s = query_str.trim();
+        // Only a *bare* leaf, for the same reason `try_location_rect` restricts
+        // itself: a leading `+`/`-` would end up in the field name, so it falls
+        // through rather than having its negation quietly dropped.
+        let (field, rest) = s.split_once(':')?;
+        let (start_col, end_col) = self.wf_schema.resolved_date_range_columns(field)?;
+        // A `date_range` value can itself contain `:` (an RFC3339 endpoint), so
+        // everything after the FIRST colon is the interval text.
+        let interval = match date_range::parse_interval(rest) {
+            Ok(i) => i,
+            Err(e) => {
+                return Some(Err(anyhow::Error::from(Self::date_range_error(e))));
+            }
+        };
+        Some(Ok(Box::new(date_range::DateRangeQuery::new(
+            start_col,
+            end_col,
+            date_range::Op::Intersects,
+            interval,
+        ))))
     }
 
     /// Resolves the `sfield`/`pt`/`d` a `{!geofilt}`/`{!bbox}` block needs,
@@ -2906,7 +3055,18 @@ impl CoreIndex {
                     if !stored || !wants(&name) {
                         continue;
                     }
-                    out.insert(name, serde_json::to_value(&v)?);
+                    let mut rendered = serde_json::to_value(&v)?;
+                    // A dynamic `date_range` value is stored as the
+                    // `{start,end,raw}` object `coerce_json` built, so that
+                    // Tantivy gives its endpoints their own date sub-columns.
+                    // Only the verbatim `raw` string is part of the wire
+                    // contract (finding 165); the endpoints are Wayfinder's own
+                    // storage, exactly like a static field's `__start`/`__end`,
+                    // and must not leak into `fl`.
+                    if self.wf_schema.resolved_value_kind(&name) == Some(ValueKind::DateRange) {
+                        rendered = unwrap_date_range_raw(rendered);
+                    }
+                    out.insert(name, rendered);
                 }
             }
         }
