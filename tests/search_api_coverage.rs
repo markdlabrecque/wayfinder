@@ -842,7 +842,12 @@ fn client_consumption_snapshot_is_hash_pinned_complete_and_auditable() {
         "source snapshot root must be a relative normal path"
     );
     let snapshot_root = root().join(snapshot_relative);
-    let expected_source_hashes = BTreeMap::from([
+    // The three citation-bearing files (the only ones `citations` excerpts)
+    // are pinned to these exact 4.4.0 hashes. Issue #368 vendored the full
+    // module tree under the snapshot dir, so the manifest now pins ~400 files;
+    // the rest are tamper-evident via the `source_file_paths == expected_files`
+    // invariant checked below, not by this literal table.
+    let pinned_citation_hashes = BTreeMap::from([
         (
             "src/Plugin/search_api/backend/SearchApiSolrBackend.php",
             "587ccd8f3fadb606b6968bc589fd6312e02c4a95e2ee502b380ca6a7241cd21d",
@@ -856,15 +861,19 @@ fn client_consumption_snapshot_is_hash_pinned_complete_and_auditable() {
             "0238f9e32ecfbe3da160e1a58ad56adade38f3ed8cd27adfc1268cd6c5e53771",
         ),
     ]);
-    assert_eq!(
-        evidence
-            .files
-            .iter()
-            .map(|file| (file.path.as_str(), file.sha256.as_str()))
-            .collect::<BTreeMap<_, _>>(),
-        expected_source_hashes,
-        "the immutable source snapshot must remain pinned to Search API Solr 4.4.0"
-    );
+    let actual_hashes = evidence
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file.sha256.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    for (path, hash) in pinned_citation_hashes {
+        assert_eq!(
+            actual_hashes.get(path),
+            Some(&hash),
+            "the citation-bearing source files must remain pinned to Search \
+             API Solr 4.4.0: {path}",
+        );
+    }
     let expected_files = evidence
         .files
         .iter()
@@ -874,7 +883,9 @@ fn client_consumption_snapshot_is_hash_pinned_complete_and_auditable() {
     assert_eq!(source_file_paths(&snapshot_root), expected_files);
     let mut source_text = BTreeMap::new();
     for file in &evidence.files {
-        assert!(file.path.starts_with("src/"));
+        // The snapshot is the full search_api_solr 4.4.0 module tree (#368),
+        // not just `src/`; the normal-components check on the next line is the
+        // guard against a path escaping the snapshot root.
         assert!(is_sha256(&file.sha256));
         assert!(
             Path::new(&file.path)

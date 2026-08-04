@@ -7,16 +7,1632 @@
   "snapshot_root": "coverage/search_api_solr_4.4.0_source",
   "files": [
     {
+      "path": ".cspell-project-words.txt",
+      "sha256": "e727aab0c135eafe20a4d8f7e942c4378a3a52183869514985f1c188c7f3b4f1"
+    },
+    {
+      "path": ".gitattributes",
+      "sha256": "adf479a31e6da73be67a8288726cce10e1df43cc446a0f863c1449bf7a44b108"
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "6f010ff2b5dd38b1b86d0a853a15affd380383317ee65af2a6f8bff2ead29877"
+    },
+    {
+      "path": ".gitlab-ci.yml",
+      "sha256": "2d42653f404dad3f4243765dbee45fe6740e63560a5cb92ab69bae122a93e56f"
+    },
+    {
+      "path": ".gitlab-ci/patches/solr-in-container.patch",
+      "sha256": "953418edfb0d40275c3fd3061952820ffcb3a2475f97e4a04a9695000a778875"
+    },
+    {
+      "path": ".gitlab-ci/scripts/solr-setup.sh",
+      "sha256": "48751a6fae6021269e40046958e9e004285755132d171af7db1a7bae99197187"
+    },
+    {
+      "path": "README.md",
+      "sha256": "10a6aba71b6652fb7eaf1a4bdec6eeb32f0f3a87b60f317c0f8762b1349c8d1a"
+    },
+    {
+      "path": "composer.json",
+      "sha256": "677c6030146d16a2088ba52004d3606d6857f1b45181158dad185a1cb0cf809a"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_cache.cache_document_default_7_0_0.yml",
+      "sha256": "0ac07da6a3cfb0d74d469a93b5aecab0c229eea2ee2781404fe172df6c85b8b9"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_cache.cache_document_default_9_0_0.yml",
+      "sha256": "5465f999e99ac56cc4654e24b1ac0f097ed91bceffee499844fdd3cf1a7391fa"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_cache.cache_fieldvalue_default_7_0_0.yml",
+      "sha256": "228095ec762ed8e3e21ded2364a8a21b0cd699fa38f97f96e8c452ccea05907a"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_cache.cache_fieldvalue_default_9_0_0.yml",
+      "sha256": "0ca51abfbf0a0eae0a26fea6ec1f89db015401f91bf83d7d767a0a05f8495d76"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_cache.cache_filter_default_7_0_0.yml",
+      "sha256": "794949d6f313d7e77de51f89f5e6e68feb07e0743eaf53035de3e05a2eac0b20"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_cache.cache_filter_default_9_0_0.yml",
+      "sha256": "a8d8275117057d1b9346119cea8d05f86f1875c0a2f5f5e0ef58bfffd3927272"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_cache.cache_persegfilter_default_7_0_0.yml",
+      "sha256": "1dea9d0cc387b0e57607a1bccc6c0298bc5bd762ef92ac368a12cca950950cd2"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_cache.cache_persegfilter_default_9_0_0.yml",
+      "sha256": "73422a0d7657dbd137d0aee687289a501c7b7176f3c3fece2e2bf7eae5dcf083"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_cache.cache_queryresult_default_7_0_0.yml",
+      "sha256": "4198aedd93e6bac16b3a9066a69a7eb2f6bf830235b470c6c39b5aa1ae4da32f"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_cache.cache_queryresult_default_9_0_0.yml",
+      "sha256": "1c4a2c4444afe41a530813f07433de1eea307e0012b4c8e1a797d227d2a70a94"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_field_type.text_edge_und_6_0_0.yml",
+      "sha256": "c606671c022787f59c2437b50dfff9be1229ad15c2aa1049d43026d727a41ede"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_field_type.text_edge_und_7_0_0.yml",
+      "sha256": "82c5763254150aa7fdb4c7736d018dee5df30ae013765fc21c0d701cd790ae28"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_field_type.text_edgestring_und_6_0_0.yml",
+      "sha256": "bbe3a4760e1d043279432516b324765f4164eae28734dbcd1614b90570f459a5"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_field_type.text_ngram_und_6_0_0.yml",
+      "sha256": "495fa37ea045442d5988ec58dde823e4a1ab2efb1d65d76425cc5d6dc71a851e"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_field_type.text_ngram_und_7_0_0.yml",
+      "sha256": "c98072ef3415f9a0c1f6ac55bb81a65ad2974f63e78ead3183fca512cfd99fe1"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_field_type.text_ngramstring_und_6_0_0.yml",
+      "sha256": "7d76eb1a8d64eeb240018b522691e963183003f9622828f3fb5c2aaac56e06d0"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_field_type.text_phonetic_und_7_0_0.yml",
+      "sha256": "66c8e05fc225aca4ebff8bd63e6c0b794bd60c8defde7caea6d5ff7d23e313a7"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_field_type.text_string_und_6_0_0.yml",
+      "sha256": "48ddff8de8a4add399a451b0ee903b68d52e126d2b8bfa7dc5b0502f0b246ebb"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_field_type.text_und_6_0_0.yml",
+      "sha256": "85bb96cdee23adb91350512cbe9ff9a04e741b55ebceb0ce8522c3625be33561"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_field_type.text_und_7_0_0.yml",
+      "sha256": "a9c4d67675c24481959704ccbcf2c3622e2a52b8eebcc1275c1d3a66b0051576"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_request_dispatcher.request_dispatcher_httpcaching_default_7_0_0.yml",
+      "sha256": "eef1edd65563b66dba4c02188aaff134ccc9ae3e1147023772663be214f78217"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_request_dispatcher.request_dispatcher_httpcachingnever_default_7_0_0.yml",
+      "sha256": "1a724d5d06c27824fae7b6c218aea3f104b773244211836cc73507e8b963d8d4"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_request_handler.request_handler_autocomplete_default_7_0_0.yml",
+      "sha256": "512da690ab2da7fa742c009a432a9e526ed3fcb89fa7bd3e74c0b3d41d0df7fc"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_request_handler.request_handler_elevate_default_7_0_0.yml",
+      "sha256": "c9521a61e35a842d08b87915276f9193cadd32d7682c08365d5868692479c461"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_request_handler.request_handler_extract_default_7_0_0.yml",
+      "sha256": "2b83988c81989c3f9d9db375ef2deae962527c183df83c0f4c7f2130d9695c4b"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_request_handler.request_handler_mlt_default_7_0_0.yml",
+      "sha256": "dfc969ed6113259ffe99b1609c239d7996d18b78e0b757428df2d769eebcf46d"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_request_handler.request_handler_query_default_7_0_0.yml",
+      "sha256": "7375cda0d9281f5cc48ed120d51600c984debcab1fe44bf8b77fb22262eeef1b"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_request_handler.request_handler_replicationmaster_default_7_0_0.yml",
+      "sha256": "c6c1549df9c4180cb5cac5b32e74aae4fa07910cb440193e65ed94468938acc3"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_request_handler.request_handler_replicationslave_default_7_0_0.yml",
+      "sha256": "3e9aeede1e5e64a8590ce72ebc830c4160a4cc799364d9e95ea3ad19922aaf95"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_request_handler.request_handler_select_default_7_0_0.yml",
+      "sha256": "0d1f34afe59c51bc7903431ea986af94f1e7f260048aaee11758fea4083ece94"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_request_handler.request_handler_spell_default_7_0_0.yml",
+      "sha256": "4d254cc27f0834c5bf562abd0e24092919abbd3fca60e81a54036ff82737852f"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_request_handler.request_handler_suggest_default_7_0_0.yml",
+      "sha256": "bcb004c520daef0108aff3730dc2c2656d4b2d6a53d8fdedc535e0ea91b3d21a"
+    },
+    {
+      "path": "config/install/search_api_solr.solr_request_handler.request_handler_tvrh_default_7_0_0.yml",
+      "sha256": "c518f757c60d588683467635dd8513df9c64bb316f63a7ec67a1ac5c4b086ed8"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_ar_6_0_0.yml",
+      "sha256": "cf6d79f4316dd3cfc86a113ea0817533e98f0c8e827abccd635d751b099ac928"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_ar_7_0_0.yml",
+      "sha256": "5e5117ad03c80f395fd3888722ef341105f4c656d67ba0bf4bdc974e71b22d5b"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_bg_7_0_0.yml",
+      "sha256": "4a0d876856e1b4f3d204d56513cf1e027ae7a31bcf39eae508642a51375c01bd"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_ca_7_0_0.yml",
+      "sha256": "001f6729d08f63b4d40f2c19ddfd0ed7c5f21304b4b84fb6fa74d82183de0bbd"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_cs_6_0_0.yml",
+      "sha256": "94390d9038de70de0aefa0486de35aafce5fd058832df7ba17f8b4c6a2a77a0b"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_cs_7_0_0.yml",
+      "sha256": "235ec1788ca34fa83a8483223bd2e3041717750eac8a30c1bebad363da55124e"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_cy_6_0_0.yml",
+      "sha256": "417938af314d54a179c3ba440f57eb5adbc1cf46fef019c67053d3ea1fb5fc7f"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_cy_7_0_0.yml",
+      "sha256": "97ec65105838c68398b6adc57441e69f206031c13255ce72f16c0c913fbb2a09"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_da_7_0_0.yml",
+      "sha256": "0482c0bdaf91941f1e355496419b90cd49bf5fb3574a609e52c59d40ad1dffd9"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_de_6_0_0.yml",
+      "sha256": "ca64b2810939c64b57b9494787a57200b5336ba68e17c28156cc6e2a2da9e796"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_de_7_0_0.yml",
+      "sha256": "1e24043bbccde62fa58a1e364762179db16bfcf82fe5ee810482583e2f70454d"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_de_scientific_6_0_0.yml",
+      "sha256": "e948679dfb8bac197f158d5e9fadef0a7fded0fd2cf16584e9aa901d7f0ff75f"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_de_scientific_7_0_0.yml",
+      "sha256": "732c976819addc2e7796463b37103e6ec79c194f372b35c1e27bf7856cbacdf1"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_el_6_0_0.yml",
+      "sha256": "4bd0011b5ae76226fb32a6805d7577bde1870ff930aff65eb605d97dcbdcae67"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_el_7_0_0.yml",
+      "sha256": "bfb29afc5dee60dc729bc272606becf59ac9b91f2d8fc82c7131fa2410e332dc"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_en_6_0_0.yml",
+      "sha256": "8e7201c1e76d3a7dfee4de72e8d50a3eb889b0f4695d9ef692ffa522adda0f5e"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_en_7_0_0.yml",
+      "sha256": "31890ed19684a2ccc9c0b5482148f7faf670c3aa0bcd44a691466a8b92e5f3c2"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_es_6_0_0.yml",
+      "sha256": "97463f50af94cc12e476ae08168b73ad78c69d66a2b63fb368b8d66b933b916f"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_es_7_0_0.yml",
+      "sha256": "344e6f19be59a97264a8bca6422b29f2c178101cf7c7a384980e96da97567f38"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_et_8_2_0.yml",
+      "sha256": "cc31eb374e5ed2505dc71005b8aae2cb680292ba3c9b8b14e7d159d9be3028d2"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_fa_7_0_0.yml",
+      "sha256": "860ae0f4f1ddee8cc8729d783a6cccbc240bd9af1a0f80b51cf9e7559c1837b4"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_fi_6_0_0.yml",
+      "sha256": "228f32ab0861330adb8cff37c04c551aad0d72618c3885666314fa7419ba8be8"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_fi_7_0_0.yml",
+      "sha256": "32d5cdd772b45b66a190acfd97d532224e9377d7dc29ca87d4336bc3e1796182"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_fr_6_0_0.yml",
+      "sha256": "e8833590eb183ce5e857c45bfd8a20b2ce697f1f781e13e5962114f930d2aa86"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_fr_7_0_0.yml",
+      "sha256": "6ab3095e003d6a39754bf0c44a63d5b5d6f9b97109ee1f8994c9480ffc82eb68"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_ga_7_7_0.yml",
+      "sha256": "0557b195613c540fb05a3e66a3794c5cffbb2815ac52f8a2a347dfc9ed18dc35"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_hi_7_0_0.yml",
+      "sha256": "035d12f2b90ca350733d5904e04864f9b87cd61f0d2e85f30afcccb39fc5f773"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_hr_7_0_0.yml",
+      "sha256": "f458f1ea736d7d58726a54748ccdaac096581ce1652b0b9b7ae2c4e210113035"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_hu_6_0_0.yml",
+      "sha256": "ef41443c5d5ad89cf0042cf0f814cfcc11ff5902211901e17c7a72a1e55c9f2e"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_hu_7_0_0.yml",
+      "sha256": "5e9d693b3dd08a792f0efb6d44f7b6068ff58ceea9e64eeea85afec1c50a7a59"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_id_7_0_0.yml",
+      "sha256": "0f74255b5cbdef832208c6bf05ce3742dd8744d4aaa8c6221b992a435ea09d2c"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_it_6_0_0.yml",
+      "sha256": "5be313c7e2ac25dd8a00ae8591099c713ee161b80828f51159517d5712e7fd78"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_it_7_0_0.yml",
+      "sha256": "a4aead8e5031911d396eaee6bc4d8399bf888297dbf73e378314247f7d6e67cf"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_ja_6_0_0.yml",
+      "sha256": "65e12d88be79880990781cc210e3e1dc3fdcff2dad0a59ba1d88bf3beaeee756"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_ja_8_0_0.yml",
+      "sha256": "431072698d7bef00df35da15e8c162188c11ff05eade48ddbadfc167e7e846a6"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_ko_7_5_0.yml",
+      "sha256": "d0ccfa22c822427dfa42b2d8b83587f01464466a5f26924e31e17638ffc4abc9"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_lv_7_0_0.yml",
+      "sha256": "d4aa15cd000502eae39df7899360f4f66894dc5eb4e7205fbd56629cd44180e4"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_nb_7_0_0.yml",
+      "sha256": "c8686cd9443f68f4c9ee333b134cb7a732036999e7a44827c178a8b45b2f7a47"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_nl_10_0_0.yml",
+      "sha256": "502d6ebf8cac3104991118b0421f85387f890e16bc40485904c71aeb0301f537"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_nl_6_0_0.yml",
+      "sha256": "4e94d6200e2f6d1bb98d7e2610fbd084c417e1cb6f67f62a4cc06d8433ef4294"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_nl_7_0_0.yml",
+      "sha256": "924ca04f505c0a186d881ee4d8b24db9542a5d57e341015477f592aef0fcadb9"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_nn_7_0_0.yml",
+      "sha256": "765c5207eac024617a7d217e988ced4837c043a7f1196a0a1ca6627bb953755b"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_phonetic_de_7_0_0.yml",
+      "sha256": "2dfcfd9524a61800f3240b5db39bbdf4852868dbd092df958f404564ce9ccf04"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_phonetic_el_7_0_0.yml",
+      "sha256": "84d8a120e29b305da4e60e4c36de8334dc09ceb37a33e2442e6149ef418ce955"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_phonetic_en_7_0_0.yml",
+      "sha256": "57e5faf197f2ffc4fdcb4ca4c8b7b2789c3db9aa7b45bedbe21b8fb10b7a8025"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_phonetic_es_7_0_0.yml",
+      "sha256": "bce1ffa4314a497cefd383877fda409eac7d579aba2ecec577be110eea4cc3e8"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_phonetic_fr_7_0_0.yml",
+      "sha256": "d10b8103e7372ca2d20e9ed9fbf7cb90bdb5b86fc830e22f00e0081471e86bef"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_phonetic_it_7_0_0.yml",
+      "sha256": "41dc021c740321f55cf740b50e50fa56e8cf7cee05ea62c78ad0c8286c5942f0"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_phonetic_pl_7_0_0.yml",
+      "sha256": "140c629d83d524db164b1a7ab5f72ce6bc165325b6c7ac94318f698e268d57ec"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_phonetic_ru_7_0_0.yml",
+      "sha256": "0802f74d0c07517fc6c219b5f7e87610e5e270a771f496d1ab91ab67d3e6dee3"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_phonetic_uk_7_0_0.yml",
+      "sha256": "d7c3d914049ed3527a7bd474c177b67d820464016f88977434f2c88d13d96231"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_pl_7_0_0.yml",
+      "sha256": "0cb1be0521ac76b780f7d01fb96a481a92c2840f619413364611884181faf80d"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_pt-br_7_0_0.yml",
+      "sha256": "a0af27e06dbba7b3d93790a6619f89c1b2ad6ffa838824bf40680a53140fa9f1"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_pt-pt_7_0_0.yml",
+      "sha256": "3acc1fd7667e7cf5d357d0f0b8fbb24b03526161eb141eb4e37720cd1a086c3d"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_ro_7_0_0.yml",
+      "sha256": "ba55ded0b8282dbe5316e9a05c8be319be4e73e681997882156db5e7365b2039"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_ru_6_0_0.yml",
+      "sha256": "738673e74e2e4b930c1916dffd6af646003b709d99b900a5d4c54accddaf978e"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_ru_7_0_0.yml",
+      "sha256": "6b6c8eab61805a6a4d6f2318a04c320a956b71823776508b7fa23dcec9dc1233"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_sk_6_0_0.yml",
+      "sha256": "fe5eb10f9c394b3af06f1e511f8b13316a17c94f3b0460732d7cc39f0874081a"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_sk_7_0_0.yml",
+      "sha256": "3b8a9a991a1e249d75a2147ea0780a1b10a7d0417a0105e9d669b649ec1b0621"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_sr_7_0_0.yml",
+      "sha256": "49ac6e21ccf165b1681f6ac77adeb71803324ea08b49064a5ceaa83035e2cdcd"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_sv_7_0_0.yml",
+      "sha256": "87f06d92cb28255789df3caebd71cc88ae48941dac9f1eaa1c6649215ae2ae47"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_th_7_0_0.yml",
+      "sha256": "1ae2141e131bcd00a45af0a16f783b06f1b75cdea28d4c2bf37fbfca1030f406"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_tr_7_0_0.yml",
+      "sha256": "773e0209e344a8f58e1ca4a0b74696747d111e851b5461fb516a2d5510350cff"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_uk_6_0_0.yml",
+      "sha256": "5bfd17b85411ee005aa8265a83947bae1545d208a5ed53ffae62cbbc311fa235"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_uk_7_0_0.yml",
+      "sha256": "ad5dfaceb3ecfd58422bff08e99f06905a7e6289ccc8f689ca5fc65aacdf5a2b"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_uk_8_2_0.yml",
+      "sha256": "c88fc45e6da100f328e3b6fbc7c412e4947e6ad9edc52c22ea62b094acbd1352"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_zh-hans_7_0_0.yml",
+      "sha256": "b18b7215e924f90fe02cd10fdb248c64bef3fec66ecd7ca41c5b2c267124bea4"
+    },
+    {
+      "path": "config/optional/search_api_solr.solr_field_type.text_zh-hant_7_0_0.yml",
+      "sha256": "50f2ce54025278d9f9623c7f6fd8f9e60b3afce57d08ce0464ff618a428919d7"
+    },
+    {
+      "path": "config/schema/search_api_solr.backend.schema.yml",
+      "sha256": "1fa0bbf1e116cd95d41f59a05ee9535ca6fd8bd9db810d32f0e37f496cbab151"
+    },
+    {
+      "path": "config/schema/search_api_solr.cache.schema.yml",
+      "sha256": "60d278dcbcef1d48e11cea67b7211c1e3f657f5231b16bf110110191a83f4b4d"
+    },
+    {
+      "path": "config/schema/search_api_solr.connector.basic_auth.schema.yml",
+      "sha256": "35d57102325563a778bcf20c029573f9aee41e15ad507d88e301eba74c47475a"
+    },
+    {
+      "path": "config/schema/search_api_solr.connector.solr_cloud.schema.yml",
+      "sha256": "1a2e96cda97941c0ff955a25401effb18201133aca748236a4ce626cf98eced5"
+    },
+    {
+      "path": "config/schema/search_api_solr.connector.solr_cloud_basic_auth.schema.yml",
+      "sha256": "f2a852d94d3ff9bea4c08bcf91c2e73b14733d86e878114b6e616a2635fd8791"
+    },
+    {
+      "path": "config/schema/search_api_solr.connector.standard.schema.yml",
+      "sha256": "c7f1d14a78d021969e6c163190b55d0ad0966ba2eb876741c1cabae141ed539b"
+    },
+    {
+      "path": "config/schema/search_api_solr.field_type.schema.yml",
+      "sha256": "b4c17e6440b5f65be2347e1db6129a5028192e389b918dc6f843a9eae983e889"
+    },
+    {
+      "path": "config/schema/search_api_solr.processor.schema.yml",
+      "sha256": "42598a19122ad199cdbc60adf0e7ec02d2bacc39cbcc5d461d1a57157ae18f54"
+    },
+    {
+      "path": "config/schema/search_api_solr.request_dispatcher.schema.yml",
+      "sha256": "902b21cc4e4570563ad1d0aa56d5b8874461e5998b02e1d8a5aa70801fabd9f1"
+    },
+    {
+      "path": "config/schema/search_api_solr.request_handler.schema.yml",
+      "sha256": "3d1c060279eef9c7a4ffab00d9c30799f9fa0fcb48634bf29fca6ccdd477d268"
+    },
+    {
+      "path": "config/schema/search_api_solr.schema.yml",
+      "sha256": "cf9aa302ed2a4db55946a8aba48efa71714b8ef52bde0496da2cc6c93bf0f66f"
+    },
+    {
+      "path": "datasource.md",
+      "sha256": "6c8d40cce05197203fd5385704928a0aa985ef55399a6f8f49d407b6eeeefe1c"
+    },
+    {
+      "path": "docs/multisite.graphml",
+      "sha256": "a34b55c5091d1af828ba8a2d5c14c7ca773f676700ce5a3929f4ca9a37a9cc1b"
+    },
+    {
+      "path": "modules/search_api_solr_admin/composer.json",
+      "sha256": "138de36491108e88bf7bc6c9e1148e8e6626541edc3b62feb7fd0e6f079a3604"
+    },
+    {
+      "path": "modules/search_api_solr_admin/css/solr_field_analysis.css",
+      "sha256": "61c5d8f12d8b100f5551bc786ba187f19fa0084e986fa9e3867abb1f182dfea5"
+    },
+    {
+      "path": "modules/search_api_solr_admin/search_api_solr_admin.info.yml",
+      "sha256": "995e08d532bc1b056383491f24ecbd10491d0467cfcd99197e549d92e38c8bee"
+    },
+    {
+      "path": "modules/search_api_solr_admin/search_api_solr_admin.libraries.yml",
+      "sha256": "7d182c0f3d6ce9dd42b335e5bec248b6ce969d9bafef53aa9533a1fc6a61a56d"
+    },
+    {
+      "path": "modules/search_api_solr_admin/search_api_solr_admin.links.action.yml",
+      "sha256": "940e43e02c0a86005e26ed93466fc219ed197e12561891284d053ae21e26521d"
+    },
+    {
+      "path": "modules/search_api_solr_admin/search_api_solr_admin.module",
+      "sha256": "9077588ca2730621a26400408fc70e8eb55166c1bda5fe883c33743a987c0dfc"
+    },
+    {
+      "path": "modules/search_api_solr_admin/search_api_solr_admin.permissions.yml",
+      "sha256": "91bbb0a15be609fb27076d09b3665f13993789cd0554b39f750010c6ed101684"
+    },
+    {
+      "path": "modules/search_api_solr_admin/search_api_solr_admin.routing.yml",
+      "sha256": "d969ba1f4f4947bf5151da241c90ab9e90c6500ab0a94f3a7100e81e6b0c94a8"
+    },
+    {
+      "path": "modules/search_api_solr_admin/search_api_solr_admin.services.yml",
+      "sha256": "f341f54047867109da677103e974ebbaac611a77b3d7aad150521d14c5ca5b02"
+    },
+    {
+      "path": "modules/search_api_solr_admin/src/Access/SolrAdminAccessCheck.php",
+      "sha256": "cb10647fe192ec442b1b476ce67196adbea6a0733ee0c7ee2b21108daa5298bc"
+    },
+    {
+      "path": "modules/search_api_solr_admin/src/Access/SolrAdminCloudAccessCheck.php",
+      "sha256": "b46d656a9ee608adbac6e1a535a76a35cb563d711ce2c8c617d7c7a078226295"
+    },
+    {
+      "path": "modules/search_api_solr_admin/src/Access/SolrAdminTrustedContextSupportedAccessCheck.php",
+      "sha256": "fd61f15df7fd89d71d63dd4733c0854c86e44cc954f5f5809cadb068b67677d8"
+    },
+    {
+      "path": "modules/search_api_solr_admin/src/Drush/Commands/SearchApiSolrAdminCommands.php",
+      "sha256": "0519f8b261b9ce27b3cd1c5c49233276d2d5c4f7a721e8ea3f141da6ad1774df"
+    },
+    {
+      "path": "modules/search_api_solr_admin/src/Form/SolrAdminFormBase.php",
+      "sha256": "d1c498e53cd14c6c3dc2f726d5cc9f5494265b599fb07bea0e1defe753936cbf"
+    },
+    {
+      "path": "modules/search_api_solr_admin/src/Form/SolrDeleteCollectionForm.php",
+      "sha256": "27cc6f53729b22a1eb58e25703bc7f1b65d38e32d24c492a24caea9c4cede286"
+    },
+    {
+      "path": "modules/search_api_solr_admin/src/Form/SolrFieldAnalysisForm.php",
+      "sha256": "d6e992bbdf2be47e00c9858b7b7fad00d2036dce6e1f42c4e71e9d0c85d272b1"
+    },
+    {
+      "path": "modules/search_api_solr_admin/src/Form/SolrReloadCoreForm.php",
+      "sha256": "ad07650ddf4edfe2f709a4f17a75c5ec7328bc6399b798e08730adca3768544a"
+    },
+    {
+      "path": "modules/search_api_solr_admin/src/Form/SolrUploadConfigsetForm.php",
+      "sha256": "1fb9209cf17692778d073e16db586380d6e06f864d0d3b9ed4389e760ea84b4b"
+    },
+    {
+      "path": "modules/search_api_solr_admin/src/Hook/SearchApiSolrAdminHooks.php",
+      "sha256": "0976715f348cffb4b978e5512b21c6a469be398188d772f37ab09a2ac4ee7f96"
+    },
+    {
+      "path": "modules/search_api_solr_admin/src/Utility/SolrAdminCommandHelper.php",
+      "sha256": "a47a8e551129244f667f1f82bf42d75554d35b9f8710fca73e13598f4669823e"
+    },
+    {
+      "path": "modules/search_api_solr_admin/templates/solr-field-analysis.html.twig",
+      "sha256": "0bd8ddae89db807d3496d9a4fc46bc384b4cb6e33f4ff08fde1a7619c27f6783"
+    },
+    {
+      "path": "modules/search_api_solr_autocomplete/config/schema/search_api_solr_autocomplete.suggester.schema.yml",
+      "sha256": "a96d7fa81e38d10300655194a30b9d70d6e815186be130e2c0154d4801898b52"
+    },
+    {
+      "path": "modules/search_api_solr_autocomplete/search_api_solr_autocomplete.info.yml",
+      "sha256": "bd55d95fbe17ebdc41e4c64e769cd266f83f817f7236fd76498503d14ba70d9a"
+    },
+    {
+      "path": "modules/search_api_solr_autocomplete/src/Event/PreSpellcheckQueryEvent.php",
+      "sha256": "86bb327bdaa588b5d6c6c9ecc222710d644764e6f928b1e722c8e7aba026594e"
+    },
+    {
+      "path": "modules/search_api_solr_autocomplete/src/Event/PreSuggesterQueryEvent.php",
+      "sha256": "8b935e178eb1e885fd37ab44535496aabe78f3679b9e684c549597d39e83edf3"
+    },
+    {
+      "path": "modules/search_api_solr_autocomplete/src/Event/SearchApiSolrAutocompleteEvents.php",
+      "sha256": "24feb5e415a569fb181c75d451248ce2329c4ca42fc5c88a48e4f9662992d9c5"
+    },
+    {
+      "path": "modules/search_api_solr_autocomplete/src/Plugin/search_api_autocomplete/suggester/BackendTrait.php",
+      "sha256": "f61aa512448a66750ee6f4b1bcfa3260e58f6bf59ed5e35df4ba955e4c9dbc98"
+    },
+    {
+      "path": "modules/search_api_solr_autocomplete/src/Plugin/search_api_autocomplete/suggester/Spellcheck.php",
+      "sha256": "7eb1d1299ec67fb9342f2fd2711946a444c12c8e7d6032c962fbd4a1261f462f"
+    },
+    {
+      "path": "modules/search_api_solr_autocomplete/src/Plugin/search_api_autocomplete/suggester/Suggester.php",
+      "sha256": "188f94ab5c18d9a4b45ed5e7c01124ba93a913f03d2ca58272b0addb7f201a78"
+    },
+    {
+      "path": "modules/search_api_solr_autocomplete/src/Plugin/search_api_autocomplete/suggester/Terms.php",
+      "sha256": "2d2fd90426750e41c72395fefacf8e186c618620e9cd5df695d71b2be7b5a2cc"
+    },
+    {
+      "path": "modules/search_api_solr_devel/search_api_solr_devel.info.yml",
+      "sha256": "09cec42acd30f800e42b41974e5e3f7adc61ad031969f84d1fae7a308ac37a8e"
+    },
+    {
+      "path": "modules/search_api_solr_devel/search_api_solr_devel.links.task.yml",
+      "sha256": "0570fb19d0cb0630c44434c64d438c9b32575eb604b56f4174f49e4faa4093d5"
+    },
+    {
+      "path": "modules/search_api_solr_devel/search_api_solr_devel.module",
+      "sha256": "fd11c0477777f8f9b18a96b4de39e162d9eb33d292493d511c2e194511436b79"
+    },
+    {
+      "path": "modules/search_api_solr_devel/search_api_solr_devel.services.yml",
+      "sha256": "c1796f781117dccf41ef5f6042a97ab9028967b59f8dc726b8bf7407966b563d"
+    },
+    {
+      "path": "modules/search_api_solr_devel/src/Controller/DevelController.php",
+      "sha256": "d953822147f4c277af990263a32fa2540c8d7692c40a6b0ec2cff32664c118e2"
+    },
+    {
+      "path": "modules/search_api_solr_devel/src/Hook/SearchApiSolrDevelHooks.php",
+      "sha256": "52ddf37850430e92039f5b4884f6076db181e962f1caf1adc174099570f06d4d"
+    },
+    {
+      "path": "modules/search_api_solr_devel/src/Logging/SolariumRequestLogger.php",
+      "sha256": "1966e2bff7d6186e302049c45eff7d80d31e10da51064c00a802ff66757922eb"
+    },
+    {
+      "path": "modules/search_api_solr_devel/src/Plugin/Derivative/DevelLocalTask.php",
+      "sha256": "f384fc32c662afc35396ac06af89a91060afd3ba77608ef8e20223fcdfdcd87d"
+    },
+    {
+      "path": "modules/search_api_solr_devel/src/Routing/DevelRouteSubscriber.php",
+      "sha256": "398917c0ded894848ca89d963fa7ae962c4c35a63959cb61e94acb9dc595bdba"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/README.md",
+      "sha256": "dbe1e665d051c0d5865fb2b12480f76b93c5522838a532424da8618120f55c65"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_cs_5_0_0.yml",
+      "sha256": "87c3b91f2734a559af8181f744e3fb05e819cd3050708d2735dff05340c8c8e3"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_de_3_6_0.yml",
+      "sha256": "dcf7cc3e392399ef211e78ca8930d42c3cec4fddd68d369688aaa365d4695a55"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_de_4_5_0.yml",
+      "sha256": "57003767d78b11f7db920d8b94b6396e8f1c4e131c434785e93c2fd5982944de"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_edge_und_3_6_0.yml",
+      "sha256": "fa3cd87d2319c62db9953a2ac1e1eb7a0282138315a10a4416681b205ccc7535"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_edge_und_4_5_0.yml",
+      "sha256": "9dfa19ef43034fd329a26faeb30b4b85eeadd5f1dfe94552e5beb491908f719a"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_edgestring_und_3_6_0.yml",
+      "sha256": "f6fea474d19d18cdb64385b7adfc7c32df16707f4b4578985da140191ff651c3"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_edgestring_und_4_5_0.yml",
+      "sha256": "3fec0e8c4e9bdd87d3b488f663599c931fbbef3c6047683ceb02328025227b9d"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_el_4_5_0.yml",
+      "sha256": "19b073a02348d717f3b3f45132cb06f6a52f72b4cd570a517898257262205a32"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_en_3_6_0.yml",
+      "sha256": "dd60de981280748843dc5a99216082484fa6744eea3bc91e224721b4ba620c44"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_en_4_5_0.yml",
+      "sha256": "2424d46c235752391f42ae2cbf3e8f811c5efcd75425e85fcf50d32f3db5ef0b"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_es_3_6_0.yml",
+      "sha256": "ed4f1aecfbe1ace1a8a494a1d2c0bd1b922e302ad9fd7f9c11ed96d516b6dc8f"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_es_4_5_0.yml",
+      "sha256": "866c9785b6f8d3e5803570ddb6554653ba7627d71e4b6c747885215888a13b41"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_fi_4_5_0.yml",
+      "sha256": "6d1e9c96ac6b74e96665a9de241d5298c9b2824783bdf33cd108982a682c3deb"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_fr_4_5_0.yml",
+      "sha256": "29d85704fd2f34e7fd408170c370841dbbaa92d7be83a3ea19a32ee1ca5ef397"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_it_4_5_0.yml",
+      "sha256": "14576e315ff530136ed4755267b7f83b62c2566cccca44d02fda7699ac24c4c8"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_ngram_und_3_6_0.yml",
+      "sha256": "ce111015ccafa6d0c8292d30f729d0ee557fd98349a1808af4440e872c3da929"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_ngram_und_4_5_0.yml",
+      "sha256": "5215541bc09175a70cecc505da653de24056bcb86d4d88d83f4c3013bdb5a6f7"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_ngramstring_und_3_6_0.yml",
+      "sha256": "80cffc77712c10bda7a609fc7b845279a73ed9f71ef5d5442877b6f4205fc84b"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_ngramstring_und_4_5_0.yml",
+      "sha256": "e6bd0de23a3596f5c0927f098a906872fcdda68cdbfbe86d8dc3ff04d8a12a4e"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_nl_3_6_0.yml",
+      "sha256": "cf52ce3ca540bac36f96ccc8804f6cc09f6d95313f404e263de081c94b5382e9"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_nl_4_5_0.yml",
+      "sha256": "6f343a46bf2c80a5f8756f3da3617254dd7ecf1af2639922da83458fcb0d0379"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_ru_4_5_0.yml",
+      "sha256": "4103505d298412af7ba014b733574fe2717ddea6c65761484f5af6cd70788f55"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_uk_4_5_0.yml",
+      "sha256": "89bd2b64ca2ee2631abb35a10f62e918e3a17fc71837fb0787068e6f4c4adf76"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_und_3_6_0.yml",
+      "sha256": "00e4e07b1faacaf0d0e5c46d44fd6f94ca0222919b7501666cfe38750caab644"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/optional/search_api_solr.solr_field_type.text_und_4_5_0.yml",
+      "sha256": "8512c6f1e9a702cf595059e34e97e979cb9b50128574961b1b2e9f923ff94630"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/config/schema/search_api_solr.connector.solr_36.schema.yml",
+      "sha256": "c0257a7bbd771f41a592ee440e727792e5746b249cd85cd9736eb15f08379452"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/search_api_solr_legacy.info.yml",
+      "sha256": "11946710a1023212c687f8ad651fae383738530cd7dfb33cf80b35864b21591d"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/search_api_solr_legacy.install",
+      "sha256": "9eea6f5fa5f81900478253dc8d86a1a9492f3bc953ea0e4fea7af7d80db6b472"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/search_api_solr_legacy.module",
+      "sha256": "a813bc93f0fc7f3ce0ca4ea4819ddd7dd05a53de39a01298f4f0aede6cfa40fb"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/search_api_solr_legacy.services.yml",
+      "sha256": "c77ee3f648fbdc2ef0fcf4336d9e18c6e21f3be21fc9b96a6214e68b11f71892"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/solr-conf-templates/3.x/elevate.xml",
+      "sha256": "79605df9db1bd0d2b819f568fef31e5cbaa612098af35ef676750b0a535d1737"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/solr-conf-templates/3.x/schema.xml",
+      "sha256": "fd1b10a3e28cee24112c72eff0913d24a30a83bf148b5c661fdf96b0ac4b9736"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/solr-conf-templates/3.x/solrconfig.xml",
+      "sha256": "93f998dcf900525f2880d04188784b0cec3714a998eedaabc08533acf3b34241"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/solr-conf-templates/3.x/solrcore.properties",
+      "sha256": "83bc1cd0619d90ccdc954d2600220ffc7528e647121977917dd3dac6abe90b1c"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/solr-conf-templates/4.x/elevate.xml",
+      "sha256": "79605df9db1bd0d2b819f568fef31e5cbaa612098af35ef676750b0a535d1737"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/solr-conf-templates/4.x/schema.xml",
+      "sha256": "f3d154e0c5d805292863d1739bb873d1f31efeb3f3ea959320477841f8514e15"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/solr-conf-templates/4.x/solrconfig.xml",
+      "sha256": "f418401a1ff025cabb510eb1b2e9f8ec7f5dbf086385da1d941fc1012149bf9b"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/solr-conf-templates/4.x/solrcore.properties",
+      "sha256": "0b1df40f2dc269e064d6b2f9295d799baed2cafcc8c88df556bd4ff7fdfcd516"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/solr-conf-templates/5.x/elevate.xml",
+      "sha256": "79605df9db1bd0d2b819f568fef31e5cbaa612098af35ef676750b0a535d1737"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/solr-conf-templates/5.x/schema.xml",
+      "sha256": "4429699638bc5b6e35edaeaca8200bac5917611d20b501b188d1a5c3c5b3e911"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/solr-conf-templates/5.x/solrconfig.xml",
+      "sha256": "e114b0d9e47f3df8ed423cbde499a94cd59fc53496b6d7cf86b55be5a8e54f7e"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/solr-conf-templates/5.x/solrcore.properties",
+      "sha256": "0e2e621f6494f07506d22e40094a3925255b9c4765c4ac1c3386e53b699ffb22"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/solr-conf-templates/README.md",
+      "sha256": "fcf90151c80e70c323c26456c0302a691e9fff864ef1532a7f8cba0bac63e858"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/src/EventSubscriber/SearchApiSolrSubscriber.php",
+      "sha256": "97f40188e8aaf4822e52b8052faded7617e9b88d961b743887528640c749ce96"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/src/Hook/SearchApiSolrLegacyHooks.php",
+      "sha256": "21dc04dfb40851de0bf3db1042bdef8f653070f5b49bfa489c8ffea707cdc8f1"
+    },
+    {
+      "path": "modules/search_api_solr_legacy/src/Plugin/SolrConnector/Solr36Connector.php",
+      "sha256": "bd41ec9bc69b13704edd3aa4b50a3290f17f9754ef90eccf7ba756bf67537572"
+    },
+    {
+      "path": "modules/search_api_solr_log/README.md",
+      "sha256": "39641496ede8ad11de78344fb0c63bb18baddbc5e2c482c637f7b6bf9b87ca93"
+    },
+    {
+      "path": "modules/search_api_solr_log/config/install/search_api.index.search_api_solr_log.yml",
+      "sha256": "298717b765766def02f63b38bd0a232ac710744576d9fb39700bba0c700a60b9"
+    },
+    {
+      "path": "modules/search_api_solr_log/config/install/search_api.server.search_api_solr_log_server.yml",
+      "sha256": "f6aee1bae3a517ecd039b93aa97fb7d47931992a0558a3e538b6b201682b377c"
+    },
+    {
+      "path": "modules/search_api_solr_log/config/install/search_api_solr_log.settings.yml",
+      "sha256": "b64de739cf82d9bbad0e11ad6ebfa57c52f089ce4b9153f121e3a551e4c0852a"
+    },
+    {
+      "path": "modules/search_api_solr_log/config/install/views.view.search_api_solr_log.yml",
+      "sha256": "f74bcebcfd31dd80908e2ccfe80a4632de871f83fb0d0bb5d9347d450bc91774"
+    },
+    {
+      "path": "modules/search_api_solr_log/config/schema/search_api_solr_log.schema.yml",
+      "sha256": "bfd7dcf4e65ae249c2a5440f740206274997d433922ef478875eb347ac0012a5"
+    },
+    {
+      "path": "modules/search_api_solr_log/search_api_solr_log.info.yml",
+      "sha256": "cdb2367a55c6d75689284329f0889ff31c2241f5b72eb70b1ccd19dda03ca8b8"
+    },
+    {
+      "path": "modules/search_api_solr_log/search_api_solr_log.links.action.yml",
+      "sha256": "63e835ed141a5373feb0ca0ccb910dde504a1fec3792e29af610045dc987e2be"
+    },
+    {
+      "path": "modules/search_api_solr_log/search_api_solr_log.links.menu.yml",
+      "sha256": "f22562d356a7a7651968db61840fcb60a3fa029d5c9161a6503d135af955953a"
+    },
+    {
+      "path": "modules/search_api_solr_log/search_api_solr_log.module",
+      "sha256": "7888b3f283557cdc3e6eb8414e573878e0faf0c42bca15e697bcc35088e6deb5"
+    },
+    {
+      "path": "modules/search_api_solr_log/search_api_solr_log.routing.yml",
+      "sha256": "347ab23357bec500dabaa1e095034904277405521db6a7994dd24844f7441d67"
+    },
+    {
+      "path": "modules/search_api_solr_log/search_api_solr_log.services.yml",
+      "sha256": "164e0a1f80193b63c4cf7dff192f1a964e035e5222837246ebbe7b49264abe98"
+    },
+    {
+      "path": "modules/search_api_solr_log/src/EventSubscriber/EventSubscriber.php",
+      "sha256": "4e2e48e457eab32816c4f2a35b582b0e3083370b0f65de876e4cf7395e2028ca"
+    },
+    {
+      "path": "modules/search_api_solr_log/src/Form/ClearLogConfirmForm.php",
+      "sha256": "f41a8e3cb15044ef93b17b7ae269e0ef54d418459f12dae0624e583ad62e94db"
+    },
+    {
+      "path": "modules/search_api_solr_log/src/Form/LogSettingsForm.php",
+      "sha256": "e09a962fa6690d755de865b06a54979f038f5767d91b09caafbdf154b862e3f1"
+    },
+    {
+      "path": "modules/search_api_solr_log/src/Hook/SearchApiSolrLogHooks.php",
+      "sha256": "5f25dba3284c184936a0cc2322d927683ae5bc8a39e4b74f1bc8f59dfa44bc54"
+    },
+    {
+      "path": "modules/search_api_solr_log/src/Logger/SolrLogger.php",
+      "sha256": "6ec017efeb48c76bf2f07941edf89284d88eec2ced24da9d0bca52175700d8bd"
+    },
+    {
+      "path": "modules/search_api_solr_log/src/Plugin/facets/processor/UserProcessor.php",
+      "sha256": "c6b379097e367172f5a26b781334a18d24dd48529473ab5c1945d1bc2b2c28a4"
+    },
+    {
+      "path": "modules/search_api_solr_log/src/Plugin/views/field/LogMessage.php",
+      "sha256": "0b7ae34046a834e7fc13502a78f740f570d7c795445b1d9d4bb19af4deacaa31"
+    },
+    {
+      "path": "modules/search_api_solr_log/src/Plugin/views/field/LogSeverity.php",
+      "sha256": "7275d481bf7d5d5b5b0c46cdec80e56de99bc08d8fa7806b92b37e73a78cf431"
+    },
+    {
+      "path": "modules/search_api_solr_log/src/Plugin/views/field/LogUser.php",
+      "sha256": "793f7342167aa89d61f202533df1cdad3c057b75250ee02d664d077b7a8d3659"
+    },
+    {
+      "path": "phpcs.xml.dist",
+      "sha256": "e7954b82cd2bf11da4d19e8445066d0779aed93acddd5f5243ad370bd9b4f733"
+    },
+    {
+      "path": "phpstan.neon",
+      "sha256": "9f673ce1e49e8c16b278aac20c5a34a8c41ff3549a33904cfa92f30eefa2b23e"
+    },
+    {
+      "path": "search_api_solr.api.php",
+      "sha256": "73eb358f0d12497936153de4ca72d0e593a66d379d81737837ceef6c3512a93a"
+    },
+    {
+      "path": "search_api_solr.info.yml",
+      "sha256": "93c5c9bab711e0363ca9c0b9deb27a9901fd415dad7def85a6f713dd06f254d6"
+    },
+    {
+      "path": "search_api_solr.install",
+      "sha256": "de84e5e1a7b64822fb4c19eac69fd2400ee8422e7b721c3e920ec1e8a8d677ce"
+    },
+    {
+      "path": "search_api_solr.links.action.yml",
+      "sha256": "48d22a830225788295ff7b07967e279e0a5317c5c9888df3d29a4bb52d6893fb"
+    },
+    {
+      "path": "search_api_solr.links.task.yml",
+      "sha256": "3e0028040bad2e9eab89063648f1c89b85d2bfd97f0a382d6bdde589d894ed55"
+    },
+    {
+      "path": "search_api_solr.module",
+      "sha256": "d44eb5ebb70ac0552a4f54b7634a337923a4354c2c3cf52a09ddd085b1118c35"
+    },
+    {
+      "path": "search_api_solr.plugin_type.yml",
+      "sha256": "babae2432bb327f42d75d183354c5bb248520bb3f26ab7ce21e7fcc875c54933"
+    },
+    {
+      "path": "search_api_solr.post_update.php",
+      "sha256": "427276de1f03b3c465a1a26328a64e1be9ab794842e972a20da00779c8cc6464"
+    },
+    {
+      "path": "search_api_solr.routing.yml",
+      "sha256": "b58d2f804af2f32cfe5cc1996b6f5b5710fbf8d98c65f70dec1f6f94eb058143"
+    },
+    {
+      "path": "search_api_solr.services.yml",
+      "sha256": "60f0bdf9d1cd2928f39fec9855087ab78d0f43bbd420ea0192bb447463e4538d"
+    },
+    {
+      "path": "solr-conf-templates/10.x/core.properties",
+      "sha256": "37947a2b4c4120c1beac0a9cd5e5a0ce0529af9915acf166a4580ad0ebc225d0"
+    },
+    {
+      "path": "solr-conf-templates/10.x/elevate.xml",
+      "sha256": "79605df9db1bd0d2b819f568fef31e5cbaa612098af35ef676750b0a535d1737"
+    },
+    {
+      "path": "solr-conf-templates/10.x/schema.xml",
+      "sha256": "494616e59caa553284ed0efb934aebe061465a8786c14b876698958c22e99920"
+    },
+    {
+      "path": "solr-conf-templates/10.x/solrconfig.xml",
+      "sha256": "85c06ae3ee4e1a66a96502a14988a0e7fd5fe6abccd7cac365959284a14df640"
+    },
+    {
+      "path": "solr-conf-templates/10.x/solrcore.properties",
+      "sha256": "2a4866758328933b67be9cd3659682a97c69b0e3f8b8277f656be23ab61e3e6b"
+    },
+    {
+      "path": "solr-conf-templates/6.x/elevate.xml",
+      "sha256": "79605df9db1bd0d2b819f568fef31e5cbaa612098af35ef676750b0a535d1737"
+    },
+    {
+      "path": "solr-conf-templates/6.x/schema.xml",
+      "sha256": "473ef38943ab4d9f1e7ed10f1964442d1e15806a35b26ad92795abcdb5278929"
+    },
+    {
+      "path": "solr-conf-templates/6.x/solrconfig.xml",
+      "sha256": "385f0081a6db3d7a7a81de1bbe078f9e8b0fae007a52b811a98824d2b1aafb81"
+    },
+    {
+      "path": "solr-conf-templates/6.x/solrcore.properties",
+      "sha256": "178ad7ce3d8d61b1e97853a312c0a344dc72741348330d0eaae24afa0a1e1335"
+    },
+    {
+      "path": "solr-conf-templates/7.x/elevate.xml",
+      "sha256": "79605df9db1bd0d2b819f568fef31e5cbaa612098af35ef676750b0a535d1737"
+    },
+    {
+      "path": "solr-conf-templates/7.x/schema.xml",
+      "sha256": "59407c8b25ed21437c3681c4124628c0a5b86ade044b30a1308336427a68e374"
+    },
+    {
+      "path": "solr-conf-templates/7.x/solrconfig.xml",
+      "sha256": "d46a73cbb82ca09faf7a0075dd6e3834aa13b64314d0b7ec4f501f08fd0d0872"
+    },
+    {
+      "path": "solr-conf-templates/7.x/solrcore.properties",
+      "sha256": "2a4866758328933b67be9cd3659682a97c69b0e3f8b8277f656be23ab61e3e6b"
+    },
+    {
+      "path": "solr-conf-templates/8.x/elevate.xml",
+      "sha256": "79605df9db1bd0d2b819f568fef31e5cbaa612098af35ef676750b0a535d1737"
+    },
+    {
+      "path": "solr-conf-templates/8.x/schema.xml",
+      "sha256": "59407c8b25ed21437c3681c4124628c0a5b86ade044b30a1308336427a68e374"
+    },
+    {
+      "path": "solr-conf-templates/8.x/solrconfig.xml",
+      "sha256": "f4ae04a085b91d5dd7b360055868fe6b03beab6cbbba1119653f61a6d35c3910"
+    },
+    {
+      "path": "solr-conf-templates/8.x/solrcore.properties",
+      "sha256": "2a4866758328933b67be9cd3659682a97c69b0e3f8b8277f656be23ab61e3e6b"
+    },
+    {
+      "path": "solr-conf-templates/9.x/elevate.xml",
+      "sha256": "79605df9db1bd0d2b819f568fef31e5cbaa612098af35ef676750b0a535d1737"
+    },
+    {
+      "path": "solr-conf-templates/9.x/schema.xml",
+      "sha256": "4b88f184bbeeada6d2b47203758f64f030f56604a8253c3e8da5c5d9626b50a2"
+    },
+    {
+      "path": "solr-conf-templates/9.x/solrconfig.xml",
+      "sha256": "85560f35c2061d8f12d4f55f40c30d7fead11f634b560f005af174d17569073b"
+    },
+    {
+      "path": "solr-conf-templates/9.x/solrcore.properties",
+      "sha256": "2a4866758328933b67be9cd3659682a97c69b0e3f8b8277f656be23ab61e3e6b"
+    },
+    {
+      "path": "solr-conf-templates/README.md",
+      "sha256": "fcf90151c80e70c323c26456c0302a691e9fff864ef1532a7f8cba0bac63e858"
+    },
+    {
+      "path": "src/Access/LocalActionAccessCheck.php",
+      "sha256": "e1c816416512aaa9f7e5d028c66762d5d727d8b1c1575f61111f248fb3fb690a"
+    },
+    {
+      "path": "src/Annotation/SolrConnector.php",
+      "sha256": "9da55f1e4e657e9eb30206f04c5ea40cd2b45d960dd0ae7976a5d67a00c3dc59"
+    },
+    {
+      "path": "src/Attribute/SolrConnector.php",
+      "sha256": "9f75fe1a8e887e836b5fbeab7bfa652126a37875ef7bcbe188d2e18e0335bcaa"
+    },
+    {
+      "path": "src/Controller/AbstractSolrEntityController.php",
+      "sha256": "5ebd9892f587952fa56940d23864f0a81e6571f0235a46dbd25ac3fa4d6b9b77"
+    },
+    {
+      "path": "src/Controller/AbstractSolrEntityListBuilder.php",
+      "sha256": "11331cfec05a12e3124b98a1cbdcb226c3fd23363bce87f63483fd269b06d61e"
+    },
+    {
+      "path": "src/Controller/BackendTrait.php",
+      "sha256": "bc52a802732e272cdd3865aac7c986606e21fbdf866ef2c5fe3fb4531c2ea458"
+    },
+    {
+      "path": "src/Controller/EventDispatcherTrait.php",
+      "sha256": "b1842528dfef81b97f2aedbc6fdc51a8a59598dd5dd5668e5adf561b2dcbf77a"
+    },
+    {
+      "path": "src/Controller/SolrCacheController.php",
+      "sha256": "070100fd79caf3aca0c99c7e89e8e435cc338658650f2b3b4808f3872100ad82"
+    },
+    {
+      "path": "src/Controller/SolrCacheListBuilder.php",
+      "sha256": "181fa935190cab18236833f8e3190187ae072646b4b176bccb3aee9d21c4bed8"
+    },
+    {
+      "path": "src/Controller/SolrConfigSetController.php",
+      "sha256": "53a0c9547fdbbca0624bf5c42ab5fc0e2021abac0b5ce2277266489edbb69940"
+    },
+    {
+      "path": "src/Controller/SolrFieldTypeController.php",
+      "sha256": "d1e1a9a109bd1622abaa04fb031085833c80b7c1c141ebe167bc3532196419f7"
+    },
+    {
+      "path": "src/Controller/SolrFieldTypeListBuilder.php",
+      "sha256": "a3527b34130c83b5433a2510a55a59e370d607e7460f05bf26159d62a021ce3e"
+    },
+    {
+      "path": "src/Controller/SolrRequestDispatcherController.php",
+      "sha256": "cd7a9ceb8a76f2b5d4c3a97ce53b4b8a481c7f8414abf901c9c5af7ee46a3014"
+    },
+    {
+      "path": "src/Controller/SolrRequestDispatcherListBuilder.php",
+      "sha256": "8068f36a673e1637f6f2224896ca8cb1694ba7511df51075e1abb24688c7dc40"
+    },
+    {
+      "path": "src/Controller/SolrRequestHandlerController.php",
+      "sha256": "9440378098408212ba20b30d16b3e88e46d1a2eb6ebb89a5225b36b9a42da4e5"
+    },
+    {
+      "path": "src/Controller/SolrRequestHandlerListBuilder.php",
+      "sha256": "13c5d38c76607e38552826577ba0c790048f12136d2ee34f3e8908b5b31ac7e6"
+    },
+    {
+      "path": "src/Drush/Commands/SearchApiSolrCommands.php",
+      "sha256": "3429432d615cac3ca4a7883b66079e6b6c89bd18be411ec5b7e445d94d78fc98"
+    },
+    {
+      "path": "src/Entity/AbstractSolrEntity.php",
+      "sha256": "ba12991c85a34c06df6139e8f9389a7f4c4d4bf5cabfbbccc7616623c4d624ed"
+    },
+    {
+      "path": "src/Entity/Index.php",
+      "sha256": "86103ef41b11bbd12272b2792d46656e8a3ee671cce6f0638a275f7d01063170"
+    },
+    {
+      "path": "src/Entity/SolrCache.php",
+      "sha256": "b88c6e02b95af6d1d7543d2be9dd6f7ac27aac509dc53089bb37081a648eacfc"
+    },
+    {
+      "path": "src/Entity/SolrFieldType.php",
+      "sha256": "418f072bfcf079770f910c4ee06f43b564113ccd7e63614d447016289bc6c584"
+    },
+    {
+      "path": "src/Entity/SolrRequestDispatcher.php",
+      "sha256": "e47f3c11796d768f5da8b3bd833a65226e62e4905ead62bd34c9bfad34c3b825"
+    },
+    {
+      "path": "src/Entity/SolrRequestHandler.php",
+      "sha256": "a28cff004cada70342e10b10667f27713016ca7831decdf8c325b32c31c5ad75"
+    },
+    {
+      "path": "src/EnvironmentAwareSolrConfigInterface.php",
+      "sha256": "47c04673310a0e192725772c2853d39e9186f537e6515e023d6e42aed522342e"
+    },
+    {
+      "path": "src/Event/AbstractIndexAwareEvent.php",
+      "sha256": "2ea0d75585d1a749872a4c409f37ec5292affdb430dbb6c8553aac4e32814301"
+    },
+    {
+      "path": "src/Event/AbstractSearchApiItemSolariumDocumentEvent.php",
+      "sha256": "222899a04223c7f4f50a1cc6a58de5e3c6dc8ff35c3671d6fa43d1ff1c9aa116"
+    },
+    {
+      "path": "src/Event/AbstractSearchApiItemsSolariumDocumentsEvent.php",
+      "sha256": "12fafdd19873eaee8b485fc49991a88e4e54a5b5987ec8fbdc134333fe18ce07"
+    },
+    {
+      "path": "src/Event/AbstractSearchApiQuerySolariumQueryEvent.php",
+      "sha256": "acc35ba6ca694d4f5fed59bd3fe45a2c5ba3a3c1ddb56370549eecccd8ef9225"
+    },
+    {
+      "path": "src/Event/AbstractSearchApiQuerySolariumResultEvent.php",
+      "sha256": "1f96c2d1b3661a5972cdef480919e5fc67477dab2de44f1053381b5fc3396bc8"
+    },
+    {
+      "path": "src/Event/AbstractServerAwareEvent.php",
+      "sha256": "b4188458ab9b612ca853729c21a39aeb57956874fbc8f67b86e6533e834d06b6"
+    },
+    {
+      "path": "src/Event/PostConfigFilesGenerationEvent.php",
+      "sha256": "2321ba4d949a165ce4ef05c81071bbc34ba4a0c0a5d88b09a90823e4ccbc7125"
+    },
+    {
+      "path": "src/Event/PostConfigSetGenerationEvent.php",
+      "sha256": "98e88d1e095034ff50228cdf6beb8c6e5da986f9e998d90871deb7854e06d138"
+    },
+    {
+      "path": "src/Event/PostConfigSetTemplateMappingEvent.php",
+      "sha256": "d2cb40bb23eb0df05238d4fc928db22155f028e961c4a04836ad6bef634abe71"
+    },
+    {
+      "path": "src/Event/PostConvertedQueryEvent.php",
+      "sha256": "c36c4ae2161fdd32a23d414001d4d22c30af32ea9c577571bba68fb4544b202b"
+    },
+    {
+      "path": "src/Event/PostCreateIndexDocumentEvent.php",
+      "sha256": "4c15e620d6c326809f2a028cfce812bc9101468e0e1dcd1650ebc1a65b783df9"
+    },
+    {
+      "path": "src/Event/PostCreateIndexDocumentsEvent.php",
+      "sha256": "e42c8809c95c92b20d8d022725c98e6f148aae44b96e52fb2c356cc58b368ae4"
+    },
+    {
+      "path": "src/Event/PostExtractFacetsEvent.php",
+      "sha256": "652f614e3ce95dcc3a809c778ea5fd3e7e312360795e7f02e3e8731910a3c7d4"
+    },
+    {
+      "path": "src/Event/PostExtractResultsEvent.php",
+      "sha256": "b35f7522965498f8a1115281f62e0a679898c5df0195354f088f8e4b504f3072"
+    },
+    {
+      "path": "src/Event/PostFieldMappingEvent.php",
+      "sha256": "01c448b544e0869ce6d5b10d21018340d0e03d4a5f9a90ad9465b2904a06ec24"
+    },
+    {
+      "path": "src/Event/PostIndexFinalizationEvent.php",
+      "sha256": "25f0b3fd50b8ec8e79f9511a1009f8b525ff8c9a02624838b6da5bac41e2b845"
+    },
+    {
+      "path": "src/Event/PostSetFacetsEvent.php",
+      "sha256": "4a6e2545d5708954d0ae8e511f9f40903519603ef575f411d4c78fea60e15368"
+    },
+    {
+      "path": "src/Event/PreAddLanguageFallbackFieldEvent.php",
+      "sha256": "65930a634209e607ba988baaee3f1eeb54288b13aa00fa1dd638db72ba6a85d0"
+    },
+    {
+      "path": "src/Event/PreAutocompleteTermsQueryEvent.php",
+      "sha256": "a8fbeeda79f49de0793608784b5d4e3da8a7d5137f4e570b4d0fc8cd53a0e617"
+    },
+    {
+      "path": "src/Event/PreCreateIndexDocumentEvent.php",
+      "sha256": "ad1dd7aa32d8a9f53e7bcce2d39e2709a16507c9be7634274c467b2faf3df9b2"
+    },
+    {
+      "path": "src/Event/PreExtractFacetsEvent.php",
+      "sha256": "b3f2c3feb73292d6e3f01d3b4f6533e646346fd070030b1a8662a4fcf9edd8e7"
+    },
+    {
+      "path": "src/Event/PreIndexFinalizationEvent.php",
+      "sha256": "9ad93c0f83428bcc93e31dbbef7f28bfead516c668b17b43fd47313e2b663774"
+    },
+    {
+      "path": "src/Event/PreQueryEvent.php",
+      "sha256": "8854c9ca7b9339a383fe7cbf2b3589eb1ba170e0a08fa2cd8819b9808c29342c"
+    },
+    {
+      "path": "src/Event/PreSetFacetsEvent.php",
+      "sha256": "d07c6e81abb4e4ce9b771957a95c35d5b2d44ca20d382596fe08299fdabc0665"
+    },
+    {
+      "path": "src/Event/SearchApiSolrEvents.php",
+      "sha256": "c6b1bbd8ac277e48d1c53bf6d1a41d8b8e8de78a75066372f0b90cfc256d9d8a"
+    },
+    {
+      "path": "src/EventSubscriber/ConfigSubscriber.php",
+      "sha256": "e7c6dcb8245274538975c5c4bac0f2ed4aee8686d89322ab2e29a8e0b07717e5"
+    },
+    {
+      "path": "src/EventSubscriber/SearchApiSubscriber.php",
+      "sha256": "0071e68af7ed7e7a95f72eac55f74062cfcf8e4e33eb7d5c584f6cf856993c1e"
+    },
+    {
+      "path": "src/Form/IndexAddSolrDocumentFieldsForm.php",
+      "sha256": "d0c128dfbd52abfa38c14d96b6b4bc6423ed3dfbd4987cb7dad8bf66f80a5219"
+    },
+    {
+      "path": "src/Form/IndexSolrMultisiteCloneForm.php",
+      "sha256": "f9587bbf43d316e8b2f6af671e29870a2b5b309043bc5789e902b7cd80d1cc53"
+    },
+    {
+      "path": "src/Form/IndexSolrMultisiteUpdateForm.php",
+      "sha256": "da02e47e97b48a45298d598cd0509fee9b6fb8ae19fb671764b72cdbd2746f59"
+    },
+    {
+      "path": "src/Form/SolrConfigForm.php",
+      "sha256": "9823e9db9d94150ee78cd563c83508c64ff78146cc844304577929a57a3f00cb"
+    },
+    {
+      "path": "src/Form/SolrFieldTypeDeleteForm.php",
+      "sha256": "d565778660f5becc9d36618198b347200667861fba98ee6cdb701d8ea12f12ca"
+    },
+    {
+      "path": "src/Form/SolrFieldTypeForm.php",
+      "sha256": "9ed0dbcfa26d0c5a794963040604e367ab0f947441e24a6727f9543cd6bf8088"
+    },
+    {
+      "path": "src/Hook/SearchApiSolrHooks.php",
+      "sha256": "b0460dd0829332b52b5d8c97bf1fa59e2c63340ccd13329324650fe9993ed36c"
+    },
+    {
+      "path": "src/Plugin/DataType/Deriver/SolrDocumentDeriver.php",
+      "sha256": "48c425bf68e81399eecd2446376fe3bf1cba54fca61420d0c8f7c6239c8edf8e"
+    },
+    {
+      "path": "src/Plugin/DataType/SolrDate.php",
+      "sha256": "b5fcf27d68f93c4aae15514b29384780edc96de29bd549452809b7b7a2ee94ac"
+    },
+    {
+      "path": "src/Plugin/DataType/SolrDocument.php",
+      "sha256": "6170fd204959c2a9005bccebca17f2a5557aa5f798d2eb4d86f1c5ea43f1afee"
+    },
+    {
+      "path": "src/Plugin/DataType/SolrField.php",
+      "sha256": "0bb1f3a4afe13ded130929e302e1acebc11f5466cba2d5d4b000a7dc88622c88"
+    },
+    {
+      "path": "src/Plugin/DataType/SolrMultisiteDocument.php",
+      "sha256": "02faa2aca590e0094e6322691af1afbcde21340f59bc031395d24d0868a62db1"
+    },
+    {
+      "path": "src/Plugin/DataType/SolrMultisiteField.php",
+      "sha256": "f255b4061b9aed49aab3335e5b04ab635f0ac148ac1cd7b8e195eedeee2a4570"
+    },
+    {
+      "path": "src/Plugin/Derivative/CustomTextDataType.php",
+      "sha256": "965e8fb2ffc10e47164fba976486912aa94412ad8a2200299bfa92b5aea812ae"
+    },
+    {
+      "path": "src/Plugin/Derivative/OmitNormsCustomTextDataType.php",
+      "sha256": "1ec258bc43862b3ff3d96dbcbc1f5e8cd1e68756250af09c96dab665cade1607"
+    },
+    {
+      "path": "src/Plugin/Field/FieldFormatter/SearchApiSolrHighlightedFormatterSettingsTrait.php",
+      "sha256": "1233938bd76a9e19267984081e9ebb4fcf55a29d9ced0e692e7dddda86fea55a"
+    },
+    {
+      "path": "src/Plugin/Field/FieldFormatter/SearchApiSolrHighlightedStringFormatter.php",
+      "sha256": "785ffd94c05aa8f41147f703b916221e30572c0fcb2bea105c89eefc589c4bd3"
+    },
+    {
+      "path": "src/Plugin/Field/FieldFormatter/SearchApiSolrHighlightedTextDefaultFormatter.php",
+      "sha256": "382a16fc0d3915114c285a5d22bc7159756161c18b54d319add83816e04f0030"
+    },
+    {
+      "path": "src/Plugin/SolrConnector/BasicAuthSolrCloudConnector.php",
+      "sha256": "6162b3f0d23447711f5e09d245ed289ac68f952f5148783b43a7c16ef57f41f2"
+    },
+    {
+      "path": "src/Plugin/SolrConnector/BasicAuthSolrConnector.php",
+      "sha256": "b14835b3e65a0fa297f972b368ba652178e10f0a6856dc952e908517dc8746d9"
+    },
+    {
+      "path": "src/Plugin/SolrConnector/StandardSolrCloudConnector.php",
+      "sha256": "3198dff14713723bf56c5e21b61a09a2f14cc858e614af8f2eca09f66e60037b"
+    },
+    {
+      "path": "src/Plugin/SolrConnector/StandardSolrConnector.php",
+      "sha256": "eff13c369295b0d9f7e7f56532cf5b68547f8328022d90d64a224166956998ab"
+    },
+    {
       "path": "src/Plugin/search_api/backend/SearchApiSolrBackend.php",
       "sha256": "587ccd8f3fadb606b6968bc589fd6312e02c4a95e2ee502b380ca6a7241cd21d"
+    },
+    {
+      "path": "src/Plugin/search_api/data_type/CustomTextDataType.php",
+      "sha256": "e6e5f965bcb95b9e8d013c3b25a51d631d367f22bc78141d5222a39a777e0d2c"
+    },
+    {
+      "path": "src/Plugin/search_api/data_type/DateRangeDataType.php",
+      "sha256": "070f73cfe569af57d653880bcee99f86eb6e28c24737e09294ecc8ffec5d94f1"
+    },
+    {
+      "path": "src/Plugin/search_api/data_type/DocValuesStringDataType.php",
+      "sha256": "7f92ec62476c171e5cca9996d8ea371bbc73bebd63f863fccfec249f30cd41a9"
+    },
+    {
+      "path": "src/Plugin/search_api/data_type/OmitNormsCustomTextDataType.php",
+      "sha256": "4ceab5c3f54322e053242cd968eb2c1fc85a540cbe963cf0c14543b08bf44b7f"
+    },
+    {
+      "path": "src/Plugin/search_api/data_type/OmitNormsTextDataType.php",
+      "sha256": "159ec3b6a5f072a2a312cc0cd047863a5aa45c2e6163ed250b67bd2d7e31b2b9"
+    },
+    {
+      "path": "src/Plugin/search_api/data_type/SearchApiDataTypePrefixInterface.php",
+      "sha256": "8dc0fe04de47323d41994e62a5f38143eb608659fe3e0c405f838e2da47a5e2a"
+    },
+    {
+      "path": "src/Plugin/search_api/data_type/SpellcheckTextDataType.php",
+      "sha256": "adc45bebbf8807ebd839c408bd33e457584263d7fffa3faf1e283a45c59b66ed"
+    },
+    {
+      "path": "src/Plugin/search_api/data_type/StorageStringDataType.php",
+      "sha256": "1b342743502048605c94c79092d1f4a43bad324a2fe1b6efd86fa379f1cb8ae4"
+    },
+    {
+      "path": "src/Plugin/search_api/data_type/SuggesterTextDataType.php",
+      "sha256": "ff9d77eb9d9b93c39fb3ab0e8c63214609cff9c58992e2985f70c3b600cceec8"
+    },
+    {
+      "path": "src/Plugin/search_api/data_type/UnstemmedTextDataType.php",
+      "sha256": "2dce03846f36a823d88e3bcae3c6e0892137ffca4b3a996eb5d222a3a8d52bf8"
+    },
+    {
+      "path": "src/Plugin/search_api/data_type/WhiteSpaceTokensTextDataType.php",
+      "sha256": "50afd4f8a050d19f82ff5b7604e553a9935d01723cc58855289f8c589dd21e09"
+    },
+    {
+      "path": "src/Plugin/search_api/data_type/value/DateRangeValue.php",
+      "sha256": "1af953ae7b6c55498f8a599c2feac4414a60ed7c9807f523c386a1e98af29870"
+    },
+    {
+      "path": "src/Plugin/search_api/data_type/value/DateRangeValueInterface.php",
+      "sha256": "debffb234125ec994dbb484070fe0b9dc37d1a21343b04a08dec9bf967ef5560"
+    },
+    {
+      "path": "src/Plugin/search_api/datasource/SolrDocument.php",
+      "sha256": "d73b6cfeb9f4bc59eed02dc24daa9ff4ed18a13f00b3be5efeb53bd40ae47f10"
+    },
+    {
+      "path": "src/Plugin/search_api/datasource/SolrMultisiteDocument.php",
+      "sha256": "a7019d280f5d7d887c3ddbf3145e148ee7cbae64ed6cd541402f015bcc9e2f1f"
+    },
+    {
+      "path": "src/Plugin/search_api/parse_mode/Edismax.php",
+      "sha256": "228f5e644f03e4e0249871b793ad9212d4e02cae6942ae90bea43473b7c069e5"
+    },
+    {
+      "path": "src/Plugin/search_api/parse_mode/FuzzyTerms.php",
+      "sha256": "9f9c30b8149f7a90f4ded7020e2540a2f806ae5206a1d489edd6fd000fd264f2"
+    },
+    {
+      "path": "src/Plugin/search_api/parse_mode/SloppyPhrase.php",
+      "sha256": "6571898561b02ade803195a620bd571c06d56f0231113b42eb696c1c048d527e"
+    },
+    {
+      "path": "src/Plugin/search_api/parse_mode/SloppyTerms.php",
+      "sha256": "9078d917aaa529240140934a48f9145b82f9912135ef47bfe89279fdc2a9261a"
+    },
+    {
+      "path": "src/Plugin/search_api/processor/AutoAggregatedFulltextFields.php",
+      "sha256": "9cd9c5e12db32d460fc9520de52d3ed6ceaf09ddb5fe2418fabfb9ff18aa5825"
+    },
+    {
+      "path": "src/Plugin/search_api/processor/BoostMoreRecent.php",
+      "sha256": "381edb7501f64212f4f689755f5f37feb3932545e552bae1c28961227287937f"
+    },
+    {
+      "path": "src/Plugin/search_api/processor/DateRange.php",
+      "sha256": "45f187b35a956d118fc9c546898ce15d306b17c9b2fbecb52eb891e6c376a807"
+    },
+    {
+      "path": "src/Plugin/search_api/processor/DoubleQuoteWorkaround.php",
+      "sha256": "73c62f4d43c15156a301527dd3435696765652dbcf36a90dce7dc5389355d838"
+    },
+    {
+      "path": "src/Plugin/search_api/processor/DummyFields.php",
+      "sha256": "f9ddce13a22cb29ea08de7101ac3d88bf6ba1a04de7fec47ec844dbcc2397172"
+    },
+    {
+      "path": "src/Plugin/search_api/processor/Property/AutoAggregatedFulltextFieldProperty.php",
+      "sha256": "a4ffc5b182314552e787388f1c268a962826612005f2af0ef39e493c8b2db2be"
+    },
+    {
+      "path": "src/Plugin/search_api/processor/Property/DummyFieldProperty.php",
+      "sha256": "7394910ceaceed84f5e10be230dfed56ebab02f7e353fc6cc52bc17f16702a23"
+    },
+    {
+      "path": "src/Plugin/search_api/processor/RegexReplace.php",
+      "sha256": "bf05ec0c5e169d33868a1d7e46450c77e762bdceb1541bfe51d4c1197d0fcb56"
+    },
+    {
+      "path": "src/Plugin/search_api/processor/UniqueFilter.php",
+      "sha256": "611aeabb95123b2d9795efd8bbd4e53dcfe0306c72eccc29ee5b17fccb27a9fc"
+    },
+    {
+      "path": "src/Plugin/search_api/tracker/IndexParallel.php",
+      "sha256": "3bacf6d237a8006c40335d03b8fb5b38702c66ba4392c5e045352efd0c7908f8"
+    },
+    {
+      "path": "src/SearchApiSolrConflictingEntitiesException.php",
+      "sha256": "ac62be1311c0c08cbaa5dc6c488f7825f6de406956b8e27bcef996fdf1b5711c"
+    },
+    {
+      "path": "src/SearchApiSolrException.php",
+      "sha256": "dac7d42db9dfb43fe696ca7d0a772164f758522e0b4dcadd2f13e13386005baf"
+    },
+    {
+      "path": "src/Solarium/Autocomplete/Query.php",
+      "sha256": "361c318a70f2cfd34bce0d11cc9e72383182c538860a6ba8919b1fa5de0e6153"
+    },
+    {
+      "path": "src/Solarium/Autocomplete/RequestBuilder.php",
+      "sha256": "ff84b15d54d3059dc434fa7ab66030167f4010a0ca0b23cd376b778dcbef5e7b"
+    },
+    {
+      "path": "src/Solarium/Autocomplete/ResponseParser.php",
+      "sha256": "eb75311ec7a2256418e37fa4e091c3af8e1286936de7d3501223bb98fda24ef6"
+    },
+    {
+      "path": "src/Solarium/Autocomplete/Result.php",
+      "sha256": "7d4ad849bd9f65f2188b02102344fc8d125c4256c2cc56abe91591c96f0535c1"
+    },
+    {
+      "path": "src/Solarium/Result/StreamDocument.php",
+      "sha256": "0e9c6bf10afdd46ee793339584942cf66676f247634d544dc24fd69068a779a7"
+    },
+    {
+      "path": "src/SolrAutocompleteBackendTrait.php",
+      "sha256": "fefbf53fb438adf81321f9f9a2ddacbc0f4776b70564b613f7f26e8ffdab834e"
+    },
+    {
+      "path": "src/SolrBackendInterface.php",
+      "sha256": "c78f1ab18f131bd11fac43949ebeeeb9884b35c80cacb2f6a1d7f620b1408204"
+    },
+    {
+      "path": "src/SolrCacheInterface.php",
+      "sha256": "79bea8bf95e976007452dd57442bfac7af0a648c21b98e14c6c18e20c50b5467"
+    },
+    {
+      "path": "src/SolrCloudConnectorInterface.php",
+      "sha256": "bfafd67c20497e4ff65cf6fb468e2ffe4a16caae4f3181723035d7bfd15bd290"
+    },
+    {
+      "path": "src/SolrConfigInterface.php",
+      "sha256": "69887092597c9c278b36cf3cb6f27d49de2613d9b185e6def5a03547c9eaac01"
+    },
+    {
+      "path": "src/SolrConnector/BasicAuthTrait.php",
+      "sha256": "d99f352caa800f72c0256e0d57c71a4ab242a463d198b80c1982bef9a86a6cdd"
+    },
+    {
+      "path": "src/SolrConnector/SolrConnectorFactory.php",
+      "sha256": "f9b1bc46f5eeb2c77eb5dedba6862db49bc2ee0780f346bf9a76a05b3fa106ca"
+    },
+    {
+      "path": "src/SolrConnector/SolrConnectorPluginBase.php",
+      "sha256": "b55ec67468adda7f70061aa8151861c7f9a7c63e680b6c48c6a7379aa9617df0"
+    },
+    {
+      "path": "src/SolrConnector/SolrConnectorPluginManager.php",
+      "sha256": "93ea646867c975278a2cbf31d6e57e322f5b58b3d1508a981adbdfda355fc747"
+    },
+    {
+      "path": "src/SolrConnectorInterface.php",
+      "sha256": "9bf9d2712d76fd85e3e16681e2f36079f06288586c9092be153596627c3ddee0"
+    },
+    {
+      "path": "src/SolrDocumentFactory.php",
+      "sha256": "b0e074bcdb8410d229e14f3517516415da8b7669ba43a886ce26a8c43c313191"
+    },
+    {
+      "path": "src/SolrDocumentFactoryInterface.php",
+      "sha256": "ef3695cfcb9ce09323cfc32c0bd3bb978eca193c7f6d2995ae6e9df0f0296020"
+    },
+    {
+      "path": "src/SolrFieldManager.php",
+      "sha256": "9e90ff449f291a25b401f2155e11410da8357342b97fefd549faced653777311"
+    },
+    {
+      "path": "src/SolrFieldManagerInterface.php",
+      "sha256": "ba23569481b9ecffed84743c6dc7fcf5e1f8020ebf1e5d9d3cced56275b6bba2"
+    },
+    {
+      "path": "src/SolrFieldTypeInterface.php",
+      "sha256": "96777e874913804eeb68a41bf90f30e33030f8e1b88df6632e8346fd54c3dbbd"
+    },
+    {
+      "path": "src/SolrMultisiteDocumentFactory.php",
+      "sha256": "549fe408a30b25390fd62a04f124b32ab1a13b63b85c42af657ede86898d79e8"
+    },
+    {
+      "path": "src/SolrMultisiteFieldManager.php",
+      "sha256": "8283352613b087f731d7bd170b6843aaf8401b0f82e1abfc139c79c36592d4bc"
+    },
+    {
+      "path": "src/SolrProcessorInterface.php",
+      "sha256": "049b3fddc9896cca3df8624442718898dd16deb992cc9ba348341d82bbd4eea9"
+    },
+    {
+      "path": "src/SolrRequestDispatcherInterface.php",
+      "sha256": "d956119405e4f0e750842232c7c500946ff08732715f58e71a3b8966bed963a4"
+    },
+    {
+      "path": "src/SolrRequestHandlerInterface.php",
+      "sha256": "a9d3e93c9354f2e9c15f2e2528893f97ad5cf4f17ef4b378f1ae7d18fcc6cbad"
     },
     {
       "path": "src/SolrSpellcheckBackendTrait.php",
       "sha256": "0238f9e32ecfbe3da160e1a58ad56adade38f3ed8cd27adfc1268cd6c5e53771"
     },
     {
-      "path": "src/SolrConnector/SolrConnectorPluginBase.php",
-      "sha256": "b55ec67468adda7f70061aa8151861c7f9a7c63e680b6c48c6a7379aa9617df0"
+      "path": "src/TypedData/SolrDocumentDefinition.php",
+      "sha256": "be42340ef9231b8b7196d7bd32645e8d15586b72daa9923ebae87751f089d979"
+    },
+    {
+      "path": "src/TypedData/SolrDocumentDefinitionInterface.php",
+      "sha256": "c63ea9572b81cedcc09aa7d2ea78f28e1ba424f8cdd0926f96e3ec7c12a36a53"
+    },
+    {
+      "path": "src/TypedData/SolrFieldDefinition.php",
+      "sha256": "f58475f3832549c8427ef587d395b2ca3900aa550097da48a76c5bfa3e49a317"
+    },
+    {
+      "path": "src/TypedData/SolrFieldDefinitionInterface.php",
+      "sha256": "33998c2f665837d8a915e0038d6e5e132956cadfe89addb83748ddf9f3d4d9b2"
+    },
+    {
+      "path": "src/TypedData/SolrMultisiteFieldDefinition.php",
+      "sha256": "477f630418c3681fc9dbcee25042285ec7834e3cd9956d0355878dccbf936874"
+    },
+    {
+      "path": "src/Utility/CommandHelper.php",
+      "sha256": "ea18fffcb16deeec44c8ea415add364d7ff25e271ef7b5af24606baed697da5e"
+    },
+    {
+      "path": "src/Utility/IndexParallelBatchHelper.php",
+      "sha256": "fb5fb07be9a0c1648659d6ea1581e05e1d306b6291e6a7aab373e527d72d5222"
+    },
+    {
+      "path": "src/Utility/SolrCommandHelper.php",
+      "sha256": "6c9b360552c93acd80531028f152b6f34cf3a5f8b298da22e319c9f72153866d"
+    },
+    {
+      "path": "src/Utility/SolrCommitTrait.php",
+      "sha256": "1666b3cb680b70a89695a53c08d311abb9305806afd6b5969557d27062649c33"
+    },
+    {
+      "path": "src/Utility/StreamingExpressionBuilder.php",
+      "sha256": "e8eaca516024da014860793a5a44847b743ff16e4bd9c8bbee585bb780bef2cc"
+    },
+    {
+      "path": "src/Utility/StreamingExpressionQueryHelper.php",
+      "sha256": "e0ff0c19657e2846c8cc341eea6729ac27bcc94b8b6813743e42253495947e30"
+    },
+    {
+      "path": "src/Utility/Utility.php",
+      "sha256": "9e507ac4d427d1a4f53ebc3331d4873a23a7b1a5967b72ca4374e892106f33bd"
+    },
+    {
+      "path": "src/Utility/ZipStreamFactory.php",
+      "sha256": "40ddf629a1f2b0d33b9b9953bc139f63a9618c757a510f3bf9d84bde34c10463"
     }
   ],
   "citations": [
