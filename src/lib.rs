@@ -499,6 +499,7 @@ macro_rules! search_api_routes {
             ("/wayfinder/{core}/select", select, any_method, inherit_body_limit),
             ("/wayfinder/{core}/mlt", mlt, any_method, inherit_body_limit),
             ("/wayfinder/{core}/terms", terms, any_method, inherit_body_limit),
+            ("/wayfinder/{core}/suggest", suggest, any_method, inherit_body_limit),
             ("/wayfinder/{core}/admin/ping", ping, any_method, inherit_body_limit),
             ("/wayfinder/admin/info/system", admin_info_system, any_method, inherit_body_limit),
             ("/wayfinder/{core}/admin/system", core_admin_system, any_method, inherit_body_limit),
@@ -582,6 +583,33 @@ const TERMS_PARAMS: &[&str] = &[
 /// `terms.limit` is absent; a negative value means unlimited, so the default
 /// is the `Some(TERMS_DEFAULT_LIMIT)` case of [`parse_terms_limit`].
 const TERMS_DEFAULT_LIMIT: usize = 10;
+
+/// `/suggest` params (issue #352). The search_api_solr cron path sends only
+/// `suggest.buildAll=true` (via `fireAndForget`); the rest are the shipped
+/// `/suggest` requestHandler's routine surface, admitted so `strict_params`
+/// does not 400 a param the handler config makes normal. `suggest` is the
+/// component gate (handler default `true`); `suggest.dictionary` (default
+/// `und`) and `suggest.count` (default `10`) are the handler defaults from
+/// `request_handler_suggest_default_7_0_0.yml`; `suggest.build` /
+/// `suggest.reload` are the single-dictionary build and reload commands the
+/// same component accepts (captured: each echoes its own `command` field,
+/// inertly).
+///
+/// ponytail: `suggest.q` (the lookup path) is deliberately NOT admitted --
+/// Wayfinder serves live token-prefix completion through `/autocomplete` ->
+/// `/terms` over `twm_suggest` with `terms.prefix` (findings 154-156), not
+/// through `/suggest`, so a `/suggest?suggest.q=` lookup is out of scope and
+/// 400s under `strict_params` rather than pretending to answer it.
+const SUGGEST_PARAMS: &[&str] = &[
+    "suggest",
+    "suggest.buildAll",
+    "suggest.build",
+    "suggest.reload",
+    "suggest.dictionary",
+    "suggest.count",
+    "wt",
+    "omitHeader",
+];
 
 /// Builds the Wayfinder HTTP app for a single core with all server-config
 /// defaults (PRD §6). Use `app_with_config` to supply a config file.
@@ -4133,6 +4161,78 @@ async fn mlt(
 /// naming a *defined but non-text* field is still a 400 — see
 /// `check_terms_field`.
 ///
+/// `/suggest?suggest.buildAll=true` -- the search_api_solr cron path
+/// (issue #352). `SearchApiSolrHooks::cron` fires this via `fireAndForget`
+/// (`nowaitforresponserequest`) whenever the server is Drupal-only-writeable,
+/// the index saw updates since the last build, and the last build was more
+/// than 1800s ago -- verified against the vendored 4.4.0 source at
+/// `src/Hook/SearchApiSolrHooks.php:143-164`.
+///
+/// Solr's SuggestComponent short-circuits a build command and emits
+/// `{"responseHeader":{status,QTime},"command":"buildAll"}` -- no `suggest`
+/// block (that is a `suggest.q` lookup) and no `params` under `responseHeader`
+/// (the component does not echo them, unlike `/select`). The fixture is
+/// `solr-ref/responses/suggest_build_all.json`; the differential harness row is
+/// in `solr-ref/manifest-errors.tsv` (own core, since `/suggest`'s handler
+/// lives in the search-api configset, not the tracer-bullet `content` core).
+///
+/// ponytail: Tantivy's term dictionary is already an FST, so Wayfinder has no
+/// separate suggester dictionary to build. `suggest.buildAll` (and the
+/// single-dictionary `suggest.build` / `suggest.reload`) are accepted and
+/// inert -- they echo Solr's `command` field and do no work. The capabilities
+/// a real suggester adds over a term dictionary -- weighted top-N,
+/// whole-phrase completion across whitespace, fuzzy completion -- are ones
+/// search_api_solr does not use: it reaches `twm_suggest` as a `terms.fl`
+/// value with `terms.prefix` (findings 154-156), token-prefix only, and Solr
+/// declares `twm_suggest` as `text_ws`, so even on real Solr that path
+/// completes single tokens. A materialized dictionary would cost an index-time
+/// build and a staleness window for no query-time gain.
+///
+/// `fireAndForget` closes without reading the response, so the acceptance bar
+/// is: does not error, does not hang, does not leak a task or connection per
+/// cron run. A synchronous immediate return clears all three by construction --
+/// there is no background work to outlive the request -- which is a further
+/// argument for inert over any async-rebuild design.
+async fn suggest(
+    State(state): State<Arc<AppState>>,
+    AxPath(core): AxPath<String>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, WfError> {
+    let params = Params::parse(query.as_deref().unwrap_or("")).allow_omit_header();
+    check_core(&state, &core, &params, Envelope::WithParams)?;
+    check_params(&state, SUGGEST_PARAMS, &params)?;
+
+    // `buildAll` wins when both it and `suggest.build` are sent: Solr's
+    // SuggestComponent processes the build-all path first (captured).
+    let command = if params.bool_or("suggest.buildAll", false)? {
+        Some("buildAll")
+    } else if params.bool_or("suggest.build", false)? {
+        Some("build")
+    } else if params.bool_or("suggest.reload", false)? {
+        Some("reload")
+    } else {
+        None
+    };
+
+    let mut body = Map::new();
+    if !params.omit_header() {
+        // No `params` key: Solr's /suggest never echoes request params under
+        // responseHeader (the SuggestComponent does not run echoParams). Adding
+        // `params.echo()` here would silently diverge from the fixture.
+        body.insert(
+            "responseHeader".to_string(),
+            json!({
+                "status": 0,
+                "QTime": 0,
+            }),
+        );
+    }
+    if let Some(cmd) = command {
+        body.insert("command".to_string(), json!(cmd));
+    }
+    Ok(axum::Json(Value::Object(body)).into_response())
+}
+
 /// `terms_body.json` and its `solr-ref/manifest.tsv` row cover this endpoint
 /// in the differential harness. The one captured analyzer difference is
 /// explicit and narrowly guarded under issue #205: Solr's `text_en` emits

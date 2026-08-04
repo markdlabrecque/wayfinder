@@ -3006,6 +3006,15 @@ fn app_and_request_url<'a>(
         Some(("pls", rest)) => (pls_app, format!("content/{rest}")),
         Some(("plsz", rest)) => (plsz_app, format!("content/{rest}")),
         Some(("daterange", rest)) => (dr341_app, format!("content/{rest}")),
+        // #352: `/suggest?suggest.buildAll=true` is the search_api_solr cron path.
+        // The handler is inert and schema-agnostic (it echoes Solr's `command`
+        // field and touches no index state), so unlike every other core segment
+        // here it needs no dedicated app or corpus -- the tracer-bullet
+        // `content` app serves it unchanged. The fixture is captured against
+        // the search-api configset's `/suggest` handler on its own `suggest`
+        // core (the handler is not in the `_default` configset the `content`
+        // core uses); Wayfinder's response is configset-independent.
+        Some(("suggest", rest)) => (content_app, format!("content/{rest}")),
         Some(("sortdebt", _)) => (sortdebt_app, entry.url.clone()),
         Some(("update9", _)) => (update9_app, entry.url.clone()),
         Some(("stats", _)) => (stats_app, entry.url.clone()),
