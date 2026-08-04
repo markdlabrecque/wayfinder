@@ -1914,6 +1914,17 @@ const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[
          tests/json_facet.rs pins the shape and checks each leaf against the real per-bucket \
          fast-field maximum",
     ),
+    (
+        "dr341_fieldtypes",
+        "issue #341: a whole-endpoint `GET /schema/fieldtypes`, so the fixture is the complete \
+         field-type list of the captured core's solr:9 `_default` configset \
+         (`solr.NestPathField`, `ancestor_path`, `binary`, `solr.TextField`, ...) while \
+         Wayfinder's introspection lists Wayfinder's own builtin types — same permanent \
+         self-description category as `admin_info_system` above, not an unbuilt feature. The one \
+         thing this fixture is captured *for* — that solr:9 declares `date_range`/`date_ranges` \
+         as `solr.DateRangeField`, hence Wayfinder's `wayfinder.DateRangeField` — is asserted \
+         for real in tests/schema_fieldtypes.rs's EXPECTED_CLASSES",
+    ),
 ];
 
 fn expected_divergence_manifest_errors_reason(name: &str) -> Option<&'static str> {
