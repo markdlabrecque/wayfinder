@@ -681,7 +681,7 @@ conditional lists (`2<-1 5<80%`). Implement it fully; it is a small self-contain
 | **v2.5 — Admin web UI** | A read-only operator dashboard, server-rendered by the same binary. Tracer bullet (core view, issue #94) done. See below. |
 | **v2.75 — the contract's remaining endpoints** | The four endpoints in the coverage denominator that Wayfinder does not yet serve: `/terms` (#155), `/schema/fieldtypes` (#156), `/admin/luke` (#157), `/admin/mbeans` (#158). Completing them closes the endpoints bucket. See below. |
 | **Document extraction — staged** | First the client-evidenced `extractOnly=true` path for plain text and HTML, behind request/concurrency/output limits; then DOCX/PPTX and spreadsheet/ODF/RTF families; PDF only after a separate parser-quality and cancellation decision. See below. |
-| **v3** | Result caches + autowarm; spellcheck is delivered end to end — the server accepts `spellcheck`, `spellcheck.q`, `spellcheck.dictionary`, and `spellcheck.collate` (#222) and generates real suggestions and collations (#228, commit `d97b442`), and the Drupal connector sends the request and parses the response (#342); the separate `suggest` path also remains here (`terms` moved earlier to v2.75). Also grouping (`group=true` — see note below on why "collapse" left this line) and `_version_` (issue TBD — scope narrowed, see below). |
+| **v3** | Result caches + autowarm; spellcheck is delivered end to end — the server accepts `spellcheck`, `spellcheck.q`, `spellcheck.dictionary`, and `spellcheck.collate` (#222) and generates real suggestions and collations (#228, commit `d97b442`), and the Drupal connector sends the request and parses the response (#342); the separate `suggest` path is now served too (#352) — `suggest.buildAll` is accepted and inert, since Tantivy's term dictionary is already the live dictionary (`terms` moved earlier to v2.75). Also grouping (`group=true` — see note below on why "collapse" left this line) and `_version_` (issue TBD — scope narrowed, see below). |
 | **v4** | ~~Function queries (`bf`, `{!func}`)~~ **arithmetic function queries landed (#289), `{!payload_score}` landed (#340)** — date/ordinal `ms`/`rord` remain — spatial (`{!geofilt}`, `bbox`, `{!frange}geodist()`, heatmap facets), snapshot-based read replicas |
 | **Solr 9.x parity** | Solr features with zero client evidence, deliberately unscheduled — the table below. |
 | **Deep roadmap** | Distributed / sharded search, SolrCloud. The majority of Solr's complexity and directly opposed to the operational-simplicity goal. |
@@ -813,8 +813,19 @@ Notes on deferred items:
   in #228 (`d97b442`), built over the term dictionary with Tantivy's FST/fuzzy support; and #342
   made the Drupal connector emit the request params and parse the response into
   `search_api_spellcheck` extra data, alongside the language-aware field naming
-  (`spellcheck_<lang>`) the component's sink field needs. Only the separate `suggest` path
-  remains v3.
+  (`spellcheck_<lang>`) the component's sink field needs. The separate `suggest`
+  path is now served (#352): `search_api_solr`'s cron fires
+  `GET /<core>/suggest?suggest.buildAll=true` via `fireAndForget` on every cron
+  run, and Wayfinder accepts it and returns Solr's `command:"buildAll"`
+  envelope inertly — Tantivy's term dictionary is already an FST, so there is
+  no separate dictionary to build, and the live suggestion read path is
+  `/autocomplete` -> `/terms` over `twm_suggest` with `terms.prefix`
+  (findings 154-156), not `/suggest`. There is no ratified divergence here:
+  the build envelope matches Solr byte-for-byte. (The #352 spec's premise that
+  the divergence to ratify was "Solr returns empty until built, Wayfinder reads
+  live" did not hold: Solr's `AnalyzingInfixLookupFactory` returns a 500
+  "suggester was not built" on a pre-build query, not empty, and Wayfinder does
+  not serve `suggest.q` via `/suggest` at all.)
 - **Atomic updates + `_version_`** — narrowed by evidence to just `_version_`; see the "v3 —
   `_version_`" subsection below.
 - **Grouping** — no native equivalent; needs a custom collector. This line originally said

@@ -4635,3 +4635,77 @@ capdr341 dr341_fieldtypes "$DR341_CORE/schema/fieldtypes?wt=json"
 if want_any '^dr341_'; then
   release "$DR341_CONTAINER" "date-range core '$DR341_CORE'"
 fi
+
+# --- /suggest?suggest.buildAll=true (issue #352) ---------------------------
+# Appended block; nothing above is edited. Own container/port/core, per the
+# wayfinder-solr-223 precedent: the `/suggest` requestHandler and its `suggest`
+# SuggestComponent live in `solr-ref/search-api/configset/solrconfig_extra.xml`
+# (the canonical Drupal configset), which the tracer-bullet `content` core (a
+# bare `_default` configset) does not carry. So this mounts the search-api
+# configset the way the #223 spellcheck block does. Same caveat as the other
+# appended blocks: NOT runnable standalone -- `$OUT`/`$HERE` come from the top
+# of the script -- so run the whole script, or `--only '^suggest_'`.
+#
+# The cron path is the single request this issue is about:
+# `search_api_solr`'s `SearchApiSolrHooks::cron` fires
+# `GET /<core>/suggest?suggest.buildAll=true` via `fireAndForget`
+# (nowaitforresponserequest) whenever the server is Drupal-only-writeable, the
+# index saw updates since the last build, and the last build was >1800s ago --
+# verified against the vendored source at
+# `coverage/search_api_solr_4.4.0_source/src/Hook/SearchApiSolrHooks.php:143-164`
+# (the gate) and `:159-161` (`getSuggesterQuery` + `addParam('suggest.buildAll',
+# TRUE)` + `fireAndForget`).
+#
+# What `suggest.buildAll` returns: Solr's SuggestComponent short-circuits a
+# build command and emits `{"responseHeader":{status,QTime},"command":"buildAll"}`
+# -- NO `suggest` block (that appears only for a `suggest.q` lookup) and NO
+# `params` under `responseHeader` (the component does not echo them). Tantivy's
+# term dictionary is already an FST, so Wayfinder has no separate dictionary to
+# build: `buildAll` is accepted and inert, returning this envelope unchanged.
+# That inertness is the ponytail: token-prefix completion is served live from
+# the index via `/terms` (findings 154-156), not via `/suggest`, so a build
+# would cost an index-time job and a staleness window for no query-time gain.
+#
+# The corpus populates `twm_suggest` (the field the `und` suggester reads) so
+# the build has something to build over, but the build envelope itself is
+# corpus-independent -- it carries no suggestions, only `command:"buildAll"`.
+SUGGEST352_CONTAINER=wayfinder-solr-352
+SUGGEST352_SOLR=http://localhost:9013/solr
+SUGGEST352_CORE=suggest
+if want_any '^suggest_'; then
+  docker rm -f "$SUGGEST352_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$SUGGEST352_CONTAINER" -p 9013:8983 \
+    -e SOLR_MODULES=analysis-extras \
+    -v "$HERE/search-api/configset:/opt/solr/server/solr/configsets/search-api:ro" \
+    solr:9 solr-precreate "$SUGGEST352_CORE" /opt/solr/server/solr/configsets/search-api >/dev/null
+  echo -n "waiting for issue #352 Solr"
+  for _ in $(seq 90); do
+    if curl -sf "$SUGGEST352_SOLR/$SUGGEST352_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n "."; sleep 1
+  done
+  curl -sf "$SUGGEST352_SOLR/$SUGGEST352_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"su1","twm_suggest":["quick brown fox","lazy dog"]},
+    {"id":"su2","twm_suggest":["quietly quacking quail","brown bear"]},
+    {"id":"su3","twm_suggest":["the quick fox jumps over the lazy dog"]}
+  ]' >/dev/null
+fi
+
+# Same 6-column manifest-errors.tsv contract as capspell/caph334: own core, so
+# never manifest.tsv (the differential harness GETs manifest.tsv rows against
+# the single `content` core, which has no /suggest handler).
+capsuggest() {  # capsuggest <name> <url-after-/solr/>
+  local name=$1 suffix=$2
+  want "$name" || return 0
+  curl -sg "$SUGGEST352_SOLR/$suffix" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$suffix" "" "$SUGGEST352_SOLR" \
+    >> "$MANIFEST_ERRORS"
+  rm -f "$OUT/$name.status"
+}
+
+# The cron path: the one request search_api_solr's default cron fires at /suggest.
+capsuggest suggest_build_all "$SUGGEST352_CORE/suggest?suggest.buildAll=true&wt=json"
+
+if want_any '^suggest_'; then
+  release "$SUGGEST352_CONTAINER" "suggest core '$SUGGEST352_CORE'"
+fi
