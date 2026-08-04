@@ -1031,10 +1031,9 @@ non-sortable — `tests/version_field.rs` still asserts both are 400.
 **write side** only. Over both evidence channels (the 28 traces and the frozen 4.4.0 source) it
 fails the day a captured request sends `_version_` or `versions=true`, or the source stops writing
 whole documents through `addDocument(s)`. It was narrowed from the wider `version_descope_guard.rs`
-when #343 landed: `json.facet` left its request needles and the read-path deferral framing went with
-it, but the write-side descopes above and the finding-132 PRD tripwires stayed, because #343 touched
-neither. When it goes red, revisit this decision (#293) with the new evidence — do not weaken the
-guard.
+when #343 landed: the read-path needles and framing came out, while the write-side descopes above
+and the finding-132 PRD tripwires stayed, because #343 touched neither. When it goes red, revisit
+this decision (#293) with the new evidence — do not weaken the guard.
 
 ---
 

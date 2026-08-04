@@ -190,8 +190,17 @@ fn parse_terms(key: &str, facet: &Map<String, Value>) -> Result<ParsedTerms> {
     // `type` is checked before the unknown-key sweep so an out-of-scope facet
     // type is named in the error rather than one of its own sub-keys (e.g.
     // `type: query`'s `q`).
+    // ponytail: Solr defaults a `type`-less facet object to `terms`; Wayfinder
+    // requires `type` explicitly. The client always sends it (spec §1a: Solarium's
+    // `JsonFacetTrait::serialize()` injects `type` unconditionally), so there is no
+    // fixture for the omitted form and no evidenced default to match -- inferring
+    // one here would be guessing at Solr behaviour we have not captured. The error
+    // therefore names the missing key rather than claiming `terms` is unsupported.
     let Some(kind) = facet.get("type") else {
-        bail!("json.facet member `{key}` has no `type`: only `type: terms` is supported");
+        bail!(
+            "json.facet member `{key}` is missing the required `type` key: Wayfinder does not \
+             infer Solr's `terms` default"
+        );
     };
     match kind.as_str() {
         Some("terms") => {}

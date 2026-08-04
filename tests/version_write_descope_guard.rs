@@ -300,9 +300,19 @@ fn prd_version_section_records_the_json_facet_read_path_as_landed_not_deferred()
          will re-descope a shipped feature."
     );
     for p in version_paragraphs() {
-        let lower = p.to_lowercase();
-        let names_the_read_path = lower.contains("json facet") || lower.contains("json.facet");
-        let calls_it_deferred = lower.contains("deferred") || lower.contains("not v1 work");
+        // Normalised so the match cannot be escaped by punctuation: `json-facet`,
+        // `json.facet` and `json facet` all collapse to `jsonfacet`, and the stem
+        // `defer` covers `deferred`/`deferral`/`deferring`. The blunt stem is only
+        // safe because no block in this section legitimately uses a `defer` word
+        // any more -- the Guard paragraph was reworded for exactly that reason, so
+        // this stays a strict negative with no exemption to game.
+        let lower: String = p
+            .to_lowercase()
+            .chars()
+            .filter(|c| !matches!(c, '-' | '.' | '_' | '`' | ' '))
+            .collect();
+        let names_the_read_path = lower.contains("jsonfacet");
+        let calls_it_deferred = lower.contains("defer") || lower.contains("notv1work");
         assert!(
             !(names_the_read_path && calls_it_deferred),
             "PRD §5's v3 `_version_` section still describes the JSON-facet read path as \
