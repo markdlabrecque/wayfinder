@@ -3886,6 +3886,15 @@ capg338 g338_truncate_qr     "select?q=*:*&$G338_GRP&group.truncate=true&$G338_Q
 # facets as computed from the FIRST specified group field. `type` gives 3
 # groups, `popularity` gives 6 (every value distinct), so which one drives the
 # counts is observable.
+# Is the truncated/grouped set the WHOLE group set or only the page of groups
+# `rows` returns? `rows=1` returns one group; if truncation were page-scoped the
+# `type` facet would be `article=1` alone. Same question for `group.facet`.
+capg338 g338_truncate_rows   "select?q=*:*&$G338_GRP&group.truncate=true&rows=1&$G338_FF&$G338_TAIL"
+capg338 g338_groupfacet_rows "select?q=*:*&$G338_GRP&group.facet=true&rows=1&$G338_FF&$G338_TAIL"
+# Which `group.field` does `group.truncate` collapse on when there are two?
+# `type` collapses 6 documents to 3, `popularity` leaves all 6 (every value is
+# distinct), so the facet counts name the answer.
+capg338 g338_truncate_multi  "select?q=*:*&group=true&group.field=type&group.field=popularity&group.ngroups=true&group.truncate=true&$G338_FF&$G338_TAIL"
 # `group.facet` is a faceting flag; this pins that it leaves `stats` alone
 # (unlike `group.truncate`, which `g338_truncate_stats` shows stats does follow).
 capg338 g338_groupfacet_stats "select?q=*:*&$G338_GRP&group.facet=true&stats=true&stats.field=popularity&$G338_TAIL"

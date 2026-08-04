@@ -2914,7 +2914,12 @@ as *grid math*, not storage).
       follows too — `popularity` goes count 6/min 5/max 40/sum 120 to count
       3/min 10/max 20/sum 45, i.e. exactly {g1:10, g2:20, g6:15}
       (`g338_truncate_stats`). The `grouped` block itself is untouched:
-      `matches` stays 6 and `ngroups` stays 3.
+      `matches` stays 6 and `ngroups` stays 3. The collapsed set is the WHOLE
+      group set, not the page of groups `rows` returns: `rows=1` returns one
+      group and still facets `article=1, page=1` (`g338_truncate_rows`). With
+      two `group.field` values it collapses on the FIRST:
+      `group.field=type&group.field=popularity` gives `type`'s 3-document
+      collapse, not `popularity`'s 6 singletons (`g338_truncate_multi`).
 
 161. **`group.facet=true` turns every facet count into a count of matching
       GROUPS, including `facet.query` and `facet.range` — the "field facets
@@ -2935,4 +2940,6 @@ as *grid math*, not storage).
       `popularity`'s 6 singleton groups (`g338_groupfacet_multi`). Combined
       with `group.truncate=true`, truncation applies first and the group
       counting then runs over the truncated set (`news=2, blog=0`,
-      `g338_groupfacet_truncate`).
+      `g338_groupfacet_truncate`). Like `group.truncate`, it is
+      paging-independent: `rows=1` returns one group and still counts over all
+      of them (`g338_groupfacet_rows`).
