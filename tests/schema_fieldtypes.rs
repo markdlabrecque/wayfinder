@@ -44,8 +44,8 @@ const NON_ENGLISH_LANGUAGE_CODES: &[&str] = &[
 
 /// Built-in type names `resolve_type` accepts that are not language presets:
 /// `string`/`keyword` (both resolve to `Str`), `text_general`, `int`/`long`,
-/// `float`/`double`, `date`, `location` (#331)/`location_rpt` (#334), and
-/// `boost_term_payload` (#340). `text_en` is listed
+/// `float`/`double`, `date`, `location` (#331)/`location_rpt` (#334),
+/// `boost_term_payload` (#340), and `date_range` (#341). `text_en` is listed
 /// separately below since it is the one `text_*` preset with its own
 /// dedicated tokenizer identity (`wayfinder_text_en_v2`), not a `LANGUAGES`-
 /// table lookup.
@@ -61,6 +61,8 @@ const NON_LANGUAGE_BUILTIN_TYPES: &[&str] = &[
     "location",
     "location_rpt",
     "boost_term_payload",
+    // #341: DateRangeField-style interval type, `drs_*`/`drm_*`.
+    "date_range",
 ];
 
 /// Names that must never appear: real languages `resolve_type` does not
@@ -105,6 +107,10 @@ const EXPECTED_CLASSES: &[(&str, &str)] = &[
     // the class is Solr's vocabulary even though Wayfinder's storage is a
     // payload-stripped index side plus a verbatim fast column.
     ("boost_term_payload", "wayfinder.TextField"),
+    // #341: real Solr's own class name for this type happens to coincide with
+    // Wayfinder's naming convention (unlike `pdate` -> `DatePointField`),
+    // since `DateRangeField` genuinely is Solr's class here too.
+    ("date_range", "wayfinder.DateRangeField"),
     // trace: `text_en`
     ("text_en", "wayfinder.TextField"),
     // trace: every `text_*` entry (`text_und`, `text_ws`, ...) is a TextField.
@@ -120,7 +126,7 @@ const EXPECTED_CLASSES: &[(&str, &str)] = &[
 const EXPECTED_ATTRIBUTE_KEYS: &[&str] = &["indexed", "stored", "multiValued", "docValues"];
 
 /// The exact, complete set of `fieldTypes` names Wayfinder must report for a
-/// schema declaring the custom chains in `extra_custom`: the twelve non-language
+/// schema declaring the custom chains in `extra_custom`: the thirteen non-language
 /// built-ins (`NON_LANGUAGE_BUILTIN_TYPES` plus `text_en`), one
 /// `text_<code>` per non-English `LANGUAGES` entry, and each custom chain --
 /// nothing else. Sorted, so `assert_eq!` against a sorted actual list is a

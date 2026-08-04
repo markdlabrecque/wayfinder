@@ -312,6 +312,25 @@ const DYNAMIC_FIELDS: &[DynamicExpectation] = &[
         stored: true,
         fast: true,
     },
+    // #341: DateRangeField-style interval type. The captured configset
+    // (`solr-ref/search-api/configset/schema.xml:199-200`) declares
+    // `drs_*`/`drm_*` as `indexed="true" stored="true"`, with NO `docValues`
+    // -- unlike every other dynamic prefix above, so `fast` must be `false`
+    // here.
+    DynamicExpectation {
+        name: "drs_created",
+        type_: "date_range",
+        multi_valued: false,
+        stored: true,
+        fast: false,
+    },
+    DynamicExpectation {
+        name: "drm_created",
+        type_: "date_range",
+        multi_valued: true,
+        stored: true,
+        fast: false,
+    },
     DynamicExpectation {
         name: "bs_status",
         // Wayfinder has no boolean type (`ResolvedType` in `src/schema.rs`
