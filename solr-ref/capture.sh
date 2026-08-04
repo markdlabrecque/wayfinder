@@ -4001,3 +4001,265 @@ capg338n g338n_truncate "select?q=*:*&$G338N_GRP&group.truncate=true&$G338N_FF&$
 if want_any '^g338n_'; then
   release "$G338N_CONTAINER" "g338null core '$G338N_CORE'"
 fi
+
+# --- {!payload_score} over a boost_term_payload field (#340)
+# The fourth and last concrete function the 4.4.0 snapshot names (finding 129);
+# findings 143-146 split it out of #289 because it is a *query parser* over a
+# payload-bearing field type, not an arithmetic function.
+#
+# The field type is copied verbatim from the module's own configset
+# (`solr-conf-templates/9.x/schema.xml:387-406`, fetched from `git.drupalcode.org`
+# `4.4.x`): whitespace tokenizer, LengthFilter min=2/max=100, lowercase,
+# RemoveDuplicates, then DelimitedPayloadTokenFilter with the float encoder. The
+# `boost_term` field is `multiValued`, `stored=false` (`schema.xml:157`), and the
+# indexing side writes one value per boosted term as `sprintf('%s|%.1F')`
+# (`SearchApiSolrBackend.php:1502-1503`), which is why every corpus value below
+# is a single `<term>|<boost>` token.
+#
+# Own container/port/core: no existing corpus has a payload-bearing field.
+# Rows land in `manifest-errors.tsv` and get a dedicated `pls_app` in
+# `tests/differential.rs`, like `fnq_*`.
+#
+# d3 carries `dog` twice with different payloads (1.5 and 4.5) -- that is the
+# only way min/max/average/sum are distinguishable from each other. d4 has no
+# `boost_term` at all, so it never matches a payload_score clause.
+PLS_CONTAINER=wayfinder-solr-340
+PLS_SOLR=http://localhost:9076/solr
+PLS_CORE=pls
+if want_any '^pls_'; then
+  if ! docker ps --format '{{.Names}}' | grep -qx "$PLS_CONTAINER"; then
+    docker rm -f "$PLS_CONTAINER" >/dev/null 2>&1 || true
+    docker run -d --name "$PLS_CONTAINER" -p 9076:8983 \
+      solr:9 solr-precreate "$PLS_CORE" >/dev/null
+  fi
+  echo -n "waiting for payload_score solr"
+  for _ in $(seq 60); do
+    if curl -sf "$PLS_SOLR/$PLS_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n "."; sleep 1
+  done
+  curl -s "$PLS_SOLR/$PLS_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field-type": {
+      "name":"boost_term_payload","class":"solr.TextField","stored":false,"indexed":true,
+      "analyzer":{
+        "tokenizer":{"class":"solr.WhitespaceTokenizerFactory"},
+        "filters":[
+          {"class":"solr.LengthFilterFactory","min":"2","max":"100"},
+          {"class":"solr.LowerCaseFilterFactory"},
+          {"class":"solr.RemoveDuplicatesTokenFilterFactory"},
+          {"class":"solr.DelimitedPayloadTokenFilterFactory","encoder":"float"}
+        ]
+      }
+    }
+  }' >/dev/null
+  curl -s "$PLS_SOLR/$PLS_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field": [
+      {"name":"body","type":"text_general","indexed":true,"stored":true},
+      {"name":"boost_document","type":"pfloat","indexed":true,"stored":true,"docValues":true},
+      {"name":"boost_term","type":"boost_term_payload","indexed":true,"stored":false,"multiValued":true}
+    ]
+  }' >/dev/null
+  curl -sf "$PLS_SOLR/$PLS_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"d1","body":"quick brown fox","boost_document":1.0,"boost_term":["fox|2.0","brown|1.5"]},
+    {"id":"d2","body":"lazy dog","boost_document":1.0,"boost_term":["dog|3.0"]},
+    {"id":"d3","body":"quick dog","boost_document":2.0,"boost_term":["dog|1.5","dog|4.5","quick|2.5"]},
+    {"id":"d4","body":"quick fox","boost_document":0.5},
+    {"id":"d5","body":"lazy brown","boost_document":1.0,"boost_term":["brown|4.0","lazy|0.5"]}
+  ]' >/dev/null
+fi
+
+cappls() {  # cappls <name> <path-after-core>
+  local name=$1 suffix=$2
+  want "$name" || return 0
+  curl -sg "$PLS_SOLR/$PLS_CORE/$suffix" \
+    -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$PLS_CORE/$suffix" "" "$PLS_SOLR" \
+    >> "$MANIFEST_ERRORS"
+  rm -f "$OUT/$name.status"
+}
+
+# Percent-encoded for the same reason the fnq block is: `{`/`}`/`!`/space/`"`
+# and the inner `=` would otherwise break the in-process axum URI the
+# differential harness replays. `%22` is the double quote the module's
+# `escapePhrase()` puts around every `v` value.
+PLS_TAIL='fl=id,score&sort=score%20desc,id%20asc&wt=json'
+
+# The four payload functions. Only d3 distinguishes them (payloads 1.5, 4.5):
+# max=4.5, min=1.5, average=3.0, sum=6.0. d2 has a single 3.0 payload, so it
+# scores 3.0 under all four -- which is what makes it the control.
+cappls pls_max     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Dmax%7D&$PLS_TAIL"
+cappls pls_min     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Dmin%7D&$PLS_TAIL"
+cappls pls_average "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Daverage%7D&$PLS_TAIL"
+cappls pls_sum     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Dsum%7D&$PLS_TAIL"
+
+# `includeSpanScore` defaults to *false* on solr:9 -- the bare form and the
+# explicit `false` form both score the raw payload value, with no BM25 factor.
+# That is what keeps these fixtures exactly comparable rather than sitting under
+# the ratified BM25-magnitude divergence. `includeSpanScore=true` multiplies the
+# span score back in and is the one row expected to diverge.
+cappls pls_span_false "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Dmax%20includeSpanScore%3Dfalse%7D&$PLS_TAIL"
+cappls pls_span_true  "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Dmax%20includeSpanScore%3Dtrue%7D&$PLS_TAIL"
+
+# `v` is analyzed by the field type, so an uppercase value still matches
+# (LowerCaseFilter); the quotes `escapePhrase()` adds are optional as far as the
+# parser is concerned. A doc with no `boost_term` (d4) and a term nothing
+# carries both yield an empty result rather than a zero score.
+cappls pls_v_unquoted "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3Ddog%20func%3Dmax%7D&$PLS_TAIL"
+cappls pls_v_upper    "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22DOG%22%20func%3Dmax%7D&$PLS_TAIL"
+cappls pls_unmatched  "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22nosuch%22%20func%3Dmax%7D&$PLS_TAIL"
+
+# Two payload_score blocks with nothing in front of them. A position-0 local
+# params block sets the parser for the *whole* `q`, so the first block consumes
+# the rest of the string and -- because `v` is given explicitly -- discards it:
+# d3 scores dog's 4.5, not dog(4.5)+quick(2.5)=7.0. Only when something else
+# holds position 0 (see `pls_client_shape`) do the blocks become clauses the
+# lucene parser sums. This row is the one that pins that asymmetry.
+cappls pls_two_terms "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Dmax%7D%20%7B%21payload_score%20f%3Dboost_term%20v%3D%22quick%22%20func%3Dmax%7D&$PLS_TAIL"
+
+# The exact string `SearchApiSolrBackend::preQuery` assembles when a term-boost
+# processor is configured (`SearchApiSolrBackend.php:1947-1981` joined with
+# spaces): a position-0 `{!boost b=boost_document}` whose child is the two
+# inline `{!payload_score}` clauses plus the `*:*` fallback. Every clause is a
+# SHOULD, so the child score is dog+quick+1.0 and the wrapper multiplies by
+# `boost_document`: d3 = (4.5+2.5+1.0)*2.0 = 16.0, d2 = (3.0+1.0)*1.0 = 4.0,
+# d1/d5 = 1.0, d4 = 0.5. This is the row the whole increment exists for -- note
+# the payload_score blocks are *inline*, not at position 0.
+cappls pls_client_shape "select?q=%7B%21boost%20b%3Dboost_document%7D%20%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Dmax%7D%20%7B%21payload_score%20f%3Dboost_term%20v%3D%22quick%22%20func%3Dmax%7D%20*%3A*&$PLS_TAIL"
+
+# A multi-term `v` becomes an ordered SpanNearQuery over the payload field.
+# `positionIncrementGap` is unset on the field type, so consecutive multiValued
+# values sit at consecutive positions and d3's `dog`(pos 1)/`quick`(pos 2) form
+# a span; the function runs over the payloads inside it (max 4.5). The module
+# never emits this -- every `boost_term` value is a single token -- so it is a
+# named descope with an expiring guard, not a supported form.
+cappls pls_multiterm_v "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%20quick%22%20func%3Dmax%7D&$PLS_TAIL"
+
+# Error shapes. `f` missing is a plain 400 `'f' not specified`; a `v` that
+# analyzes to nothing -- absent entirely, or shorter than LengthFilter's min=2
+# -- is 400 `SpanQuery is null`, the exception the module's own comments warn
+# about (`Utility.php:1004-1007`). `func` is case-sensitive and required.
+cappls pls_err_no_f          "select?q=%7B%21payload_score%20v%3D%22dog%22%20func%3Dmax%7D&$PLS_TAIL"
+cappls pls_err_no_v          "select?q=%7B%21payload_score%20f%3Dboost_term%20func%3Dmax%7D&$PLS_TAIL"
+cappls pls_err_short_v       "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22a%22%20func%3Dmax%7D&$PLS_TAIL"
+cappls pls_err_no_func       "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%7D&$PLS_TAIL"
+cappls pls_err_unknown_func  "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Dbogus%7D&$PLS_TAIL"
+cappls pls_err_func_case     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3DMAX%7D&$PLS_TAIL"
+cappls pls_err_undef_field   "select?q=%7B%21payload_score%20f%3Dnosuchfield%20v%3D%22dog%22%20func%3Dmax%7D&$PLS_TAIL"
+# `f` naming a real field that carries no payloads is an uncaught
+# NullPointerException in Lucene's PayloadScoreQuery constructor -- HTTP 500,
+# not 400. Captured as evidence; Wayfinder answers 400 rather than reproducing
+# an upstream crash, which is a ratified divergence, not a bug.
+cappls pls_err_nonpayload    "select?q=%7B%21payload_score%20f%3Dbody%20v%3D%22dog%22%20func%3Dmax%7D&$PLS_TAIL"
+
+if want_any '^pls_'; then
+  release "$PLS_CONTAINER" "payload_score core '$PLS_CORE'"
+fi
+
+# --- payload-free occurrences in a boost_term_payload field (#340, finding 172)
+# The `pls` corpus writes every value as `<term>|<boost>`, because that is all
+# the module ever emits (`sprintf('%s|%.1F')`). It therefore says nothing about
+# what a *payload-free* occurrence scores -- and the natural guesses are both
+# wrong. Solr's PayloadDecoder decodes a null payload to `1f` rather than
+# skipping the position, so a bare token contributes the factor 1.0 and takes
+# part in the aggregate like any other.
+#
+# Own container/port/core rather than three more docs in `pls`, so none of the
+# committed `pls_*` fixtures move.
+#
+# z1 has the bare token alone; z2 is the payloaded control; z3 carries both
+# forms of the same term, which is the row that distinguishes "contributes 1.0"
+# from "is skipped" -- under `min`, skipping would give 2.0 and contributing
+# gives 1.0.
+PLSZ_CONTAINER=wayfinder-solr-340z
+PLSZ_SOLR=http://localhost:9077/solr
+PLSZ_CORE=plsz
+if want_any '^plsz_'; then
+  if ! docker ps --format '{{.Names}}' | grep -qx "$PLSZ_CONTAINER"; then
+    docker rm -f "$PLSZ_CONTAINER" >/dev/null 2>&1 || true
+    docker run -d --name "$PLSZ_CONTAINER" -p 9077:8983 \
+      solr:9 solr-precreate "$PLSZ_CORE" >/dev/null
+  fi
+  echo -n "waiting for payload-free solr"
+  for _ in $(seq 60); do
+    if curl -sf "$PLSZ_SOLR/$PLSZ_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n "."; sleep 1
+  done
+  # Field type identical to the `pls` block's -- same verbatim copy of the
+  # module's configset, so the only variable under test is the corpus.
+  curl -s "$PLSZ_SOLR/$PLSZ_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field-type": {
+      "name":"boost_term_payload","class":"solr.TextField","stored":false,"indexed":true,
+      "analyzer":{
+        "tokenizer":{"class":"solr.WhitespaceTokenizerFactory"},
+        "filters":[
+          {"class":"solr.LengthFilterFactory","min":"2","max":"100"},
+          {"class":"solr.LowerCaseFilterFactory"},
+          {"class":"solr.RemoveDuplicatesTokenFilterFactory"},
+          {"class":"solr.DelimitedPayloadTokenFilterFactory","encoder":"float"}
+        ]
+      }
+    }
+  }' >/dev/null
+  curl -s "$PLSZ_SOLR/$PLSZ_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field": [
+      {"name":"boost_term","type":"boost_term_payload","indexed":true,"stored":false,"multiValued":true}
+    ]
+  }' >/dev/null
+  curl -sf "$PLSZ_SOLR/$PLSZ_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"z1","boost_term":["dog"]},
+    {"id":"z2","boost_term":["dog|3.0"]},
+    {"id":"z3","boost_term":["cat","cat|2.0"]},
+    {"id":"z4","boost_term":["bird|2.0","bird|2.0"]}
+  ]' >/dev/null
+fi
+
+capplsz() {  # capplsz <name> <path-after-core>
+  local name=$1 suffix=$2
+  want "$name" || return 0
+  curl -sg "$PLSZ_SOLR/$PLSZ_CORE/$suffix" \
+    -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$PLSZ_CORE/$suffix" "" "$PLSZ_SOLR" \
+    >> "$MANIFEST_ERRORS"
+  rm -f "$OUT/$name.status"
+}
+
+PLSZ_TAIL='fl=id,score&sort=score%20desc,id%20asc&wt=json'
+
+# `dog`: z1 (bare) against z2 (payload 3.0). z1 scores 1.0 under all four
+# functions -- not 0.0, and not absent from the results.
+capplsz plsz_bare_max     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Dmax%7D&$PLSZ_TAIL"
+capplsz plsz_bare_min     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Dmin%7D&$PLSZ_TAIL"
+capplsz plsz_bare_average "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Daverage%7D&$PLSZ_TAIL"
+capplsz plsz_bare_sum     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Dsum%7D&$PLSZ_TAIL"
+
+# `cat`: z3 alone, carrying both `cat` and `cat|2.0`. The aggregate runs over
+# [1.0, 2.0] -- max 2.0, min 1.0, average 1.5, sum 3.0. These four values are
+# the whole evidence for the "decodes to 1f, does not skip" rule.
+capplsz plsz_mixed_max     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Dmax%7D&$PLSZ_TAIL"
+capplsz plsz_mixed_min     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Dmin%7D&$PLSZ_TAIL"
+capplsz plsz_mixed_average "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Daverage%7D&$PLSZ_TAIL"
+capplsz plsz_mixed_sum     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Dsum%7D&$PLSZ_TAIL"
+
+# Solr's general local-params contract says a block with no `v` takes its query
+# text from the *bound* run after `}`. `pls_err_no_v` shows the 400 when there
+# is no bound text either, but says nothing about the case where there is one --
+# so these two rows settle whether `{!payload_score f=... func=max}dog` is a
+# working query and whether an explicit `v` beats a bound run that disagrees
+# with it. The module always emits an explicit `v`
+# (`Utility::flattenKeysToPayloadScore`), so this is contract coverage rather
+# than client-path coverage.
+capplsz plsz_vbound_max    "select?q=%7B%21payload_score%20f%3Dboost_term%20func%3Dmax%7Ddog&$PLSZ_TAIL"
+capplsz plsz_vbound_v_wins "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Dmax%7Ddog&$PLSZ_TAIL"
+
+# Two *identical* `<term>|<boost>` values. `RemoveDuplicatesTokenFilter` drops
+# duplicates only within one position, and consecutive multiValued values sit at
+# consecutive positions (finding 171), so both occurrences survive and both
+# count: `sum` 4.0 and `average` 2.0 rather than 2.0 and 2.0. z4 uses `bird`, a
+# term no other row queries, so adding it moves none of the committed fixtures.
+capplsz plsz_dup_sum     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22bird%22%20func%3Dsum%7D&$PLSZ_TAIL"
+capplsz plsz_dup_average "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22bird%22%20func%3Daverage%7D&$PLSZ_TAIL"
+
+if want_any '^plsz_'; then
+  release "$PLSZ_CONTAINER" "payload-free core '$PLSZ_CORE'"
+fi

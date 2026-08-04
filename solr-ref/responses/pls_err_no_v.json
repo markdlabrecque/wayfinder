@@ -1,0 +1,17 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0,
+    "params":{
+      "q":"{!payload_score f=boost_term func=max}",
+      "fl":"id,score",
+      "sort":"score desc,id asc",
+      "wt":"json"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"SpanQuery is null",
+    "code":400
+  }
+}

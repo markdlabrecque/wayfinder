@@ -361,9 +361,22 @@ chosen. Nothing may be added here without the same two things.
     rather than `ACCEPTED_DIVERGENCES_MULTIPART`.
     (issues #258, #259, and #294; findings 120-123)
 
+11. **`{!payload_score}` over a field that carries no term payloads is a 400, where Solr dies on
+    an uncaught `NullPointerException` (500).** `pls_err_nonpayload.json` is
+    `{!payload_score f=body v="dog" func=max}` against a plain `text` field: Solr's
+    `PayloadScoreQParserPlugin` builds the span query, hands it to `PayloadScoreQuery`, and the
+    request fails with a 500 carrying a `trace` and no `msg` at all — a crash, not a diagnosis.
+    Wayfinder validates the field's payload capability after Solr's own checks (`f` present, `f`
+    defined, `v` analyzes to a term, `func` known, each of which keeps its captured message) and
+    answers 400 naming the field. Reproducing an upstream crash is not a goal, and a 500 with no
+    `msg` is unactionable for the client; a 400 is the same category the project already chose in
+    divergence 2 for "you asked for something impossible". Recorded in `ACCEPTED_DIVERGENCES`
+    with a check arm that asserts the fixture is still the 500/NPE shape and that Wayfinder still
+    answers 400, so the entry cannot rot into an excuse. (finding 170; issue #340)
+
 Note that divergence 3 is a difference from the *configset* the reference fixtures were captured
 against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, 4, 6, 7,
-8, and 10 are differences from Solr proper. Divergence 5 is a deliberate config choice plus
+8, 10, and 11 are differences from Solr proper. Divergence 5 is a deliberate config choice plus
 inherent host non-reproducibility, not a Solr-behaviour disagreement. Divergence 9 is a
 difference from Solr's auth-filter/container error body, while retaining its 401 and Basic
 challenge realm.
@@ -597,11 +610,18 @@ the composed query, and `bf` an additive one — both via the function-query eva
   over the arithmetic function-query subset (issue #289): constants, numeric field references,
   and `sum`/`product`/`max`/`min`/`recip`, reached through `bf` (additive), `boost`
   (multiplicative, constant or function form), and the `{!func}`/`{!boost b=...}` query parsers.
-- **Out:** `pf2`/`pf3`, `ps`, `stopwords`, `lowercaseOperators`. The `{!payload_score}` query
-  parser (`Utility::flattenKeysToPayloadScore`, a separate parser over a payload-bearing
-  `boost_term_payload` field type) and the date/ordinal functions `ms`/`rord` (off the
-  corrected client path — finding 129) are a follow-up to the arithmetic evaluator, not a v1
-  exclusion: they extend `src/function_query.rs` rather than re-scoping it (findings 75, 83, 129).
+- **Out:** `pf2`/`pf3`, `ps`, `stopwords`, `lowercaseOperators`. The date/ordinal functions
+  `ms`/`rord` (off the corrected client path — finding 129) are a follow-up to the arithmetic
+  evaluator, not a v1 exclusion: they extend `src/function_query.rs` rather than re-scoping it
+  (findings 75, 83, 129). The `{!payload_score}` query parser
+  (`Utility::flattenKeysToPayloadScore`, over the payload-bearing `boost_term_payload` field
+  type) **landed the same way** (issue #340): a `boost_term_payload` field type whose indexing
+  side strips the `|<float>` suffix and whose fast column keeps the token verbatim, plus a
+  `PayloadScoreQuery` in `src/function_query.rs` that replaces the child term query's score with
+  the `min`/`max`/`average`/`sum` of the matched term's payloads. Still out within it:
+  `includeSpanScore=true` (Lucene's span-plus-payload blend) and a multi-term `v` (Solr's ordered
+  `SpanNearQuery`), both named descopes with self-expiring entries in
+  `EXPECTED_DIVERGENCES_MANIFEST_ERRORS` (findings 165, 171).
 
 **`boost` and `bf` apply function queries (issue #289).** Real Solr's `boost` is a
 *function-query* parameter (finding 83), not a plain float — a constant like `boost=2.5` is just
@@ -662,7 +682,7 @@ conditional lists (`2<-1 5<80%`). Implement it fully; it is a small self-contain
 | **v2.75 — the contract's remaining endpoints** | The four endpoints in the coverage denominator that Wayfinder does not yet serve: `/terms` (#155), `/schema/fieldtypes` (#156), `/admin/luke` (#157), `/admin/mbeans` (#158). Completing them closes the endpoints bucket. See below. |
 | **Document extraction — staged** | First the client-evidenced `extractOnly=true` path for plain text and HTML, behind request/concurrency/output limits; then DOCX/PPTX and spreadsheet/ODF/RTF families; PDF only after a separate parser-quality and cancellation decision. See below. |
 | **v3** | Result caches + autowarm; spellcheck is delivered end to end — the server accepts `spellcheck`, `spellcheck.q`, `spellcheck.dictionary`, and `spellcheck.collate` (#222) and generates real suggestions and collations (#228, commit `d97b442`), and the Drupal connector sends the request and parses the response (#342); the separate `suggest` path also remains here (`terms` moved earlier to v2.75). Also grouping (`group=true` — see note below on why "collapse" left this line) and `_version_` (issue TBD — scope narrowed, see below). |
-| **v4** | ~~Function queries (`bf`, `{!func}`)~~ **arithmetic function queries landed (#289)** — `{!payload_score}` and date/ordinal `ms`/`rord` remain — spatial (`{!geofilt}`, `bbox`, `{!frange}geodist()`, heatmap facets), snapshot-based read replicas |
+| **v4** | ~~Function queries (`bf`, `{!func}`)~~ **arithmetic function queries landed (#289), `{!payload_score}` landed (#340)** — date/ordinal `ms`/`rord` remain — spatial (`{!geofilt}`, `bbox`, `{!frange}geodist()`, heatmap facets), snapshot-based read replicas |
 | **Solr 9.x parity** | Solr features with zero client evidence, deliberately unscheduled — the table below. |
 | **Deep roadmap** | Distributed / sharded search, SolrCloud. The majority of Solr's complexity and directly opposed to the operational-simplicity goal. |
 

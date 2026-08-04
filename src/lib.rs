@@ -3476,14 +3476,18 @@ async fn select(
                 // global-max are indistinguishable there; no fixture pages a scored
                 // query to tell them apart.
                 //
-                // ponytail: no fixture covers `fl=score` against zero hits, so
-                // whether Solr omits `maxScore` or reports `0.0` there is
-                // unverified; this omits the key entirely on the (untested)
-                // assumption that Solr does the same, mirroring how `docs: []`
-                // still reports a real `numFound: 0` without inventing a score.
-                if let Some(max_score) = outcome.max_score {
-                    response.insert("maxScore".to_string(), json!(max_score));
-                }
+                // Zero hits with `score` in `fl` still carries the key: Solr
+                // reports `"maxScore":0.0` alongside `numFound: 0` and
+                // `docs: []` rather than omitting it. Evidence is a single
+                // fixture, `pls_unmatched.json` (issue #340) — but it is the
+                // only one there is, being the only zero-hit capture with
+                // `score` in `fl` (every other empty response, `facet_zero`
+                // through `mlt_no_interesting_terms`, omits `maxScore` because
+                // it never asked for a score).
+                response.insert(
+                    "maxScore".to_string(),
+                    json!(outcome.max_score.unwrap_or(0.0)),
+                );
             }
             response.insert("numFoundExact".to_string(), json!(true));
             response.insert("docs".to_string(), json!(docs));

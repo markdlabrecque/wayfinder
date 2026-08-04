@@ -967,6 +967,103 @@ async fn heatmap_malformed_numeric_params_are_400_not_silent_defaults() {
     }
 }
 
+// --- payload_score corpus for manifest-errors.tsv's `pls` rows (issue #340).
+// `capture.sh`'s pls block indexes this 5-doc corpus into the `pls` core: a
+// `boost_term_payload` field type (whitespace/length/lowercase/dedupe, then a
+// delimited float payload on the last `|`) backing the multi-valued
+// `boost_term` field, plus `boost_document` for the `{!boost}` wrapper
+// `pls_client_shape` exercises. Like `fnq`/`geo`/`heatmap`, this schema names
+// its core `content`, so `pls/...` rows are rewritten to `content/...` in
+// `app_and_request_url` below. The corpus is byte-for-byte the one indexed
+// into the live `solr:9` container the fixtures were captured from.
+const PLS_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_general"
+stored = true
+
+[[fields]]
+name = "boost_document"
+type = "float"
+stored = true
+fast = true
+
+[[fields]]
+name = "boost_term"
+type = "boost_term_payload"
+stored = false
+multi_valued = true
+"#;
+
+/// The 5-doc corpus `capture.sh`'s pls block indexes into the `pls` core. d3
+/// carries `dog` twice with different payloads (1.5 and 4.5) -- the only way
+/// min/max/average/sum are distinguishable from each other; d4 has no
+/// `boost_term` at all, so it never matches a payload_score clause.
+fn pls_corpus() -> Value {
+    json!([
+        {"id":"d1","body":"quick brown fox","boost_document":1.0,"boost_term":["fox|2.0","brown|1.5"]},
+        {"id":"d2","body":"lazy dog","boost_document":1.0,"boost_term":["dog|3.0"]},
+        {"id":"d3","body":"quick dog","boost_document":2.0,"boost_term":["dog|1.5","dog|4.5","quick|2.5"]},
+        {"id":"d4","body":"quick fox","boost_document":0.5},
+        {"id":"d5","body":"lazy brown","boost_document":1.0,"boost_term":["brown|4.0","lazy|0.5"]}
+    ])
+}
+
+/// The 3-doc corpus `capture.sh`'s plsz block indexes into the `plsz` core
+/// (finding 172). z1's only occurrence of `dog` is a *bare* token; z2 is the
+/// payloaded control; z3 carries both forms of `cat`, which is what separates
+/// "a payload-free occurrence contributes 1.0" from "it is skipped". z4 carries
+/// one term twice with the same payload, which pins that both occurrences count
+/// (finding 174 -- `RemoveDuplicatesTokenFilter` is position-scoped); it uses a
+/// term no other
+/// row queries, so it moves none of the other `plsz` fixtures. Reuses
+/// `PLS_SCHEMA_TOML` -- a superset of what these docs need, and the same
+/// `boost_term_payload` field config the live `plsz` core was given.
+fn plsz_corpus() -> Value {
+    json!([
+        {"id":"z1","boost_term":["dog"]},
+        {"id":"z2","boost_term":["dog|3.0"]},
+        {"id":"z3","boost_term":["cat","cat|2.0"]},
+        {"id":"z4","boost_term":["bird|2.0","bird|2.0"]}
+    ])
+}
+
+async fn plsz_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), PLS_SCHEMA_TOML).expect("plsz app must build");
+    let (status, body) = post_docs(&app, &plsz_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the plsz corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
+async fn pls_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), PLS_SCHEMA_TOML).expect("pls app must build");
+    let (status, body) = post_docs(&app, &pls_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the pls corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
 // --- duplicated schema/corpus for manifest-errors.tsv's `update9` rows
 // (issue #9). Mirrors `tests/update_pipeline.rs::UPDATE9_SCHEMA_TOML` /
 // `update9_corpus` exactly — same duplication precedent as `sortdebt`/
@@ -1505,6 +1602,14 @@ const ACCEPTED_DIVERGENCES: &[(&str, &str)] = &[
          empty body in Solr; Wayfinder stays method-agnostic and serves its normal JSON 404 \
          there too — noted, not matched",
     ),
+    (
+        "pls_err_nonpayload",
+        "issue #340 spec section D: `{!payload_score f=body ...}` on a real, non-payload \
+         field is an uncaught Lucene NullPointerException upstream (PayloadScoreQuery's \
+         constructor, `PayloadScoreQParserPlugin.java:91`) -- Solr 500s with a `trace` and no \
+         `msg`. Wayfinder answers 400 instead; reproducing an upstream crash is not a goal. \
+         Permanent, per docs/PRD.md.",
+    ),
 ];
 
 fn accepted_divergence_reason(name: &str) -> Option<&'static str> {
@@ -1600,6 +1705,19 @@ const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[
         "issue #99: Solr `_version_` values are update-log/time-derived and Wayfinder deliberately \
          seeds per-core values from Unix-epoch milliseconds, so exact metrics cannot be fixture-stable; \
          tests/version_field.rs checks this row's envelope and the actual fast-field maximum",
+    ),
+    (
+        "pls_span_true",
+        "issue #340 spec section D: `includeSpanScore=true` is descoped -- Wayfinder returns \
+         the payload-only score (same as `includeSpanScore=false`) rather than Lucene's \
+         span-plus-payload blend (fixture maxScore 1.7091298 vs Wayfinder's 4.5). Self-expiring: \
+         remove this entry if an inline span-score evaluator ever lands.",
+    ),
+    (
+        "pls_multiterm_v",
+        "issue #340 spec section D: a multi-term `v` (`v=\"dog quick\"`) is a named descope -- \
+         real Solr treats it as an ordered SpanNearQuery (finding 171); Wayfinder supports \
+         single-term `v` only. Self-expiring: remove this entry if multi-term `v` ever lands.",
     ),
 ];
 
@@ -2660,6 +2778,8 @@ fn app_and_request_url<'a>(
     pf296_app: &'a Router,
     geo_app: &'a Router,
     heatmap_app: &'a Router,
+    pls_app: &'a Router,
+    plsz_app: &'a Router,
 ) -> (&'a Router, String) {
     match entry.url.split_once('/') {
         Some(("content", rest)) => (content_app, format!("content/{rest}")),
@@ -2675,6 +2795,8 @@ fn app_and_request_url<'a>(
         Some(("pf296", rest)) => (pf296_app, format!("content/{rest}")),
         Some(("geo", rest)) => (geo_app, format!("content/{rest}")),
         Some(("heatmap", rest)) => (heatmap_app, format!("content/{rest}")),
+        Some(("pls", rest)) => (pls_app, format!("content/{rest}")),
+        Some(("plsz", rest)) => (plsz_app, format!("content/{rest}")),
         Some(("sortdebt", _)) => (sortdebt_app, entry.url.clone()),
         Some(("update9", _)) => (update9_app, entry.url.clone()),
         Some(("stats", _)) => (stats_app, entry.url.clone()),
@@ -2727,6 +2849,8 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let (pf296_app, _pf296_dir) = pf296_app().await;
     let (geo_app, _geo_dir) = geo_app().await;
     let (heatmap_app, _heatmap_dir) = heatmap_app().await;
+    let (pls_app, _pls_dir) = pls_app().await;
+    let (plsz_app, _plsz_dir) = plsz_app().await;
 
     let mut ran = 0usize;
     let mut diffed = 0usize;
@@ -2756,6 +2880,8 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
             &pf296_app,
             &geo_app,
             &heatmap_app,
+            &pls_app,
+            &plsz_app,
         );
         // `update_select_commitwithin_visible` follows a `commitWithin=500`
         // row with no settle delay in this hermetic replay, unlike
@@ -2860,6 +2986,31 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
                     if status.as_u16() != 404 {
                         failures.push(format!(
                             "{}: expected Wayfinder's method-agnostic JSON 404, got {} \
+                             ({reason})",
+                            entry.name, status
+                        ));
+                    }
+                }
+                "pls_err_nonpayload" => {
+                    // Keep the check honest: the fixture must genuinely be the
+                    // upstream 500/NPE shape, or this "accepted" entry could
+                    // rot into a false excuse.
+                    assert_eq!(
+                        entry.status, 500,
+                        "{}: fixture must be 500 for this accepted divergence to still name \
+                         the gap ({reason})",
+                        entry.name
+                    );
+                    if status.as_u16() == 500 {
+                        failures.push(format!(
+                            "{}: Wayfinder answered 500 — the documented crash divergence no \
+                             longer holds, remove this ACCEPTED_DIVERGENCES entry and update \
+                             the PRD ({reason})",
+                            entry.name
+                        ));
+                    } else if status.as_u16() != 400 {
+                        failures.push(format!(
+                            "{}: expected Wayfinder's 400 for a non-payload field, got {} \
                              ({reason})",
                             entry.name, status
                         ));

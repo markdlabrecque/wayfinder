@@ -1,0 +1,17 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0,
+    "params":{
+      "q":"{!payload_score f=boost_term v=\"dog\"}",
+      "fl":"id,score",
+      "sort":"score desc,id asc",
+      "wt":"json"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.search.SyntaxError"],
+    "msg":"org.apache.solr.search.SyntaxError: Unknown payload function: null",
+    "code":400
+  }
+}

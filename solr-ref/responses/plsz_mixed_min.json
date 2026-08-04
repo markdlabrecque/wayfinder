@@ -1,0 +1,22 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"{!payload_score f=boost_term v=\"cat\" func=min}",
+      "fl":"id,score",
+      "sort":"score desc,id asc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":1,
+    "start":0,
+    "maxScore":1.0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"z3",
+      "score":1.0
+    }]
+  }
+}

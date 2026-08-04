@@ -2996,3 +2996,128 @@ Captured against real `solr:9` via `capture.sh --only '^g338_'` / `'^g338n_'`
       `{!ex=t}category` facet is `news=2, blog=0` and the excluded `facet.query`
       is 0 (`g338_ex_truncate`), and adding `group.facet=true` on top changes
       nothing (`g338_ex_both`) -- each collapsed document is its own group.
+
+## Findings from the issue #340 `{!payload_score}` capture
+
+Captured 2026-08-04 against a real `solr:9` on a dedicated `pls` core (5 docs,
+a `boost_term_payload` field type copied verbatim from the module's own
+`solr-conf-templates/9.x/schema.xml:387-406`, and a multiValued `boost_term`
+field). 20 rows in `solr-ref/manifest-errors.tsv` under a dedicated `pls_app`
+in `tests/differential.rs`. d3 carries `dog` twice with payloads 1.5 and 4.5 --
+the only way the four payload functions are distinguishable from each other.
+
+165. **`includeSpanScore` defaults to *false*, so a `{!payload_score}` score is
+      the raw payload value with no BM25 factor.** `{!payload_score
+      f=boost_term v="dog" func=max}` scores d3 exactly `4.5` and d2 exactly
+      `3.0` -- the payloads themselves (`pls_max`), and the explicit
+      `includeSpanScore=false` form is byte-identical (`pls_span_false`).
+      `includeSpanScore=true` multiplies the span score back in and gives
+      `1.7091298`/`1.1882524` instead (`pls_span_true`). This is the opposite of
+      what the Solr reference guide's prose implies, and it matters: the default
+      -- the only form the module ever emits -- is exactly comparable, so these
+      fixtures sit outside PRD's ratified BM25-magnitude divergence rather than
+      under it.
+
+166. **All four payload functions exist and `func` is required and
+      case-sensitive.** Over d3's two `dog` payloads (1.5, 4.5): `func=max`
+      -> 4.5, `func=min` -> 1.5, `func=average` -> 3.0, `func=sum` -> 6.0
+      (`pls_max`/`pls_min`/`pls_average`/`pls_sum`); d2's single 3.0 payload
+      scores 3.0 under all four, which makes it the control. Omitting `func`
+      is 400 `Unknown payload function: null` (`pls_err_no_func`) and
+      `func=MAX` is 400 `Unknown payload function: MAX` (`pls_err_func_case`) --
+      the value is matched literally, not case-folded.
+
+167. **`v` is analyzed by the field type, and the quotes `escapePhrase()` adds
+      are optional.** `v="DOG"`, `v="dog"` and bare `v=dog` all return the same
+      two docs with the same scores (`pls_v_upper`, `pls_max`,
+      `pls_v_unquoted`) -- the field type's `LowerCaseFilterFactory` runs on the
+      query value too. A term nothing carries returns an empty result rather
+      than scoring every doc 0 (`pls_unmatched`, `numFound: 0`), and a doc with
+      no `boost_term` at all (d4) never matches a payload_score clause.
+
+168. **The client emits `{!payload_score}` *inline*, never at position 0, and
+      the distinction changes the score.** With nothing in front of them, two
+      `{!payload_score}` blocks do not both apply: a position-0 local params
+      block sets the parser for the whole `q`, so the first block consumes the
+      rest of the string and -- `v` being explicit -- discards it, scoring d3
+      `4.5` rather than dog(4.5)+quick(2.5)=7.0 (`pls_two_terms`). Put something
+      else at position 0 and the blocks become nested subqueries the lucene
+      parser sums as SHOULD clauses. That second form is what
+      `SearchApiSolrBackend::preQuery` builds
+      (`SearchApiSolrBackend.php:1947-1981`, joined with spaces):
+      `{!boost b=boost_document} {!payload_score f=boost_term v="dog" func=max}
+      {!payload_score f=boost_term v="quick" func=max} *:*` scores d3
+      `(4.5+2.5+1.0)*2.0 = 16.0`, d2 `(3.0+1.0)*1.0 = 4.0`, d1/d5 `1.0` and d4
+      `0.5` (`pls_client_shape`). So inline `{!payload_score}` support is a
+      requirement of the real client path, not an extension of it -- unlike
+      inline `{!func}`/`{!boost}`, which the client never nests.
+
+169. **A `v` that analyzes to nothing is 400 `SpanQuery is null`, which is the
+      exception the module's own comments are written around.** Omitting `v`
+      entirely (`pls_err_no_v`) and `v="a"` (`pls_err_short_v`, dropped by the
+      field type's `LengthFilterFactory min=2`) both produce it. That is exactly
+      why `Utility::flattenKeysToPayloadScore` and
+      `SearchApiSolrBackend::addIndexField` both skip terms outside 2..100 chars
+      (`Utility.php:1004-1007`, `SearchApiSolrBackend.php:2833`). Note the
+      asymmetry in where the length filter bites: at index time the token is the
+      whole `term|boost` string, at query time it is the bare term. Omitting `f`
+      is a different, plainer 400: `'f' not specified` (`pls_err_no_f`), and
+      `f=nosuchfield` is 400 `undefined field nosuchfield`
+      (`pls_err_undef_field`).
+
+170. **`f` naming a real field that carries no payloads is an uncaught
+      NullPointerException -- HTTP 500, not 400.** `f=body` (a `text_general`
+      field) dies in `org.apache.lucene.queries.payloads.PayloadScoreQuery`'s
+      constructor and returns `"error": {"code": 500}` with a `trace` and *no*
+      `msg` at all (`pls_err_nonpayload`). Captured as evidence; reproducing an
+      upstream crash is not a compatibility goal, so Wayfinder answers 400 here
+      and the row is a ratified divergence rather than a bug.
+
+171. **A multi-term `v` is an ordered SpanNearQuery over the payload field, and
+      consecutive multiValued values are adjacent.** The field type sets no
+      `positionIncrementGap`, so d3's `dog`(pos 1) and `quick`(pos 2) -- two
+      separate `boost_term` values -- form a span, and `v="dog quick"` matches
+      d3 with the function applied to the payloads inside it (max 4.5,
+      `pls_multiterm_v`). The module never emits this: every `boost_term` value
+      it writes is a single `sprintf('%s|%.1F')` token
+      (`SearchApiSolrBackend.php:1502-1503`). Single-term `v` is therefore the
+      supported form and this row is a named descope with an expiring guard.
+
+172. **A payload-free occurrence contributes the factor `1.0`; it is not skipped
+      and it does not score `0`.** Solr's `PayloadDecoder` decodes a *null*
+      payload to `1f` rather than passing the position over, so a `boost_term`
+      value written as a bare token takes part in the aggregate like any other
+      occurrence. A document whose only occurrence is bare scores `1.0` under
+      **all four** functions including `sum` (`plsz_bare_*`, z1), and a document
+      carrying both forms of one term -- `["cat", "cat|2.0"]` -- aggregates
+      `[1.0, 2.0]`: max `2.0`, min `1.0`, average `1.5`, sum `3.0`
+      (`plsz_mixed_*`, z3). The `min` row is the discriminating one -- skipping
+      the bare occurrence would give `2.0`.
+
+      The module never writes a bare token (every value is
+      `sprintf('%s|%.1F')`, `SearchApiSolrBackend.php:1502-1503`), so this is
+      off the client path -- but it is reachable by anyone indexing a
+      `boost_term_payload` field directly, and both natural guesses about it
+      ("the accumulator never sees a value, so the document scores 0" and "only
+      `sum` returns 0") are wrong. Captured on a dedicated `plsz` core so the
+      `pls_*` fixtures stay put.
+
+173. **`{!payload_score}` with no `v` takes its query text from the bound run
+      after `}`.** Solr's general local-params contract
+      (`QParser.getParser`) applies to this parser like any other, so
+      `{!payload_score f=boost_term func=max}dog` is a working query
+      (`plsz_vbound_max`, scoring z2 3.0 and z1 1.0 exactly as the `v="dog"`
+      form does), and an explicit `v` beats a bound run that disagrees with it
+      (`plsz_vbound_v_wins`: `v="cat"` with a bound `dog` returns z3 only).
+
+      `pls_err_no_v` -- 400 `SpanQuery is null` -- is not in tension with this:
+      it has no bound text either, so there is nothing to fall back to. That
+      single fixture is what made "`v` is mandatory" look true, and the first
+      implementation of #340 encoded it as such.
+
+174. **Two identical `<term>|<boost>` values both count.**
+      `RemoveDuplicatesTokenFilter` drops duplicates only within a single
+      position, and consecutive multiValued values sit at consecutive positions
+      (finding 171), so `["bird|2.0","bird|2.0"]` aggregates `[2.0, 2.0]`:
+      `sum` 4.0 and `average` 2.0, not 2.0 and 2.0 (`plsz_dup_sum`,
+      `plsz_dup_average`).
