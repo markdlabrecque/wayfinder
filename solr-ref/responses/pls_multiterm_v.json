@@ -1,0 +1,22 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":4,
+    "params":{
+      "q":"{!payload_score f=boost_term v=\"dog quick\" func=max}",
+      "fl":"id,score",
+      "sort":"score desc,id asc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":1,
+    "start":0,
+    "maxScore":4.5,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"d3",
+      "score":4.5
+    }]
+  }
+}

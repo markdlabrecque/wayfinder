@@ -1,0 +1,34 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":10,
+    "params":{
+      "q":"{!boost b=boost_document} {!payload_score f=boost_term v=\"dog\" func=max} {!payload_score f=boost_term v=\"quick\" func=max} *:*",
+      "fl":"id,score",
+      "sort":"score desc,id asc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "maxScore":16.0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"d3",
+      "score":16.0
+    },{
+      "id":"d2",
+      "score":4.0
+    },{
+      "id":"d1",
+      "score":1.0
+    },{
+      "id":"d5",
+      "score":1.0
+    },{
+      "id":"d4",
+      "score":0.5
+    }]
+  }
+}

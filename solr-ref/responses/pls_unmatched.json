@@ -1,0 +1,19 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"{!payload_score f=boost_term v=\"nosuch\" func=max}",
+      "fl":"id,score",
+      "sort":"score desc,id asc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":0,
+    "start":0,
+    "maxScore":0.0,
+    "numFoundExact":true,
+    "docs":[ ]
+  }
+}
