@@ -1472,3 +1472,202 @@ async fn grouping_hl_unions_doclists_across_multiple_group_fields() {
          block, not just the first, got {body}"
     );
 }
+
+// --- group.facet over a null group with facet values (#338, finding 162) --
+
+/// Same schema shape as `GROUPING_SCHEMA_TOML` but named `content` for the
+/// same reason (`common::get`/`post_docs` address `CORE` unchanged). A
+/// separate corpus because `grouping_corpus()`'s only null-group document
+/// (g6) carries no facetable value at all -- the one shape `group.facet`'s
+/// missing-value-group correction needs a document that *does* have a
+/// facetable value but is missing the group field.
+const G338NULL_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "type"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "category"
+type = "string"
+stored = true
+fast = true
+multi_valued = true
+
+[[fields]]
+name = "popularity"
+type = "int"
+stored = true
+fast = true
+"#;
+
+/// The exact 5-doc corpus `solr-ref/capture.sh`'s `g338n_` block indexes:
+/// `type` article on h1/h2, page on h3, missing on h4/h5 (the null group),
+/// while `category=news` sits on h1, h3, h4 and h5.
+fn g338null_corpus() -> Value {
+    json!([
+        {"id":"h1","type":"article","category":["news"],"body":"first","popularity":10},
+        {"id":"h2","type":"article","category":["blog"],"body":"second","popularity":20},
+        {"id":"h3","type":"page","category":["news"],"body":"third","popularity":30},
+        {"id":"h4","category":["news"],"body":"fourth","popularity":40},
+        {"id":"h5","category":["news"],"body":"fifth","popularity":50}
+    ])
+}
+
+/// Builds an app on `G338NULL_SCHEMA_TOML` and indexes `g338null_corpus()`.
+async fn g338null_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = app_with_schema(dir.path(), G338NULL_SCHEMA_TOML).expect("app must build");
+    let (status, body) = post_docs(&app, &g338null_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the g338null corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
+/// Baseline document counts: `type` article=2/page=1 (h4/h5 have no `type`
+/// at all, so they contribute nothing to the `type` facet), `category`
+/// news=4/blog=1. `g338n_facet`.
+#[tokio::test]
+async fn g338null_facet_counts_documents() {
+    let (app, _dir) = g338null_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338n_facet");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 4, "blog", 1])),
+        "got {body}"
+    );
+}
+
+/// The mutation-kill case: under `group.facet=true`, `category` news must go
+/// 4 documents -> 3 groups (article via h1, page via h3, and the null group
+/// via h4/h5 together) -- reachable only by adding the missing-value group
+/// back, since a `group.field=type` terms sub-aggregation cannot see h4/h5 (no
+/// group term). `blog` stays 1 -> 1. `type`'s own facet is unaffected by the
+/// correction (h4/h5 have no `type` value to facet on at all):
+/// article=1/page=1. `g338n_groupfacet`.
+#[tokio::test]
+async fn g338null_group_facet_counts_the_null_group_as_one_group() {
+    let (app, _dir) = g338null_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.facet=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338n_groupfacet");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 3, "blog", 1])),
+        "news is on h1 (article), h3 (page), and h4+h5 (the null group) -- \
+         group.facet must count that as 3 distinct groups, not 4 documents \
+         and not 2 (which is what a terms sub-aggregation sees on its own, \
+         since h4/h5 produce no group term), got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "got {body}"
+    );
+}
+
+/// `facet.missing=true` baseline: the `type` facet's `null` bucket is 2
+/// documents (h4, h5); `category`'s `null` bucket is 0 (every document has a
+/// `category`). `g338n_facet_missing`.
+#[tokio::test]
+async fn g338null_facet_missing_counts_documents() {
+    let (app, _dir) = g338null_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&facet=true&facet.field=type&facet.field=category&facet.missing=true&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338n_facet_missing");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 2, "page", 1, null, 2])),
+        "got {body}"
+    );
+}
+
+/// `facet.missing=true` combined with `group.facet=true`: the `type` facet's
+/// `null` bucket is 1 group (h4 and h5 are both the same null group), not 2
+/// documents. `category`'s `null` bucket stays 0 either way -- every document
+/// has a `category`, so the correction has nothing to add there.
+/// `g338n_groupfacet_missing`.
+#[tokio::test]
+async fn g338null_group_facet_missing_counts_the_null_bucket_as_one_group() {
+    let (app, _dir) = g338null_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.facet=true&facet=true&facet.field=type&facet.field=category&facet.missing=true&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338n_groupfacet_missing");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1, null, 1])),
+        "the type facet's null bucket covers h4/h5, which are one group (the \
+         null group itself), not two documents, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 3, "blog", 1, null, 0])),
+        "got {body}"
+    );
+}
+
+/// `group.truncate=true` on this corpus (no `group.facet`): the collapsed set
+/// under `sort=id asc` is {h1, h3, h4} (first doc per `type` group), so
+/// `category` news = 3 (h1, h3, h4) and blog = 0 (h2 is truncated away).
+/// `type`'s own facet over the truncated set is article=1/page=1 (h4 has no
+/// `type`). `g338n_truncate`.
+#[tokio::test]
+async fn g338null_truncate_collapses_facets_to_the_first_doc_per_group() {
+    let (app, _dir) = g338null_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&group=true&group.field=type&group.ngroups=true&group.truncate=true&facet=true&facet.field=type&facet.field=category&fl=id&sort=id+asc&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_matches_fixture(body.clone(), "g338n_truncate");
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/category"),
+        Some(&json!(["news", 3, "blog", 0])),
+        "got {body}"
+    );
+    assert_eq!(
+        body.pointer("/facet_counts/facet_fields/type"),
+        Some(&json!(["article", 1, "page", 1])),
+        "got {body}"
+    );
+}
