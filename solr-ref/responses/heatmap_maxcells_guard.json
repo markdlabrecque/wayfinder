@@ -1,0 +1,26 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":1,
+    "params":{
+      "facet.heatmap.gridLevel":"2",
+      "q":"*:*",
+      "facet.heatmap":"rpts_geo",
+      "facet.heatmap.maxCells":"10",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":10,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","java.lang.IllegalArgumentException"],
+    "msg":"java.lang.IllegalArgumentException: Too many cells (32 x 32) for level 2 shape Rect(minX=-180.0,maxX=180.0,minY=-90.0,maxY=90.0)",
+    "code":400
+  }
+}

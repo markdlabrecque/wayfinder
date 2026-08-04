@@ -1,0 +1,39 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "facet.heatmap.gridLevel":"2",
+      "q":"*:*",
+      "facet.heatmap":"rpts_geo",
+      "facet.heatmap.geom":"[\"-90 -45\" TO \"90 45\"]",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":10,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{ },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{
+      "rpts_geo":{
+        "gridLevel":2,
+        "columns":17,
+        "rows":17,
+        "minX":-101.25,
+        "maxX":90.0,
+        "minY":-50.625,
+        "maxY":45.0,
+        "counts_ints2D":[[0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0],[0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0],null,null,null,[0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0],null,[0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0],null,null,[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],null,null,null,null,null]
+      }
+    }
+  }
+}

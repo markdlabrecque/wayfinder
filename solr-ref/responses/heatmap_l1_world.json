@@ -1,0 +1,38 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":10,
+    "params":{
+      "facet.heatmap.gridLevel":"1",
+      "q":"*:*",
+      "facet.heatmap":"rpts_geo",
+      "rows":"0",
+      "facet":"true",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":10,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{ },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{
+      "rpts_geo":{
+        "gridLevel":1,
+        "columns":8,
+        "rows":4,
+        "minX":-180.0,
+        "maxX":180.0,
+        "minY":-90.0,
+        "maxY":90.0,
+        "counts_ints2D":[[0,0,0,0,0,0,0,1],[0,0,1,0,4,0,1,0],[0,1,0,1,0,0,0,0],[0,0,0,0,1,0,0,0]]
+      }
+    }
+  }
+}

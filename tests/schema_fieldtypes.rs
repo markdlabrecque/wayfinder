@@ -58,6 +58,7 @@ const NON_LANGUAGE_BUILTIN_TYPES: &[&str] = &[
     "double",
     "date",
     "location",
+    "location_rpt",
 ];
 
 /// Names that must never appear: real languages `resolve_type` does not
@@ -91,6 +92,12 @@ const EXPECTED_CLASSES: &[(&str, &str)] = &[
     // Solr's `location` is `LatLonPointSpatialField`; the class is Solr's
     // vocabulary even though Wayfinder stores a point as two f64 columns (#331).
     ("location", "wayfinder.LatLonPointSpatialField"),
+    // #334: `location_rpt` is SpatialRecursivePrefixTreeFieldType (the type
+    // `facet.heatmap` runs over); same two-column encoding as `location`.
+    (
+        "location_rpt",
+        "wayfinder.SpatialRecursivePrefixTreeFieldType",
+    ),
     // trace: `text_en`
     ("text_en", "wayfinder.TextField"),
     // trace: every `text_*` entry (`text_und`, `text_ws`, ...) is a TextField.

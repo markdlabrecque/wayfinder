@@ -3,6 +3,7 @@
 //! one of these per running `app()`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::Bound;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -24,7 +25,8 @@ use tantivy::aggregation::{
 use tantivy::collector::{Count, DocSetCollector};
 use tantivy::query::{
     AllQuery, BooleanQuery, BoostQuery, ConstScoreQuery, DisjunctionMaxQuery, EmptyQuery,
-    ExistsQuery, Occur, PhraseQuery, Query, QueryClone, QueryParser, RegexQuery, TermQuery,
+    ExistsQuery, Occur, PhraseQuery, Query, QueryClone, QueryParser, RangeQuery, RegexQuery,
+    TermQuery,
 };
 use tantivy::schema::document::Value as _;
 use tantivy::schema::{Field, IndexRecordOption, OwnedValue};
@@ -369,11 +371,11 @@ fn coerce_json(field: &str, kind: ValueKind, value: &Value) -> Result<Value> {
             as_date(field, value)?;
             value.clone()
         }
-        // A dynamic `location` value (from a `locs_*`/`geos_*` rule) is kept as
-        // its `lat,lon` string in the catch-all JSON, matching the form Solr
-        // echoes for a stored dynamic point. `geodist()` on a dynamic sfield is
-        // not supported in this tracer (no synthetic columns: the field name is
-        // unknown at build time) -- see `WayfinderSchema::location_fields`.
+        // A dynamic `location`/`location_rpt` value (from a `locs_*`/`rpts_*`
+        // rule) has no synthetic columns (the name is unknown at build time),
+        // so it is kept as its `lat,lon` string in the catch-all JSON, matching
+        // the form Solr returns for an un-declared dynamic point. `as_location`
+        // still validates it, so a malformed point fails the update.
         ValueKind::Location => {
             as_location(field, value)?;
             value.clone()
@@ -1205,9 +1207,10 @@ impl CoreIndex {
         kind: ValueKind,
         values: &[Value],
     ) -> Result<()> {
-        // A `location` field is two synthetic f64 columns, not the single
-        // Tantivy field every other kind resolves to, so it splits each
-        // `lat,lon` value into the pair and writes both (#331).
+        // A `location`/`location_rpt` field is two synthetic f64 columns, not
+        // the single Tantivy field the other kinds use, so it takes a separate
+        // path: resolve the `__lat`/`__lon` column pair and parse each `lat,lon`
+        // value into the pair (#331; #334's heatmap reads them back).
         if kind == ValueKind::Location {
             let (lat_field, lon_field) = self
                 .wf_schema
@@ -1230,7 +1233,9 @@ impl CoreIndex {
                 ValueKind::I64 => doc.add_i64(field, as_i64(field_name, v)?),
                 ValueKind::F64 => doc.add_f64(field, as_f64(field_name, v)?),
                 ValueKind::Date => doc.add_date(field, as_date(field_name, v)?),
-                // Handled above the match (two synthetic columns).
+                // Reached only for a dynamic `location` field routed here by a
+                // caller mistake; the static path returns above, and the dynamic
+                // path keeps the string via `coerce_json`.
                 ValueKind::Location => unreachable!(),
             }
         }
@@ -1274,6 +1279,13 @@ impl CoreIndex {
         {
             return Ok(func_q);
         }
+        // #334: a standalone `<location_field>:["minLon minLat" TO "maxLon
+        // maxLat"]` rectangle fq is Solr RPT's spatial filter. It is not lucene
+        // range syntax on one field (a location field is two columns), so it
+        // must be intercepted before the grammar sees it.
+        if let Some(rect) = self.try_location_rect(query_str) {
+            return rect;
+        }
         let default_field = self
             .wf_schema
             .field(default_field_name)
@@ -1313,6 +1325,47 @@ impl CoreIndex {
         let parser = QueryParser::for_index(&self.index, vec![default_field]);
         self.build_ast(user_ast, &parser, default_field_name, &nested)
             .map_err(anyhow::Error::from)
+    }
+
+    /// If `query_str` is a standalone `<location_field>:<rect-geom>` rectangle
+    /// filter (Solr RPT's spatial `fq`, #334), parses it into the intersection
+    /// of two inclusive `RangeQuery`s over the field's synthetic `__lat`/`__lon`
+    /// columns: `lat ∈ [minY, maxY] AND lon ∈ [minX, maxX]`. Returns `None` for
+    /// anything that is not exactly that shape, so the normal grammar path
+    /// handles every other query unchanged.
+    fn try_location_rect(&self, query_str: &str) -> Option<Result<Box<dyn Query>>> {
+        let s = query_str.trim();
+        // Only a *bare* `<field>:<rect>` leaf is intercepted. A leading
+        // `+`/`-` occur marker would make the split field name `+field`/`-field`,
+        // which is not a declared location field, so it falls through to the
+        // grammar (which 400s on the un-parseable location range) rather than
+        // being silently stripped into a positive filter here -- negation must
+        // not be quietly dropped. No fixture exercises a prefixed rectangle fq.
+        let (field, rest) = s.split_once(':')?;
+        let rest = rest.trim_start();
+        if !rest.starts_with('[') {
+            return None;
+        }
+        // Only a declared static location field has the synthetic columns a
+        // range query needs; a non-location (or dynamic) field falls through to
+        // the normal parser, which 400s on the un-parseable range itself.
+        let (lat_field, lon_field) = self.wf_schema.location_fields(field)?;
+        let rect = match crate::heatmap::parse_geom(rest) {
+            Ok(r) => r,
+            Err(e) => return Some(Err(e)),
+        };
+        let lat = RangeQuery::new(
+            Bound::Included(Term::from_field_f64(lat_field, rect.min_y)),
+            Bound::Included(Term::from_field_f64(lat_field, rect.max_y)),
+        );
+        let lon = RangeQuery::new(
+            Bound::Included(Term::from_field_f64(lon_field, rect.min_x)),
+            Bound::Included(Term::from_field_f64(lon_field, rect.max_x)),
+        );
+        Some(Ok(Box::new(BooleanQuery::new(vec![
+            (Occur::Must, Box::new(lat) as Box<dyn Query>),
+            (Occur::Must, Box::new(lon) as Box<dyn Query>),
+        ]))))
     }
 
     /// One inline nested query: `{!edismax qf='...'}<bound token>` becomes the
@@ -3307,6 +3360,17 @@ impl CoreIndex {
     /// which are "how many docs also match this extra constraint?".
     pub fn count(&self, query: &dyn Query) -> Result<usize> {
         Ok(self.reader.searcher().search(query, &Count)?)
+    }
+
+    /// Runs an arbitrary [`Collector`] over `query`. `facet.heatmap` (#334)
+    /// uses it to tally per-cell counts over the `/select` base query; the
+    /// generic keeps the heatmap collector in its own module.
+    pub fn collect<C: tantivy::collector::Collector>(
+        &self,
+        query: &dyn Query,
+        collector: &C,
+    ) -> Result<C::Fruit> {
+        Ok(self.reader.searcher().search(query, collector)?)
     }
 
     /// Live document count as of the last commit — the same searcher the

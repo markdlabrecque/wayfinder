@@ -35,6 +35,8 @@ pub mod extract;
 mod facet;
 mod function_query;
 mod grouping;
+/// `facet.heatmap` over `location`/`location_rpt` fields (#334).
+mod heatmap;
 mod highlight;
 mod local_params;
 mod params;
@@ -224,6 +226,17 @@ const SELECT_PARAMS: &[&str] = &[
     "facet.range.start",
     "facet.range.end",
     "facet.range.gap",
+    // `facet.heatmap` (issue #334, finding 158): the field is repeatable
+    // (`facet.heatmap=a&facet.heatmap=b`); the rest are per-request globals.
+    // `format` is accepted so `strict_params` does not 400 it, but only
+    // `ints2D` (the default) is implemented -- `png` is a descope.
+    "facet.heatmap",
+    "facet.heatmap.gridLevel",
+    "facet.heatmap.geom",
+    "facet.heatmap.maxCells",
+    "facet.heatmap.distErrPct",
+    "facet.heatmap.distErr",
+    "facet.heatmap.format",
     "json.nl",
     "stats",
     "stats.field",
@@ -1751,10 +1764,11 @@ fn field_class_for_builtin(name: &str) -> &'static str {
         "float" => "wayfinder.FloatPointField",
         "double" => "wayfinder.DoublePointField",
         "date" => "wayfinder.DatePointField",
-        // Solr's `LatLonPointSpatialField` (#331): the class name is Solr's
-        // vocabulary, like every other entry, even though Wayfinder stores a
-        // point as two f64 fast columns rather than a BKD point tree.
+        // Spatial point types (#331 `location` = Solr LatLonPointSpatialField;
+        // #334 `location_rpt` = SpatialRecursivePrefixTreeFieldType). Both are
+        // two synthetic f64 columns, not one Tantivy field.
         "location" => "wayfinder.LatLonPointSpatialField",
+        "location_rpt" => "wayfinder.SpatialRecursivePrefixTreeFieldType",
         // `text_general`, `text_en` and every `text_<code>` preset: analyzed
         // text, which is Solr's `TextField`.
         _ => "wayfinder.TextField",

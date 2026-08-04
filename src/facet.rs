@@ -185,6 +185,12 @@ fn facet_counts_inner(
     // fq clauses (index 0 is the main query).
     let fq_tags = fq_tag_lists(params);
     let facet_queries = facet_queries(index, params, default_field, base, &fq_tags)?;
+    // #334: `facet.heatmap` is a post-query facet (the base query has already
+    // run by the time `facet_counts_inner` is reached), so its errors are NOT
+    // `PreQueryFacetError` -- they get the `response` block attached, like
+    // `facet.field`/`facet.query` errors, matching Solr's
+    // `heatmap_unknown_field.json` (which carries `response` + `error`).
+    let facet_heatmaps = crate::heatmap::facet_heatmaps(index, params, base)?;
     let (facet_fields, warnings) = match fused {
         Some((plan, agg_results)) => {
             render_facet_fields(index, config, params, base, plan, agg_results)?
@@ -198,7 +204,7 @@ fn facet_counts_inner(
     // Out of scope (PRD §5 leaves them for later): the keys are present and
     // empty because Solr always emits all five (findings fact 3).
     counts.insert("facet_intervals".to_string(), json!({}));
-    counts.insert("facet_heatmaps".to_string(), json!({}));
+    counts.insert("facet_heatmaps".to_string(), facet_heatmaps);
     Ok((Value::Object(counts), warnings))
 }
 
@@ -209,6 +215,17 @@ pub(crate) fn narrowed(base: &BaseClauses, occur: Occur, extra: Box<dyn Query>) 
         .map(|(occur, query)| (*occur, query.box_clone()))
         .collect();
     clauses.push((occur, extra));
+    BooleanQuery::from(clauses)
+}
+
+/// The /select base query (q + fq) as a `BooleanQuery`, with no extra facet
+/// clause. `facet.heatmap` (#334) tallies per-cell counts over exactly this
+/// document set.
+pub(crate) fn base_query(base: &BaseClauses) -> BooleanQuery {
+    let clauses: BaseClauses = base
+        .iter()
+        .map(|(occur, query)| (*occur, query.box_clone()))
+        .collect();
     BooleanQuery::from(clauses)
 }
 
@@ -931,6 +948,10 @@ fn range_buckets(
 ) -> Result<Vec<(String, RangeEnd, RangeEnd)>> {
     let mut out = Vec::new();
     match kind {
+        ValueKind::Location => bail!(
+            "can not range facet on the location field `{field_name}`: \
+             facet.range needs a numeric or date field"
+        ),
         ValueKind::I64 => {
             let (start, end) = (
                 parse_i64(field_name, "start", start)?,
@@ -1015,10 +1036,6 @@ fn range_buckets(
         }
         ValueKind::Text => bail!(
             "can not range facet on the text field `{field_name}`: \
-             facet.range needs a numeric or date field"
-        ),
-        ValueKind::Location => bail!(
-            "can not range facet on the location field `{field_name}`: \
              facet.range needs a numeric or date field"
         ),
     }

@@ -847,6 +847,10 @@ const MUST_BE_RESERVED_TYPE_NAMES: &[&str] = &[
     "float",
     "double",
     "date",
+    // #331 added `location`; #334 added `location_rpt`. Both resolve to the
+    // shared two-column encoding, and both must be reserved like the rest.
+    "location",
+    "location_rpt",
     "text_de",
     "text_fr",
     "text_ta",
@@ -2015,4 +2019,73 @@ type = "double""#,
         msg.contains("views"),
         "startup refusal must name the offending field, got: {msg}"
     );
+}
+
+/// #331/#334: a `location` and a `location_rpt` field both resolve
+/// (`ValueKind::Location`) and encode as two synthetic f64 fast columns
+/// (`<field>__lat`/`<field>__lon`), never as one name-resolvable Tantivy field.
+/// `geodist()` (#331) and `facet.heatmap` (#334) read the columns back through
+/// `location_fields`; this test pins that contract so a refactor that collapses
+/// the pair back into one field (or drops a column) is caught.
+#[test]
+fn location_and_location_rpt_fields_are_two_synthetic_f64_columns() {
+    let toml = r#"
+[core]
+name = "content"
+unique_key = "id"
+
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+
+[[fields]]
+name = "loc"
+type = "location"
+
+[[fields]]
+name = "rpt"
+type = "location_rpt"
+"#;
+    let (_dir, path) = write_schema(toml);
+    let wf = schema::load(&path).expect("`location` and `location_rpt` fields must resolve");
+
+    for name in ["loc", "rpt"] {
+        // Two synthetic columns, not one field.
+        let (lat, lon) = wf
+            .location_fields(name)
+            .unwrap_or_else(|| panic!("`{name}` must have a `(__lat, __lon)` column pair"));
+        assert_ne!(
+            lat, lon,
+            "`{name}__lat` and `{name}__lon` must be distinct columns"
+        );
+        // The synthetic columns and the user-facing name are never reachable
+        // through the single-field resolver, so they cannot leak into `fl`,
+        // `qf`, sort, or any name-based path.
+        assert_eq!(
+            wf.field(name),
+            None,
+            "`{name}` must not be a single name-resolvable Tantivy field"
+        );
+        assert_eq!(
+            wf.field(&format!("{name}__lat")),
+            None,
+            "the synthetic `{name}__lat` column must not leak into the resolver"
+        );
+        assert_eq!(
+            wf.value_kind(name),
+            Some(schema::ValueKind::Location),
+            "`{name}` must resolve to ValueKind::Location"
+        );
+    }
+
+    // A name with no such field is `None`, not a panic.
+    assert!(wf.location_fields("nope").is_none());
 }

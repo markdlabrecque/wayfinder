@@ -3645,3 +3645,124 @@ capg331 geo_geodist_sort   'select?q=*:*&sfield=loc&pt=40,-74&fl=id,dist:geodist
 if want_any '^geo_'; then
   release "$GEO_CONTAINER" "geo core '$GEO_CORE'"
 fi
+# --- spatial heatmap facets (issue #334) ------------------------------------
+# Appended block; nothing above is edited. Own container/port/core, per the
+# wayfinder-solr-24 precedent: the heatmap needs an `rpts_*` field that the
+# `content` core does not have, and adding one (plus a geo corpus) to `content`
+# would rewrite ground truth for every doc-returning fixture. Same caveat as the
+# other appended blocks: NOT runnable standalone -- `$OUT`/`$HERE` come from the
+# top of the script and `caph334` appends to manifest-errors.tsv unconditionally,
+# so run the whole script (or `--only '^heatmap_'`).
+#
+# The configset declares `location_rpt` (solr.SpatialRecursivePrefixTreeFieldType,
+# geo/distErrPct/maxDistErr/distanceUnits) and the `rpts_*`/`rptm_*` dynamic
+# rules (solr-ref/search-api/configset/schema.xml:240-241,435-438). solr:9's
+# _default configset already ships an identical `location_rpt` type, so this
+# block only adds the two dynamic rules -- no add-field-type. (If a future Solr
+# drops it from _default, add the type here exactly as the configset has it.)
+#
+# Corpus is 10 lat,lon points: a 3-point cluster (h1-h3) to produce a count>1
+# cell, four widely-spread interior points (h4-h8) to populate separate cells,
+# and two boundary points -- h9 "0,0" (origin) and h10 "45,45" -- to pin Solr's
+# cell-boundary convention (longitude cells are right-closed, latitude cells
+# are top-closed under north-indexed rows; see finding 159). Values are written
+# in the client's "lat,lon" comma form (search_api_solr's rpt format).
+HEATMAP_CONTAINER=wayfinder-solr-334
+HEATMAP_SOLR=http://localhost:9334/solr
+HEATMAP_CORE=heatmap
+# NOTE: unlike the sibling blocks above, this one ALWAYS recreates its container
+# (rm -f + run) rather than reusing a running one. The corpus here IS the fixture's
+# ground truth, and the reuse path re-POSTs h1..h10 without clearing what is there,
+# so a leftover wayfinder-solr-334 would silently contaminate every heatmap fixture
+# (stale + new docs). Recreating guarantees a clean corpus every run.
+if want_any 'heatmap_'; then
+  docker rm -f "$HEATMAP_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$HEATMAP_CONTAINER" -p 9334:8983 \
+    solr:9 solr-precreate "$HEATMAP_CORE" >/dev/null
+  echo -n "waiting for heatmap solr"
+  for _ in $(seq 60); do
+    if curl -sf "$HEATMAP_SOLR/$HEATMAP_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n "."; sleep 1
+  done
+  curl -s "$HEATMAP_SOLR/$HEATMAP_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-dynamic-field": {"name":"rpts_*", "type":"location_rpt", "indexed":true, "stored":true, "multiValued":false},
+    "add-dynamic-field": {"name":"rptm_*", "type":"location_rpt", "indexed":true, "stored":true, "multiValued":true}
+  }' >/dev/null
+  curl -sf "$HEATMAP_SOLR/$HEATMAP_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"h1","rpts_geo":"10,20"},
+    {"id":"h2","rpts_geo":"10,22"},
+    {"id":"h3","rpts_geo":"12,20"},
+    {"id":"h4","rpts_geo":"-20,-100"},
+    {"id":"h5","rpts_geo":"60,140"},
+    {"id":"h6","rpts_geo":"-70,30"},
+    {"id":"h7","rpts_geo":"35,-75"},
+    {"id":"h8","rpts_geo":"5,130"},
+    {"id":"h9","rpts_geo":"0,0"},
+    {"id":"h10","rpts_geo":"45,45"}
+  ]' >/dev/null
+fi
+
+# Same 6-column manifest-errors.tsv contract as capd/capf: own core, so never
+# manifest.tsv (the differential harness GETs manifest.tsv rows against the
+# `content` core, which has no rpts_* field).
+caph334() {  # caph334 <name> <url-after-/solr/>
+  local name=$1 suffix=$2
+  want "$name" || return 0
+  curl -sg "$HEATMAP_SOLR/$suffix" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$suffix" "" "$HEATMAP_SOLR" \
+    >> "$MANIFEST_ERRORS"
+  rm -f "$OUT/$name.status"
+}
+
+# Grid math over the whole world at three explicit levels. The columns/rows
+# here pin the geohash tree's subdivision: columns=2^ceil(5L/2), rows=2^floor
+# (5L/2) -- L=1 -> 8x4, L=2 -> 32x32, L=3 -> 256x128 (finding 159). counts_ints2D
+# is rows-indexed-from-NORTH, columns-from-WEST; all-zero rows are null.
+caph334 heatmap_l1_world "$HEATMAP_CORE/select?q=*:*&rows=0&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=1&wt=json"
+caph334 heatmap_l2_world "$HEATMAP_CORE/select?q=*:*&rows=0&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=2&wt=json"
+caph334 heatmap_l3_world "$HEATMAP_CORE/select?q=*:*&rows=0&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=3&wt=json"
+
+# Default gridLevel (no gridLevel param) is distErrPct-derived and depends on
+# the geom size: whole world -> level 2, the bounded box below -> level 3. The
+# client always sends gridLevel (finding 133), so this is the secondary path;
+# captured to pin the default-level computation.
+GEO_RECT='%5B%22-90%20-45%22%20TO%20%2290%2045%22%5D'
+caph334 heatmap_default_world   "$HEATMAP_CORE/select?q=*:*&rows=0&facet=true&facet.heatmap=rpts_geo&wt=json"
+caph334 heatmap_default_bounded "$HEATMAP_CORE/select?q=*:*&rows=0&facet=true&facet.heatmap=rpts_geo&facet.heatmap.geom=$GEO_RECT&wt=json"
+
+# Bounded geom with explicit gridLevel: the grid is the world cells overlapping
+# the geom bbox, snapped OUT to cell edges (minX/maxX/minY/maxY are cell-aligned,
+# not the raw geom bounds). GEO_RECT is lon[-90,90] lat[-45,45].
+caph334 heatmap_l1_bounded "$HEATMAP_CORE/select?q=*:*&rows=0&facet=true&facet.heatmap=rpts_geo&facet.heatmap.geom=$GEO_RECT&facet.heatmap.gridLevel=1&wt=json"
+caph334 heatmap_l2_bounded "$HEATMAP_CORE/select?q=*:*&rows=0&facet=true&facet.heatmap=rpts_geo&facet.heatmap.geom=$GEO_RECT&facet.heatmap.gridLevel=2&wt=json"
+
+# The <field>:<geom> fq constrains the doc set; the heatmap then counts only
+# surviving docs. GEO_RECT keeps h1/h2/h3 (lat 10-12, lon 20-22 -- inside) and
+# drops the rest, so the grid shows just that cluster.
+caph334 heatmap_fq_rect "$HEATMAP_CORE/select?q=*:*&rows=0&fq=rpts_geo:$GEO_RECT&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=2&wt=json"
+
+# Edge cases. heatmap_empty: no matching docs -> counts_ints2D is a single null
+# (not an array). heatmap_format_ints2d: the default format, made explicit.
+# (format=png is also a 200 in Solr but emits base64 counts_png AND stringifies
+# the numeric fields -- binary, non-deterministic, never sent by the client; not
+# captured, descope with a guard.)
+caph334 heatmap_empty         "$HEATMAP_CORE/select?q=zzznomatch&rows=0&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=2&wt=json"
+caph334 heatmap_format_ints2d "$HEATMAP_CORE/select?q=*:*&rows=0&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=2&facet.heatmap.format=ints2D&wt=json"
+
+# maxCells is a ceiling GUARD, not a level selector: it never lowers or raises
+# the level. heatmap_maxcells_guard: gridLevel=2 (32x32=1024 cells) under
+# maxCells=10 -> 400 "Too many cells". heatmap_gridlevel_exceeds_maxcells:
+# gridLevel=4 (1024x1024) under the default maxCells=100000 -> same 400.
+caph334 heatmap_maxcells_guard             "$HEATMAP_CORE/select?q=*:*&rows=0&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=2&facet.heatmap.maxCells=10&wt=json"
+caph334 heatmap_gridlevel_exceeds_maxcells "$HEATMAP_CORE/select?q=*:*&rows=0&facet=true&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=4&wt=json"
+
+# Error shapes: an undefined field, a non-spatial field, and facet.heatmap
+# without facet=true (Solr silently omits facet_counts entirely).
+caph334 heatmap_unknown_field    "$HEATMAP_CORE/select?q=*:*&rows=0&facet=true&facet.heatmap=nosuchfield&facet.heatmap.gridLevel=2&wt=json"
+caph334 heatmap_nonspatial_field "$HEATMAP_CORE/select?q=*:*&rows=0&facet=true&facet.heatmap=id&facet.heatmap.gridLevel=2&wt=json"
+caph334 heatmap_no_facet_true    "$HEATMAP_CORE/select?q=*:*&rows=0&facet.heatmap=rpts_geo&facet.heatmap.gridLevel=2&wt=json"
+
+if want_any 'heatmap_'; then
+  release "$HEATMAP_CONTAINER" "heatmap core '$HEATMAP_CORE'"
+fi

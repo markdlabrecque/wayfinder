@@ -1,0 +1,19 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "facet.heatmap.gridLevel":"2",
+      "q":"*:*",
+      "facet.heatmap":"rpts_geo",
+      "rows":"0",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":10,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  }
+}
