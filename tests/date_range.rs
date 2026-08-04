@@ -1416,3 +1416,69 @@ async fn reversed_interval_past_the_upper_bound_collapses_instead_of_erroring() 
         "a reversed interval inside the representable range still 500s: {body}"
     );
 }
+
+// --- json.facet (#343) over a date_range field -------------------------------
+
+/// `json.facet` landed (#343) after the `dr341_*` capture, so no fixture pins
+/// what real Solr answers for a `type: terms` facet over a `DateRangeField`.
+/// What this test *does* pin is the two Wayfinder-internal invariants that hold
+/// whatever Solr turns out to do: the request is a clean 400 rather than a
+/// panic, and the synthetic endpoint columns stay unreachable by name.
+///
+/// The 400 wording is `check_facetable`'s generic "w/o fast values" message,
+/// which is honest here -- the user-facing `date_range` field is a stored text
+/// field, not a fast column; `facet.field`'s 200-with-empty-buckets (finding
+/// 186) is a deliberate special case *ahead* of that check, and `json.facet`
+/// has no such case.
+///
+/// ponytail: if a capture ever shows Solr answering `json.facet` over a
+/// `DateRangeField` with an empty bucket list the way `facet.field` does, this
+/// 400 becomes a divergence and the `facet.rs` special case has to be lifted
+/// into `json_facet.rs` too.
+#[tokio::test]
+async fn json_facet_on_a_date_range_field_is_a_clean_400_and_leaks_no_endpoints() {
+    let (app, _dir) = date_range_app().await;
+    for (jf, expected_msg) in [
+        (
+            r#"{"x":{"type":"terms","field":"drs_x"}}"#,
+            "can not facet on a field w/o fast values (docValues): drs_x",
+        ),
+        (
+            r#"{"x":{"type":"terms","field":"drm_x"}}"#,
+            "can not facet on a field w/o fast values (docValues): drm_x",
+        ),
+        (
+            r#"{"x":"max(drs_x)"}"#,
+            "can not aggregate on a field w/o fast values (docValues): drs_x",
+        ),
+        // The synthetic endpoint column is not a nameable field anywhere,
+        // json.facet included -- same guard the fl/luke/sort/stats surfaces
+        // already carry.
+        (
+            r#"{"x":{"type":"terms","field":"drs_x__start"}}"#,
+            "can not facet on undefined field: drs_x__start",
+        ),
+    ] {
+        let encoded: String = jf
+            .bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect();
+        let (status, body) = get(
+            &app,
+            &format!("select?q=*:*&rows=0&json.facet={encoded}&wt=json"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{jf}: {body}");
+        assert_eq!(body["error"]["code"], 400, "{jf}: {body}");
+        assert_eq!(body["error"]["msg"], expected_msg, "{jf}: {body}");
+        assert!(
+            body.get("facets").is_none(),
+            "{jf}: a failed json.facet must not emit a facets block: {body}"
+        );
+    }
+}
