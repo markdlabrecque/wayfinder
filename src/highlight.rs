@@ -51,6 +51,41 @@
 //!   to the schema's highlightable fields and never errors on the non-text
 //!   ones it sweeps up. See `resolve_hl_fl`/`highlightable_fields` below for
 //!   the evidence and the asymmetry between wildcard and explicit fields.
+//!
+//! Issue #353 admitted five more `hl.*` params `SearchApiSolrBackend::
+//! setHighlighting` emits. Two have implemented behaviour here:
+//!
+//! - **`hl.preserveMulti`**: under `hl.method=original`, one snippet PER VALUE
+//!   of a multi-valued field, in indexed order, for every value (matching
+//!   highlighted, non-matching plain) -- see `highlight_field_preserve_multi`
+//!   in `crate::core_index` and `hl353_preserve_multi_on`/`_off`. A no-op on
+//!   the default (`hl.method=unified`) path, which Wayfinder does not truly
+//!   implement (finding 55), matching real Solr's own no-op there.
+//! - **`hl.fragmenter`**: `gap` is Solr's default original-method fragmenter
+//!   (`LuceneGapFragmenter`) and changes nothing here -- Tantivy already gaps.
+//!   See `hl353_fragmenter_gap` (byte-identical to omitting it).
+//!
+//! The other three (#353) are admitted but currently inert; each ceiling is
+//! named so an accepted param cannot change behaviour silently:
+//!
+//! - ponytail: **`hl.maxAnalyzedChars`** caps how many leading characters of a
+//!   field Solr scans for highlight candidates (default 51200). Tantivy's
+//!   `SnippetGenerator` analyses the whole field, so this is ignored today.
+//!   Implementing it means truncating each field value to the char window
+//!   before snippet generation and verifying boundary behaviour (a term that
+//!   straddles the window), captured live first.
+//! - ponytail: **`hl.usePhraseHighlighter`** correlates the terms of a phrase
+//!   query so they highlight as one span. Wayfinder's snippet path highlights
+//!   each query term independently and has no phrase-span notion; the param is
+//!   accepted and ignored.
+//! - ponytail: **`hl.highlightMultiTerm`** expands wildcard/prefix/fuzzy query
+//!   terms so their expansions are highlighted. Wayfinder does not expand
+//!   such terms for highlighting; the param is accepted and ignored.
+//!
+//! `hl.fragmenter=regex` is also not built: the regex fragmenter needs
+//! `hl.regex.*`, which the client never reaches because of the inverted inner
+//! guard at `SearchApiSolrBackend.php:4250` -- `tests/hl353_regex_descope_guard.rs`
+//! fails the day that inversion is fixed upstream.
 
 use std::fmt;
 
@@ -154,19 +189,43 @@ pub fn highlighting(
             let original_fragments = params.get("hl.method") == Some("original");
             let merge_contiguous =
                 original_fragments && params.get("hl.mergeContiguous") == Some("true");
-            let mut snippets = index.highlight_field_with_options(
-                query,
-                addr,
-                field_name,
-                max_chars,
-                pre,
-                post,
-                snippets_cap,
-                cross_field_query_terms,
-                original_fragments,
-                merge_contiguous,
-            )?;
-            if snippets.is_empty() && index.wf_schema.is_raw_string(field_name) {
+            // Issue #353: `hl.preserveMulti` only takes effect on the original
+            // path (the default `hl.method=unified` is a captured no-op for
+            // it), and only on a multi-valued field -- on a single-valued
+            // field "one snippet per value" is just the ordinary path.
+            let preserve_multi = original_fragments
+                && params.get("hl.preserveMulti") == Some("true")
+                && index
+                    .wf_schema
+                    .field_config(field_name)
+                    .is_some_and(|c| c.multi_valued);
+            let mut snippets = if preserve_multi {
+                index.highlight_field_preserve_multi(
+                    query,
+                    addr,
+                    field_name,
+                    max_chars,
+                    pre,
+                    post,
+                    snippets_cap,
+                    cross_field_query_terms,
+                    merge_contiguous,
+                )?
+            } else {
+                index.highlight_field_with_options(
+                    query,
+                    addr,
+                    field_name,
+                    max_chars,
+                    pre,
+                    post,
+                    snippets_cap,
+                    cross_field_query_terms,
+                    original_fragments,
+                    merge_contiguous,
+                )?
+            };
+            if !preserve_multi && snippets.is_empty() && index.wf_schema.is_raw_string(field_name) {
                 snippets = raw_string_snippets(
                     index,
                     query,
@@ -185,12 +244,20 @@ pub fn highlighting(
             // it has to, since every extra snippet costs another pass over the
             // field text. This `take` is the belt to that braces: capping is
             // finding 53's wire contract, and it stays enforced here rather
-            // than relying on the primitive having got it right.
-            let capped: Vec<Value> = snippets
-                .into_iter()
-                .take(snippets_cap)
-                .map(Value::from)
-                .collect();
+            // than relying on the primitive having got it right. NOT applied
+            // under `hl.preserveMulti`: that path returns one snippet per
+            // value by contract (issue #353), so capping it to `hl.snippets`
+            // would drop values Solr returns -- captured `hl.snippets` 1, 2,
+            // and 5 all yield every value.
+            let capped: Vec<Value> = if preserve_multi {
+                snippets.into_iter().map(Value::from).collect()
+            } else {
+                snippets
+                    .into_iter()
+                    .take(snippets_cap)
+                    .map(Value::from)
+                    .collect()
+            };
             per_field.insert((*field_name).to_string(), Value::Array(capped));
         }
         // finding 52: always an entry, `{}` when nothing matched, never

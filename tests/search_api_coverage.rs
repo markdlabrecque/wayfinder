@@ -1046,12 +1046,14 @@ async fn classification_guards_exercise_real_router_strict_param_and_renderer_be
 
     // This half of the guard needs *any* param `SELECT_PARAMS` does not
     // carry; it is about the strict-param rejection path, not about which
-    // particular `hl.*` param is unimplemented. It used `hl.requireFieldMatch`
-    // until issue #139 allowlisted that one (and `hl.mergeContiguous`),
-    // making it a 200 -- so it moves to `hl.maxAnalyzedChars`, still
-    // genuinely unsupported and explicitly listed as uncaptured in
-    // `docs/solr-ref-findings.md`. The assertions themselves are unchanged.
-    let (status, body) = common::get(&app, "select?q=*:*&hl.maxAnalyzedChars=100").await;
+    // particular `hl.*` param is unimplemented. It walked through
+    // `hl.requireFieldMatch` (issue #139 allowlisted it), then
+    // `hl.maxAnalyzedChars` (issue #353 allowlisted it); both became 200s.
+    // It now uses `hl.alternateField` -- a real Solr param Wayfinder has no
+    // alternate-field highlighting to honour, so it is genuinely unsupported
+    // and far out of scope. Move it again if it is ever admitted. The
+    // assertions themselves are unchanged.
+    let (status, body) = common::get(&app, "select?q=*:*&hl.alternateField=body").await;
     assert_eq!(
         status,
         axum::http::StatusCode::BAD_REQUEST,

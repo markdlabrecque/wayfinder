@@ -4709,3 +4709,79 @@ capsuggest suggest_build_all "$SUGGEST352_CORE/suggest?suggest.buildAll=true&wt=
 if want_any '^suggest_'; then
   release "$SUGGEST352_CONTAINER" "suggest core '$SUGGEST352_CORE'"
 fi
+
+# --- hl.preserveMulti + hl.fragmenter admission (issue #353) ---------------
+# Own container, own port (`wayfinder-solr-353`, 9353), per the
+# `wayfinder-solr-4`/`-24` precedent. Same body + multi-valued `category`
+# schema and 5-doc corpus as the canonical `content` core (and the
+# `wayfinder-solr-4` highlighting block), so these are ordinary content-core
+# GETs and belong in `manifest.tsv` (via `cap353()` below), not
+# `manifest-errors.tsv`. Not runnable standalone: builds its own container from
+# scratch every run, like the highlighting block above.
+#
+# Two facts this block pins (captured, not assumed -- see the issue's
+# "verify before implementing"):
+#
+# `hl.preserveMulti` is a NO-OP under the default (`hl.method=unified`)
+# highlighter and under `hl.method=original` only changes one thing: it
+# returns one snippet PER VALUE of a multi-valued field, in indexed order,
+# for EVERY value -- matching values highlighted, non-matching values
+# returned plain (whole value, no `<em>`). The default (`false`) merges the
+# values into one stream and returns only the matching fragments. Captured
+# here on `category` (multi-valued `string`): doc1 is
+# `["animals","classic"]`, so `q=category:animals&hl.preserveMulti=true`
+# yields `["<em>animals</em>","classic"]` where the default yields just
+# `["<em>animals</em>"]`.
+#
+# `hl.fragmenter=gap` is byte-identical to the default fragmenter (Solr's own
+# `LuceneGapFragmenter` is the default for `hl.method=original`), captured to
+# prove admission is the only work `gap` needs. `hl.fragmenter=regex` needs
+# the regex fragmenter, which `search_api_solr` 4.4.0 never reaches because of
+# the inverted inner guard at `SearchApiSolrBackend.php:4250` (see
+# `tests/hl353_regex_descope_guard.rs`) -- it is deliberately not captured.
+HL353_CONTAINER=wayfinder-solr-353
+HL353_SOLR=http://localhost:9353/solr
+HL353_CORE=content
+if want_any '^hl353_'; then
+docker rm -f "$HL353_CONTAINER" >/dev/null 2>&1 || true
+docker run -d --name "$HL353_CONTAINER" -p 9353:8983 \
+  solr:9 solr-precreate "$HL353_CORE" >/dev/null
+echo -n "waiting for hl353 solr"
+for _ in $(seq 60); do
+  if curl -sf "$HL353_SOLR/$HL353_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+  echo -n "."; sleep 1
+done
+curl -s "$HL353_SOLR/$HL353_CORE/schema" -H 'Content-Type: application/json' -d '{
+  "add-field": [
+    {"name":"body",     "type":"text_en", "indexed":true, "stored":true},
+    {"name":"category", "type":"string",  "indexed":true, "stored":true,
+     "docValues":true, "multiValued":true}
+  ]
+}' >/dev/null
+curl -sf "$HL353_SOLR/$HL353_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"doc1","body":"the quick brown fox jumps over the lazy dog","category":["animals","classic"]},
+    {"id":"doc2","body":"a lazy afternoon in the garden","category":["garden"]},
+    {"id":"doc3","body":"quick thinking saves the day","category":["misc","classic"]},
+    {"id":"doc4","body":"dogs and cats living together","category":["animals"]},
+    {"id":"doc5","body":"nothing much here at all"}
+]' >/dev/null
+cap353() {  # cap353 <name> <path-with-query>, against $HL353_SOLR/$HL353_CORE
+  local name=$1 path=$2
+  want "$name" || return 0
+  curl -sg "$HL353_SOLR/$HL353_CORE/$path" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\n' "$name" "$(cat "$OUT/$name.status")" "$path" >> "$MANIFEST"
+  rm -f "$OUT/$name.status"
+}
+
+# hl.preserveMulti under hl.method=original (the only method it affects).
+# Default: merge -> only matching fragments. q=category:animals hits doc1
+# (["animals","classic"]) and doc4 (["animals"]).
+cap353 hl353_preserve_multi_off 'select?q=category:animals&hl=true&hl.fl=category&hl.method=original&wt=json'
+cap353 hl353_preserve_multi_on  'select?q=category:animals&hl=true&hl.fl=category&hl.method=original&hl.preserveMulti=true&wt=json'
+
+# hl.fragmenter=gap is the default original-method fragmenter: byte-identical
+# to omitting it. q=body:lazy hits doc1 and doc2; fragsize 20 truncates.
+cap353 hl353_fragmenter_gap 'select?q=body:lazy&hl=true&hl.fl=body&hl.method=original&hl.fragsize=20&hl.fragmenter=gap&wt=json'
+
+release "$HL353_CONTAINER" "hl353 core '$HL353_CORE'"
+fi

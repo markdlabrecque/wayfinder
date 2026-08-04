@@ -930,11 +930,14 @@ container at the top of `capture.sh`. All core-relative GETs, so all in `manifes
     assertion from; `hl_fragsize_small.json` is kept as the documented default-method surprise
     (a no-truncation control), not as a truncation assertion's source.
 
-Not yet captured for highlighting: `hl.maxAnalyzedChars`, `hl.highlightMultiTerm`,
-per-field `f.<field>.hl.*` overrides, and any field type other than
+Not yet captured for highlighting: per-field `f.<field>.hl.*` overrides, and any field type other than
 `text_en` (a highlighted `string`/numeric/date field was not exercised — `category` above is
 requested but never actually matched, so its shape when it *does* highlight remains unseen).
-Also not captured: an `hl.fl` naming an undefined or non-text field. Wayfinder renders that as a
+The five `setHighlighting()` `hl.*` params issue #353 added (`hl.maxAnalyzedChars`,
+`hl.fragmenter`, `hl.usePhraseHighlighter`, `hl.highlightMultiTerm`, `hl.preserveMulti`) are now
+admitted to `SELECT_PARAMS`; `hl.preserveMulti` and `hl.fragmenter=gap` are captured (findings
+187-188) and the other three are admitted-and-inert with a `ponytail:` naming each ceiling
+(`src/highlight.rs`). Also not captured: an `hl.fl` naming an undefined or non-text field. Wayfinder renders that as a
 400 with the base query's `response` block attached (`WfError::with_response`), by inference from
 `facet.field`'s own unknown-field precedent (`facet_unknown_field.json`, issue #35) rather than
 from a captured `hl_*` fixture — flag for correction if a real capture ever shows a different
@@ -3286,3 +3289,34 @@ exactly as `solr-ref/search-api/configset/schema.xml:199-200,340-341` has them:
      `Field type date_range{class=org.apache.solr.schema.DateRangeField,...}`
      message for stats (`dr341_err_stats`). The asymmetry is worth preserving:
      three surfaces, three different behaviours.
+
+187. **`hl.preserveMulti` returns one snippet PER VALUE, in indexed order, for
+    every value — but only under `hl.method=original`; under the default
+    (`hl.method=unified`) it is a complete no-op.** Captured on the 5-doc
+    `category` field (`["animals","classic"]` on doc1) by `hl353_preserve_multi_on`
+    /`_off` (issue #353): with `q=category:animals&hl.fl=category&hl.method=original`,
+    the default yields doc1 `["<em>animals</em>"]` (only the matching value,
+    values merged into one stream), while `hl.preserveMulti=true` yields doc1
+    `["<em>animals</em>","classic"]` — every value in order, matching values
+    highlighted, non-matching values returned plain (whole value, no `<em>`).
+    `hl.snippets` does NOT cap the number of values returned (verified at
+    `hl.snippets` 1, 2, and 5 — all yield every value); it caps fragments
+    *within* a value only. Under the default `hl.method`, `hl.preserveMulti=true`
+    and absent produce byte-identical output (captured on the same `category`
+    request). Wayfinder consults the flag only on the original path
+    (`highlight_field_preserve_multi`), matching that no-op.
+
+188. **`hl.fragmenter=gap` is byte-identical to omitting it — `gap` is Solr's
+    default original-method fragmenter (`LuceneGapFragmenter`)**, captured as
+    `hl353_fragmenter_gap` (`q=body:lazy&hl.fl=body&hl.method=original&hl.fragsize=20&hl.fragmenter=gap`,
+    issue #353). `hl.fragmenter=regex` is never emitted by `search_api_solr`
+    4.4.0: an inverted inner guard at `SearchApiSolrBackend.php:4250`
+    (`if ('regex' !== $highlighter['fragmenter'])` — always false once the outer
+    `if ('gap' !== ...)` is entered) gates `setRegexPattern`/`setRegexSlop`/
+    `setRegexMaxAnalyzedChars` behind a condition that never runs, so
+    `hl.regex.*` is unreachable client traffic. The outer guard DOES fire and
+    `setFragmenter('regex')` runs (line 4249), so the client can send
+    `hl.fragmenter=regex` without the pattern — Wayfinder admits `hl.fragmenter`
+    and falls back to gap behaviour for `regex`; the descope is guarded by
+    `tests/hl353_regex_descope_guard.rs`, which fails the day upstream fixes the
+    inversion.

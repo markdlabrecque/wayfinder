@@ -3668,6 +3668,104 @@ impl CoreIndex {
         Ok(snippets)
     }
 
+    /// `hl.preserveMulti=true` highlighting (issue #353). Only ever called on
+    /// the `hl.method=original` path -- the default (`hl.method=unified`)
+    /// highlighter is a documented no-op for `hl.preserveMulti` (captured:
+    /// `hl353_preserve_multi_on`/`_off`'s default-method counterparts are
+    /// byte-identical), and Wayfinder does not truly implement unified anyway
+    /// (finding 55).
+    ///
+    /// Semantics, pinned by `hl353_preserve_multi_on`: return one snippet PER
+    /// VALUE of a multi-valued field, in indexed order, for EVERY value --
+    /// matching values highlighted, non-matching values returned plain (whole
+    /// value, HTML-escaped, no markers). This is the opposite of the default
+    /// `highlight_field_with_options`, which space-joins every value into one
+    /// stream and returns only matching fragments. `hl.snippets` does NOT cap
+    /// the number of values returned (captured with `hl.snippets` 1, 2, and 5
+    /// all yielding every value); it caps fragments WITHIN a text value only.
+    ///
+    /// Raw `string`/`keyword` fields take an exact-match per-value path (the
+    /// multi-valued analogue of `raw_string_snippets` in `src/highlight.rs`):
+    /// a value equals a query term or it does not. Text fields delegate each
+    /// value to `original_highlight_fragments`, so a value's fragments are
+    /// selected exactly as the joined path would select them over that value
+    /// alone.
+    #[allow(clippy::too_many_arguments)]
+    pub fn highlight_field_preserve_multi(
+        &self,
+        query: &dyn Query,
+        addr: DocAddress,
+        field_name: &str,
+        max_num_chars: usize,
+        pre: &str,
+        post: &str,
+        snippets_cap: usize,
+        cross_field_query_terms: bool,
+        merge_contiguous: bool,
+    ) -> Result<Vec<String>> {
+        let field = self
+            .wf_schema
+            .field(field_name)
+            .ok_or_else(|| anyhow!("can not highlight undefined field: {field_name}"))?;
+        let searcher = self.reader.searcher();
+        let doc: TantivyDocument = searcher.doc(addr)?;
+        // Stored string values in indexed order -- the same source
+        // `render_doc` reads, so the order matches the field's stored order
+        // the way Solr's `hl.preserveMulti` promises.
+        let values: Vec<String> = doc
+            .get_all(field)
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+
+        if self.wf_schema.is_raw_string(field_name) {
+            // Exact-match per value: every value is returned, matching ones
+            // wrapped in the markers, non-matching ones plain. Mirrors
+            // `raw_string_snippets`'s term extraction verbatim.
+            let mut terms = Vec::new();
+            query.query_terms(&mut |term, _| {
+                if (cross_field_query_terms || term.field() == field)
+                    && let Some(value) = term.value().as_str()
+                {
+                    terms.push(value.to_owned());
+                }
+            });
+            return Ok(values
+                .iter()
+                .map(|value| {
+                    let escaped = encode_minimal(value);
+                    if terms.iter().any(|term| term == value) {
+                        format!("{pre}{escaped}{post}")
+                    } else {
+                        escaped
+                    }
+                })
+                .collect());
+        }
+
+        // Text field: per-value original-method fragment selection. A value
+        // with no term overlap comes back plain (whole value, escaped).
+        let terms = self.highlight_terms(query, field, cross_field_query_terms)?;
+        let mut out = Vec::with_capacity(values.len());
+        for value in &values {
+            let fragments = self.original_highlight_fragments(
+                field,
+                value,
+                &terms,
+                max_num_chars,
+                pre,
+                post,
+                snippets_cap,
+                merge_contiguous,
+            )?;
+            if fragments.is_empty() {
+                out.push(encode_minimal(value));
+            } else {
+                out.extend(fragments);
+            }
+        }
+        Ok(out)
+    }
+
     /// Builds the `/mlt` similarity query for `addr` — mines terms from
     /// `field_names`'s stored values (every declared field if absent, from
     /// `mlt.fl`), tuned by `opts`.

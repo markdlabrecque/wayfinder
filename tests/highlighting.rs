@@ -340,18 +340,135 @@ async fn strict_params_accepts_every_implemented_highlight_param() {
     // rest of the implemented `hl.*` surface here. `hl.fl=*` is exercised
     // separately below (it interacts with field resolution, not just
     // `SELECT_PARAMS` membership), so this request keeps the explicit
-    // `hl.fl=body` the rest of this guard already used.
+    // `hl.fl=body` the rest of this guard already used. Issue #353 adds the
+    // five `setHighlighting()` params: `hl.preserveMulti` is a no-op here
+    // (`body` is single-valued), `hl.fragmenter=gap` is the default, and the
+    // other three are admitted-and-inert -- all must clear `strict_params`.
     let (status, body) = get(
         &app,
         "select?q=lazy&df=body&hl=true&hl.fl=body&hl.snippets=2&hl.fragsize=50\
          &hl.method=original&hl.simple.pre=%3Cb%3E&hl.simple.post=%3C%2Fb%3E\
-         &hl.mergeContiguous=false&hl.requireFieldMatch=false&wt=json",
+         &hl.mergeContiguous=false&hl.requireFieldMatch=false\
+         &hl.preserveMulti=true&hl.fragmenter=gap&hl.maxAnalyzedChars=51200\
+         &hl.usePhraseHighlighter=false&hl.highlightMultiTerm=false&wt=json",
     )
     .await;
     assert_eq!(
         status,
         StatusCode::OK,
         "every implemented hl.* param must pass strict mode, got body: {body}"
+    );
+}
+
+// --- Issue #353: hl.preserveMulti + hl.fragmenter admission ---------------
+//
+// `SearchApiSolrBackend::setHighlighting()` emits five `hl.*` params only
+// when non-default; under `strict_params = true` each 400'd a request the
+// client legitimately sends. `hl.preserveMulti` is the one with wire-visible
+// semantics: under `hl.method=original` it returns one snippet PER VALUE of a
+// multi-valued field (matching highlighted, non-matching plain), where the
+// default merges the values into one stream. `hl.fragmenter=gap` is Solr's
+// own default original-method fragmenter, so admitting it changes nothing.
+// Both are pinned by the `hl353_*` fixtures captured against the same 5-doc
+// `category` corpus the rest of this suite uses.
+
+#[tokio::test]
+async fn hl_preserve_multi_on_returns_one_snippet_per_value_in_order() {
+    let (app, _dir) = indexed_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=category:animals&hl=true&hl.fl=category&hl.method=original\
+         &hl.preserveMulti=true&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "hl.preserveMulti=true must not 400 under strict_params, got {body}"
+    );
+    let expected = common::fixture("hl353_preserve_multi_on")
+        .pointer("/highlighting")
+        .cloned()
+        .expect("hl353_preserve_multi_on carries a highlighting block");
+    assert_eq!(
+        body.pointer("/highlighting"),
+        Some(&expected),
+        "hl.preserveMulti=true under hl.method=original must return one snippet \
+         per value in indexed order -- matching values highlighted, \
+         non-matching values plain -- got {body}"
+    );
+}
+
+#[tokio::test]
+async fn hl_preserve_multi_off_merges_values_into_one_stream() {
+    let (app, _dir) = indexed_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=category:animals&hl=true&hl.fl=category&hl.method=original&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    let expected = common::fixture("hl353_preserve_multi_off")
+        .pointer("/highlighting")
+        .cloned()
+        .expect("hl353_preserve_multi_off carries a highlighting block");
+    assert_eq!(
+        body.pointer("/highlighting"),
+        Some(&expected),
+        "hl.preserveMulti absent must merge the values into one stream and \
+         return only matching fragments, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn hl_fragmenter_gap_is_byte_identical_to_the_default_fragmenter() {
+    let (app, _dir) = indexed_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=body:lazy&hl=true&hl.fl=body&hl.method=original&hl.fragsize=20\
+         &hl.fragmenter=gap&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "hl.fragmenter=gap must not 400, got {body}"
+    );
+    let expected = common::fixture("hl353_fragmenter_gap")
+        .pointer("/highlighting")
+        .cloned()
+        .expect("hl353_fragmenter_gap carries a highlighting block");
+    assert_eq!(
+        body.pointer("/highlighting"),
+        Some(&expected),
+        "hl.fragmenter=gap is Solr's default original-method fragmenter, so it \
+         must match the default gap behaviour exactly, got {body}"
+    );
+}
+
+/// Captured: `hl.preserveMulti` is a no-op under the default (`hl.method=unified`)
+/// highlighter -- real Solr returns identical output with and without it. This
+/// guards that Wayfinder does not activate the per-value path off the original
+/// method, where the unified highlighter is itself a ponytail (finding 55).
+#[tokio::test]
+async fn hl_preserve_multi_is_a_noop_under_the_default_unified_method() {
+    let (app, _dir) = indexed_app().await;
+    let (status, off) = get(
+        &app,
+        "select?q=category:animals&hl=true&hl.fl=category&wt=json",
+    )
+    .await;
+    let (status_on, on) = get(
+        &app,
+        "select?q=category:animals&hl=true&hl.fl=category&hl.preserveMulti=true&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {off}");
+    assert_eq!(status_on, StatusCode::OK, "got {on}");
+    assert_eq!(
+        off.pointer("/highlighting"),
+        on.pointer("/highlighting"),
+        "hl.preserveMulti must be a no-op under the default hl.method"
     );
 }
 
