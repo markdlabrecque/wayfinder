@@ -2649,3 +2649,19 @@ are special-cased to fixed sink fields before the prefix logic ever runs.
       `addIndexField` normalises any `solr_text_*` to `'text'` before its switch
       (`2706-2708`), and `solr_date_range` is the lone extra branch, building
       `[$start TO $end]` (`2764-2768`).
+
+## Findings from the #296 per-field facet capture, continued
+
+152. **Precedence is `f.<field>.facet.X` > the local param on `facet.field` >
+      the global `facet.X`** — the per-field param beats the local one, which is
+      the opposite of "local params shadow the request". `{!key=cat
+      facet.limit=1}category` with `f.category.facet.limit=3` returns three
+      buckets (`facet_perfield_prec_lp_vs_field`); the same local param with a
+      global `facet.limit=3` returns one (`facet_perfield_prec_lp_vs_global`);
+      and `f.category.facet.limit=1` beats a global `3`
+      (`facet_perfield_prec_field_vs_global`). The mechanism explains it:
+      `SimpleFacets.parseParams` wraps the local params as *defaults* under the
+      request params and then reads the setting with `getFieldParam(field,
+      "facet.limit")`, which tries `f.<field>.facet.limit` first and only then
+      the bare name — so a local param can only ever shadow the bare global,
+      never the per-field form.

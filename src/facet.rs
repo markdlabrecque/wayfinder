@@ -278,6 +278,14 @@ fn excluded_base_clauses(
 /// counts with the tagged `fq` clauses excluded, while the key still carries
 /// the `{!ex=...}` text verbatim — Solr does not strip local params from
 /// `facet_queries` keys.
+///
+/// ponytail: only `ex` is read off a `facet.query` block. Solr also honours
+/// `facet.*` settings carried as local params there (the same
+/// `SimpleFacets.parseParams` mechanism issue #296 implemented for
+/// `facet.field`, finding 148), but nothing here captures that shape and a
+/// `facet.query` bucket is a single count with no list to limit, sort or
+/// mincount — so the only setting with any meaning would be `facet.missing`,
+/// which has no `facet_queries` rendering at all. Capture before implementing.
 fn facet_queries(
     index: &CoreIndex,
     params: &Params,
@@ -320,12 +328,14 @@ fn facet_queries(
 ///
 /// ponytail: this function reads only `key` (the label). `ex` is read
 /// separately in `plan_facet_fields`/`facet_queries` for #295's filter
-/// exclusion, and `key`/`ex` compose in either order (finding 138) because
-/// both come off the same parsed block. A `tag` on a `facet.field` value is
-/// meaningless (tags label `fq` clauses) and is dropped, as are inline
-/// `facet.*` params inside the block -- adjacent to issue #140's
-/// `f.<field>.facet.*`, which is still uncaptured. A repeated `key` is
-/// first-wins, matching Solr's `{!key=a key=b}category` capture (finding 108).
+/// exclusion, and the inline `facet.limit`/`facet.mincount`/`facet.sort`/
+/// `facet.missing` settings in `FacetSettings::resolve` for #296's; all of
+/// them compose in any order (finding 138) because they come off the same
+/// parsed block. A `tag` on a `facet.field` value is meaningless (tags label
+/// `fq` clauses) and is dropped, as is every other local param -- `facet.prefix`
+/// and `facet.method` included, both uncaptured and unimplemented in either
+/// form. A repeated `key` is first-wins, matching Solr's `{!key=a
+/// key=b}category` capture (finding 108).
 ///
 fn split_facet_key(value: &str) -> (String, &str) {
     match local_params::parse_block(value) {
@@ -363,9 +373,9 @@ fn facet_fields(
             .collect::<BaseClauses>(),
     );
 
-    let shaping = BucketShaping::from_params(config, params);
     let mut out = Map::new();
     for field in &plan.fields {
+        let shaping = BucketShaping::for_field(config, &field.settings);
         // #295: `{!ex=...}` on a facet.field counts against the filter set with
         // the tagged fq clauses dropped (finding 136). An empty or
         // non-matching `ex` reduces to the full set, so the common no-exclusion
@@ -417,9 +427,15 @@ pub struct FacetFieldPlan {
     /// requested value, not per field: `facet.field=category&
     /// facet.field={!key=other}category` is two aggregations over one column.
     pub agg_name: String,
-    /// The effective `facet.missing` for this field, after the
-    /// `f.<field>.facet.missing` override.
+    /// The effective `facet.missing` for this facet, after the
+    /// `f.<field>.facet.missing` override and the local-param form.
     pub missing: bool,
+    /// The effective `facet.limit`/`facet.mincount`/`facet.sort` for this
+    /// facet, after the same precedence (issue #296, finding 152). Per facet
+    /// rather than per request: two `facet.field` values over one column may
+    /// legitimately disagree, and only the local-param form can say so
+    /// (finding 149).
+    pub settings: FacetSettings,
     /// The `{!ex=...}` tag list on this facet.field (#295): count this facet
     /// against the filter set with the `fq` clauses carrying any of these
     /// tags dropped. Empty for a plain `facet.field`, which counts the full
@@ -440,6 +456,112 @@ pub struct FacetFieldsPlan {
     /// aggregation (against the full q+fq set) cannot provide, so `select`
     /// falls back to the unfused path rather than fusing.
     pub exclusion_active: bool,
+}
+
+/// One facet's `facet.limit`/`facet.mincount`/`facet.sort`, resolved for that
+/// facet alone (issue #296). The limit is the *requested* value, before
+/// `query.facet_limit_max` clamping — clamping needs the server config, which
+/// the plan phase does not have.
+#[derive(Debug)]
+pub struct FacetSettings {
+    /// `facet.limit`, negative meaning "as many as the server allows".
+    pub limit: i64,
+    /// `facet.mincount`.
+    pub mincount: u64,
+    /// `facet.sort`: `Some(true)` is `index`, `Some(false)` is `count`, `None`
+    /// is unset — which Solr resolves against this facet's own limit, not the
+    /// global one (see [`BucketShaping::for_field`]).
+    pub by_index: Option<bool>,
+}
+
+/// The value of one facet setting for one facet, taking Solr's *addressed*
+/// forms only: the per-field param `f.<field>.<name>` first, then the local
+/// param of the same name on this `facet.field` value. `None` leaves the
+/// caller on the bare global.
+///
+/// That order is finding 152, and it is the counter-intuitive half of it: a
+/// local param normally shadows the request, but `SimpleFacets.parseParams`
+/// wraps the local params as *defaults* under the request params and then
+/// reads the setting through `getFieldParam(field, name)`, which tries
+/// `f.<field>.<name>` before the bare name — so a local param can only ever
+/// beat the global, never the per-field form
+/// (`facet_perfield_prec_lp_vs_field.json` / `_lp_vs_global.json`).
+///
+/// `field` is the field being faceted, never a `{!key=...}` label: finding
+/// 147, the premise issue #296 was filed on and the one it got backwards.
+fn addressed_setting<'a>(
+    params: &'a Params,
+    local: &'a local_params::LocalParams,
+    field: &str,
+    name: &str,
+) -> Option<&'a str> {
+    params
+        .get(&format!("f.{field}.{name}"))
+        .or_else(|| local.get(name))
+}
+
+/// [`addressed_setting`] parsed as a number, with Solr's own
+/// `NumberFormatException` wording for a value that is not one
+/// (`facet_perfield_err_bad_limit.json`: `For input string: "abc"`).
+///
+/// ponytail: only the *addressed* forms validate. A non-numeric bare global
+/// `facet.limit`/`facet.mincount` is still silently defaulted below, as it was
+/// before this function existed — real Solr 400s on that too, but no fixture
+/// pins it and changing it would be a behaviour change outside issue #296.
+fn addressed_number<T: std::str::FromStr>(
+    params: &Params,
+    local: &local_params::LocalParams,
+    field: &str,
+    name: &str,
+) -> Result<Option<T>> {
+    match addressed_setting(params, local, field, name) {
+        None => Ok(None),
+        Some(raw) => match raw.parse::<T>() {
+            Ok(value) => Ok(Some(value)),
+            Err(_) => bail!("For input string: \"{raw}\""),
+        },
+    }
+}
+
+impl FacetSettings {
+    /// Resolves one facet's settings: addressed form (per-field param, then
+    /// local param) over the bare global, per finding 152.
+    fn resolve(
+        params: &Params,
+        local: &local_params::LocalParams,
+        field: &str,
+        global_mincount: u64,
+    ) -> Result<FacetSettings> {
+        let limit = match addressed_number::<i64>(params, local, field, "facet.limit")? {
+            Some(limit) => limit,
+            None => params
+                .get("facet.limit")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_FACET_LIMIT),
+        };
+        // Parsed signed and clamped, not as a `u64`: the bare global below is
+        // read through `u64::from_str().ok()`, so a negative `facet.mincount`
+        // is a parse *failure* there and silently becomes the default 0. A
+        // `u64` here would 400 on the same value the global path accepts --
+        // a self-inconsistency this issue would have introduced. No fixture
+        // pins the negative case in either direction, so the addressed form
+        // matches the shipped global behaviour rather than inventing a
+        // stricter one; a mincount of 0 admits every bucket, which is what a
+        // negative one means anyway. `abc` still 400s, which is the case
+        // `facet_perfield_err_bad_limit.json` does pin.
+        let mincount = match addressed_number::<i64>(params, local, field, "facet.mincount")? {
+            Some(mincount) => mincount.max(0) as u64,
+            None => global_mincount,
+        };
+        let by_index = addressed_setting(params, local, field, "facet.sort")
+            .or_else(|| params.get("facet.sort"))
+            .map(|sort| sort == "index");
+        Ok(FacetSettings {
+            limit,
+            mincount,
+            by_index,
+        })
+    }
 }
 
 /// Plan/validate phase of `facet.field` (issue #246): resolves every requested
@@ -464,7 +586,7 @@ pub fn plan_facet_fields(index: &CoreIndex, params: &Params) -> Result<FacetFiel
         });
     }
 
-    let mincount: u64 = params
+    let global_mincount: u64 = params
         .get("facet.mincount")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
@@ -487,6 +609,14 @@ pub fn plan_facet_fields(index: &CoreIndex, params: &Params) -> Result<FacetFiel
         // filter set when counting it (finding 136). `key`/`ex` compose in
         // either order, and `split_facet_key` already took the `key` label.
         let ex = local_param_csv(value, "ex");
+        // #296 (finding 148): the same block may also carry this facet's
+        // `facet.limit`/`facet.mincount`/`facet.sort`/`facet.missing`. An
+        // unparseable value is not a block at all, which is the pre-existing
+        // "the whole value is a field name" path (`split_facet_key`), so an
+        // empty set of local params is the right reading here.
+        let local = local_params::parse_block(value)
+            .map(|(local, _)| local)
+            .unwrap_or_default();
         // Finding 102: Solr can emit duplicate `facet_fields` object members,
         // but serde_json's Map cannot represent them. Refuse before validating
         // or aggregating the second field rather than silently overwriting the
@@ -516,9 +646,14 @@ pub fn plan_facet_fields(index: &CoreIndex, params: &Params) -> Result<FacetFiel
         // can exist for `min_doc_count: 0` to introduce), so it is purely a
         // header-honesty concern; the actual `mincount` filtering below is
         // left at its requested value.
+        //
+        // #296: the mincount it tests is this facet's effective one, not the
+        // bare global — a facet that asked for `facet.mincount=1` through
+        // either addressed form has nothing to be raised.
+        let settings = FacetSettings::resolve(params, &local, field_name, global_mincount)?;
         let kind = index.wf_schema.resolved_value_kind(field_name);
         let is_points_based = kind.is_some_and(|kind| kind != ValueKind::Text);
-        if is_points_based && mincount == 0 {
+        if is_points_based && settings.mincount == 0 {
             warnings.push(format!(
                 "Raising facet.mincount from 0 to 1, because field {field_name} is Points-based."
             ));
@@ -532,9 +667,20 @@ pub fn plan_facet_fields(index: &CoreIndex, params: &Params) -> Result<FacetFiel
         // faceted, never `label` from a `{!key=...}` prefix
         // (`facet_local_params_key_f_field.json` / `_f_key.json`), so an
         // override naming a field nobody passed to `facet.field` is inert.
-        let missing = params
-            .per_field_bool(field_name, "facet.missing")?
-            .unwrap_or(global_missing);
+        //
+        // #296 (finding 148): the local-param form of the same setting sits
+        // between the two — below `f.<field>.facet.missing`, above the global
+        // (`facet_perfield_lp_missing.json`). It goes through the same
+        // `parse_bool` as every other boolean, so `{!facet.missing=yes}` is on
+        // and `{!facet.missing=nope}` is the usual 400.
+        let missing = match params.per_field_bool(field_name, "facet.missing")? {
+            Some(missing) => missing,
+            None => match local.get("facet.missing") {
+                Some(raw) => crate::params::parse_bool(raw)
+                    .ok_or_else(|| anyhow!(crate::params::invalid_bool_msg(raw)))?,
+                None => global_missing,
+            },
+        };
 
         // Keyed by request position, not by field name: two `facet.field`
         // values may legitimately name the same column under different
@@ -552,6 +698,7 @@ pub fn plan_facet_fields(index: &CoreIndex, params: &Params) -> Result<FacetFiel
             kind,
             agg_name,
             missing,
+            settings,
             ex,
         });
     }
@@ -581,10 +728,10 @@ pub fn render_facet_fields(
         return Ok((json!({}), Vec::new()));
     }
     let nl = JsonNl::from_params(params);
-    let shaping = BucketShaping::from_params(config, params);
 
     let mut out = Map::new();
     for field in &plan.fields {
+        let shaping = BucketShaping::for_field(config, &field.settings);
         let counts = crate::core_index::render_term_facet_buckets(
             &field.column,
             field.kind,
@@ -600,9 +747,9 @@ pub fn render_facet_fields(
 }
 
 /// The response-shaping half of `facet.field`: `facet.mincount`,
-/// `facet.limit` (clamped by `query.facet_limit_max`) and `facet.sort`. Read
-/// once per request and applied to every field, by both the fused and the
-/// unfused path.
+/// `facet.limit` (clamped by `query.facet_limit_max`) and `facet.sort`.
+/// Derived per facet from that facet's own [`FacetSettings`] (issue #296), by
+/// both the fused and the unfused path.
 struct BucketShaping {
     mincount: u64,
     limit: usize,
@@ -610,32 +757,21 @@ struct BucketShaping {
 }
 
 impl BucketShaping {
-    fn from_params(config: &ServerConfig, params: &Params) -> BucketShaping {
-        let mincount: u64 = params
-            .get("facet.mincount")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        let requested_limit: i64 = params
-            .get("facet.limit")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_FACET_LIMIT);
+    fn for_field(config: &ServerConfig, settings: &FacetSettings) -> BucketShaping {
         // `query.facet_limit_max` is a Wayfinder cap with no Solr equivalent,
         // so (like `rows_limit`) an over-limit request is clamped rather than
         // rejected, and `-1` means "as many as the server allows".
-        let limit = if requested_limit < 0 {
+        let limit = if settings.limit < 0 {
             config.query.facet_limit_max
         } else {
-            (requested_limit as usize).min(config.query.facet_limit_max)
+            (settings.limit as usize).min(config.query.facet_limit_max)
         };
         // Solr's `facet.sort` default is `count` when the requested limit is
-        // positive and `index` otherwise.
-        let by_index = match params.get("facet.sort") {
-            Some("index") => true,
-            Some(_) => false,
-            None => requested_limit <= 0,
-        };
+        // positive and `index` otherwise — against *this facet's* limit, since
+        // both are now per facet.
+        let by_index = settings.by_index.unwrap_or(settings.limit <= 0);
         BucketShaping {
-            mincount,
+            mincount: settings.mincount,
             limit,
             by_index,
         }

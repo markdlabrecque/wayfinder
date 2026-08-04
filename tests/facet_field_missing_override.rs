@@ -404,18 +404,27 @@ async fn strict_params_accepts_the_per_field_missing_override_for_any_field() {
 /// strategy this issue needs must not widen into "any dotted param starting
 /// with `f.` is accepted", which would silently defeat `strict_params` for
 /// every param Wayfinder does not actually implement.
+///
+/// `f.<field>.facet.prefix`, not `.limit`/`.mincount`/`.sort`: issue #296
+/// (`tests/facet_perfield_settings.rs`) implements those three and adds them
+/// to `PER_FIELD_PARAMS`, so this guard would otherwise flip from a 400 to a
+/// 200 the moment #296 landed, even though the *shape-vs-endpoint* rule it
+/// pins is still true. `.prefix` stays outside `PER_FIELD_PARAMS` on both
+/// sides of #296 (per the ticket's own scope note on
+/// `search_api_solr`'s `f.<field>.facet.range.*`), so it keeps testing a
+/// genuinely unimplemented per-field param rather than expiring.
 #[tokio::test]
 async fn strict_params_still_rejects_an_unrelated_f_dot_param() {
     let (app, _dir) = indexed_app_with_config("strict_params = true\n").await;
     let (status, body) = get(
         &app,
-        "select?q=*:*&rows=0&facet=true&facet.field=category&f.category.facet.limit=5&wt=json",
+        "select?q=*:*&rows=0&facet=true&facet.field=category&f.category.facet.prefix=abc&wt=json",
     )
     .await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "f.<field>.facet.limit is not part of this issue's scope and must still 400 under \
+        "f.<field>.facet.prefix is not part of this issue's scope and must still 400 under \
          strict_params, got {body}"
     );
     let msg = body
@@ -423,7 +432,7 @@ async fn strict_params_still_rejects_an_unrelated_f_dot_param() {
         .and_then(Value::as_str)
         .unwrap_or("");
     assert!(
-        msg.contains("f.category.facet.limit"),
+        msg.contains("f.category.facet.prefix"),
         "error.msg must name the unknown param, got: {msg}"
     );
 }
