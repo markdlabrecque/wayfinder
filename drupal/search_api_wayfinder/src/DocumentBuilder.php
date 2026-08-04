@@ -70,6 +70,26 @@ class DocumentBuilder {
       $multiValued = $this->fieldMapper->isMultiValued($field);
       $name = $this->fieldMapper->fieldName($field->getFieldIdentifier(), $type, $multiValued);
 
+      if ($type === 'solr_text_suggester') {
+        // Every solr_text_suggester field collapses to the ONE fixed sink
+        // field twm_suggest (FieldMapper::fieldName(), FieldMapper.php:106-118),
+        // so a plain `$doc[$name] = ...` assign lets the second such field on
+        // an item silently overwrite the first. search_api_solr never hits
+        // this because addIndexField() goes through Solarium's
+        // Document::addField(), which APPENDS when the key already exists.
+        // Issue #339: accumulate instead, in item-field iteration order.
+        //
+        // ponytail: the sink is always an array, regardless of each contributing
+        // field's cardinality: the preset declares twm_suggest as
+        // multi_valued = true (presets/search-api.toml:99-103), so a
+        // one-element array is the honest shape for a single-valued
+        // suggester field. That is a small, deliberate divergence from
+        // Solarium's scalar-when-one output, and is fine because
+        // Solr/Wayfinder accept either shape for a multi-valued field.
+        $doc[$name] = array_merge($doc[$name] ?? [], array_values($formatted));
+        continue;
+      }
+
       $doc[$name] = $multiValued ? array_values($formatted) : $formatted[0];
 
       if ($type === 'text') {
