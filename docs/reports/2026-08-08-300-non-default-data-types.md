@@ -27,7 +27,7 @@ fixed sink fields *before* the generic prefix logic. The classification:
 | `solr_text_wstoken` | `tw` | **supported** → `text_general` (tokenizer + norms divergence) |
 | `solr_text_suggester` | fixed `twm_suggest` | **supported** → fixed static sink; feeds #291's SuggestComponent |
 | `solr_date_range` | `dr` | **descoped** — Wayfinder `date` holds one instant, not a `[start TO end]` range; needs a new server-side type |
-| `solr_text_spellcheck` | fixed `spellcheck_<lang>` | **descoped** — language-specific sink; FieldMapper has no language-aware naming yet |
+| `solr_text_spellcheck` | fixed `spellcheck_<lang>` | **descoped at the time** — language-specific sink; FieldMapper had no language-aware naming yet. *Resolved in #342: FieldMapper is now language-aware and the type is supported.* |
 | `solr_text_custom` / `solr_text_custom_omit_norms` | `tc` / `toc` | **descoped** — site-defined analyzer escape hatch (`SolrFieldType` entities); preset has no equivalent |
 | `location` / `rpt` | `loc` / `rpt` | **descoped** — spatial, scope of #292 |
 
@@ -114,6 +114,11 @@ cargo test                                                                 # all
 - **`solr_text_spellcheck`** needs language-aware field naming
   (`spellcheck_<lang>`), which the FieldMapper does not yet do for any type — its
   own piece of work, coordinated with spellcheck.
+  *Resolved in #342: the FieldMapper now names every text-family field per
+  language (`tm_X3b_<lang>_<id>`) and the spellcheck sink as
+  `spellcheck_<lang>`, and the backend declares `solr_text_spellcheck`
+  supported. A breaking rename — see the README's "Language-aware text field
+  names" section for the reindex requirement.*
 - **`solr_date_range`** needs a new server-side date-range type (Wayfinder `date`
   holds a single instant).
 

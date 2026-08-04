@@ -661,7 +661,7 @@ conditional lists (`2<-1 5<80%`). Implement it fully; it is a small self-contain
 | **v2.5 — Admin web UI** | A read-only operator dashboard, server-rendered by the same binary. Tracer bullet (core view, issue #94) done. See below. |
 | **v2.75 — the contract's remaining endpoints** | The four endpoints in the coverage denominator that Wayfinder does not yet serve: `/terms` (#155), `/schema/fieldtypes` (#156), `/admin/luke` (#157), `/admin/mbeans` (#158). Completing them closes the endpoints bucket. See below. |
 | **Document extraction — staged** | First the client-evidenced `extractOnly=true` path for plain text and HTML, behind request/concurrency/output limits; then DOCX/PPTX and spreadsheet/ODF/RTF families; PDF only after a separate parser-quality and cancellation decision. See below. |
-| **v3** | Result caches + autowarm; spellcheck's delivered tracer slice accepts `spellcheck`, `spellcheck.q`, `spellcheck.dictionary`, and `spellcheck.collate` and returns the captured empty envelope (#222), while real suggestions/collations remain #223; the separate `suggest` path also remains here (`terms` moved earlier to v2.75). Also grouping (`group=true` — see note below on why "collapse" left this line) and `_version_` (issue TBD — scope narrowed, see below). |
+| **v3** | Result caches + autowarm; spellcheck is delivered end to end — the server accepts `spellcheck`, `spellcheck.q`, `spellcheck.dictionary`, and `spellcheck.collate` (#222) and generates real suggestions and collations (#228, commit `d97b442`), and the Drupal connector sends the request and parses the response (#342); the separate `suggest` path also remains here (`terms` moved earlier to v2.75). Also grouping (`group=true` — see note below on why "collapse" left this line) and `_version_` (issue TBD — scope narrowed, see below). |
 | **v4** | ~~Function queries (`bf`, `{!func}`)~~ **arithmetic function queries landed (#289)** — `{!payload_score}` and date/ordinal `ms`/`rord` remain — spatial (`{!geofilt}`, `bbox`, `{!frange}geodist()`, heatmap facets), snapshot-based read replicas |
 | **Solr 9.x parity** | Solr features with zero client evidence, deliberately unscheduled — the table below. |
 | **Deep roadmap** | Distributed / sharded search, SolrCloud. The majority of Solr's complexity and directly opposed to the operational-simplicity goal. |
@@ -773,10 +773,11 @@ semantic assertions and explicit key-order cases. It is not a claim of byte-for-
 every trace. A reproducible claim is what keeps "75-80%" from becoming a slogan.
 
 The resulting **75/75 is a wire-contract claim, not a feature-completeness claim**. It does not
-mean that every Solr component behind those requests is implemented. The current concrete example
-is spellcheck: issue #222 accepts the client's four captured spellcheck parameters and returns the
-captured empty `suggestions`/`collations` envelope, while actual correction generation remains v3
-work in #223.
+mean that every Solr component behind those requests is implemented. Spellcheck used to be the
+concrete example — #222 accepted the four captured parameters and returned the captured empty
+`suggestions`/`collations` envelope — but it no longer is: #228 (`d97b442`) generates real
+suggestions and collations, and #342 wires the Drupal connector to both halves. The distinction
+itself still stands; it just has no current instance.
 `mlt.maxntp` was the other case that exposed this distinction during #189, but it is not a current
 gap: Wayfinder now implements and probes the token cap rather than counting accepted-but-ignored
 syntax as coverage.
@@ -786,11 +787,14 @@ Notes on deferred items:
 - **Caches** — Tantivy has none. Measure before building; Tantivy may be fast enough that a
   filter cache is unnecessary. If v1 latency lands materially worse than Solr, that is the
   signal to build it.
-- **Spellcheck / suggester** — the captured `spellcheck`, `spellcheck.q`, repeated
-  `spellcheck.dictionary`, and `spellcheck.collate` request plus its empty response envelope are a
-  delivered v3 tracer slice (#222). Real suggestions and collations remain v3 work in #223; they
-  need a build step over the term dictionary. Tantivy's FST and fuzzy support give a foundation,
-  not the component. The separate `suggest` path also remains v3.
+- **Spellcheck / suggester** — no longer deferred. The captured `spellcheck`, `spellcheck.q`,
+  repeated `spellcheck.dictionary`, and `spellcheck.collate` request plus its empty response
+  envelope landed as the tracer slice (#222); real suggestions and collations landed on top of it
+  in #228 (`d97b442`), built over the term dictionary with Tantivy's FST/fuzzy support; and #342
+  made the Drupal connector emit the request params and parse the response into
+  `search_api_spellcheck` extra data, alongside the language-aware field naming
+  (`spellcheck_<lang>`) the component's sink field needs. Only the separate `suggest` path
+  remains v3.
 - **Atomic updates + `_version_`** — narrowed by evidence to just `_version_`; see the "v3 —
   `_version_`" subsection below.
 - **Grouping** — no native equivalent; needs a custom collector. This line originally said
