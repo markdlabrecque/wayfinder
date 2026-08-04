@@ -1,0 +1,33 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":5,
+    "params":{
+      "q":"drs_x:[* TO *]",
+      "fl":"id",
+      "sort":"id asc",
+      "rows":"20",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":7,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"d1"
+    },{
+      "id":"d2"
+    },{
+      "id":"d3"
+    },{
+      "id":"d4"
+    },{
+      "id":"d5"
+    },{
+      "id":"d6"
+    },{
+      "id":"d7"
+    }]
+  }
+}

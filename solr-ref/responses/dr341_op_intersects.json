@@ -1,0 +1,29 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "q":"{!field f=drs_x op=Intersects}[2020-05-01T00:00:00Z TO 2020-07-01T00:00:00Z]",
+      "fl":"id",
+      "sort":"id asc",
+      "rows":"20",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"d1"
+    },{
+      "id":"d2"
+    },{
+      "id":"d3"
+    },{
+      "id":"d4"
+    },{
+      "id":"d7"
+    }]
+  }
+}

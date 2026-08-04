@@ -1,0 +1,25 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"drs_x:[2019-12-31T23:59:59Z TO 2020-01-01T00:00:00Z]",
+      "fl":"id",
+      "sort":"id asc",
+      "rows":"20",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":3,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"d1"
+    },{
+      "id":"d5"
+    },{
+      "id":"d7"
+    }]
+  }
+}

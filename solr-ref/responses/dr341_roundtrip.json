@@ -1,0 +1,46 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":8,
+    "params":{
+      "q":"*:*",
+      "fl":"id,drs_x,drm_x",
+      "sort":"id asc",
+      "rows":"20",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":9,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"d1",
+      "drs_x":"2020"
+    },{
+      "id":"d2",
+      "drs_x":"2020-06"
+    },{
+      "id":"d3",
+      "drs_x":"[2020-03-01T00:00:00Z TO 2020-09-30T00:00:00Z]"
+    },{
+      "id":"d4",
+      "drs_x":"2020-06-15T12:00:00Z"
+    },{
+      "id":"d5",
+      "drs_x":"[* TO 2019-12-31T23:59:59Z]"
+    },{
+      "id":"d6",
+      "drs_x":"[2021-01-01T00:00:00Z TO *]"
+    },{
+      "id":"d7",
+      "drs_x":"[* TO *]"
+    },{
+      "id":"d8",
+      "drm_x":["2020","2022-05"]
+    },{
+      "id":"d9",
+      "drm_x":["2020"]
+    }]
+  }
+}

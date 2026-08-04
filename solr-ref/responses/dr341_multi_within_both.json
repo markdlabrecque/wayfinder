@@ -1,0 +1,23 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"{!field f=drm_x op=Within}[2019-01-01T00:00:00Z TO 2023-12-31T23:59:59.999Z]",
+      "fl":"id",
+      "sort":"id asc",
+      "rows":"20",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"d8"
+    },{
+      "id":"d9"
+    }]
+  }
+}

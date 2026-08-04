@@ -1,0 +1,16 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0,
+    "params":{
+      "q":"drs_x:[2020-13 TO 2021]",
+      "fl":"id",
+      "wt":"json"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","java.lang.IllegalArgumentException"],
+    "msg":"Couldn't parse date because: Improperly formatted datetime: 2020-13",
+    "code":400
+  }
+}

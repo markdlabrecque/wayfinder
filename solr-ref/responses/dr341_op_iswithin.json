@@ -1,0 +1,23 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"{!field f=drs_x op=IsWithin}[2020-05-01T00:00:00Z TO 2020-07-01T00:00:00Z]",
+      "fl":"id",
+      "sort":"id asc",
+      "rows":"20",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"d2"
+    },{
+      "id":"d4"
+    }]
+  }
+}
