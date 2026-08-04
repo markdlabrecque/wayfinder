@@ -4074,6 +4074,10 @@ cappls() {  # cappls <name> <path-after-core>
     -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$(cat "$OUT/$name.status")" GET "$PLS_CORE/$suffix" "" "$PLS_SOLR" \
+    >> "$MANIFEST_ERRORS"
+  rm -f "$OUT/$name.status"
+}
+
 # --- solr.DateRangeField intervals (issue #341) ------------------------------
 # Appended block; nothing above is edited. Own container/port/core, per the
 # wayfinder-solr-24 precedent: `date_range` is NOT in solr:9's `_default`
@@ -4495,6 +4499,8 @@ capjf343 jf343_terms_sort_index    '{"siteHashes":{"limit":-1,"field":"index_id"
 
 if want_any '^jf343_'; then
   release "$JF343_CONTAINER" "json-facet core '$JF343_CORE'"
+fi
+
 DR341_TAIL='fl=id&sort=id%20asc&rows=20&wt=json'
 # The query interval every predicate fixture below uses, so the three ops are
 # directly comparable on one corpus: May 1 -- Jul 1 2020.
