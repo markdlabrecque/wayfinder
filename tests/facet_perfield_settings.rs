@@ -65,23 +65,6 @@ fn fixture_bucket(fixture_name: &str, label: &str) -> Vec<Value> {
     })
 }
 
-/// A flat `term, count, term, count` array as an order-independent set of
-/// `(term, count)` pairs, for the assertions that are about *which* buckets
-/// survive rather than what order they come back in.
-fn bucket_set(flat: &[Value]) -> Vec<(String, i64)> {
-    let mut pairs: Vec<(String, i64)> = flat
-        .chunks(2)
-        .map(|pair| {
-            (
-                pair[0].as_str().unwrap_or("<null>").to_string(),
-                pair[1].as_i64().expect("a bucket count must be an integer"),
-            )
-        })
-        .collect();
-    pairs.sort();
-    pairs
-}
-
 /// An app on the tracer-bullet schema/corpus but with an arbitrary server
 /// config, for the `strict_params` guards below. `common::indexed_app`
 /// always uses `ServerConfig` defaults.
@@ -907,23 +890,16 @@ async fn a_negative_mincount_behaves_like_zero_in_every_form() {
 /// against a fixture in `per_field_limit_beats_a_conflicting_global` above;
 /// this covers the local-param form and the global on the same run.
 ///
-/// Bucket *sets* are compared, not the arrays in order: `facet.sort`'s
-/// default flips to `index` when the effective limit is non-positive
-/// (`BucketShaping::for_field`), so a negative limit legitimately reorders
-/// where the unlimited baseline does not. This test is about which buckets
-/// survive; order is section 3's business.
+/// The expected order comes from `facet_limit_unlimited`, Solr's own capture
+/// of the global form, never from what Wayfinder produces. `facet.sort`'s
+/// default does flip to `index` when the effective limit is non-positive
+/// (`BucketShaping::for_field`), but that is unobservable on this corpus:
+/// `category`'s counts tie count order and index order together (see the
+/// module doc above), which is why the fixture pins one array for all three.
 #[tokio::test]
 async fn a_negative_limit_is_unlimited_in_every_form() {
     let (app, _dir) = indexed_app().await;
-    let baseline = {
-        let (status, body) = get(
-            &app,
-            "select?q=*:*&rows=0&facet=true&facet.field=category&wt=json",
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "got {body}");
-        bucket_set(&facet_bucket(&body, "category").expect("the baseline facet must be present"))
-    };
+    let expected = fixture_bucket("facet_limit_unlimited", "category");
 
     for (label, query) in [
         (
@@ -948,8 +924,8 @@ async fn a_negative_limit_is_unlimited_in_every_form() {
             "facet.limit=-1 in the {label} form must not 400; got {body}"
         );
         assert_eq!(
-            facet_bucket(&body, "category").map(|b| bucket_set(&b)),
-            Some(baseline.clone()),
+            facet_bucket(&body, "category").as_deref(),
+            Some(expected.as_slice()),
             "facet.limit=-1 in the {label} form must return every bucket; got {body}"
         );
     }
