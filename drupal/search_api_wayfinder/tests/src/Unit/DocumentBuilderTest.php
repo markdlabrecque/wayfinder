@@ -267,4 +267,145 @@ class DocumentBuilderTest extends TestCase {
     $this->assertArrayNotHasKey('ss_field_optional', $doc);
   }
 
+  /**
+   * Issue #339: TWO solr_text_suggester fields on one item must ACCUMULATE
+   * into the fixed sink field `twm_suggest`, not have the second silently
+   * overwrite the first via `$doc[$name] = ...` (DocumentBuilder.php:73).
+   *
+   * search_api_solr does not hit this bug because its Solarium
+   * Document::addField() appends to an existing key instead of assigning;
+   * search_api_wayfinder's plain array-assign needs its own accumulation
+   * path for the one field name every solr_text_suggester field collapses
+   * to (FieldMapper::fieldName()).
+   *
+   * Both cardinalities are exercised deliberately: a single-valued
+   * suggester field ('field_suggest_a') and a multi-valued one
+   * ('field_suggest_b'), in item-field iteration order, so the assertion is
+   * precise about both completeness (no value lost) and ordering (values
+   * appear in field order, not sorted or grouped by field).
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandAccumulatesMultipleSuggesterFieldsIntoSinkField(): void {
+    $item = $this->mockItem('node/339:en', 'entity:node', 'en', [
+      'field_suggest_a' => $this->mockField(
+        'field_suggest_a',
+        'solr_text_suggester',
+        [new TextValue('alpha')],
+      ),
+      'field_suggest_b' => $this->mockField(
+        'field_suggest_b',
+        'solr_text_suggester',
+        [new TextValue('bravo'), new TextValue('charlie')],
+        TRUE
+      ),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    // Every field of type solr_text_suggester maps to the ONE fixed sink
+    // field (FieldMapper::SUGGESTER_SINK_FIELD) -- there must be no
+    // per-field dynamic field name alongside it.
+    $this->assertArrayHasKey('twm_suggest', $doc);
+    $this->assertSame(
+      ['alpha', 'bravo', 'charlie'],
+      $doc['twm_suggest'],
+      'twm_suggest must accumulate every solr_text_suggester field value, in item-field iteration order -- not have the last field silently overwrite the first.'
+    );
+  }
+
+  /**
+   * Issue #339: `twm_suggest` is ALWAYS a JSON array, even for a single
+   * solr_text_suggester field with cardinality 1 -- the preset declares it
+   * multi_valued = true (presets/search-api.toml:99-103), so a one-element
+   * array is what a single-valued suggester field must produce, not a bare
+   * scalar (which is what today's generic single/multi branch in
+   * DocumentBuilder::buildAddCommand() produces for every other type).
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandSingleSuggesterFieldIsOneElementArray(): void {
+    $item = $this->mockItem('node/339-1:en', 'entity:node', 'en', [
+      'field_suggest' => $this->mockField(
+        'field_suggest',
+        'solr_text_suggester',
+        [new TextValue('only value')],
+      ),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    $this->assertSame(['only value'], $doc['twm_suggest']);
+  }
+
+  /**
+   * Issue #339: a solr_text_suggester field with zero values must not create
+   * a `twm_suggest` key at all -- the empty-value omission rule
+   * (DocumentBuilder.php:63) applies to the sink field exactly like any
+   * other field; accumulation must not turn "no values contributed" into an
+   * empty array being written to the doc.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandOmitsSinkFieldWhenSuggesterFieldHasNoValues(): void {
+    $item = $this->mockItem('node/339-2:en', 'entity:node', 'en', [
+      'field_suggest_empty' => $this->mockField(
+        'field_suggest_empty',
+        'solr_text_suggester',
+        [],
+      ),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    $this->assertArrayNotHasKey('twm_suggest', $doc);
+  }
+
+  /**
+   * Issue #339: solr_text_suggester fields alongside a plain 'text' field and
+   * another typed field must not disturb the other fields' normal shape, and
+   * must NOT get a sort_* copy themselves -- only plain 'text' does today
+   * (DocumentBuilder.php:75-94 guards on `$type === 'text'` exactly, not
+   * isTextType()/isTextType-like matching, so 'solr_text_suggester' must not
+   * slip through that check).
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandSuggesterFieldsDoNotAffectOtherFieldsOrGetSortCopy(): void {
+    $item = $this->mockItem('node/339-3:en', 'entity:node', 'en', [
+      'title' => $this->mockField('title', 'text', [new TextValue('Plain title')]),
+      'field_price' => $this->mockField('field_price', 'decimal', [9.99]),
+      'field_suggest_a' => $this->mockField(
+        'field_suggest_a',
+        'solr_text_suggester',
+        [new TextValue('one')],
+      ),
+      'field_suggest_b' => $this->mockField(
+        'field_suggest_b',
+        'solr_text_suggester',
+        [new TextValue('two')],
+        TRUE
+      ),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    // Other fields keep their current shape exactly.
+    $this->assertSame('Plain title', $doc['ts_title']);
+    $this->assertSame('Plain title', $doc['sort_title']);
+    $this->assertSame(9.99, $doc['fts_field_price']);
+
+    // The sink field accumulates both suggester fields.
+    $this->assertSame(['one', 'two'], $doc['twm_suggest']);
+
+    // No sort_* field for either suggester field id, and no per-field
+    // dynamic field name leaking through for them either.
+    $this->assertArrayNotHasKey('sort_field_suggest_a', $doc);
+    $this->assertArrayNotHasKey('sort_field_suggest_b', $doc);
+    $this->assertArrayNotHasKey('twm_field_suggest_a', $doc);
+    $this->assertArrayNotHasKey('twm_field_suggest_b', $doc);
+    $this->assertArrayNotHasKey('tws_field_suggest_a', $doc);
+    $this->assertArrayNotHasKey('twm_field_suggest_b', $doc);
+  }
+
 }
