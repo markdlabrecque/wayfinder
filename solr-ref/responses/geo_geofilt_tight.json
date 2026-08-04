@@ -1,0 +1,26 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2,
+    "params":{
+      "q":"*:*",
+      "pt":"40,-74",
+      "d":"70",
+      "fl":"id",
+      "fq":"{!geofilt}",
+      "sort":"id asc",
+      "sfield":"loc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"g1"
+    },{
+      "id":"g7"
+    }]
+  }
+}

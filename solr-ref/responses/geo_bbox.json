@@ -1,0 +1,36 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2,
+    "params":{
+      "q":"*:*",
+      "pt":"40,-74",
+      "d":"130",
+      "fl":"id",
+      "fq":"{!bbox}",
+      "sort":"id asc",
+      "sfield":"loc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":7,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"g1"
+    },{
+      "id":"g2"
+    },{
+      "id":"g3"
+    },{
+      "id":"g4"
+    },{
+      "id":"g5"
+    },{
+      "id":"g6"
+    },{
+      "id":"g7"
+    }]
+  }
+}

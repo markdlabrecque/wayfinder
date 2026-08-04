@@ -44,6 +44,7 @@ use crate::config::ServerConfig;
 use crate::edismax;
 use crate::function_query;
 use crate::local_params;
+use crate::params::Params;
 use crate::query::{self, QueryError};
 use crate::schema::{self, ValueKind, WayfinderSchema};
 
@@ -1268,7 +1269,7 @@ impl CoreIndex {
         // path below unchanged. (This also makes `{!func}`/`{!boost}` usable
         // as `fq`/`facet.query`, correct Solr parity that came for free.)
         if let Some(func_q) = self
-            .parse_function_query_q(query_str, default_field_name)
+            .parse_function_query_q(query_str, default_field_name, None)
             .map_err(anyhow::Error::from)?
         {
             return Ok(func_q);
@@ -1377,6 +1378,15 @@ impl CoreIndex {
     /// `{!func}` ranks every document by the function value; `{!boost b=f}`
     /// multiplies the wrapped query's score by the function value per doc.
     ///
+    /// `{!geofilt}`/`{!bbox}` (#332) are param-driven filters, not function
+    /// expressions -- they take no body, reading `sfield`/`pt`/`d` from the
+    /// block's local params with request-param fallback -- so they need
+    /// `params`. It is `Option` because the nested call from `parse_query`
+    /// (a `{!func}` body, an `edismax` clause) has no request context, and a
+    /// `{!geofilt}` there is not a thing the client emits; passing `None`
+    /// makes such a block 400 on its missing params rather than silently
+    /// inventing them. The top-level `q`/`fq` call sites pass `Some(params)`.
+    ///
     /// Only the position-0 form is handled here: the client never nests these
     /// mid-query, and an inline `{!func}`/`{!boost}` still reaches
     /// `extract_nested_queries`'s unsupported-parser 400, which is the honest
@@ -1385,6 +1395,7 @@ impl CoreIndex {
         &self,
         q: &str,
         default_field_name: &str,
+        params: Option<&Params>,
     ) -> Result<Option<Box<dyn Query>>, QueryError> {
         let Some((local, consumed)) = local_params::parse_block(q) else {
             return Ok(None);
@@ -1447,8 +1458,78 @@ impl CoreIndex {
                     include_upper,
                 ))))
             }
+            // `{!geofilt}`/`{!bbox}` as a position-0 `q`/`fq` block (issue
+            // #332): Solr's `SpatialFilterQParser` over a `location` field's
+            // two-column encoding (#331). `geofilt` keeps the `d`-km circle
+            // (haversine ≤ `d`); `bbox` keeps its lat/lon bounding rectangle
+            // -- a cheaper superset whose corner docs the circle drops. They
+            // take no body (`rest` is ignored): `sfield`/`pt`/`d` resolve from
+            // the block's own local params first (e.g. `{!geofilt sfield=loc}`)
+            // then the request params (finding 133's client-evidenced form).
+            Some(t @ ("geofilt" | "bbox")) => {
+                let shape = if t == "geofilt" {
+                    function_query::GeoShape::Circle
+                } else {
+                    function_query::GeoShape::Rectangle
+                };
+                let (sfield, pt, d) = self.resolve_geo_filter(&local, params)?;
+                Ok(Some(Box::new(function_query::GeoFilterQuery::new(
+                    shape, sfield, pt, d,
+                ))))
+            }
             _ => Ok(None),
         }
+    }
+
+    /// Resolves the `sfield`/`pt`/`d` a `{!geofilt}`/`{!bbox}` block needs,
+    /// the block's own local params winning over the request params (Solr's
+    /// QParser fallback). `sfield` must name a declared `location` field;
+    /// `pt` parses from `lat,lon`; `d` from kilometres. Each failure is a
+    /// Solr-shaped 400 (`QueryError::Syntax` -> `wayfinder::SyntaxError`), the
+    /// same shape `{!frange}`'s bound/bool parsers take. None of these
+    /// missing-/bad-param paths is client-exercised (the capture always sends
+    /// all three), so they carry no fixture; they are the correct 400 rather
+    /// than a panic or a silent match-all.
+    fn resolve_geo_filter(
+        &self,
+        local: &local_params::LocalParams,
+        params: Option<&Params>,
+    ) -> Result<(String, (f64, f64), f64), QueryError> {
+        let get = |key: &str| -> Option<String> {
+            local
+                .get(key)
+                .map(str::to_string)
+                .or_else(|| params.and_then(|p| p.get(key).map(str::to_string)))
+        };
+        let sfield = get("sfield").ok_or_else(|| {
+            QueryError::Syntax("`{!geofilt}`/`{!bbox}` requires the `sfield` param".to_string())
+        })?;
+        if self.wf_schema.location_fields(&sfield).is_none() {
+            return Err(QueryError::Syntax(format!(
+                "`sfield` `{sfield}` is not a declared `location` field"
+            )));
+        }
+        let pt_str = get("pt").ok_or_else(|| {
+            QueryError::Syntax("`{!geofilt}`/`{!bbox}` requires the `pt` param".to_string())
+        })?;
+        let (lat_s, lon_s) = pt_str.split_once(',').ok_or_else(|| {
+            QueryError::Syntax(format!("`pt` `{pt_str}` is not a `lat,lon` point"))
+        })?;
+        let lat: f64 = lat_s.trim().parse().map_err(|_| {
+            QueryError::Syntax(format!("`pt` `{pt_str}` has a non-numeric latitude"))
+        })?;
+        let lon: f64 = lon_s.trim().parse().map_err(|_| {
+            QueryError::Syntax(format!("`pt` `{pt_str}` has a non-numeric longitude"))
+        })?;
+        let d_str = get("d").ok_or_else(|| {
+            QueryError::Syntax(
+                "`{!geofilt}`/`{!bbox}` requires the `d` (radius, km) param".to_string(),
+            )
+        })?;
+        let d: f64 = d_str
+            .parse()
+            .map_err(|_| QueryError::Syntax(format!("`d` `{d_str}` is not a number")))?;
+        Ok((sfield, (lat, lon), d))
     }
 
     /// Builds a `defType=edismax` query (issue #7, PRD §5 v1 exception):

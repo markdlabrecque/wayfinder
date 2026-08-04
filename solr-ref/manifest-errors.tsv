@@ -203,3 +203,7 @@ frange_err_unknown_field	400	GET	frange/select?q=*:*&fq=%7B%21frange%20l%3D2%20u
 frange_err_bad_bool	400	GET	frange/select?q=*:*&fq=%7B%21frange%20l%3D2%20u%3D6%20incl%3Dmaybe%7Drating&fl=id&wt=json		http://localhost:9072/solr
 geo_geodist_fl	200	GET	geo/select?q=*:*&fl=id,dist:geodist%28%29&sfield=loc&pt=40,-74&sort=id%20asc&wt=json		http://localhost:9073/solr
 geo_geodist_fl_pt	200	GET	geo/select?q=*:*&fl=id,dist:geodist%28%29&sfield=loc&pt=41,-73&sort=id%20asc&wt=json		http://localhost:9073/solr
+geo_geofilt	200	GET	geo/select?q=*:*&fq=%7B%21geofilt%7D&sfield=loc&pt=40,-74&d=130&fl=id&sort=id%20asc&wt=json		http://localhost:9073/solr
+geo_bbox	200	GET	geo/select?q=*:*&fq=%7B%21bbox%7D&sfield=loc&pt=40,-74&d=130&fl=id&sort=id%20asc&wt=json		http://localhost:9073/solr
+geo_geofilt_tight	200	GET	geo/select?q=*:*&fq=%7B%21geofilt%7D&sfield=loc&pt=40,-74&d=70&fl=id&sort=id%20asc&wt=json		http://localhost:9073/solr
+geo_geodist_sort	200	GET	geo/select?q=*:*&sfield=loc&pt=40,-74&fl=id,dist:geodist%28%29&sort=geodist%28%29%20asc&wt=json		http://localhost:9073/solr
