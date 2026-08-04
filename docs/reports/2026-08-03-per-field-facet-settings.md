@@ -9,7 +9,7 @@ produce.
 ## What shipped
 
 Per-facet resolution of `facet.limit`, `facet.mincount`, `facet.sort`, and `facet.missing` in
-finding-151 precedence order: `f.<field>.facet.X` beats a local param on that `facet.field`,
+finding-152 precedence order: `f.<field>.facet.X` beats a local param on that `facet.field`,
 which beats the global `facet.X`. Resolution is always addressed by field name — never by a
 `{!key=}` label, matching finding 147.
 

@@ -18,7 +18,7 @@
 //!   need, and the reason #296 cannot be built from `f.<field>.facet.*` alone.
 //! - finding 150: `facet.limit` is applied after `{!ex=...}` exclusion, like
 //!   `facet.mincount`/`facet.missing` already are (finding 140).
-//! - finding 151: precedence is `f.<field>.facet.X` > local param on
+//! - finding 152: precedence is `f.<field>.facet.X` > local param on
 //!   `facet.field` > global `facet.X` -- the per-field param beats the local
 //!   one, the opposite of "local params shadow the request".
 //!
@@ -644,7 +644,7 @@ async fn local_param_limit_ranks_the_excluded_list_not_the_filtered_one() {
     assert_matches_fixture(body, "facet_perfield_ex_lp_limit_rank");
 }
 
-// === 7. finding 151: `f.<field>.facet.X` > local param > global =============
+// === 7. finding 152: `f.<field>.facet.X` > local param > global =============
 
 /// `{!key=cat facet.limit=1}category` with `f.category.facet.limit=3` --
 /// the per-field param beats the local one, even though "local params shadow

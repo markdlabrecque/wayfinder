@@ -462,7 +462,7 @@ class QueryBuilder {
    * settings win for the whole request" ceiling.
    *
    * Precedence on the server is f.<field>.facet.X > local param > global
-   * facet.X (finding 151); this module emits only the local-param form, so a
+   * facet.X (finding 152); this module emits only the local-param form, so a
    * site that also sets a global facet.* elsewhere loses to these, which is
    * the intended reading.
    *

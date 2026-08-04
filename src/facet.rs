@@ -431,7 +431,7 @@ pub struct FacetFieldPlan {
     /// `f.<field>.facet.missing` override and the local-param form.
     pub missing: bool,
     /// The effective `facet.limit`/`facet.mincount`/`facet.sort` for this
-    /// facet, after the same precedence (issue #296, finding 151). Per facet
+    /// facet, after the same precedence (issue #296, finding 152). Per facet
     /// rather than per request: two `facet.field` values over one column may
     /// legitimately disagree, and only the local-param form can say so
     /// (finding 149).
@@ -479,7 +479,7 @@ pub struct FacetSettings {
 /// param of the same name on this `facet.field` value. `None` leaves the
 /// caller on the bare global.
 ///
-/// That order is finding 151, and it is the counter-intuitive half of it: a
+/// That order is finding 152, and it is the counter-intuitive half of it: a
 /// local param normally shadows the request, but `SimpleFacets.parseParams`
 /// wraps the local params as *defaults* under the request params and then
 /// reads the setting through `getFieldParam(field, name)`, which tries
@@ -525,7 +525,7 @@ fn addressed_number<T: std::str::FromStr>(
 
 impl FacetSettings {
     /// Resolves one facet's settings: addressed form (per-field param, then
-    /// local param) over the bare global, per finding 151.
+    /// local param) over the bare global, per finding 152.
     fn resolve(
         params: &Params,
         local: &local_params::LocalParams,
