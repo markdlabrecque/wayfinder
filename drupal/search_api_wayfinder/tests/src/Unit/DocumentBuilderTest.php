@@ -175,6 +175,67 @@ class DocumentBuilderTest extends TestCase {
   }
 
   /**
+   * Pins trace 00001: a single-valued string gets language-specific sort
+   * copies alongside its ordinary ss_* field.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandAddsSortCopiesForSingleValuedString(): void {
+    $item = $this->mockItem('node/358-1:en', 'entity:node', 'en', [
+      'field_sku' => $this->mockField('field_sku', 'string', ['ART-001']),
+    ]);
+
+    $builder = new DocumentBuilder(new FieldMapper(), $this->mockLanguageManager(['en']));
+    $doc = $builder->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    $this->assertSame('ART-001', $doc['ss_field_sku']);
+    $this->assertSame('ART-001', $doc['sort_X3b_en_field_sku']);
+    $this->assertSame('ART-001', $doc['sort_X3b_und_field_sku']);
+  }
+
+  /**
+   * Pins trace 00001: a multi-valued sm_* string sort copy is the first
+   * indexed value, not the minimum or maximum value.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandMultivaluedStringSortTakesFirstValueNotMinMax(): void {
+    $item = $this->mockItem('node/358-2:en', 'entity:node', 'en', [
+      'field_keywords' => $this->mockField(
+        'field_keywords',
+        'string',
+        ['mango', 'apple', 'zebra'],
+        TRUE
+      ),
+    ]);
+
+    $builder = new DocumentBuilder(new FieldMapper(), $this->mockLanguageManager(['en']));
+    $doc = $builder->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    $this->assertSame(['mango', 'apple', 'zebra'], $doc['sm_field_keywords']);
+    $this->assertSame('mango', $doc['sort_X3b_en_field_keywords']);
+    $this->assertSame('mango', $doc['sort_X3b_und_field_keywords']);
+  }
+
+  /**
+   * The upstream t-or-s gate must not give numeric fields a sort_* copy.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandDoesNotAddSortCopyForNumericField(): void {
+    $item = $this->mockItem('node/358-3:en', 'entity:node', 'en', [
+      'field_priority' => $this->mockField('field_priority', 'integer', [7]),
+    ]);
+
+    $builder = new DocumentBuilder(new FieldMapper(), $this->mockLanguageManager(['en']));
+    $doc = $builder->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    $this->assertSame(7, $doc['its_field_priority']);
+    $this->assertArrayNotHasKey('sort_X3b_en_field_priority', $doc);
+    $this->assertArrayNotHasKey('sort_X3b_und_field_priority', $doc);
+  }
+
+  /**
    * search_api_solr 4.3.13 indexes a deterministic scalar sort copy for text.
    *
    * @covers ::buildAddCommand

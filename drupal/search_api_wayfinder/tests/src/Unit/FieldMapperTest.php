@@ -226,9 +226,9 @@ class FieldMapperTest extends TestCase {
    * issue #342: sortFieldName() gains the same optional `$language`
    * argument as fieldName(). A text-type field sorts through
    * `sort_X3b_<enc-lang>_<id>` (encodeSolrName('sort' . SEPARATOR
-   * . $sort_language_id . '_' . $name), :1483); every other type is
-   * unaffected and keeps sorting on its ordinary mapped field name (current
-   * FieldMapper::sortFieldName() behaviour, unchanged for non-text).
+   * . $sort_language_id . '_' . $name), :1483). String fields use the same
+   * dedicated sort copy because upstream gates on mapped names beginning with
+   * either "t" or "s" (SearchApiSolrBackend.php:1447-1455).
    *
    * @covers ::sortFieldName
    * @dataProvider sortFieldNameProvider
@@ -242,9 +242,10 @@ class FieldMapperTest extends TestCase {
     return [
       'text sort field carries the language, en' => ['title', 'text', FALSE, 'sort_X3b_en_title', 'en'],
       'text sort field defaults to und' => ['title', 'text', FALSE, 'sort_X3b_und_title'],
-      // Non-text: unaffected by language, unchanged from today -- the mapped
-      // field name itself (current FieldMapper::sortFieldName() behaviour).
-      'non-text sort field is the mapped field name, unaffected by language' => ['weight', 'integer', FALSE, 'its_weight', 'en'],
+      'single string sort field carries the language' => ['field_sku', 'string', FALSE, 'sort_X3b_en_field_sku', 'en'],
+      'multi string sort field carries explicit und' => ['field_keywords', 'string', TRUE, 'sort_X3b_und_field_keywords', 'und'],
+      // Other types are unaffected by language and sort on their mapped field.
+      'numeric sort field is the mapped field name, unaffected by language' => ['weight', 'integer', FALSE, 'its_weight', 'en'],
     ];
   }
 

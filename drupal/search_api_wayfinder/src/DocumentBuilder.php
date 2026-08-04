@@ -118,7 +118,7 @@ class DocumentBuilder {
         ? array_values($formatted)
         : $formatted[0];
 
-      if ($type === 'text') {
+      if ($this->fieldMapper->usesLanguageSpecificSortCopy($name)) {
         // Confirmed-correct, not a descope: a multi-valued text field's
         // sort_* copy takes the FIRST value, matching captured
         // search_api_solr / solr:9. search_api_solr's own source copies only
@@ -136,6 +136,11 @@ class DocumentBuilder {
         // finding #153 in docs/solr-ref-findings.md; pinned by
         // DocumentBuilderTest with an input whose first value is neither its
         // min nor its max. See issue #302.
+        // Issue #358: upstream applies this same first-value sort-copy path to
+        // mapped string fields (ss_*/sm_*), because its exact gate is a mapped
+        // name beginning with "t" or "s" (SearchApiSolrBackend.php:1447-1455).
+        // Trace 00001 confirms both ss_field_sku and multi-valued
+        // sm_field_keywords/sm_field_topics use scalar sort_* copies.
         // issue #342 (MF-3): the copy goes into EVERY enabled site language's
         // sort field plus the language-unspecific one, not just the item's own
         // language -- SearchApiSolrBackend.php:1469-1481, whose inline comment

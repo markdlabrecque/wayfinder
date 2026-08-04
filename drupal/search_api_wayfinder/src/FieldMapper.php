@@ -80,6 +80,9 @@ class FieldMapper {
    */
   private const SUGGESTER_SINK_FIELD = 'twm_suggest';
 
+  /** The fixed prefix for each language's spellcheck sink field. */
+  private const SPELLCHECK_SINK_PREFIX = 'spellcheck';
+
   /**
    * The language separator search_api_solr puts between a text field's infix
    * and its language id, before encoding:
@@ -156,7 +159,7 @@ class FieldMapper {
     // 'de-AT' gives 'spellcheck_de_AT' where a text field gives
     // 'tm_X3b_de_X2d_AT_*'.
     if ($type === 'solr_text_spellcheck') {
-      return 'spellcheck_' . $this->spellcheckDictionary($language);
+      return self::SPELLCHECK_SINK_PREFIX . '_' . $this->spellcheckDictionary($language);
     }
 
     $prefix = self::TYPE_PREFIXES[$type] ?? $type;
@@ -311,20 +314,44 @@ class FieldMapper {
   /**
    * Maps a Search API field to the field used by Wayfinder sorting.
    *
-   * Text fields sort through their dedicated sort_* dynamic field; every
-   * other type sorts on the actual mapped field, preserving cardinality so
-   * Wayfinder can use its native multi-value min/max selection.
+   * Text and string fields sort through their dedicated sort_* dynamic field;
+   * every other type sorts on the actual mapped field, preserving cardinality
+   * so Wayfinder can use its native multi-value min/max selection.
    *
    * issue #342: the text sort field is language-specific too --
    * encodeSolrName('sort' . SEPARATOR . $sort_language_id . '_' . $name),
    * SearchApiSolrBackend.php:1483 -- so 'title' in English sorts on
-   * 'sort_X3b_en_title'. Non-text types are unaffected: their sort field IS
-   * their mapped field, which carries no language.
+   * 'sort_X3b_en_title'. String fields use the same copy because upstream
+   * applies this path when the mapped name begins with either "t" or "s"
+   * (SearchApiSolrBackend.php:1447-1455).
    */
-  public function sortFieldName(string $fieldId, string $type, bool $multiValued, string $language = self::LANGUAGE_UNSPECIFIED): string {
-    return $this->isTextPrefix(self::TYPE_PREFIXES[$type] ?? $type)
-      ? $this->encodeSolrName('sort' . self::LANGUAGE_SEPARATOR . $language . '_' . $fieldId)
-      : $this->fieldName($fieldId, $type, $multiValued, $language);
+  public function sortFieldName(string $fieldId, string $type, bool $multiValued, ?string $language = NULL): string {
+    $resolvedLanguage = $language ?? self::LANGUAGE_UNSPECIFIED;
+    $fieldName = $this->fieldName($fieldId, $type, $multiValued, $resolvedLanguage);
+
+    // The grouping path historically reuses this mapper without passing a
+    // language and must keep grouping on the ordinary single-valued ss_* field,
+    // matching upstream setGrouping() at lines 4579-4601. Actual sorting and
+    // document sort-copy writes always pass their resolved language explicitly.
+    // Text retains its pre-#358 no-language fallback to sort_X3b_und_*.
+    $useSortCopy = $this->usesLanguageSpecificSortCopy($fieldName)
+      && ($language !== NULL || str_starts_with($fieldName, 't'));
+
+    return $useSortCopy
+      ? $this->encodeSolrName('sort' . self::LANGUAGE_SEPARATOR . $resolvedLanguage . '_' . $fieldId)
+      : $fieldName;
+  }
+
+  /**
+   * Whether an already-mapped field gets a language-specific sort_* copy.
+   *
+   * This mirrors SearchApiSolrBackend.php:1447-1455: mapped names beginning
+   * with "t" or "s" qualify, except the fixed suggester and spellcheck sinks.
+   */
+  public function usesLanguageSpecificSortCopy(string $fieldName): bool {
+    return (str_starts_with($fieldName, 't') || str_starts_with($fieldName, 's'))
+      && !str_starts_with($fieldName, self::SUGGESTER_SINK_FIELD)
+      && !str_starts_with($fieldName, self::SPELLCHECK_SINK_PREFIX);
   }
 
   /**
