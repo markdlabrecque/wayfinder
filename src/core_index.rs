@@ -325,6 +325,28 @@ fn as_date(field: &str, v: &Value) -> Result<DateTime> {
     Ok(DateTime::from_utc(parsed))
 }
 
+/// Parses Solr's `location` JSON form `"lat,lon"` into its two f64 columns
+/// (#331). The `_default`/Search API configsets send the point as this single
+/// comma-separated string (e.g. `"40.0,-74.0"`); on `/update` it splits into
+/// the two synthetic f64 fast fields `<field>__lat`/`<field>__lon`.
+fn as_location(field: &str, v: &Value) -> Result<(f64, f64)> {
+    let s = v
+        .as_str()
+        .ok_or_else(|| anyhow!("field `{field}` expects a `lat,lon` string, got {v}"))?;
+    let (lat, lon) = s
+        .split_once(',')
+        .ok_or_else(|| anyhow!("field `{field}` value `{s}` is not a `lat,lon` point"))?;
+    let lat: f64 = lat
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("field `{field}` value `{s}` has a non-numeric latitude `{lat}`"))?;
+    let lon: f64 = lon
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("field `{field}` value `{s}` has a non-numeric longitude `{lon}`"))?;
+    Ok((lat, lon))
+}
+
 /// Coerces a value destined for a catch-all JSON field, so a dynamic rule's
 /// declared type still governs how the value is indexed (`*_i` gets an integer,
 /// not the string `"7"`).
@@ -344,6 +366,15 @@ fn coerce_json(field: &str, kind: ValueKind, value: &Value) -> Result<Value> {
         // parse date-shaped strings themselves.
         ValueKind::Date => {
             as_date(field, value)?;
+            value.clone()
+        }
+        // A dynamic `location` value (from a `locs_*`/`geos_*` rule) is kept as
+        // its `lat,lon` string in the catch-all JSON, matching the form Solr
+        // echoes for a stored dynamic point. `geodist()` on a dynamic sfield is
+        // not supported in this tracer (no synthetic columns: the field name is
+        // unknown at build time) -- see `WayfinderSchema::location_fields`.
+        ValueKind::Location => {
+            as_location(field, value)?;
             value.clone()
         }
     })
@@ -1173,6 +1204,21 @@ impl CoreIndex {
         kind: ValueKind,
         values: &[Value],
     ) -> Result<()> {
+        // A `location` field is two synthetic f64 columns, not the single
+        // Tantivy field every other kind resolves to, so it splits each
+        // `lat,lon` value into the pair and writes both (#331).
+        if kind == ValueKind::Location {
+            let (lat_field, lon_field) = self
+                .wf_schema
+                .location_fields(field_name)
+                .expect("caller passes a declared location field name");
+            for v in values {
+                let (lat, lon) = as_location(field_name, v)?;
+                doc.add_f64(lat_field, lat);
+                doc.add_f64(lon_field, lon);
+            }
+            return Ok(());
+        }
         let field = self
             .wf_schema
             .field(field_name)
@@ -1183,6 +1229,8 @@ impl CoreIndex {
                 ValueKind::I64 => doc.add_i64(field, as_i64(field_name, v)?),
                 ValueKind::F64 => doc.add_f64(field, as_f64(field_name, v)?),
                 ValueKind::Date => doc.add_date(field, as_date(field_name, v)?),
+                // Handled above the match (two synthetic columns).
+                ValueKind::Location => unreachable!(),
             }
         }
         Ok(())
@@ -2513,6 +2561,11 @@ impl CoreIndex {
             .iter()
             .filter(|f| f.stored)
             .filter(|f| wants(&f.name))
+            // A `location` field has no single Tantivy field (two synthetic
+            // columns), so it is not reconstructable into `fl` in this tracer;
+            // skipping it here avoids the `field().unwrap()` below panicking on
+            // `fl=*` over a schema with a stored `location` field (#331).
+            .filter(|f| self.wf_schema.value_kind(&f.name) != Some(ValueKind::Location))
             .collect();
 
         let mut out = Map::new();
@@ -2577,6 +2630,17 @@ impl CoreIndex {
         }
 
         Ok(Value::Object(out))
+    }
+
+    /// Evaluates a function query (`geodist()`, the arithmetic functions) for a
+    /// single document, the per-doc entry point the `fl=<alias>:<func>()`
+    /// computed-field path needs (#331). Solr appends computed/transformer
+    /// fields after the stored fields, so callers merge the result into an
+    /// already-rendered doc rather than threading it through `render_doc`.
+    pub fn eval_function(&self, addr: DocAddress, func: &function_query::FuncQuery) -> Result<f64> {
+        let searcher = self.reader.searcher();
+        let reader = searcher.segment_reader(addr.segment_ord);
+        Ok(function_query::eval_doc(reader, addr.doc_id, func)?)
     }
 
     /// Extracts the query's textual terms for `field`. With
@@ -5059,5 +5123,31 @@ fast = true
         assert!(!is_aggregation_error(&anyhow!(
             "not a tantivy error at all"
         )));
+    }
+
+    /// `as_location` parses Solr's `lat,lon` point form and rejects the shapes
+    /// that are not one. It is the input boundary for a `location` field, so a
+    /// wrong parse would silently mis-place every document (#331).
+    #[test]
+    fn as_location_parses_lat_lon_and_rejects_other_shapes() {
+        assert_eq!(
+            as_location("loc", &json!("40.0,-74.0")).unwrap(),
+            (40.0, -74.0)
+        );
+        // whitespace around the halves is tolerated.
+        assert_eq!(
+            as_location("loc", &json!(" 40.0 , -74.0 ")).unwrap(),
+            (40.0, -74.0)
+        );
+        // negatives and a half-degree.
+        assert_eq!(
+            as_location("loc", &json!("-40.5,73.25")).unwrap(),
+            (-40.5, 73.25)
+        );
+        // not a string, no comma, non-numeric halves.
+        assert!(as_location("loc", &json!(40.0)).is_err());
+        assert!(as_location("loc", &json!("40.0")).is_err());
+        assert!(as_location("loc", &json!("lat,lon")).is_err());
+        assert!(as_location("loc", &json!("40.0,abc")).is_err());
     }
 }

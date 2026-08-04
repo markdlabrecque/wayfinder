@@ -694,6 +694,78 @@ async fn fnq_app() -> (Router, TempDir) {
     (app, dir)
 }
 
+// --- spatial corpus for manifest-errors.tsv's `geo` rows (issue #331).
+// `capture.sh`'s geo block indexes this 7-doc grid into the `geo` core: a
+// `location` field `loc` plus seven points on a regular grid around NYC
+// (40,-74). Like `fnq`/`pf296`, this schema names its core `content`, so
+// `geo/...` rows are rewritten to `content/...` in `app_and_request_url`
+// below. The corpus is byte-for-byte the one indexed into the live `solr:9`
+// container the fixtures were captured from.
+const GEO_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "id"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "loc"
+type = "location"
+stored = true
+"#;
+
+/// The 7-doc grid `capture.sh`'s geo block indexes: the origin, one degree
+/// N/S/E/W, the NE corner, and a half-degree NW point.
+fn geo_corpus() -> Value {
+    json!([
+        {"id":"g1","loc":"40.0,-74.0"},
+        {"id":"g2","loc":"41.0,-74.0"},
+        {"id":"g3","loc":"40.0,-73.0"},
+        {"id":"g4","loc":"39.0,-74.0"},
+        {"id":"g5","loc":"40.0,-75.0"},
+        {"id":"g6","loc":"41.0,-73.0"},
+        {"id":"g7","loc":"40.5,-74.5"}
+    ])
+}
+
+async fn geo_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), GEO_SCHEMA_TOML).expect("geo app must build");
+    let (status, body) = post_docs(&app, &geo_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the geo corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
+/// Regression guard for #331: a `location` field is two synthetic columns,
+/// not a single Tantivy field, so `fl=*` over a schema with a stored
+/// `location` field must skip it rather than panic on `render_doc`'s
+/// `field().unwrap()`. The non-location stored field (`id`) still returns.
+#[tokio::test]
+async fn fl_star_over_a_stored_location_field_skips_it_without_panicking() {
+    let (app, _dir) = geo_app().await;
+    let (status, body) = get(&app, "select?q=*:*&fl=*&sort=id%20asc&rows=1&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "fl=* must not panic, got {body}");
+    let doc = body
+        .pointer("/response/docs/0")
+        .and_then(Value::as_object)
+        .expect("a doc is returned");
+    assert_eq!(doc.get("id").and_then(Value::as_str), Some("g1"));
+    assert!(
+        !doc.contains_key("loc"),
+        "a `location` field is not reconstructed into `fl` in this tracer; got {doc:?}"
+    );
+}
+
 // --- per-field facet.sort corpus for manifest-errors.tsv's `pf296` rows
 // (issue #296). The `content` corpus cannot pin `facet.sort` at all: its
 // category values are animals 2, classic 2, garden 1, misc 1, so count order
@@ -2301,6 +2373,43 @@ fn live_solr_matches_committed_query_set() {
 /// `version99`, `fragsize104`, and `spellcheck_223` (which keep their own
 /// names — see the module comment above).
 /// An unrecognised segment is returned unrewritten against `content_app`.
+///
+/// #331: rounds every float leaf under `response.docs` to `dp` decimal
+/// places, the documented geodist float-magnitude tolerance for `geo_*` rows
+/// (see the call site for the rationale).
+fn round_doc_distances(value: &mut Value, dp: i32) {
+    let Some(docs) = value
+        .pointer_mut("/response/docs")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let mul = 10f64.powi(dp);
+    for doc in docs {
+        round_floats(doc, mul);
+    }
+}
+
+fn round_floats(value: &mut Value, mul: f64) {
+    match value {
+        Value::Object(map) => {
+            for (_, child) in map.iter_mut() {
+                round_floats(child, mul);
+            }
+        }
+        Value::Array(items) => {
+            for child in items.iter_mut() {
+                round_floats(child, mul);
+            }
+        }
+        other => {
+            if let Some(f) = other.as_f64() {
+                *other = serde_json::json!((f * mul).round() / mul);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // one hermetic app per manifest-errors core
 fn app_and_request_url<'a>(
     entry: &ManifestErrorEntry,
@@ -2317,6 +2426,7 @@ fn app_and_request_url<'a>(
     grouping_app: &'a Router,
     fnq_app: &'a Router,
     pf296_app: &'a Router,
+    geo_app: &'a Router,
 ) -> (&'a Router, String) {
     match entry.url.split_once('/') {
         Some(("content", rest)) => (content_app, format!("content/{rest}")),
@@ -2330,6 +2440,7 @@ fn app_and_request_url<'a>(
         // the fnq app rather than duplicating its schema/corpus.
         Some(("frange", rest)) => (fnq_app, format!("content/{rest}")),
         Some(("pf296", rest)) => (pf296_app, format!("content/{rest}")),
+        Some(("geo", rest)) => (geo_app, format!("content/{rest}")),
         Some(("sortdebt", _)) => (sortdebt_app, entry.url.clone()),
         Some(("update9", _)) => (update9_app, entry.url.clone()),
         Some(("stats", _)) => (stats_app, entry.url.clone()),
@@ -2378,6 +2489,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let (grouping_app, _grouping_dir) = grouping_app().await;
     let (fnq_app, _fnq_dir) = fnq_app().await;
     let (pf296_app, _pf296_dir) = pf296_app().await;
+    let (geo_app, _geo_dir) = geo_app().await;
 
     let mut ran = 0usize;
     let mut diffed = 0usize;
@@ -2404,6 +2516,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
             &grouping_app,
             &fnq_app,
             &pf296_app,
+            &geo_app,
         );
         // `update_select_commitwithin_visible` follows a `commitWithin=500`
         // row with no settle delay in this hermetic replay, unlike
@@ -2561,6 +2674,22 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
                 {
                     docs.sort_by_key(ToString::to_string);
                 }
+            }
+        }
+        // #331: `geodist()` returns an approximate distance. Solr computes it
+        // via Lucene's `SloppyMath` (documented ~40 cm error) on lat/lon
+        // re-read from lossy 32-bit BKD quantisation; Wayfinder computes the
+        // exact haversine on full-precision f64 columns. The two agree to
+        // well under 1 cm -- the same "same logical value, different
+        // floating-point path" category the harness already tolerates for
+        // BM25 `score` magnitudes (`score_tolerance`) -- so the per-doc
+        // distance is compared at meter granularity (3 dp of km) rather than
+        // exact bytes. Structural fields (numFound, doc ids, the presence of
+        // the alias key) are still compared exactly; only the float magnitude
+        // relaxes. See `docs/reports/2026-08-03-331-spatial-tracer.md`.
+        if entry.name.starts_with("geo_") {
+            for v in [&mut expected_n.value, &mut actual_n.value] {
+                round_doc_distances(v, 3);
             }
         }
         let report = diff(&expected_n.value, &actual_n.value);

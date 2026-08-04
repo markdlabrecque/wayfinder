@@ -850,6 +850,9 @@ const MUST_BE_RESERVED_TYPE_NAMES: &[&str] = &[
     "text_de",
     "text_fr",
     "text_ta",
+    // #331 added `location` as a built-in `resolve_type` arm, so it joins the
+    // reserved set like every other built-in (#170).
+    "location",
 ];
 
 /// Was `custom_field_type_can_silently_shadow_a_non_text_en_builtin`: a
@@ -957,7 +960,7 @@ tokenizer = "simple"
 #[test]
 fn type_names_absent_from_the_reservation_list_are_still_unresolvable() {
     for name in [
-        "boolean", "bool", "binary", "location", "pint", "plong", "pfloat", "pdouble", "pdate",
+        "boolean", "bool", "binary", "pint", "plong", "pfloat", "pdouble", "pdate",
     ] {
         assert!(
             !schema::builtin_type_names().contains(&name.to_string()),
@@ -989,6 +992,54 @@ stored = true
             "`{name}` must still be rejected as an unsupported field type, got: {msg}"
         );
     }
+}
+
+/// #331: a `location` field resolves (#292 sizing report) and is encoded as
+/// two synthetic f64 fast columns `<name>__lat`/`<name>__lon`, not one Tantivy
+/// field. The user-facing name is reachable only through `location_fields`,
+/// and never becomes a `field()`-resolvable Tantivy field, so it cannot leak
+/// into the name-based query/fl paths.
+#[test]
+fn location_field_is_two_synthetic_f64_columns() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[fields]]
+name = "loc"
+type = "location"
+stored = true
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let wf = schema::load(&path).expect("a `location` field must resolve");
+
+    // The two synthetic columns exist in the Tantivy schema.
+    assert_eq!(
+        wf.tantivy_schema
+            .get_field("loc__lat")
+            .map(|f| f.field_id())
+            .ok(),
+        wf.location_fields("loc").map(|(lat, _)| lat.field_id()),
+        "loc__lat must be the first column `location_fields` returns"
+    );
+    assert_eq!(
+        wf.tantivy_schema
+            .get_field("loc__lon")
+            .map(|f| f.field_id())
+            .ok(),
+        wf.location_fields("loc").map(|(_, lon)| lon.field_id()),
+        "loc__lon must be the second column `location_fields` returns"
+    );
+
+    // The user-facing name is *not* itself a Tantivy field.
+    assert!(
+        wf.field("loc").is_none(),
+        "a `location` field must not be a single name-resolvable Tantivy field"
+    );
+    assert_eq!(
+        wf.value_kind("loc"),
+        Some(schema::ValueKind::Location),
+        "a declared `location` field resolves to ValueKind::Location"
+    );
 }
 
 /// The guard must not over-reject. `resolve_type` matches built-in names with

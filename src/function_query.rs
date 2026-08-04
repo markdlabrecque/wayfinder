@@ -73,6 +73,17 @@ pub enum FuncQuery {
         Box<FuncQuery>,
         Box<FuncQuery>,
     ),
+    /// Argless `geodist()`: the haversine distance (km) from the request-param
+    /// point `pt` to each document's `sfield` point. `sfield` is a `location`
+    /// field whose two synthetic columns `sfield__lat`/`sfield__lon` hold the
+    /// doc's point (#331); `pt` is the `(lat, lon)` origin the caller parsed
+    /// from the `pt` request param. Carrying `pt` in the variant (rather than
+    /// threading request params through `eval`) keeps `eval`'s closure-over-
+    /// field-values signature unchanged for every other variant, and the
+    /// argless request-param-driven form is the client-evidenced one (finding
+    /// 133); the explicit-args `geodist(sfield, pt, ...)` form is a documented
+    /// descope.
+    GeoDist { sfield: String, pt: (f64, f64) },
 }
 
 impl FuncQuery {
@@ -107,6 +118,17 @@ impl FuncQuery {
                 a.collect_fields(out);
                 b.collect_fields(out);
             }
+            FuncQuery::GeoDist { sfield, .. } => {
+                // The two synthetic columns backing the `location` field.
+                let lat = format!("{sfield}__lat");
+                let lon = format!("{sfield}__lon");
+                if !out.contains(&lat) {
+                    out.push(lat);
+                }
+                if !out.contains(&lon) {
+                    out.push(lon);
+                }
+            }
         }
     }
 
@@ -133,6 +155,11 @@ impl FuncQuery {
                 let av = a.eval(field_value);
                 let bv = b.eval(field_value);
                 av / (mv * xv + bv)
+            }
+            FuncQuery::GeoDist { sfield, pt } => {
+                let lat = field_value(&format!("{sfield}__lat"));
+                let lon = field_value(&format!("{sfield}__lon"));
+                haversine_km(lat, lon, pt.0, pt.1)
             }
         }
     }
@@ -163,8 +190,40 @@ impl FuncQuery {
                     && a.exists(field_exists)
                     && b.exists(field_exists)
             }
+            // A `geodist()` exists iff the document has both synthetic
+            // columns backing its `location` field. This is what makes
+            // `{!frange}geodist()` (#332) exclude docs with no point even
+            // though `eval` would resolve the missing columns to 0.0 -- the
+            // same `{!func}`-scores vs `{!frange}`-filters distinction every
+            // other variant honours (#333).
+            FuncQuery::GeoDist { sfield, .. } => {
+                field_exists(&format!("{sfield}__lat")) && field_exists(&format!("{sfield}__lon"))
+            }
         }
     }
+}
+
+/// Great-circle distance in kilometres, the quantity Solr's `geodist()` returns
+/// for a `LatLonPointSpatialField`. Standard haversine over the earth radius
+/// Solr/Lucene use (`DistanceUtils.EARTH_EQUATORIAL_RADIUS_KM` /
+/// `SloppyMath`'s `TO_METERS`, both `6371008.7714` m -- a mean radius despite
+/// the legacy "equatorial" name).
+///
+/// Solr computes this through Lucene's `SloppyMath.haversinMeters`, a
+/// speed-optimised approximation that is itself only accurate to ~40 cm, on
+/// lat/lon re-read from Lucene's lossy 32-bit BKD quantisation. Wayfinder
+/// computes the exact haversine on the full-precision f64 columns instead; the
+/// two agree to well under a centimetre here, the same "same logical value,
+/// different floating-point path" category the differential harness already
+/// tolerates for BM25 `score` magnitudes and stats `sum`/`mean` (#331).
+fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    const R_KM: f64 = 6_371.008_771_4;
+    let dlat = (lat2 - lat1).to_radians();
+    let dlon = (lon2 - lon1).to_radians();
+    let lat1r = lat1.to_radians();
+    let lat2r = lat2.to_radians();
+    let h = (dlat / 2.0).sin().powi(2) + lat1r.cos() * lat2r.cos() * (dlon / 2.0).sin().powi(2);
+    R_KM * 2.0 * h.sqrt().asin()
 }
 
 /// A parse error carrying a Solr-shaped `SyntaxError` message. The message is
@@ -482,6 +541,17 @@ impl Weight for FunctionScoreWeight {
         // Membership is the child's; the function adds no documents.
         self.child.count(reader)
     }
+}
+
+/// Evaluates `func` for a single document, opening that segment's fast-field
+/// columns and resolving each field reference (missing numeric → `0.0`, Solr's
+/// function-query default). The per-`DocAddress` entry point the `fl=`
+/// computed-field path needs for `dist:geodist()` (#331): unlike the
+/// [`FunctionScoreQuery`] scorer, it evaluates one doc at a time rather than
+/// driving a `DocSet`, which is fine at site scale (small page of `rows` docs).
+pub fn eval_doc(reader: &SegmentReader, doc: DocId, func: &FuncQuery) -> tantivy::Result<f64> {
+    let columns = FieldColumns::open(reader, &func.fields())?;
+    Ok(func.eval(&|name| columns.value(name, doc)))
 }
 
 /// The resolved fast-field columns a function references, for one segment.
@@ -1008,5 +1078,49 @@ mod tests {
             true,
             true
         ));
+    }
+
+    #[test]
+    fn geodist_reports_the_two_synthetic_columns_and_haversines() {
+        // `geodist()` is constructed with the request params resolved (sfield,
+        // pt) rather than parsed, since the argless form is request-param-
+        // driven and `parse` has no request context.
+        let f = FuncQuery::GeoDist {
+            sfield: "loc".to_string(),
+            pt: (40.0, -74.0),
+        };
+        assert_eq!(
+            f.fields(),
+            vec!["loc__lat".to_string(), "loc__lon".to_string()]
+        );
+
+        // The origin doc itself is 0 km away.
+        let origin = |name: &str| match name {
+            "loc__lat" => 40.0,
+            "loc__lon" => -74.0,
+            _ => 0.0,
+        };
+        assert_eq!(f.eval(&origin), 0.0);
+
+        // One degree of latitude is ~111.2 km. This is the exact-haversine
+        // value; Solr's SloppyMath agrees to <1 cm (see `haversine_km`).
+        let one_deg_n = |name: &str| match name {
+            "loc__lat" => 41.0,
+            "loc__lon" => -74.0,
+            _ => 0.0,
+        };
+        let km = f.eval(&one_deg_n);
+        assert!(
+            (km - 111.195).abs() < 1e-2,
+            "1 degree of latitude ≈ 111.2 km, got {km}"
+        );
+
+        // Symmetry: +1 lat and -1 lat are the same distance from the origin.
+        let one_deg_s = |name: &str| match name {
+            "loc__lat" => 39.0,
+            "loc__lon" => -74.0,
+            _ => 0.0,
+        };
+        assert_eq!(f.eval(&one_deg_n), f.eval(&one_deg_s));
     }
 }

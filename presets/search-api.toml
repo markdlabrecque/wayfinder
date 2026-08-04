@@ -24,9 +24,15 @@
 #
 # This preset covers the prefixes real captured Drupal traffic actually uses
 # (verified against `solr-ref/search-api/trace/*.json`), not the full
-# configset's exhaustive prefix list -- spatial types, `random_*`, `access_*`,
+# configset's exhaustive prefix list -- `random_*`, `access_*`,
 # `xs_`/`xm_` binary, `hs_`/`hts_` hierarchy, etc. are out of scope. Don't
 # mistake this for a complete `schema.xml` transliteration.
+#
+# issue #331 added the spatial `location` field type and these four dynamic
+# rules (`locs_*`/`locm_*`/`geos_*`/`geom_*`) from the configset; a stored
+# dynamic point round-trips as its `lat,lon` string, but `geodist()` on a
+# dynamic sfield is not yet supported (the two-column encoding needs the field
+# name at build time) -- see `WayfinderSchema::location_fields`.
 #
 # issue #300 added the search_api_solr non-default data types that round-trip
 # on these existing Wayfinder types: `zs_*`/`zm_*` (solr_string_storage) and
@@ -336,3 +342,32 @@ stored = true
 pattern = "sort_*"
 type = "string"
 fast = true
+
+# --- #331 spatial: `location` (LatLonPointSpatialField) dynamic rules ------
+# From `solr-ref/search-api/configset/schema.xml:229-237`. A stored point
+# round-trips as its `lat,lon` string; `geodist()` reads a declared `location`
+# field's two synthetic columns, which a dynamic name cannot have, so distance
+# on a dynamic sfield is a documented ceiling of this tracer.
+[[dynamic_fields]]
+pattern = "locs_*"
+type = "location"
+stored = true
+
+[[dynamic_fields]]
+pattern = "locm_*"
+type = "location"
+stored = true
+multi_valued = true
+
+# GeoHash aliases are deprecated (LatLonPointSpatialField supersedes them) but
+# the configset keeps the dedicated names for backward compatibility.
+[[dynamic_fields]]
+pattern = "geos_*"
+type = "location"
+stored = true
+
+[[dynamic_fields]]
+pattern = "geom_*"
+type = "location"
+stored = true
+multi_valued = true

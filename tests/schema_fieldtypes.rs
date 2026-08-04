@@ -44,9 +44,10 @@ const NON_ENGLISH_LANGUAGE_CODES: &[&str] = &[
 
 /// Built-in type names `resolve_type` accepts that are not language presets:
 /// `string`/`keyword` (both resolve to `Str`), `text_general`, `int`/`long`,
-/// `float`/`double`, `date`. `text_en` is listed separately below since it is
-/// the one `text_*` preset with its own dedicated tokenizer identity
-/// (`wayfinder_text_en_v2`), not a `LANGUAGES`-table lookup.
+/// `float`/`double`, `date`, and `location` (#331). `text_en` is listed
+/// separately below since it is the one `text_*` preset with its own
+/// dedicated tokenizer identity (`wayfinder_text_en_v2`), not a `LANGUAGES`-
+/// table lookup.
 const NON_LANGUAGE_BUILTIN_TYPES: &[&str] = &[
     "string",
     "keyword",
@@ -56,6 +57,7 @@ const NON_LANGUAGE_BUILTIN_TYPES: &[&str] = &[
     "float",
     "double",
     "date",
+    "location",
 ];
 
 /// Names that must never appear: real languages `resolve_type` does not
@@ -86,6 +88,9 @@ const EXPECTED_CLASSES: &[(&str, &str)] = &[
     ("double", "wayfinder.DoublePointField"),
     // trace: `pdate`
     ("date", "wayfinder.DatePointField"),
+    // Solr's `location` is `LatLonPointSpatialField`; the class is Solr's
+    // vocabulary even though Wayfinder stores a point as two f64 columns (#331).
+    ("location", "wayfinder.LatLonPointSpatialField"),
     // trace: `text_en`
     ("text_en", "wayfinder.TextField"),
     // trace: every `text_*` entry (`text_und`, `text_ws`, ...) is a TextField.
@@ -101,7 +106,7 @@ const EXPECTED_CLASSES: &[(&str, &str)] = &[
 const EXPECTED_ATTRIBUTE_KEYS: &[&str] = &["indexed", "stored", "multiValued", "docValues"];
 
 /// The exact, complete set of `fieldTypes` names Wayfinder must report for a
-/// schema declaring the custom chains in `extra_custom`: the nine non-language
+/// schema declaring the custom chains in `extra_custom`: the ten non-language
 /// built-ins (`NON_LANGUAGE_BUILTIN_TYPES` plus `text_en`), one
 /// `text_<code>` per non-English `LANGUAGES` entry, and each custom chain --
 /// nothing else. Sorted, so `assert_eq!` against a sorted actual list is a
@@ -303,12 +308,13 @@ async fn schema_fieldtypes_honesty_guard_unsupported_languages_absent() {
 
 /// Padding-resistant version of the two guards above, and the strongest test
 /// in this file: the *exact, complete* `fieldTypes` name list must equal the
-/// verified set -- the nine non-language built-ins, `text_en`, and the 17
+/// verified set -- the ten non-language built-ins, `text_en`, and the 17
 /// non-English stemmed presets -- with no duplicates and nothing else at all.
 ///
 /// Scoping this to the `text_*` subset (an earlier version of this test did)
 /// left a hole: padding the list with non-language Solr-looking types
-/// (`boolean`, `pdate`, `location`, `binary` -- all real names from the trace)
+/// (`boolean`, `pdate`, `location`, `binary` -- all real names from the trace;
+/// `location` joined the built-ins with #331, the others remain unsupported)
 /// went undetected, which is precisely the "make it look more Solr-like"
 /// failure mode this endpoint exists to prevent. The expected set is
 /// hardcoded test-side, so widening `schema.rs`'s tables cannot widen the
