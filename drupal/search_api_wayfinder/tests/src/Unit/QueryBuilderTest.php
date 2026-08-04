@@ -499,15 +499,23 @@ class QueryBuilderTest extends TestCase {
    * facet's sort if given" -- so these tests treat 'sort' as an optional key
    * on the per-facet info array, present or absent, per plan doc wording.
    *
-   * `src/facet.rs` (`facet_fields()`) reads `facet.limit`/`facet.mincount`/
-   * `facet.missing`/`facet.sort` as single global params applied to every
-   * `facet.field` entry -- there is no `f.<field>.facet.*` per-field
-   * override (#296 is that ceiling). So
-   * these tests only exercise multi-facet requests where every facet shares
-   * identical limit/mincount/missing/sort settings; a query with two facets
-   * asking for different values is left unspecified deliberately (see
-   * handoff notes -- this is a real premise gap in the plan doc's per-facet
-   * phrasing, not a guessed requirement).
+   * Issue #296 (findings 147-151, `docs/solr-ref-findings.md`): the server
+   * only honours per-field facet settings as a local param on `facet.field`
+   * itself (`f.<field>.facet.*` resolves against the Solr field name, never
+   * the `{!key=}` delta this module always sends -- finding 147, and #299
+   * keys every facet by the Search API delta). So `buildFacets()` emits
+   * `limit`/`min_count`/`sort`/`missing` as `facet.<name>=<value>` local
+   * params appended to the SAME block `{!key=<delta>}`/`{!ex=...}` already
+   * carries -- never as top-level `facet.limit`/`facet.mincount`/
+   * `facet.sort`/`facet.missing` params, and never shared across facets. The
+   * previous "last facet's settings win for the whole request" ceiling
+   * (ponytail, now removed) is gone: two facets on one field keep independent
+   * settings, which is the routine shape #299 produces and the reason #296
+   * exists. Order inside the block is `ex`, `key`, then `facet.limit`,
+   * `facet.mincount`, `facet.sort`, `facet.missing` -- the same order the
+   * settings are read from the Search API facet array below, and matching
+   * captured Solr rows where a key/ex prefix is followed by facet.* settings
+   * (`solr-ref/responses/facet_perfield_lp_limit.json` et al.).
    *
    * @covers ::build
    */
@@ -530,7 +538,7 @@ class QueryBuilderTest extends TestCase {
   /**
    * @covers ::build
    */
-  public function testSingleFacetProducesFacetParams(): void {
+  public function testSingleFacetEmitsSettingsAsLocalParamsOnItsFacetField(): void {
     $index = $this->mockIndex([], [
       'category' => $this->mockIndexField('category', 'string', FALSE),
     ]);
@@ -549,19 +557,23 @@ class QueryBuilderTest extends TestCase {
     $params = (new QueryBuilder())->build($query);
 
     $this->assertSame('true', $params['facet']);
-    // #299: each facet is emitted under {!key=<delta>} so two facets on one
-    // field answer under distinct keys; a single facet is still one string.
-    $this->assertSame('{!key=category}ss_category', $params['facet.field']);
-    $this->assertSame(10, $params['facet.limit']);
-    $this->assertSame(2, $params['facet.mincount']);
-    $this->assertSame('false', $params['facet.missing']);
+    // #296: limit/mincount/missing travel as local params on this facet's own
+    // facet.field, not as global facet.* params -- there is no top-level
+    // facet.limit/facet.mincount/facet.missing at all.
+    $this->assertSame(
+      '{!key=category facet.limit=10 facet.mincount=2 facet.missing=false}ss_category',
+      $params['facet.field'],
+    );
+    $this->assertArrayNotHasKey('facet.limit', $params);
+    $this->assertArrayNotHasKey('facet.mincount', $params);
+    $this->assertArrayNotHasKey('facet.missing', $params);
     $this->assertArrayNotHasKey('facet.sort', $params);
   }
 
   /**
    * @covers ::build
    */
-  public function testFacetMissingTrueSendsFacetMissingStringTrue(): void {
+  public function testFacetMissingTrueIsSentAsALocalParamStringTrue(): void {
     $index = $this->mockIndex([], [
       'category' => $this->mockIndexField('category', 'string', FALSE),
     ]);
@@ -577,13 +589,18 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    $this->assertSame('true', $params['facet.missing']);
+    // Sent as the literal string Solr expects (never a PHP bool cast to '').
+    $this->assertSame(
+      '{!key=category facet.limit=10 facet.mincount=1 facet.missing=true}ss_category',
+      $params['facet.field'],
+    );
+    $this->assertArrayNotHasKey('facet.missing', $params);
   }
 
   /**
    * @covers ::build
    */
-  public function testFacetSortIsSentWhenGivenOnTheFacetOption(): void {
+  public function testFacetSortIsSentAsALocalParamWhenGivenOnTheFacetOption(): void {
     $index = $this->mockIndex([], [
       'category' => $this->mockIndexField('category', 'string', FALSE),
     ]);
@@ -600,20 +617,28 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    $this->assertSame('index', $params['facet.sort']);
+    // sort sits between mincount and missing -- the order the settings are
+    // read from the facet array in buildFacets().
+    $this->assertSame(
+      '{!key=category facet.limit=10 facet.mincount=1 facet.sort=index facet.missing=false}ss_category',
+      $params['facet.field'],
+    );
+    $this->assertArrayNotHasKey('facet.sort', $params);
   }
 
   /**
+   * #296: two facets on two different fields, each with its own settings
+   * baked into its own facet.field local-params block -- no top-level
+   * facet.* param is shared or overwritten between them, unlike the removed
+   * last-wins ceiling.
+   *
    * @covers ::build
    */
-  public function testMultipleFacetsProduceMultipleFacetFieldEntries(): void {
+  public function testMultipleFacetsEachCarryTheirOwnSettingsAsLocalParams(): void {
     $index = $this->mockIndex([], [
       'category' => $this->mockIndexField('category', 'string', FALSE),
       'brand' => $this->mockIndexField('brand', 'string', TRUE),
     ]);
-    // Both facets share identical limit/mincount/missing -- see class-level
-    // doc comment on why this test suite does not exercise divergent
-    // per-facet settings.
     $facets = [
       'category' => [
         'field' => 'category',
@@ -623,23 +648,28 @@ class QueryBuilderTest extends TestCase {
       ],
       'brand' => [
         'field' => 'brand',
-        'limit' => 10,
-        'min_count' => 1,
-        'missing' => FALSE,
+        'limit' => 3,
+        'min_count' => 2,
+        'missing' => TRUE,
       ],
     ];
     $query = $this->mockQuery(NULL, NULL, $index, NULL, [], ['search_api_facets' => $facets]);
 
     $params = (new QueryBuilder())->build($query);
 
-    // #299: each entry carries its {!key=<delta>} prefix; here two facets on
-    // two different fields, so two distinct keys. "brand" is multi-valued
-    // (per mockIndexField's TRUE arg above), so its mapped name uses the 'm'
-    // infix, exactly as qf/fq mapping already does elsewhere in this class.
-    $this->assertSame(['{!key=category}ss_category', '{!key=brand}sm_brand'], $params['facet.field']);
-    $this->assertSame(10, $params['facet.limit']);
-    $this->assertSame(1, $params['facet.mincount']);
-    $this->assertSame('false', $params['facet.missing']);
+    // "brand" is multi-valued (per mockIndexField's TRUE arg above), so its
+    // mapped name uses the 'm' infix, exactly as qf/fq mapping already does
+    // elsewhere in this class.
+    $this->assertSame(
+      [
+        '{!key=category facet.limit=10 facet.mincount=1 facet.missing=false}ss_category',
+        '{!key=brand facet.limit=3 facet.mincount=2 facet.missing=true}sm_brand',
+      ],
+      $params['facet.field'],
+    );
+    $this->assertArrayNotHasKey('facet.limit', $params);
+    $this->assertArrayNotHasKey('facet.mincount', $params);
+    $this->assertArrayNotHasKey('facet.missing', $params);
   }
 
   /**
@@ -652,11 +682,12 @@ class QueryBuilderTest extends TestCase {
    * only a *negative* limit means "as many as the server allows"
    * (`facet_limit_unlimited.json`; `src/facet.rs` `facet_fields()` maps
    * `requested_limit < 0` to `config.query.facet_limit_max`). So the builder
-   * must translate, or a default facet config silently returns nothing.
+   * must translate, or a default facet config silently returns nothing --
+   * now inside the local-params block rather than a top-level param.
    *
    * @covers ::build
    */
-  public function testFacetLimitZeroMeansUnlimitedAndIsSentAsMinusOne(): void {
+  public function testFacetLimitZeroMeansUnlimitedAndIsSentAsMinusOneInTheLocalParam(): void {
     $index = $this->mockIndex([], [
       'category' => $this->mockIndexField('category', 'string', FALSE),
     ]);
@@ -672,7 +703,10 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    $this->assertSame(-1, $params['facet.limit']);
+    $this->assertSame(
+      '{!key=category facet.limit=-1 facet.mincount=1 facet.missing=false}ss_category',
+      $params['facet.field'],
+    );
   }
 
   /**
@@ -694,27 +728,30 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    // #299: the facet.field value is {!key=<delta>}<mapped field>.
-    $this->assertSame('{!key=weight}its_weight', $params['facet.field']);
+    $this->assertSame(
+      '{!key=weight facet.limit=5 facet.mincount=1 facet.missing=false}its_weight',
+      $params['facet.field'],
+    );
   }
 
   /**
-   * #299: two Search API facets on the same field must not collapse. The core
-   * answers one key per distinct facet.field value, so QueryBuilder emits a
-   * distinct {!key=<delta>} per facet -- here two facets over `category` come
-   * back under `category_top` and `category_all` instead of both under
-   * `ss_category`. Ground truth: solr-ref/responses/facet_extag_both_facets.json
-   * (one field, two {!key=} labels, two distinct result keys with different
-   * counts); the prefix wire format is fixed by src/facet.rs split_facet_key
-   * ({!key=label}field, no space).
-   *
-   * The two facets state different limits -- the routine Search API setup
-   * this issue is about -- but buildFacets() still writes facet.limit as one
-   * global param (last wins); per-facet settings are #296, out of scope here.
+   * #299/#296: two Search API facets on the same field must not collapse,
+   * AND must keep independent settings -- the shape #299's delta-keyed
+   * facets routinely produce, and the reason #296 cannot be built from
+   * `f.<field>.facet.*` alone (finding 149: the per-field form addresses the
+   * field, which both facets share, so it can only ever set both or neither).
+   * The core answers one key per distinct facet.field value, so QueryBuilder
+   * emits a distinct {!key=<delta> facet.limit=...} per facet -- here two
+   * facets over `category` come back under `category_top` (limited to 5) and
+   * `category_all` (unlimited) instead of both sharing one global limit.
+   * Ground truth for the shape: `solr-ref/responses/facet_perfield_two_lp.json`
+   * (two facets on one field, each carrying its own `facet.limit` local
+   * param); the prefix wire format itself is fixed by src/facet.rs
+   * split_facet_key ({!key=label ...}field, no space before field).
    *
    * @covers ::build
    */
-  public function testTwoFacetsOnOneFieldEmitDistinctKeyedFacetFieldEntries(): void {
+  public function testTwoFacetsOnOneFieldEmitDistinctKeyedFacetFieldEntriesWithTheirOwnSettings(): void {
     $index = $this->mockIndex([], [
       'category' => $this->mockIndexField('category', 'string', FALSE),
     ]);
@@ -736,10 +773,14 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    // Both entries facet the same mapped field (ss_category); only the
-    // {!key=} label differs, so the core answers two distinct keys.
+    // Both entries facet the same mapped field (ss_category); the {!key=}
+    // label AND the facet.limit local param differ per facet -- 5 vs
+    // unlimited (-1, Search API's limit => 0).
     $this->assertSame(
-      ['{!key=category_top}ss_category', '{!key=category_all}ss_category'],
+      [
+        '{!key=category_top facet.limit=5 facet.mincount=1 facet.missing=false}ss_category',
+        '{!key=category_all facet.limit=-1 facet.mincount=1 facet.missing=false}ss_category',
+      ],
       $params['facet.field'],
     );
   }
@@ -750,16 +791,19 @@ class QueryBuilderTest extends TestCase {
    * constrained to be one. A delta carrying `}` or whitespace would break out
    * of the {!key=...} local-params block (src/local_params.rs terminates the
    * block on `}` and splits pairs on whitespace), so buildFacets() falls back
-   * to the bare mapped field name for a delta that is not [A-Za-z0-9_:-]+
-   * rather than emit a broken prefix. parseFacets() registers both the delta
-   * and the field name as response keys to resolve either.
+   * to dropping just the `key=` half for a delta that is not
+   * [A-Za-z0-9_:-]+ rather than emit a broken prefix. This is the *key* guard
+   * only -- issue #296's facet.* settings are not delta-derived, so they are
+   * still emitted in the block; only the key is dropped, same fallback #298
+   * already established for an OR facet's `{!ex=...}` half
+   * (`testOrFacetWithHostileDeltaKeepsExButDropsKey` below).
    *
    * Mutation-tested: removing the guard makes this emit
-   * '{!key=bad delta}ss_category' and the assertion fails.
+   * '{!key=bad delta facet.limit=10 ...}ss_category' and the assertion fails.
    *
    * @covers ::build
    */
-  public function testHostileFacetDeltaFallsBackToBareFieldName(): void {
+  public function testHostileFacetDeltaDropsTheKeyButKeepsSettings(): void {
     $index = $this->mockIndex([], [
       'category' => $this->mockIndexField('category', 'string', FALSE),
     ]);
@@ -777,8 +821,53 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    // Single hostile facet -> bare mapped field name, still a single string.
-    $this->assertSame('ss_category', $params['facet.field']);
+    $this->assertSame(
+      '{!facet.limit=10 facet.mincount=1 facet.missing=false}ss_category',
+      $params['facet.field'],
+    );
+  }
+
+  /**
+   * #296: a facet setting value is not necessarily a safe local-params token
+   * either -- `facet.sort` on the facet array is free-form input the same way
+   * the delta is (#299's guard covers only the key), and a value carrying a
+   * space or a `}` would otherwise break out of the block the same way a
+   * hostile delta does. Unlike the delta (which has a safe fallback -- the
+   * bare field name / a dropped key), a setting has no safe fallback that
+   * keeps its meaning, so it must be quoted rather than dropped: wrapped in
+   * `"..."`, which src/local_params.rs's block-value grammar already reads
+   * (a `}` inside a quoted value does not close the block -- `find_block_end`
+   * skips it -- and read_value stops at the matching, non-escaped closing
+   * quote).
+   *
+   * Mutation-tested: removing the guard makes this emit
+   * '{!key=cat facet.sort=count} extra=malicious}ss_category' (the block
+   * closing early, right after count) and the assertion fails.
+   *
+   * @covers ::build
+   */
+  public function testHostileFacetSortValueIsQuotedRatherThanBreakingTheBlock(): void {
+    $index = $this->mockIndex([], [
+      'category' => $this->mockIndexField('category', 'string', FALSE),
+    ]);
+    $facets = [
+      'cat' => [
+        'field' => 'category',
+        'min_count' => 1,
+        'missing' => FALSE,
+        // A space and an unescaped `}` -- both would otherwise terminate the
+        // block early or split into a bogus second local param.
+        'sort' => 'count} extra=malicious',
+      ],
+    ];
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], ['search_api_facets' => $facets]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame(
+      '{!key=cat facet.mincount=1 facet.sort="count} extra=malicious" facet.missing=false}ss_category',
+      $params['facet.field'],
+    );
   }
 
   /**
@@ -788,7 +877,8 @@ class QueryBuilderTest extends TestCase {
    * string search_api_solr's SearchApiSolrBackend puts in {!ex=...} via
    * addExcludes(['facet:' . $info['field']]) and the facets module matches in
    * {!tag=...} -- never the mapped Solr field. The delta key (#299) is kept
-   * so ResponseParser still resolves the facet by key.
+   * so ResponseParser still resolves the facet by key, and #296's settings
+   * follow both.
    *
    * @covers ::build
    */
@@ -810,11 +900,15 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    // ex before key -- the shape solr-ref/responses/facet_extag_both_facets.json
-    // proves is the reproducible OR-facet UI. The tag carries a colon, which
-    // the server's local_params::read_value reads as a bare value (pinned in
-    // src/local_params.rs).
-    $this->assertSame('{!ex=facet:category key=category}ss_category', $params['facet.field']);
+    // ex before key, settings after -- the shape
+    // solr-ref/responses/facet_extag_both_facets.json proves is the
+    // reproducible OR-facet UI, extended by #296's facet.* settings. The tag
+    // carries a colon, which the server's local_params::read_value reads as
+    // a bare value (pinned in src/local_params.rs).
+    $this->assertSame(
+      '{!ex=facet:category key=category facet.limit=10 facet.mincount=1 facet.missing=false}ss_category',
+      $params['facet.field'],
+    );
   }
 
   /**
@@ -841,7 +935,10 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    $this->assertSame('{!key=category}ss_category', $params['facet.field']);
+    $this->assertSame(
+      '{!key=category facet.limit=10 facet.mincount=1 facet.missing=false}ss_category',
+      $params['facet.field'],
+    );
   }
 
   public static function nonOrOperatorProvider(): array {
@@ -854,7 +951,8 @@ class QueryBuilderTest extends TestCase {
   /**
    * #298: an OR facet whose delta is not a safe local-params value still gets
    * its {!ex} (built from the field id, not the delta) but drops the key, the
-   * same fallback #299 established for the key half.
+   * same fallback #299 established for the key half -- #296's settings are
+   * unaffected by the delta and are still emitted.
    *
    * @covers ::build
    */
@@ -875,7 +973,10 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    $this->assertSame('{!ex=facet:category}ss_category', $params['facet.field']);
+    $this->assertSame(
+      '{!ex=facet:category facet.limit=10 facet.mincount=1 facet.missing=false}ss_category',
+      $params['facet.field'],
+    );
   }
 
   /**
