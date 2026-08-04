@@ -383,7 +383,14 @@ fn precision_end_ms(start: OffsetDateTime, precision: Precision) -> Option<i64> 
         Precision::Minute => start.checked_add(Duration::minutes(1))?,
         Precision::Second => start.checked_add(Duration::seconds(1))?,
     };
-    Some(to_millis(next).saturating_sub(1).max(MIN_MS))
+    // Clamp on BOTH sides, and never below `start`. When `next` itself clamps
+    // to `MAX_MS`, the naive `- 1` puts `end` one millisecond *before* `start`,
+    // and that inverted interval then reports finding 170's `Wrong order` for a
+    // query the client wrote in the correct order (and rejects a document Solr
+    // accepts). Guarding only the low side left every literal from 2263 to 9998
+    // inverted; `9999` escaped only because its end clamps to exactly `MAX_MS`.
+    let start_ms = to_millis(start);
+    Some(to_millis(next).saturating_sub(1).clamp(start_ms, MAX_MS))
 }
 
 /// `dt` as a millisecond timestamp, **clamped** into `MIN_MS..=MAX_MS` rather
@@ -519,18 +526,29 @@ fn shift(dt: OffsetDateTime, unit: Unit, count: i64) -> Option<OffsetDateTime> {
             Some(PrimitiveDateTime::new(date, dt.time()).assume_utc())
         }
         Unit::Month => {
-            let total = i64::from(dt.year()) * 12 + i64::from(u8::from(dt.month())) - 1 + count;
+            let total = (i64::from(dt.year()) * 12 + i64::from(u8::from(dt.month())) - 1)
+                .checked_add(count)?;
             let year = i32::try_from(total.div_euclid(12)).ok()?;
             let month = Month::try_from(u8::try_from(total.rem_euclid(12) + 1).ok()?).ok()?;
             let day = dt.day().min(days_in_month(year, month));
             let date = Date::from_calendar_date(year, month, day).ok()?;
             Some(PrimitiveDateTime::new(date, dt.time()).assume_utc())
         }
-        Unit::Week => dt.checked_add(Duration::weeks(count)),
-        Unit::Day => dt.checked_add(Duration::days(count)),
-        Unit::Hour => dt.checked_add(Duration::hours(count)),
-        Unit::Minute => dt.checked_add(Duration::minutes(count)),
-        Unit::Second => dt.checked_add(Duration::seconds(count)),
+        // Every fixed-length unit goes through `Duration::milliseconds` and an
+        // explicit `checked_mul`, NOT `Duration::weeks`/`days`/`hours`/
+        // `minutes`/`seconds`: those constructors are
+        // `checked_mul(..).expect(..)` inside `time`, so a large user-supplied
+        // count panics -- in release builds too, not just debug. On the index
+        // path that panic fired while the index-writer lock was held, poisoning
+        // it and bricking every subsequent write to the core, so an
+        // out-of-range count must be `None` here (the finding-170 400) instead.
+        // `Duration::milliseconds` is the one constructor that divides rather
+        // than multiplies and so cannot overflow.
+        Unit::Week => dt.checked_add(Duration::milliseconds(count.checked_mul(604_800_000)?)),
+        Unit::Day => dt.checked_add(Duration::milliseconds(count.checked_mul(86_400_000)?)),
+        Unit::Hour => dt.checked_add(Duration::milliseconds(count.checked_mul(3_600_000)?)),
+        Unit::Minute => dt.checked_add(Duration::milliseconds(count.checked_mul(60_000)?)),
+        Unit::Second => dt.checked_add(Duration::milliseconds(count.checked_mul(1_000)?)),
         Unit::Milli => dt.checked_add(Duration::milliseconds(count)),
     }
 }

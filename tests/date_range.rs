@@ -1159,3 +1159,166 @@ async fn fl_star_does_not_leak_synthetic_start_end_keys() {
         "the stored field itself must still render, verbatim, in fl=*: {doc}"
     );
 }
+
+// --- round-3 review: three defects the round-2 fixes left reachable ---------
+
+/// Round 2 fixed the `split_at(1)` panic on a multi-byte character after `NOW`,
+/// but not the panic *class* it was an instance of. `time`'s
+/// `Duration::days/weeks/hours/minutes` are `checked_mul(...).expect(...)`
+/// internally, so an unbounded user-supplied count panics -- in release builds
+/// too. On the index path that panic fires while the index-writer lock is held,
+/// poisoning it: one such `/update` and every subsequent write to the core
+/// fails for the process lifetime. It must be the finding-170 400 instead, and
+/// the core must still be writable afterwards.
+///
+/// Not fixture-derived: Solr's own limit is a `NumberFormatException` on a
+/// count this size, so the shared truth here is only "a 400, and the server
+/// survives". The second `/update` is the actual regression assertion.
+#[tokio::test]
+async fn date_math_overflow_on_the_index_path_is_400_and_leaves_the_core_writable() {
+    let dir = TempDir::new().expect("temp dir");
+    let app =
+        app_with_schema(dir.path(), DATE_RANGE_SCHEMA_TOML).expect("date_range app must build");
+    for expr in [
+        "NOW+9223372036854775807DAYS",
+        "NOW-9223372036854775807DAYS",
+        "NOW+9223372036854775807WEEKS",
+        "NOW+9223372036854775807HOURS",
+        "NOW+9223372036854775807MINUTES",
+        "NOW+9223372036854775807MONTHS",
+    ] {
+        let (status, body) = post_docs(&app, &json!([{"id":"bad","drs_x":expr}])).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "`{expr}` must be a 400, not a panic: {body}"
+        );
+        let (status, body) = post_docs(&app, &json!([{"id":"ok","drs_x":"2022"}])).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the index writer must survive `{expr}`; a poisoned lock bricks the core: {body}"
+        );
+    }
+}
+
+/// The query-path half of the same defect: a 400 quoting the whole expression
+/// (finding 170), never the 500 a caught panic produces.
+#[tokio::test]
+async fn date_math_overflow_on_the_query_path_is_400() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=drs_x%3A%5BNOW%20TO%20NOW%2B9223372036854775807DAYS%5D&fl=id&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        body["error"]["msg"].as_str(),
+        Some("Invalid Date Math String:'NOW+9223372036854775807DAYS'"),
+        "finding 170's message shape, quoting the whole expression: {body}"
+    );
+}
+
+/// Round 2's clamp guards the low side of a truncated literal's end
+/// (`.max(MIN_MS)`) but not the high side, so a literal whose *next* unit
+/// exceeds `MAX_MS` gets `end = MAX_MS - 1` while `start` is already `MAX_MS` --
+/// an inverted interval, which then reports the finding-170 `Wrong order` error
+/// for a correctly ordered query. Year 9999 happened to escape it (its end
+/// clamps to exactly `MAX_MS`); everything from 2263 to 9998 did not.
+///
+/// Expected set is the clamp's own consequence, derived from the 9-doc corpus:
+/// both endpoints collapse to `MAX_MS`, so the query is the point interval at
+/// the upper bound, which d6 (`[2021-01-01 TO *]`) and d7 (`[* TO *]`) contain
+/// and no other doc reaches. Solr answers d6/d7 for `[3000 TO 3001]` too.
+#[tokio::test]
+async fn far_future_truncated_endpoints_do_not_invert_the_interval() {
+    let (app, _dir) = date_range_app().await;
+    for query in [
+        "drs_x%3A%5B3000%20TO%203001%5D",
+        "drs_x%3A%5B2300%20TO%202400%5D",
+        "drs_x%3A%5B2262-05%20TO%202262-06%5D",
+        "drs_x%3A%5B3000-06-15T12%3A00%3A00Z%20TO%209998%5D",
+    ] {
+        let (status, body) = get(
+            &app,
+            &format!("select?q={query}&fl=id&sort=id%20asc&rows=20&wt=json"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "`{query}` is correctly ordered and must not report Wrong order: {body}"
+        );
+        assert_eq!(
+            ids(&body),
+            vec!["d6".to_string(), "d7".to_string()],
+            "`{query}` clamps to the point interval at MAX_MS: {body}"
+        );
+    }
+}
+
+/// The index-path half: a document Solr accepts must not be rejected because
+/// its endpoints clamped into an inverted interval.
+#[tokio::test]
+async fn far_future_truncated_endpoints_index_without_inverting() {
+    let dir = TempDir::new().expect("temp dir");
+    let app =
+        app_with_schema(dir.path(), DATE_RANGE_SCHEMA_TOML).expect("date_range app must build");
+    let (status, body) = post_docs(
+        &app,
+        &json!([
+            {"id":"f1","drs_x":"[3000 TO 3001]"},
+            {"id":"f2","drs_x":"2300"},
+            {"id":"f3","drs_x":"2262-05"}
+        ]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a far-future literal must clamp, not fail the update: {body}"
+    );
+}
+
+/// A field-LESS literal under `edismax`/`dismax` never reaches `build_leaf` --
+/// it is routed to the `qf` disjunction, which builds a term query against the
+/// raw text field carrying the verbatim string (finding 165). So
+/// `qf=drs_x&q=2020` matched only the doc whose stored string is literally
+/// `2020`, exactly the silently-wrong-term-query class round 2 was meant to
+/// close. Solr routes a `qf` field through `FieldType::getFieldQuery`, i.e. the
+/// interval query, so the answer is `dr341_single_year`'s set.
+///
+/// `defType=dismax` is deliberately NOT exercised: this repo implements only
+/// `edismax` (`src/lib.rs:3213` is the sole `defType` branch), so a `dismax`
+/// request falls through to the plain Lucene parser and answers `q=2020`
+/// against `df` -- a pre-existing gap unrelated to #341, not a `date_range`
+/// defect. Its 0 hits are that gap, not a wrong interval query.
+#[tokio::test]
+async fn field_less_literal_in_qf_is_an_interval_query() {
+    let (app, _dir) = date_range_app().await;
+    let expected = vec![
+        "d1".to_string(),
+        "d2".to_string(),
+        "d3".to_string(),
+        "d4".to_string(),
+        "d7".to_string(),
+    ];
+    for query in [
+        "defType=edismax&qf=drs_x&q=2020",
+        "defType=edismax&qf=drs_x%20id&q=2020",
+        "defType=edismax&qf=drs_x&q=2020&tie=0.3",
+    ] {
+        let (status, body) = get(
+            &app,
+            &format!("select?{query}&fl=id&sort=id%20asc&rows=20&wt=json"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "`{query}`: {body}");
+        assert_eq!(
+            ids(&body),
+            expected,
+            "`{query}` must be the interval query, not a term query on the raw text: {body}"
+        );
+    }
+}

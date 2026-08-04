@@ -1056,3 +1056,35 @@ async fn dynamic_out_of_range_endpoints_clamp() {
         "finding 165: the sentinel still round-trips verbatim, {body}"
     );
 }
+
+// --- round-3 review: the `qf` path on a dynamic date_range field ------------
+
+/// The dynamic mirror of
+/// `tests/date_range.rs::field_less_literal_in_qf_is_an_interval_query`. A
+/// field-less literal under `edismax` is routed to the `qf` disjunction rather
+/// than to `build_leaf`, so #341's per-leaf interception does not cover it; on
+/// the dynamic path the term query it built instead went against the
+/// `_dynamic_text` JSON container and matched nothing at all. Solr routes a `qf`
+/// field through `FieldType::getFieldQuery`, i.e. the interval query, so this is
+/// `dr341_single_year`'s set.
+#[tokio::test]
+async fn dynamic_field_less_literal_in_qf_is_an_interval_query() {
+    let (app, _dir) = dynamic_date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?defType=edismax&qf=drs_x&q=2020&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec![
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "d4".to_string(),
+            "d7".to_string()
+        ],
+        "a dynamic date_range field in `qf` must be the interval query: {body}"
+    );
+}

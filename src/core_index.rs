@@ -2056,7 +2056,7 @@ impl CoreIndex {
                 tantivy::query_grammar::UserInputLeaf::Literal(lit) if lit.field_name.is_none() => {
                     literal_texts.push(lit.phrase.clone());
                     let quoted = lit.delimiter != tantivy::query_grammar::Delimiter::None;
-                    self.build_field_disjunction(&lit.phrase, quoted, &qf_fields, tie)
+                    self.build_field_disjunction(&lit.phrase, quoted, &qf_fields, tie)?
                 }
                 _ => self.build_ast(
                     tantivy::query_grammar::UserInputAst::Leaf(Box::new(leaf)),
@@ -2337,9 +2337,35 @@ impl CoreIndex {
         quoted: bool,
         qf_fields: &[(FieldTarget, f32)],
         tie: f32,
-    ) -> Box<dyn Query> {
+    ) -> Result<Box<dyn Query>, QueryError> {
         let mut disjuncts: Vec<Box<dyn Query>> = Vec::with_capacity(qf_fields.len());
         for (target, field_boost) in qf_fields {
+            // A field-LESS literal never reaches `build_leaf`, so #341's
+            // per-leaf interception does not cover it: a `date_range` field
+            // named in `qf`/`pf` would otherwise contribute a term query against
+            // the raw text field holding the verbatim string (finding 165), i.e.
+            // it would match only the document whose stored string happens to be
+            // literally the query text -- the same silently-wrong-term-query
+            // failure that interception exists to prevent. Solr routes a `qf`
+            // field through `FieldType::getFieldQuery`, which for
+            // `DateRangeField` is the interval query, so build that instead.
+            if let Some((start_col, end_col)) = self.leaf_date_range_columns(&match target {
+                FieldTarget::Static(field) => {
+                    self.index.schema().get_field_name(*field).to_string()
+                }
+                FieldTarget::Dynamic { path, .. } => path.clone(),
+            }) {
+                let interval =
+                    date_range::parse_interval(phrase_text).map_err(Self::date_range_error)?;
+                let dr: Box<dyn Query> = Box::new(date_range::DateRangeQuery::new(
+                    start_col,
+                    end_col,
+                    date_range::Op::Intersects,
+                    interval,
+                ));
+                disjuncts.push(Box::new(BoostQuery::new(dr, *field_boost)));
+                continue;
+            }
             let tokens = self.tokenize_for_target(target, phrase_text);
             let base: Box<dyn Query> = match tokens.as_slice() {
                 [] => continue,
@@ -2371,9 +2397,11 @@ impl CoreIndex {
             disjuncts.push(Box::new(BoostQuery::new(base, *field_boost)));
         }
         if disjuncts.is_empty() {
-            Box::new(EmptyQuery)
+            Ok(Box::new(EmptyQuery))
         } else {
-            Box::new(DisjunctionMaxQuery::with_tie_breaker(disjuncts, tie))
+            Ok(Box::new(DisjunctionMaxQuery::with_tie_breaker(
+                disjuncts, tie,
+            )))
         }
     }
 
