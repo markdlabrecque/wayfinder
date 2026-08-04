@@ -1707,6 +1707,70 @@ class QueryBuilderTest extends TestCase {
   }
 
   /**
+   * issue #342, MF-1 (round-2 review bounce): a NEGATED condition on a text
+   * field must combine its per-language variants with AND, not the OR the
+   * positive case above uses. With OR, `((*:* -tm_X3b_en_body:"hello") OR
+   * (*:* -tm_X3b_de_body:"hello"))` is a tautology: a document only ever
+   * carries ONE language variant of a text field
+   * (DocumentBuilder::buildAddCommand() writes exactly one `tm_X3b_<item
+   * language>_body`, never both), so whichever variant a given doc lacks
+   * always satisfies "doc does NOT have `<other-lang>_body`:hello" trivially
+   * -- the OR matches every document regardless of `body`'s actual value.
+   * AND is the correct combination: a doc must fail the negated condition on
+   * EVERY variant to be excluded, and only the one variant the doc actually
+   * carries can ever be non-vacuously true or false. Upstream picks the
+   * conjunction by operator polarity, not by variant count
+   * (SearchApiSolrBackend.php:3455-3459: `'=' === $condition->getOperator()
+   * ? 'AND' : 'OR'`, applied outside the OR at :3435-3445) -- this test pins
+   * the equivalent outcome as "negated parts join with AND" rather than
+   * "negate a positive OR once", since QueryBuilder builds each part already
+   * negated (buildConditionForFieldName()'s `<>`/`NOT IN`/`NOT BETWEEN`
+   * arms), so AND-joining already-negated parts is the natural fix here.
+   *
+   * @covers ::build
+   * @dataProvider negatedOperatorOnMultiLanguageTextFieldProvider
+   */
+  public function testNegatedConditionOnAMultiLanguageTextFieldCombinesVariantsWithAnd(string $operator, $value, string $expected): void {
+    $index = $this->mockIndex([], [
+      'body' => $this->mockIndexField('body', 'text', FALSE),
+      'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
+    ]);
+    $languageCondition = (new ConditionGroup())->addCondition('search_api_language', ['en', 'de'], 'IN');
+    $conditions = (new ConditionGroup('AND'))
+      ->addConditionGroup($languageCondition)
+      ->addCondition('body', $value, $operator);
+    $query = $this->mockQuery(NULL, NULL, $index, $conditions);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame($expected, $params['fq'][2]);
+  }
+
+  public static function negatedOperatorOnMultiLanguageTextFieldProvider(): array {
+    return [
+      // Single-language shapes for each operator, confirmed by direct
+      // reading of buildConditionForFieldName()/notInQuery()/rangeValues()
+      // (src/QueryBuilder.php:528, :534/:544/:555, :582-593), then AND-joined
+      // per-variant for the fixed two-language ([en, de]) case.
+      'not equals' => [
+        '<>',
+        'hello',
+        '((*:* -tm_X3b_en_body:"hello") AND (*:* -tm_X3b_de_body:"hello"))',
+      ],
+      'not in' => [
+        'NOT IN',
+        ['hello', 'world'],
+        '((*:* -tm_X3b_en_body:("hello" "world")) AND (*:* -tm_X3b_de_body:("hello" "world")))',
+      ],
+      'not between' => [
+        'NOT BETWEEN',
+        ['a', 'z'],
+        '((*:* -tm_X3b_en_body:["a" TO "z"]) AND (*:* -tm_X3b_de_body:["a" TO "z"]))',
+      ],
+    ];
+  }
+
+  /**
    * issue #342: sorting on a text field uses only the FIRST language of the
    * resolved set, never every variant -- unlike qf/fl/hl.fl.
    *
@@ -1881,6 +1945,37 @@ class QueryBuilderTest extends TestCase {
     $this->assertArrayNotHasKey('spellcheck.dictionary', $params);
     $this->assertArrayNotHasKey('spellcheck.collate', $params);
     $this->assertArrayNotHasKey('spellcheck.count', $params);
+  }
+
+  /**
+   * issue #342, MF-2 (round-2 review bounce): `spellcheck.dictionary` must
+   * send the SAME hyphen-to-underscore transform the indexed sink name uses
+   * (FieldMapper::fieldName()'s `solr_text_spellcheck` branch:
+   * `'spellcheck_' . str_replace('-', '_', $language)`), not the raw
+   * langcode. Today `buildSpellcheck()` sends `$this->languages` verbatim
+   * (src/QueryBuilder.php:167-169), so for a hyphenated Drupal langcode like
+   * 'de-AT' the two sides disagree: indexing writes the sink
+   * `spellcheck_de_AT`, but this param would send the raw 'de-AT', and the
+   * server's `format!("spellcheck_{dictionary}")` (src/lib.rs:2963) then
+   * looks up `spellcheck_de-AT`, a field no document carries -- a silently
+   * empty spellcheck envelope, no error. Every OTHER spellcheck test in this
+   * class uses 'und'/'de'/'fr' (no hyphen), which is exactly why this bug
+   * survived: those langcodes are unchanged by the transform either way.
+   *
+   * @covers ::build
+   */
+  public function testSpellcheckDictionaryTransformsAHyphenatedLanguageLikeTheIndexedSink(): void {
+    $index = $this->mockIndex([], [
+      'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
+    ]);
+    $conditions = (new ConditionGroup())->addCondition('search_api_language', 'de-AT', '=');
+    $query = $this->mockQuery(NULL, NULL, $index, $conditions, [], [
+      'search_api_spellcheck' => ['keys' => ['qwick']],
+    ]);
+
+    $params = (new QueryBuilder())->build($query);
+
+    $this->assertSame('de_AT', $params['spellcheck.dictionary']);
   }
 
 }

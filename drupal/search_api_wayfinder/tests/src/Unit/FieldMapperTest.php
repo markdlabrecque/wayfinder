@@ -135,6 +135,45 @@ class FieldMapperTest extends TestCase {
   }
 
   /**
+   * issue #342, MF-2 (round-2 review bounce): the hyphen-to-underscore
+   * transform `fieldName()`'s `solr_text_spellcheck` branch applies
+   * (`'spellcheck_' . str_replace('-', '_', $language)`) must live in its own
+   * method, `spellcheckDictionary()`, so `QueryBuilder`'s
+   * `spellcheck.dictionary` param can call the SAME transform rather than
+   * sending the raw langcode -- see QueryBuilderTest's
+   * testSpellcheckDictionaryTransformsAHyphenatedLanguageLikeTheIndexedSink()
+   * for why the two sides silently disagreeing today is a real bug.
+   * `spellcheckDictionary()` itself returns just the transformed language
+   * ('de_AT'), not the full sink name -- `fieldName()`'s branch still
+   * prepends 'spellcheck_' itself, exercised directly by the next test.
+   *
+   * @covers ::spellcheckDictionary
+   */
+  public function testSpellcheckDictionaryTransformsHyphenToUnderscore(): void {
+    $mapper = new FieldMapper();
+    $this->assertSame('de_AT', $mapper->spellcheckDictionary('de-AT'));
+  }
+
+  /**
+   * issue #342, MF-2 (round-2 review bounce): pins that `fieldName()`'s
+   * `solr_text_spellcheck` sink name is built FROM `spellcheckDictionary()`
+   * (`'spellcheck_' . $this->spellcheckDictionary($language)`), not a
+   * second, independent copy of the same transform -- so the two can never
+   * drift apart again the way index-time and query-time did before this
+   * fix.
+   *
+   * @covers ::spellcheckDictionary
+   * @covers ::fieldName
+   */
+  public function testFieldNameSpellcheckSinkAgreesWithSpellcheckDictionary(): void {
+    $mapper = new FieldMapper();
+    $this->assertSame(
+      'spellcheck_' . $mapper->spellcheckDictionary('de-AT'),
+      $mapper->fieldName('field_x', 'solr_text_spellcheck', FALSE, 'de-AT')
+    );
+  }
+
+  /**
    * issue #342 testing requirement: "the full trace-derived name list above,
    * as a single regression case pinning the module's output against real
    * captured client behaviour." Field id/type/cardinality pairs and their
