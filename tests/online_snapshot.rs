@@ -3,7 +3,7 @@
 
 #[cfg(unix)]
 mod unix {
-    use std::io::{Read, Write};
+    use std::io::{ErrorKind, Read, Write};
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::path::Path;
     use std::process::{Child, Command, Stdio};
@@ -70,7 +70,7 @@ stored = true
     }
 
     fn http_request(addr: SocketAddr, method: &str, target: &str, body: &str) -> (u16, String) {
-        let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(200))
+        let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(1))
             .unwrap_or_else(|error| panic!("connect to {addr}: {error}"));
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -82,10 +82,34 @@ stored = true
         stream
             .write_all(request.as_bytes())
             .expect("write HTTP request");
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .expect("read HTTP response");
+        // Read the full response, retrying through the transient WouldBlock /
+        // TimedOut reads that appear when the machine is under CPU contention
+        // instead of treating the first slow read as fatal. On Unix a fired
+        // read-timeout is surfaced as WouldBlock. The continuous updater thread
+        // in the snapshot-under-load test relies on this: a panic here would
+        // silently stop commits and cascade into the merge-observation timeout.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut response = Vec::new();
+        loop {
+            let mut buf = [0u8; 8192];
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(ref error)
+                    if error.kind() == ErrorKind::WouldBlock
+                        || error.kind() == ErrorKind::TimedOut =>
+                {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out reading HTTP response from {addr}; partial response: {:?}",
+                        String::from_utf8_lossy(&response)
+                    );
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => panic!("read HTTP response from {addr}: {error}"),
+            }
+        }
+        let response = String::from_utf8(response).expect("HTTP response is UTF-8");
         let (head, body) = response
             .split_once("\r\n\r\n")
             .unwrap_or_else(|| panic!("malformed HTTP response: {response:?}"));
@@ -283,7 +307,14 @@ stored = true
         let mut observed_counts = Vec::new();
         let mut attempt = 0;
         let mut first_wave_committed = false;
-        let merge_deadline = Instant::now() + Duration::from_secs(15);
+        // Hard cap so a stalled updater (no first-wave commit observed) cannot
+        // hang the test; the merge window below is the meaningful budget.
+        let outer_deadline = Instant::now() + Duration::from_secs(45);
+        // Measure the merge wait from when the first commit wave lands, not from
+        // loop start: under CPU contention the updater can spend most of a
+        // fixed-from-start budget committing before Tantivy has segments to merge.
+        let merge_window = Duration::from_secs(20);
+        let mut merge_deadline: Option<Instant> = None;
         loop {
             let destination = temp.path().join(format!("snapshot-{attempt}"));
             let snapshot = Command::new(env!("CARGO_BIN_EXE_wayfinder"))
@@ -305,7 +336,11 @@ stored = true
             observed_counts.push((count, segment_count));
             attempt += 1;
 
-            first_wave_committed |= first_wave_rx.try_recv().is_ok();
+            let just_landed_first_wave = !first_wave_committed && first_wave_rx.try_recv().is_ok();
+            first_wave_committed |= just_landed_first_wave;
+            if just_landed_first_wave {
+                merge_deadline = Some(Instant::now() + merge_window);
+            }
             let committed_batches = (count - 1) / 80;
             if first_wave_committed
                 && committed_batches >= 8
@@ -313,7 +348,7 @@ stored = true
             {
                 break;
             }
-            if Instant::now() >= merge_deadline {
+            if Instant::now() >= merge_deadline.unwrap_or(outer_deadline) {
                 let _ = resume_tx.send(());
                 panic!(
                     "a snapshot did not observe Tantivy's first-wave merge before the deadline: {observed_counts:?}"
