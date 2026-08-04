@@ -107,6 +107,9 @@ fn check_statable(schema: &WayfinderSchema, field_name: &str) -> Result<()> {
     // `_version_` is the sole internal exception. Keeping it here, alongside
     // the existing stats validation and aggregation call, avoids making it a
     // general schema-resolved field for sort, facet, or dynamic JSON paths.
+    // This is a capability of the field, not the captured client's read path:
+    // finding 132 (#293) shows the client reads `_version_` through a
+    // `json.facet` aggregation, never the stats component.
     if field_name == VERSION_FIELD {
         return Ok(());
     }

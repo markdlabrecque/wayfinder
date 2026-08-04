@@ -128,8 +128,10 @@ fn render_original_highlight_fragment(
 
 /// Seeds each core's in-process `_version_` source from wall-clock time. A
 /// restart therefore starts later than ordinary pre-restart writes without
-/// persisting write-side version semantics; unusually fast restart/write
-/// cycles remain outside this narrow stats-only compatibility scope.
+/// persisting write-side version semantics. The client only reads `_version_`
+/// (finding 132, #293) and needs solely "bigger means newer" for a
+/// `max(_version_)` watermark, so unusually fast restart/write cycles stay
+/// outside that compatibility scope.
 fn version_seed() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

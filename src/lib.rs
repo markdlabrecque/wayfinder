@@ -224,8 +224,12 @@ const SELECT_PARAMS: &[&str] = &[
     "json.nl",
     "stats",
     "stats.field",
-    // Solr accepts and echoes search_api_solr's `function=max(_version_)`
-    // watermark shape; stats.field remains the sole aggregation key.
+    // `function=max(_version_)` is a real Solr stats-component form (the
+    // `stats_version_max` fixture captures Solr accepting and echoing it), so
+    // it is admitted for strict_params parity. The captured client does not
+    // send it: finding 132 (#293) shows search_api_solr reads `_version_`
+    // through a `json.facet` aggregation, not the stats component. `function`
+    // stays admitted as a valid capability of the statable `_version_` field.
     "function",
     // Result grouping (issue #290, finding 130): `setGrouping()` sends
     // exactly these six `group.*` params plus `group` (from Solarium's
