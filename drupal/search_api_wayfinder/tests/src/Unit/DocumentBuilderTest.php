@@ -172,6 +172,48 @@ class DocumentBuilderTest extends TestCase {
   }
 
   /**
+   * Pins #302: a multi-valued text field's sort_* copy takes the FIRST value,
+   * matching captured search_api_solr / solr:9 — not the min/max selector the
+   * non-text path uses.
+   *
+   * search_api_solr's own source copies only the first value into sort_*:
+   * SearchApiSolrBackend::addIndexField() returns "the first value of $values
+   * that has been added to the index" (coverage/.../SearchApiSolrBackend.php,
+   * the @return at line 2726), and the caller writes that scalar into each
+   * language-specific sort_* field (line 1485). The captured live-solr:9 trace
+   * confirms it (`solr-ref/search-api/trace/00001.json`): a document with
+   * `sm_field_topics = ["legacy", "documentation"]` indexes as
+   * `sort_X3b_en_field_topics = "legacy"` — the first value, not the min
+   * (`documentation`) nor the max. Zero sort_* field carries more than one
+   * value anywhere in the trace, so Solr's Lucene min/max selector never runs
+   * on a text sort field. Recorded as finding #153 in
+   * docs/solr-ref-findings.md.
+   *
+   * The values below are chosen so the first value is NEITHER the min NOR the
+   * max: first='mango', min='apple', max='zebra'. A regression that "fixed"
+   * this to min/max selection (the tempting wrong fix) would make this test
+   * fail, where the sibling test above would not — its ['First paragraph',
+   * 'Second paragraph'] happens to sort first==min.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandMultivaluedTextSortTakesFirstValueNotMinMax(): void {
+    $item = $this->mockItem('node/302:en', 'entity:node', 'en', [
+      'field_pick' => $this->mockField(
+        'field_pick',
+        'text',
+        // first='mango' is neither the min ('apple') nor the max ('zebra').
+        [new TextValue('mango'), new TextValue('apple'), new TextValue('zebra')],
+        TRUE
+      ),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    $this->assertSame('mango', $doc['sort_field_pick']);
+  }
+
+  /**
    * Regression test for issue #83, end-to-end through the
    * DocumentBuilder -> FieldMapper path: a multi-valued `text` field whose
    * values are TextValue objects (their real shape from Search API, per

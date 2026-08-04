@@ -126,10 +126,6 @@ Deliberate descopes, each with its reason. (Each is also marked with a
     escape hatch for site-defined analyzer chains (`SolrFieldType` entities);
     the preset has no equivalent.
   - `location` / `rpt` — spatial types, scope of #292.
-- **Multi-valued text sorting uses the first value** (`DocumentBuilder`) — a
-  collation-aware multi-value text selector needs a dedicated schema/type
-  design first. Non-text types sort natively with Wayfinder's multi-value
-  min/max selection.
 - **Per-facet settings beyond the four** (`QueryBuilder::buildFacets()`) —
   each facet's `limit`/`min_count`/`sort`/`missing` *is* expressed
   independently, as local params on that facet's own `facet.field`

@@ -73,10 +73,23 @@ class DocumentBuilder {
       $doc[$name] = $multiValued ? array_values($formatted) : $formatted[0];
 
       if ($type === 'text') {
-        // ponytail: multi-valued text sorts use the first Search API value.
-        // Wayfinder has native min/max selection only for the actual mapped
-        // fast field; a collation-aware multi-value text selector needs a
-        // dedicated schema/type design before this can be broadened.
+        // Confirmed-correct, not a descope: a multi-valued text field's
+        // sort_* copy takes the FIRST value, matching captured
+        // search_api_solr / solr:9. search_api_solr's own source copies only
+        // the first value into sort_* -- SearchApiSolrBackend::addIndexField()
+        // returns "the first value of $values that has been added to the
+        // index", written as a scalar into each language-specific sort_*
+        // field (coverage/.../SearchApiSolrBackend.php:1485, 2726). The
+        // captured live-solr:9 trace agrees (solr-ref/search-api/trace/00001.json:
+        // sm_field_topics = ["legacy", "documentation"] -> sort_*_field_topics
+        // = "legacy"), and zero sort_* field carries more than one value
+        // anywhere in the trace, so Solr's Lucene min/max selector never runs
+        // on a text sort field. The non-text path is different: it sorts on
+        // the actual mapped multi-valued fast field, where Wayfinder's native
+        // min/max selection (src/collector.rs) IS what Solr does. Recorded as
+        // finding #153 in docs/solr-ref-findings.md; pinned by
+        // DocumentBuilderTest with an input whose first value is neither its
+        // min nor its max. See issue #302.
         $doc[$this->fieldMapper->sortFieldName($field->getFieldIdentifier(), $type, $multiValued)] = $formatted[0];
       }
     }

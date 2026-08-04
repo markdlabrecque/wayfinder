@@ -2665,3 +2665,41 @@ are special-cased to fixed sink fields before the prefix logic ever runs.
       "facet.limit")`, which tries `f.<field>.facet.limit` first and only then
       the bare name — so a local param can only ever shadow the bare global,
       never the per-field form.
+
+## Finding from issue #302 (multi-valued text → `sort_*` selector)
+
+153. **`search_api_solr` writes exactly one value — the first — into the
+      `sort_*` field, so Solr never min/max-selects across a multi-valued
+      text field's sort copy.** The `sort_*` dynamic field
+      (`solr-ref/search-api/configset/schema_extra_fields.xml:77`) is
+      `collated_und` (`ICUCollationField`, `indexed=false docValues=true`),
+      but nothing populates it by `copyField`: the only `copyField` mentions
+      in the captured configset are comment boilerplate
+      (`schema.xml:42,44`). The field is written directly by the module, and
+      the source shows it takes the first value only —
+      `SearchApiSolrBackend::addIndexField()` returns "the first value of
+      `$values` that has been added to the index"
+      (`coverage/search_api_solr_4.4.0_source/.../SearchApiSolrBackend.php:2726`),
+      and the caller copies that scalar into each language-specific `sort_*`
+      field with `if (!$doc->{$key}) { $doc->addField($key, $first_value); }`
+      (`:1485`). The sibling path for non-text multi-valued fields names the
+      workaround outright (`:1495`): "For other multi-valued fields (which
+      aren't sortable by nature) we use the same hackish workaround like the
+      DB backend: just copy the first value in a single value field for
+      sorting."
+
+      The captured live-`solr:9` trace agrees (`solr-ref/search-api/trace/00001.json`):
+      `sm_field_topics = ["legacy", "documentation"]` indexes as
+      `sort_X3b_en_field_topics = "legacy"` and `sort_X3b_und_field_topics =
+      "legacy"` — the first value, not the min (`documentation`) and not the
+      max. Across every update trace, **zero** `sort_*` fields carry more
+      than one value (8 scalars, 0 lists), so the Lucene min/max selector the
+      issue hypothesised never runs on a text sort field at all.
+
+      Conclusion for #302: the "Solr selects min for asc / max for desc"
+      divergence the issue feared does not exist — Wayfinder's
+      `DocumentBuilder` already writes `$formatted[0]` into `sort_*`, which
+      matches captured `search_api_solr`/`solr:9` byte-for-byte. Closes as a
+      recorded no-op, pinned by `DocumentBuilderTest` with an input whose
+      first value is neither its min nor its max (so a future "fix" to
+      min/max selection would fail the test, not pass it).
