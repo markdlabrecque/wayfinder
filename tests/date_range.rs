@@ -135,6 +135,20 @@ fn assert_error_matches(status: StatusCode, body: &Value, fixture_name: &str) {
         expected["error"]["msg"].as_str(),
         "{fixture_name}: error.msg must match Solr verbatim (finding 170), body: {body}"
     );
+    // The presence or absence of a `response` block is part of the captured
+    // envelope, not decoration: every `dr341_err_*` fixture has keys
+    // `["responseHeader","error"]` only, and `dr341_err_stats` is the fixture
+    // that makes it load-bearing -- Solr raises the stats refusal *before*
+    // running the base query, which is the whole reason
+    // `stats::PreQueryStatsError` exists (`src/stats.rs`, `src/lib.rs`'s
+    // `stats_result` arm). Without this assertion that machinery can be
+    // deleted with the suite still green.
+    assert_eq!(
+        body.get("response").is_some(),
+        expected.get("response").is_some(),
+        "{fixture_name}: a `response` block must be present exactly when the \
+         captured envelope has one, body: {body}"
+    );
 }
 
 // --- storage: verbatim round-trip (finding 165) -----------------------------
@@ -693,6 +707,386 @@ async fn op_equals_is_500() {
     )
     .await;
     assert_error_matches(status, &body, "dr341_err_equals");
+}
+
+// --- a date_range leaf is one CLAUSE, not the whole query string ------------
+//
+// Round-2 review: detection used to be a whole-`q` special case (split on the
+// first `:`, hand the rest to the interval parser), so any `date_range` clause
+// that was not the entire query string was either a spurious 400 or a silently
+// wrong term query against the verbatim stored text -- the exact failure mode
+// `parse_query`'s own doc comment already records for another feature. Every
+// expected id list below is the set-algebra of fixture-pinned leaf results over
+// the 9-doc corpus; each test names its derivation.
+
+/// `drs_x:2020 AND id:d5` -- `dr341_single_year` is d1,d2,d3,d4,d7, which does
+/// not contain d5, so the conjunction is empty. The old whole-string special
+/// case 400ed here (`Couldn't parse date ...: 2020 AND id:d5`).
+#[tokio::test]
+async fn date_range_leaf_conjoined_with_another_clause() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=drs_x%3A2020%20AND%20id%3Ad5&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        Vec::<String>::new(),
+        "d5 is not in dr341_single_year's d1,d2,d3,d4,d7, so the AND is empty"
+    );
+    let (status, body) = get(
+        &app,
+        "select?q=drs_x%3A2020%20AND%20id%3Ad3&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec!["d3".to_string()],
+        "d3 IS in dr341_single_year, so the AND keeps it -- the interval \
+         predicate must really have run, not matched everything"
+    );
+}
+
+/// Two `date_range` leaves OR-ed together: the union of `dr341_single_year`
+/// (d1,d2,d3,d4,d7) and `dr341_touch_endpoint` (d1,d5,d7), both fixture-pinned,
+/// so the expected set is purely fixture-derived.
+#[tokio::test]
+async fn two_date_range_leaves_disjoined() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=drs_x%3A2020%20OR%20drs_x%3A%5B2019-12-31T23%3A59%3A59Z%20TO%202020-01-01T00%3A00%3A00Z%5D&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec![
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "d4".to_string(),
+            "d5".to_string(),
+            "d7".to_string()
+        ],
+        "union of dr341_single_year (d1,d2,d3,d4,d7) and dr341_touch_endpoint (d1,d5,d7)"
+    );
+}
+
+/// A parenthesised leaf. The grammar flattens `(drs_x:2020)` to the same single
+/// leaf, so the answer must be `dr341_single_year` unchanged -- the old
+/// whole-string special case fell through to the Lucene grammar here and built
+/// a term query against the raw stored text, matching only d1 (whose stored
+/// string is literally `2020`).
+#[tokio::test]
+async fn parenthesised_date_range_leaf() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=%28drs_x%3A2020%29&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // Only the echoed `q` differs from `dr341_single_year`'s envelope (the
+    // parentheses), so the id list is asserted rather than the whole fixture.
+    assert_eq!(
+        ids(&body),
+        vec![
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "d4".to_string(),
+            "d7".to_string()
+        ],
+        "dr341_single_year's set, parenthesised"
+    );
+    assert_eq!(body["response"]["numFound"].as_u64(), Some(5), "{body}");
+}
+
+/// A `+`-prefixed required leaf as an `fq`. Same set as the bare form; the old
+/// code path split the field name as `+drs_x`, found no `date_range` field, and
+/// fell through to the raw-text term query (d1 alone).
+#[tokio::test]
+async fn required_occur_date_range_leaf_as_fq() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&fq=%2Bdrs_x%3A2020&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec![
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "d4".to_string(),
+            "d7".to_string()
+        ],
+        "dr341_single_year's set, reached as a `+`-prefixed fq clause"
+    );
+}
+
+/// A `-`-prefixed excluded leaf as an `fq`: the complement of
+/// `dr341_single_year` over the 9-doc corpus, i.e. d5,d6,d8,d9.
+#[tokio::test]
+async fn excluded_occur_date_range_leaf_as_fq() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&fq=-drs_x%3A2020&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec![
+            "d5".to_string(),
+            "d6".to_string(),
+            "d8".to_string(),
+            "d9".to_string()
+        ],
+        "the 9-doc corpus minus dr341_single_year's d1,d2,d3,d4,d7 -- a \
+         negated interval clause must exclude all five, not just the doc whose \
+         stored text is literally `2020`"
+    );
+}
+
+/// Under `defType=edismax` a *fielded* leaf still routes through the same
+/// per-leaf builder, so a `date_range` clause answers identically to the
+/// lucene parser's (`dr341_single_year`).
+#[tokio::test]
+async fn date_range_leaf_under_edismax() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?defType=edismax&q=drs_x%3A2020&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec![
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "d4".to_string(),
+            "d7".to_string()
+        ],
+        "dr341_single_year's set, reached through the edismax parser"
+    );
+}
+
+/// A field-LESS leaf whose field comes from `df`: `q=2020&df=drs_x` is the same
+/// interval query as `q=drs_x:2020` (`dr341_single_year`).
+#[tokio::test]
+async fn date_range_leaf_via_the_default_field_param() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=2020&df=drs_x&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec![
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "d4".to_string(),
+            "d7".to_string()
+        ],
+        "dr341_single_year's set, reached with the field supplied by `df`"
+    );
+}
+
+/// The same per-leaf reach for the multiValued field, inside a compound query:
+/// `dr341_multi_gap` (0 hits, d8's hole) AND-ed with nothing else still 0, and
+/// `dr341_multi_intersects` (d8) OR-ed with an id clause adds d9.
+#[tokio::test]
+async fn multivalued_date_range_leaf_inside_a_compound_query() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=drm_x%3A2022-05%20OR%20id%3Ad9&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec!["d8".to_string(), "d9".to_string()],
+        "union of dr341_multi_intersects (d8) and id:d9"
+    );
+}
+
+// --- must-fix 1: a non-ASCII byte after `NOW` must not panic -----------------
+
+/// A `NOW`-prefixed value whose next character is multi-byte UTF-8 is the
+/// finding-170 parse 400, never a panic. On the INDEX path the panic fired
+/// while the index-writer lock was held, poisoning it and bricking every later
+/// write to the core -- so the clean doc indexed *after* the rejected one is the
+/// regression this test exists for.
+#[tokio::test]
+async fn non_ascii_date_math_on_the_index_path_is_400_and_leaves_the_core_writable() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = post_docs(&app, &json!([{"id":"bad","drs_x":"NOW\u{e9}"}])).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unparseable date-math value must be a 400, not a panic: {body}"
+    );
+    let (status, body) = post_docs(&app, &json!([{"id":"ok","drs_x":"2022"}])).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a clean doc indexed after the rejected one must still succeed -- a \
+         panic under the index-writer lock poisons it for the process lifetime: {body}"
+    );
+    let (status, body) = get(&app, "select?q=id%3Aok&fl=id&rows=20&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ids(&body), vec!["ok".to_string()], "{body}");
+}
+
+/// The same value on the QUERY path is the finding-170 400 with the date-math
+/// message shape, not the 500 a caught panic produced.
+#[tokio::test]
+async fn non_ascii_date_math_on_the_query_path_is_400() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = get(&app, "select?q=drs_x%3ANOW%C3%A9&fl=id&wt=json").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"].as_u64(), Some(400), "{body}");
+    assert_eq!(
+        body["error"]["msg"].as_str(),
+        Some("Invalid Date Math String:'NOW\u{e9}'"),
+        "finding 170: an unparseable date-math expression is a 400 quoting the \
+         whole expression, body: {body}"
+    );
+}
+
+// --- must-fix 3: out-of-representable-range endpoints clamp ------------------
+
+/// `9999-12-31T23:59:59Z` is the standard Solr / Search API open-ended
+/// sentinel. `tantivy::DateTime` is i64 NANOseconds, so it cannot represent
+/// that instant at all; `MIN_MS`/`MAX_MS` clamp such an endpoint to the
+/// representable bound rather than rejecting the value, which is what the
+/// constants' own doc comment promises and what keeps the sentinel
+/// interoperable. NOT fixture-derived -- Solr has no such limit, so there is
+/// nothing to capture this against; it pins Wayfinder's documented clamp.
+#[tokio::test]
+async fn out_of_range_endpoints_clamp_on_the_index_path() {
+    let dir = TempDir::new().expect("temp dir");
+    let app =
+        app_with_schema(dir.path(), DATE_RANGE_SCHEMA_TOML).expect("date_range app must build");
+    let (status, body) = post_docs(
+        &app,
+        &json!([
+            {"id":"s1","drs_x":"[* TO 9999-12-31T23:59:59Z]"},
+            {"id":"s2","drs_x":"0001-01-01T00:00:00Z"}
+        ]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an out-of-range endpoint must clamp, not fail the update: {body}"
+    );
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&fl=id,drs_x&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["response"]["docs"][0]["drs_x"].as_str(),
+        Some("[* TO 9999-12-31T23:59:59Z]"),
+        "finding 165: the sentinel still round-trips verbatim, {body}"
+    );
+}
+
+/// The query-path half: a far-future sentinel upper bound clamps to the same
+/// open bound `*` resolves to, so the interval answers exactly what
+/// `dr341_star_both` pins for `[* TO *]` (d1-d7).
+#[tokio::test]
+async fn far_future_sentinel_endpoint_answers_as_the_open_bound() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=drs_x%3A%5B*%20TO%209999-12-31T23%3A59%3A59Z%5D&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec![
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "d4".to_string(),
+            "d5".to_string(),
+            "d6".to_string(),
+            "d7".to_string()
+        ],
+        "clamped to MAX_MS, so identical to dr341_star_both's `[* TO *]`"
+    );
+}
+
+/// And the too-EARLY endpoint: `0001-01-01T00:00:00Z` clamps to `MIN_MS`, so
+/// `[0001-01-01T00:00:00Z TO 2019-12-31T23:59:59Z]` answers as
+/// `[* TO 2019-12-31T23:59:59Z]` does -- d5 (which ends in that second) and d7
+/// (fully open). Derived from the 9-doc corpus plus finding 166, not from a
+/// fixture of its own.
+#[tokio::test]
+async fn far_past_sentinel_endpoint_answers_as_the_open_bound() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=drs_x%3A%5B0001-01-01T00%3A00%3A00Z%20TO%202019-12-31T23%3A59%3A59Z%5D&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec!["d5".to_string(), "d7".to_string()],
+        "clamped to MIN_MS, so identical to `[* TO 2019-12-31T23:59:59Z]`"
+    );
+}
+
+// --- mixed inclusive/exclusive brackets (inferred, not captured) -------------
+
+/// `[a TO b}` -- a mixed bracket pair. Finding 169 pins that `DateRangeField`
+/// ignores endpoint exclusivity entirely (`{a TO b}` == `[a TO b]`), and the
+/// classic Lucene grammar accepts a mixed pair, so the mixed form must answer
+/// exactly what the closed form does.
+///
+/// This test encodes an INFERRED rule, not a captured one: no `dr341_*` fixture
+/// sends a mixed pair. It is derived from finding 169 (exclusivity is silently
+/// ignored) plus the grammar's own acceptance of the mixed form, and its
+/// expected value is `dr341_intersects_plain`'s.
+#[tokio::test]
+async fn mixed_bracket_pair_behaves_like_the_closed_form() {
+    let (app, _dir) = date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=drs_x%3A%5B2020-05-01T00%3A00%3A00Z%20TO%202020-07-01T00%3A00%3A00Z%7D&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec![
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "d4".to_string(),
+            "d7".to_string()
+        ],
+        "must be identical to dr341_intersects_plain's closed-bracket result set"
+    );
 }
 
 // --- fl=* must not leak the synthetic __start/__end keys --------------------

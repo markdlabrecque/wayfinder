@@ -142,6 +142,16 @@ fn assert_error_matches(status: StatusCode, body: &Value, fixture_name: &str) {
         expected["error"]["msg"].as_str(),
         "{fixture_name}: error.msg must match Solr verbatim (finding 170), body: {body}"
     );
+    // Presence/absence of the `response` block is part of the captured envelope
+    // (see the same assertion in `tests/date_range.rs`): every `dr341_err_*`
+    // fixture has keys `["responseHeader","error"]` only, and
+    // `dr341_err_stats`'s is what makes `stats::PreQueryStatsError` load-bearing.
+    assert_eq!(
+        body.get("response").is_some(),
+        expected.get("response").is_some(),
+        "{fixture_name}: a `response` block must be present exactly when the \
+         captured envelope has one, body: {body}"
+    );
 }
 
 // --- storage: verbatim round-trip through the dynamic path (finding 165) -----
@@ -750,4 +760,261 @@ async fn dynamic_op_equals_is_500() {
     )
     .await;
     assert_error_matches(status, &body, "dr341_err_equals");
+}
+
+// --- a dynamic date_range leaf is one CLAUSE, not the whole query string -----
+//
+// The dynamic mirror of `tests/date_range.rs`'s per-leaf block. This half is the
+// one that failed hardest before per-leaf detection: `rewrite_dynamic_fields`
+// turns `drs_x:` into `_dynamic.drs_x:` before the grammar runs, so a clause
+// that missed the whole-query-string special case did not even reach the raw
+// stored text -- `fq=+drs_x:2020` answered 0 hits. Expected id lists are the
+// set-algebra of fixture-pinned leaf results over the same 9-doc corpus.
+
+/// `drs_x:2020 AND id:d5` -- `dr341_single_year` is d1,d2,d3,d4,d7, so the
+/// conjunction with d5 is empty and the one with d3 keeps d3.
+#[tokio::test]
+async fn dynamic_date_range_leaf_conjoined_with_another_clause() {
+    let (app, _dir) = dynamic_date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=drs_x%3A2020%20AND%20id%3Ad5&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ids(&body), Vec::<String>::new(), "{body}");
+    let (status, body) = get(
+        &app,
+        "select?q=drs_x%3A2020%20AND%20id%3Ad3&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ids(&body), vec!["d3".to_string()], "{body}");
+}
+
+/// Two dynamic `date_range` leaves OR-ed: the union of `dr341_single_year`
+/// (d1,d2,d3,d4,d7) and `dr341_touch_endpoint` (d1,d5,d7).
+#[tokio::test]
+async fn dynamic_two_date_range_leaves_disjoined() {
+    let (app, _dir) = dynamic_date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=drs_x%3A2020%20OR%20drs_x%3A%5B2019-12-31T23%3A59%3A59Z%20TO%202020-01-01T00%3A00%3A00Z%5D&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec![
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "d4".to_string(),
+            "d5".to_string(),
+            "d7".to_string()
+        ],
+        "union of dr341_single_year and dr341_touch_endpoint"
+    );
+}
+
+/// A parenthesised dynamic leaf answers `dr341_single_year` unchanged.
+#[tokio::test]
+async fn dynamic_parenthesised_date_range_leaf() {
+    let (app, _dir) = dynamic_date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=%28drs_x%3A2020%29&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // Only the echoed `q` differs from `dr341_single_year`'s envelope (the
+    // parentheses), so the id list is asserted rather than the whole fixture.
+    assert_eq!(
+        ids(&body),
+        vec![
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "d4".to_string(),
+            "d7".to_string()
+        ],
+        "dr341_single_year's set, parenthesised"
+    );
+    assert_eq!(body["response"]["numFound"].as_u64(), Some(5), "{body}");
+}
+
+/// `fq=+drs_x:2020` on the dynamic path -- the row that answered 0 hits before,
+/// because the `+`-prefixed name missed the whole-query special case and the
+/// rewritten `_dynamic.drs_x` JSON path holds the interval endpoints, not the
+/// raw text.
+#[tokio::test]
+async fn dynamic_required_occur_date_range_leaf_as_fq() {
+    let (app, _dir) = dynamic_date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&fq=%2Bdrs_x%3A2020&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec![
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "d4".to_string(),
+            "d7".to_string()
+        ],
+        "dr341_single_year's set, reached as a `+`-prefixed dynamic fq clause"
+    );
+}
+
+/// `fq=-drs_x:2020` on the dynamic path: the corpus minus `dr341_single_year`.
+#[tokio::test]
+async fn dynamic_excluded_occur_date_range_leaf_as_fq() {
+    let (app, _dir) = dynamic_date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=*:*&fq=-drs_x%3A2020&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec![
+            "d5".to_string(),
+            "d6".to_string(),
+            "d8".to_string(),
+            "d9".to_string()
+        ],
+        "the 9-doc corpus minus dr341_single_year's five docs"
+    );
+}
+
+/// A dynamic `date_range` leaf under `defType=edismax`.
+#[tokio::test]
+async fn dynamic_date_range_leaf_under_edismax() {
+    let (app, _dir) = dynamic_date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?defType=edismax&q=drs_x%3A2020&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec![
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "d4".to_string(),
+            "d7".to_string()
+        ],
+        "dr341_single_year's set, reached through the edismax parser"
+    );
+}
+
+/// The multiValued dynamic field inside a compound query: the union of
+/// `dr341_multi_intersects` (d8) and `id:d9`.
+#[tokio::test]
+async fn dynamic_multivalued_date_range_leaf_inside_a_compound_query() {
+    let (app, _dir) = dynamic_date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=drm_x%3A2022-05%20OR%20id%3Ad9&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec!["d8".to_string(), "d9".to_string()],
+        "union of dr341_multi_intersects (d8) and id:d9"
+    );
+}
+
+// --- must-fix 1 / must-fix 3 on the dynamic path ------------------------------
+
+/// The dynamic mirror of the index-path panic regression: a `NOW`-prefixed value
+/// whose next character is multi-byte UTF-8 is a 400, and the core stays
+/// writable afterwards (the panic used to fire under the index-writer lock).
+#[tokio::test]
+async fn dynamic_non_ascii_date_math_on_the_index_path_is_400_and_leaves_the_core_writable() {
+    let (app, _dir) = dynamic_date_range_app().await;
+    let (status, body) = post_docs(&app, &json!([{"id":"bad","drs_x":"NOW\u{e9}"}])).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unparseable date-math value must be a 400, not a panic: {body}"
+    );
+    let (status, body) = post_docs(&app, &json!([{"id":"ok","drs_x":"2022"}])).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a clean doc indexed after the rejected one must still succeed: {body}"
+    );
+    let (status, body) = get(&app, "select?q=id%3Aok&fl=id&rows=20&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ids(&body), vec!["ok".to_string()], "{body}");
+}
+
+/// The same value on the dynamic QUERY path is the finding-170 400.
+#[tokio::test]
+async fn dynamic_non_ascii_date_math_on_the_query_path_is_400() {
+    let (app, _dir) = dynamic_date_range_app().await;
+    let (status, body) = get(&app, "select?q=drs_x%3ANOW%C3%A9&fl=id&wt=json").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"].as_u64(), Some(400), "{body}");
+    assert_eq!(
+        body["error"]["msg"].as_str(),
+        Some("Invalid Date Math String:'NOW\u{e9}'"),
+        "{body}"
+    );
+}
+
+/// The far-future open-ended sentinel clamps on the dynamic path too, both as an
+/// indexed value (still round-tripping verbatim, finding 165) and as a query
+/// endpoint (answering `dr341_star_both`'s d1-d7).
+#[tokio::test]
+async fn dynamic_out_of_range_endpoints_clamp() {
+    let (app, _dir) = dynamic_date_range_app().await;
+    let (status, body) = get(
+        &app,
+        "select?q=drs_x%3A%5B*%20TO%209999-12-31T23%3A59%3A59Z%5D&fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec![
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "d4".to_string(),
+            "d5".to_string(),
+            "d6".to_string(),
+            "d7".to_string()
+        ],
+        "clamped to MAX_MS, so identical to dr341_star_both's `[* TO *]`"
+    );
+
+    let dir = TempDir::new().expect("temp dir");
+    let app = app_with_schema(dir.path(), DATE_RANGE_DYNAMIC_SCHEMA_TOML)
+        .expect("dynamic date_range app must build");
+    let (status, body) = post_docs(
+        &app,
+        &json!([{"id":"s1","drs_x":"[* TO 9999-12-31T23:59:59Z]"}]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an out-of-range endpoint must clamp, not fail the update: {body}"
+    );
+    let (status, body) = get(&app, "select?q=*:*&fl=id,drs_x&rows=20&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["response"]["docs"][0]["drs_x"].as_str(),
+        Some("[* TO 9999-12-31T23:59:59Z]"),
+        "finding 165: the sentinel still round-trips verbatim, {body}"
+    );
 }

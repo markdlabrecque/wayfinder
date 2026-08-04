@@ -38,10 +38,18 @@ use tantivy::{DateTime, DocId, DocSet, Score, SegmentReader, TERMINATED, Term};
 /// 1677-09-21 .. 2262-04-11 — year 1 does not fit, and constructing it
 /// overflows. These two constants are that range rounded inwards to a whole
 /// millisecond, so `[* TO *]` means "every instant Tantivy can store" rather
-/// than "every instant Solr can name". Ceiling: an interval endpoint outside
-/// 1678..2261 is not representable at all, and a query for one is answered
-/// against the clamped bound. No fixture goes anywhere near it (the corpus
-/// spans 2019..2022).
+/// than "every instant Solr can name".
+///
+/// Ceiling, and it is a real one: an endpoint outside 1678..2261 is **clamped**
+/// to the nearer of these two bounds ([`to_millis`]), never rejected. That is
+/// deliberate rather than incidental — `9999-12-31T23:59:59Z` is the standard
+/// Solr / Search API "open-ended" sentinel and `0001-01-01T00:00:00Z` its
+/// mirror, so 400ing on either would break interop with a client that only ever
+/// meant "forever". The visible consequence is that two distinct far-future
+/// instants compare equal, and a literal wholly outside the range becomes a
+/// degenerate point at the bound (`9999` is `[MAX_MS, MAX_MS]`, not the year).
+/// No fixture goes anywhere near it (the corpus spans 2019..2022), and the raw
+/// string still round-trips verbatim either way (finding 165).
 pub const MIN_MS: i64 = i64::MIN / 1_000_000 + 1;
 /// The millisecond timestamp an open upper bound (`*`) resolves to. See
 /// [`MIN_MS`] for why this is not Solr's `9999-12-31T23:59:59.999Z`.
@@ -129,14 +137,19 @@ pub fn parse_op(raw: &str) -> DrResult<Op> {
 /// exactly as written (`Wrong order: 2021 TO 2020`).
 pub fn parse_interval(text: &str) -> DrResult<Interval> {
     let s = text.trim();
+    // ponytail: a matching bracket pair only, `[a TO b]` or `{a TO b}`. A MIXED
+    // pair (`[a TO b}`) is deliberately NOT accepted here: on the query path a
+    // mixed pair never reaches this function at all (the Lucene grammar splits
+    // the two bounds itself, and `interval_from_bounds` takes them already
+    // separated, exclusivity discarded per finding 169), and on the value/
+    // `{!field}`-body path Lucene's own `NumberRangePrefixTree.parseShape`
+    // requires the pair to match. No fixture sends a mixed pair to either path,
+    // so this is the smaller claim; the earlier "Solr looks at the first and
+    // last character independently" arms were an unverified guess.
     let inner = s
         .strip_prefix('[')
         .and_then(|rest| rest.strip_suffix(']'))
-        .or_else(|| s.strip_prefix('{').and_then(|rest| rest.strip_suffix('}')))
-        // A mixed pair (`[a TO b}`) is what Solr's own parser accepts too: it
-        // looks at the first and last character independently.
-        .or_else(|| s.strip_prefix('[').and_then(|rest| rest.strip_suffix('}')))
-        .or_else(|| s.strip_prefix('{').and_then(|rest| rest.strip_suffix(']')));
+        .or_else(|| s.strip_prefix('{').and_then(|rest| rest.strip_suffix('}')));
     let Some(inner) = inner else {
         return endpoint_interval(s);
     };
@@ -148,6 +161,20 @@ pub fn parse_interval(text: &str) -> DrResult<Interval> {
         Some(pair) => pair,
         None => return Err(bad_datetime(s)),
     };
+    interval_from_bounds(lo, hi)
+}
+
+/// The interval two already-separated endpoint tokens denote. This is the entry
+/// point the query path uses: `tantivy::query_grammar` has already split
+/// `<field>:[a TO b]` into its two bounds by the time a leaf reaches
+/// `CoreIndex::build_leaf`, and whether each bound was written inclusive or
+/// exclusive is discarded on the way in — finding 169, `DateRangeField` has no
+/// notion of an exclusive endpoint, so `{a TO b}`, `[a TO b}` and `[a TO b]` are
+/// all the same query. An open bound is the token `*`.
+///
+/// A reversed interval is the finding-170 500, quoting the two tokens exactly as
+/// written (`Wrong order: 2021 TO 2020`).
+pub fn interval_from_bounds(lo: &str, hi: &str) -> DrResult<Interval> {
     let (lo, hi) = (lo.trim(), hi.trim());
     let start = endpoint_interval(lo)?.start_ms;
     let end = endpoint_interval(hi)?.end_ms;
@@ -310,8 +337,13 @@ fn literal_interval(token: &str) -> DrResult<Interval> {
     )
     .map_err(|_| err())?;
     let start = PrimitiveDateTime::new(date, time).assume_utc();
-    let start_ms = to_millis(start).ok_or_else(err)?;
-    let end_ms = precision_end_ms(start, precision).ok_or_else(err)?;
+    let start_ms = to_millis(start);
+    // `precision_end_ms` returns `None` only when advancing one unit of the
+    // stated precision leaves the calendar `time` can represent at all, i.e.
+    // year 9999 rolling over into 10000. That is already past `MAX_MS`, so the
+    // clamped bound is the answer (see `MIN_MS`'s ceiling note) rather than a
+    // 400 -- `9999-12-31T23:59:59Z` is the open-ended sentinel clients send.
+    let end_ms = precision_end_ms(start, precision).unwrap_or(MAX_MS);
     Ok(Interval { start_ms, end_ms })
 }
 
@@ -332,7 +364,7 @@ enum Precision {
 /// February and leap years come out right.
 fn precision_end_ms(start: OffsetDateTime, precision: Precision) -> Option<i64> {
     let next = match precision {
-        Precision::Milli => return to_millis(start),
+        Precision::Milli => return Some(to_millis(start)),
         Precision::Year => {
             let date = Date::from_calendar_date(start.year() + 1, Month::January, 1).ok()?;
             PrimitiveDateTime::new(date, Time::MIDNIGHT).assume_utc()
@@ -351,15 +383,17 @@ fn precision_end_ms(start: OffsetDateTime, precision: Precision) -> Option<i64> 
         Precision::Minute => start.checked_add(Duration::minutes(1))?,
         Precision::Second => start.checked_add(Duration::seconds(1))?,
     };
-    to_millis(next)?.checked_sub(1)
+    Some(to_millis(next).saturating_sub(1).max(MIN_MS))
 }
 
-fn to_millis(dt: OffsetDateTime) -> Option<i64> {
-    let nanos = dt.unix_timestamp_nanos();
-    let millis = nanos.div_euclid(1_000_000);
+/// `dt` as a millisecond timestamp, **clamped** into `MIN_MS..=MAX_MS` rather
+/// than rejected when it falls outside — see [`MIN_MS`] for why that is the
+/// deliberate choice (the `9999-12-31T23:59:59Z` open-ended sentinel).
+fn to_millis(dt: OffsetDateTime) -> i64 {
+    let millis = dt.unix_timestamp_nanos().div_euclid(1_000_000);
     i64::try_from(millis)
-        .ok()
-        .filter(|ms| (MIN_MS..=MAX_MS).contains(ms))
+        .unwrap_or(if millis.is_negative() { MIN_MS } else { MAX_MS })
+        .clamp(MIN_MS, MAX_MS)
 }
 
 fn parse_num<T: std::str::FromStr>(
@@ -390,13 +424,21 @@ fn date_math(expr: &str) -> DrResult<i64> {
     let mut now = OffsetDateTime::now_utc().to_offset(UtcOffset::UTC);
     let mut rest = expr.strip_prefix("NOW").ok_or_else(&err)?;
     while !rest.is_empty() {
-        let (op, tail) = rest.split_at(1);
+        // By `char`, not by byte: `rest` is raw user text, and `split_at(1)` on
+        // a multi-byte first character panics ("byte index 1 is not a char
+        // boundary"). On the index path that panic fired while the index-writer
+        // lock was held, poisoning it and bricking every subsequent write to the
+        // core, so this must be a plain finding-170 400 instead. Every other
+        // byte-index split in this function is guarded by a `find` on an ASCII
+        // needle, which always lands on a boundary.
+        let op = rest.chars().next().ok_or_else(&err)?;
+        let tail = &rest[op.len_utf8()..];
         // The operand runs to the next operator.
         let end = tail.find(['/', '+', '-']).unwrap_or(tail.len());
         let (operand, next) = tail.split_at(end);
         match op {
-            "/" => now = round_down(now, parse_unit(operand).ok_or_else(&err)?).ok_or_else(&err)?,
-            "+" | "-" => {
+            '/' => now = round_down(now, parse_unit(operand).ok_or_else(&err)?).ok_or_else(&err)?,
+            '+' | '-' => {
                 let digits_end = operand
                     .find(|c: char| !c.is_ascii_digit())
                     .ok_or_else(&err)?;
@@ -406,14 +448,14 @@ fn date_math(expr: &str) -> DrResult<i64> {
                 let (count, unit) = operand.split_at(digits_end);
                 let count: i64 = count.parse().map_err(|_| err())?;
                 let unit = parse_unit(unit).ok_or_else(&err)?;
-                let signed = if op == "-" { -count } else { count };
+                let signed = if op == '-' { -count } else { count };
                 now = shift(now, unit, signed).ok_or_else(&err)?;
             }
             _ => return Err(err()),
         }
         rest = next;
     }
-    to_millis(now).ok_or_else(err)
+    Ok(to_millis(now))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -763,7 +805,7 @@ mod tests {
     use super::*;
 
     fn ms(s: &str) -> i64 {
-        to_millis(OffsetDateTime::parse(s, &Rfc3339).expect("rfc3339")).expect("in range")
+        to_millis(OffsetDateTime::parse(s, &Rfc3339).expect("rfc3339"))
     }
 
     #[test]
@@ -911,6 +953,83 @@ mod tests {
         };
         assert!(!matches(Op::Within, &d8, within_2020));
         assert!(matches(Op::Within, &d8[..1], within_2020));
+    }
+
+    #[test]
+    fn contains_merges_adjacent_members_into_one_run() {
+        // Finding 168: a multiValued field is ONE point set, the union of its
+        // members. Two millisecond-adjacent members (`["2010","2011"]`) form a
+        // single contiguous run, so a query straddling the join IS contained by
+        // the union even though no single member contains it. This is what
+        // Lucene's own `ContainsPrefixTreeQuery` does for a `DateRangeField`
+        // (`multiOverlappingIndexedShapes`), and it is the case a per-member
+        // `any` -- which satisfies every current fixture -- gets wrong.
+        let adjacent = [
+            (ms("2010-01-01T00:00:00Z"), ms("2010-12-31T23:59:59.999Z")),
+            (ms("2011-01-01T00:00:00Z"), ms("2011-12-31T23:59:59.999Z")),
+        ];
+        let straddling = Interval {
+            start_ms: ms("2010-06-01T00:00:00Z"),
+            end_ms: ms("2011-06-30T23:59:59.999Z"),
+        };
+        assert!(
+            matches(Op::Contains, &adjacent, straddling),
+            "adjacent members merge into one run, which contains the query"
+        );
+        // Order must not matter: the merge sorts first.
+        let reversed = [adjacent[1], adjacent[0]];
+        assert!(matches(Op::Contains, &reversed, straddling));
+        // But a real hole still breaks the run (finding 168's
+        // `dr341_multi_no_contains` direction).
+        let with_hole = [
+            (ms("2010-01-01T00:00:00Z"), ms("2010-12-31T23:59:59.999Z")),
+            (ms("2012-01-01T00:00:00Z"), ms("2012-12-31T23:59:59.999Z")),
+        ];
+        assert!(!matches(Op::Contains, &with_hole, straddling));
+    }
+
+    #[test]
+    fn out_of_representable_range_endpoints_clamp() {
+        // The `MIN_MS`/`MAX_MS` contract: `9999-12-31T23:59:59Z` is the standard
+        // Solr open-ended sentinel and `tantivy::DateTime` (i64 nanoseconds)
+        // cannot hold it, so it clamps to the representable bound instead of
+        // being rejected.
+        assert_eq!(
+            parse_interval("[* TO 9999-12-31T23:59:59Z]").expect("clamps"),
+            Interval {
+                start_ms: MIN_MS,
+                end_ms: MAX_MS
+            }
+        );
+        assert_eq!(
+            parse_interval("[0001-01-01T00:00:00Z TO *]").expect("clamps"),
+            Interval {
+                start_ms: MIN_MS,
+                end_ms: MAX_MS
+            }
+        );
+        // A whole literal out of range is a degenerate point at the bound, not
+        // a 400.
+        let far_past = parse_interval("0001-01-01T00:00:00Z").expect("clamps");
+        assert_eq!(far_past.start_ms, MIN_MS);
+        assert_eq!(far_past.end_ms, MIN_MS);
+        let far_future = parse_interval("9999").expect("clamps");
+        assert_eq!(far_future.start_ms, MAX_MS);
+        assert_eq!(far_future.end_ms, MAX_MS);
+    }
+
+    #[test]
+    fn non_ascii_after_now_is_a_parse_error_not_a_panic() {
+        // `str::split_at(1)` panics when byte 1 is not a char boundary, and on
+        // the index path that panic fired while the index-writer lock was held.
+        for expr in ["NOW\u{e9}", "NOW\u{e9}-bad", "NOW/\u{e9}", "NOW+1\u{e9}"] {
+            let err = parse_interval(expr).expect_err("must be an error, not a panic");
+            assert!(matches!(err, DateRangeError::Parse(_)), "{expr}: {err:?}");
+            assert_eq!(
+                err.to_string(),
+                format!("Invalid Date Math String:'{expr}'")
+            );
+        }
     }
 
     #[test]
