@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Drupal\search_api_wayfinder;
 
+use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\search_api\Item\ItemInterface;
 
 /**
@@ -29,8 +30,16 @@ use Drupal\search_api\Item\ItemInterface;
  */
 class DocumentBuilder {
 
+  /**
+   * The language manager is optional so every pre-#342 call site
+   * (`new DocumentBuilder($fieldMapper)`) keeps working; without one the
+   * sort-copy language set falls back to just 'und', the same
+   * language-unspecific fallback LanguageResolver gives QueryBuilder when no
+   * manager and no language condition are available.
+   */
   public function __construct(
     private readonly FieldMapper $fieldMapper,
+    private readonly ?LanguageManagerInterface $languageManager = NULL,
   ) {}
 
   /**
@@ -127,7 +136,26 @@ class DocumentBuilder {
         // finding #153 in docs/solr-ref-findings.md; pinned by
         // DocumentBuilderTest with an input whose first value is neither its
         // min nor its max. See issue #302.
-        $doc[$this->fieldMapper->sortFieldName($field->getFieldIdentifier(), $type, $multiValued, $language)] = $formatted[0];
+        // issue #342 (MF-3): the copy goes into EVERY enabled site language's
+        // sort field plus the language-unspecific one, not just the item's own
+        // language -- SearchApiSolrBackend.php:1469-1481, whose inline comment
+        // is "To allow sorted multilingual searches we need to fill *all*
+        // language-specific sort fields!". Querying sorts on
+        // sort_X3b_<languages[0]>_<id> (QueryBuilder::buildSort()), and
+        // languages[0] is the site's first enabled language, not the
+        // document's; filling one language only made every document in any
+        // other language sort as missing.
+        foreach ($this->sortLanguages() as $sortLanguage) {
+          $key = $this->fieldMapper->sortFieldName($field->getFieldIdentifier(), $type, $multiValued, $sortLanguage);
+          // First write wins, mirroring upstream's `if (!$doc->{$key})` guard
+          // (SearchApiSolrBackend.php:1479): a later field must never
+          // overwrite a sort copy an earlier one already placed. (isset()
+          // rather than upstream's falsy test, so a legitimately empty first
+          // value still counts as written.)
+          if (!isset($doc[$key])) {
+            $doc[$key] = $formatted[0];
+          }
+        }
       }
     }
 
@@ -136,6 +164,38 @@ class DocumentBuilder {
         'doc' => $doc,
       ],
     ];
+  }
+
+  /**
+   * The languages a text field's sort copy is written for (issue #342, MF-3).
+   *
+   * Every enabled site language, in the language manager's order, plus
+   * LanguageInterface::LANGCODE_NOT_SPECIFIED ('und') -- exactly upstream's
+   * `array_keys($this->languageManager->getLanguages())` followed by
+   * `$sort_languages[] = LANGCODE_NOT_SPECIFIED`
+   * (SearchApiSolrBackend.php:1469-1481). Deliberately independent of the
+   * item's own language: the point of the fill is that a document indexed in
+   * one language is still sortable by a query resolved to another.
+   *
+   * ponytail: upstream's `$use_universal_collation` / `$specific_languages`
+   * narrowing has no Wayfinder counterpart (no per-index Solr field-type
+   * config), so the set is always "all enabled languages + und".
+   *
+   * @return array<int, string>
+   */
+  private function sortLanguages(): array {
+    $languages = [];
+    if ($this->languageManager !== NULL) {
+      foreach ($this->languageManager->getLanguages() as $language) {
+        $id = $language->getId();
+        if (is_string($id) && $id !== '') {
+          $languages[] = $id;
+        }
+      }
+    }
+    $languages[] = FieldMapper::LANGUAGE_UNSPECIFIED;
+
+    return array_values(array_unique($languages));
   }
 
 }

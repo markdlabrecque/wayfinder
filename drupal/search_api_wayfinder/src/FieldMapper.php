@@ -156,7 +156,7 @@ class FieldMapper {
     // 'de-AT' gives 'spellcheck_de_AT' where a text field gives
     // 'tm_X3b_de_X2d_AT_*'.
     if ($type === 'solr_text_spellcheck') {
-      return 'spellcheck_' . str_replace('-', '_', $language);
+      return 'spellcheck_' . $this->spellcheckDictionary($language);
     }
 
     $prefix = self::TYPE_PREFIXES[$type] ?? $type;
@@ -176,6 +176,28 @@ class FieldMapper {
     // SearchApiSolrBackend.php:2504-2505 ("$name = $pref . '_' .
     // $search_api_name; ... Utility::encodeSolrName($name)").
     return $this->encodeSolrName($prefix . $infix . '_' . $fieldId);
+  }
+
+  /**
+   * The spellcheck dictionary name for a language (issue #342, MF-2).
+   *
+   * One transform, two callers: the indexed sink's name is
+   * 'spellcheck_' . spellcheckDictionary($language) (fieldName() above), and
+   * the query's spellcheck.dictionary param is spellcheckDictionary($language)
+   * (QueryBuilder::buildSpellcheck()), because Wayfinder's server resolves the
+   * param back to the field with format!("spellcheck_{dictionary}")
+   * (src/lib.rs:2963). Sharing the method is the point: while the query side
+   * sent the raw langcode, every hyphenated Drupal langcode (de-AT, pt-br,
+   * zh-hans) asked for a field no document carries -- no error, just a
+   * permanently empty spellcheck envelope.
+   *
+   * The hyphen-to-underscore substitution -- and NOT encodeSolrName() or the
+   * language separator -- is upstream's own
+   * (SearchApiSolrBackend.php:2440-2446, "Don't use the language separator
+   * here! This field name is used without in solrconfig.xml.").
+   */
+  public function spellcheckDictionary(string $language): string {
+    return str_replace('-', '_', $language);
   }
 
   /**

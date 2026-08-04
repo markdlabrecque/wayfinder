@@ -164,9 +164,18 @@ class QueryBuilder {
       $params['spellcheck.q'] = implode(' ', array_map('strval', $keys));
     }
 
-    $params['spellcheck.dictionary'] = count($this->languages) === 1
-      ? $this->languages[0]
-      : $this->languages;
+    // issue #342 (MF-2): the dictionary name is the INDEXED sink's language
+    // component, not the raw langcode -- FieldMapper::spellcheckDictionary()
+    // is the single shared transform, so this param and
+    // FieldMapper::fieldName()'s 'spellcheck_' . <dictionary> sink cannot
+    // drift apart again.
+    $dictionaries = array_map(
+      fn (string $language): string => $this->fieldMapper->spellcheckDictionary($language),
+      $this->languages
+    );
+    $params['spellcheck.dictionary'] = count($dictionaries) === 1
+      ? $dictionaries[0]
+      : $dictionaries;
 
     if (!empty($options['collate'])) {
       $params['spellcheck.collate'] = 'true';
@@ -471,8 +480,8 @@ class QueryBuilder {
     }
 
     // issue #342: a text field has one name per resolved language, and a
-    // document carries only the one it was indexed in, so the condition has
-    // to match ANY of them -- search_api_solr ORs the same way in
+    // document carries only the one it was indexed in, so a POSITIVE condition
+    // has to match ANY of them -- search_api_solr ORs the same way in
     // createFilterQuery() (SearchApiSolrBackend.php:3392). A single resolved
     // language (the common case) produces exactly the pre-#342 string, with
     // no added parentheses.
@@ -485,7 +494,54 @@ class QueryBuilder {
       $fieldNames
     );
 
-    return count($parts) === 1 ? $parts[0] : '(' . implode(' OR ', $parts) . ')';
+    if (count($parts) === 1) {
+      return $parts[0];
+    }
+
+    // issue #342 (MF-1): a NEGATED condition joins its variants with AND, not
+    // OR. Since a document carries only one variant, the variants it lacks
+    // satisfy "-<other-lang field>:x" unconditionally, so OR-ing negations
+    // matches every document -- `body <> "hello"` would return the document
+    // whose body IS "hello", and an exclusion filter would silently do
+    // nothing. Upstream picks the conjunction by polarity for exactly this
+    // reason (SearchApiSolrBackend.php:3455-3459).
+    $conjunction = $this->isNegatedClause($operator, $value) ? ' AND ' : ' OR ';
+
+    return '(' . implode($conjunction, $parts) . ')';
+  }
+
+  /**
+   * Whether a condition's per-variant clause is a pure negation, i.e. a clause
+   * that a document lacking the field satisfies trivially (issue #342, MF-1).
+   *
+   * Ground truth is upstream's rule for a fulltext field checked against NULL,
+   * "'=' === $condition->getOperator() ? 'AND' : 'OR'"
+   * (SearchApiSolrBackend.php:3455-3459): `= NULL` ("field is missing") joins
+   * with AND, `<> NULL` ("field exists") with OR. Generalised to the operators
+   * this class also supports, the test is on the emitted clause, not the
+   * operator name:
+   * - `= NULL`, `IN [NULL]` emit "-field:[* TO *]" (missing) -> negated;
+   * - `<>`, `NOT BETWEEN`, and `NOT IN` without a NULL member emit
+   *   "*:* -field:..." -> negated;
+   * - `<> NULL` and `NOT IN` WITH a NULL member both keep a "field:[* TO *]"
+   *   existence requirement (notInQuery()), which already pins the clause to
+   *   the one variant the document actually carries, so those join with OR --
+   *   AND would require every variant to exist and exclude every document.
+   *
+   * @param mixed $value
+   */
+  private function isNegatedClause(string $operator, $value): bool {
+    if ($value === NULL) {
+      return $operator === '=';
+    }
+
+    if (($operator === 'IN' || $operator === 'NOT IN') && is_array($value)) {
+      $hasNull = in_array(NULL, $value, TRUE);
+      $hasValue = array_filter($value, static fn ($item): bool => $item !== NULL) !== [];
+      return $operator === 'NOT IN' ? !$hasNull : !$hasValue;
+    }
+
+    return $operator === '<>' || $operator === 'NOT BETWEEN';
   }
 
   /**
@@ -905,9 +961,14 @@ class QueryBuilder {
       if (!$field) {
         continue;
       }
-      // getBoost() is nullable on FieldInterface (an unset boost is NULL, not
-      // 1.0), and qf is now built for keyless queries too -- so normalise
-      // before comparing, rather than passing NULL into formatBoost().
+      // Correction (#342 review): an earlier comment here claimed getBoost()
+      // is nullable in production. It is not -- Field::getBoost() is
+      // "return $this->boost ?? 1.0;"
+      // (vendor/drupal/search_api/src/Item/Field.php:604), and
+      // FieldInterface::getBoost() documents the 1.0 default. NULL only ever
+      // reaches this line from a test double that stubs getBoost() without a
+      // return value, so the ?? is kept purely so such a mock cannot push NULL
+      // into formatBoost(); it is defensive, not a real-world case.
       $boost = (float) ($field->getBoost() ?? 1.0);
       // issue #342: one qf entry per language variant, each carrying the
       // field's boost -- a document only ever holds the variant it was

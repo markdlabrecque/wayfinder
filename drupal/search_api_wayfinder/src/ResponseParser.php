@@ -137,6 +137,14 @@ class ResponseParser {
       if (!is_string($term) || !is_array($info)) {
         continue;
       }
+      // ponytail: only SCALAR suggestion members survive. With
+      // spellcheck.extendedResults=true Solr returns each suggestion as a
+      // {word, freq} object instead, and those are silently dropped here
+      // rather than reduced to their 'word' -- so the ceiling is
+      // "extendedResults yields an empty suggestion list". Nothing in this
+      // module sets that param today (it is not in the server's SELECT_PARAMS
+      // either, src/lib.rs:286-292), so the case is unreachable from here;
+      // handling it is a follow-up, deliberately out of scope for #342.
       $words = array_values(array_map('strval', array_filter(
         (array) ($info['suggestion'] ?? []),
         static fn ($word): bool => is_scalar($word)

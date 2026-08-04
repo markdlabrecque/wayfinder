@@ -345,7 +345,12 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
    */
   public function indexItems(IndexInterface $index, array $items) {
     $client = $this->getClient();
-    $builder = new DocumentBuilder(new FieldMapper());
+    // issue #342 (MF-3): the language manager decides which language-specific
+    // sort_* copies each document carries, so it has to reach DocumentBuilder
+    // exactly like it already reaches QueryBuilder/ResponseParser below --
+    // otherwise indexing fills only the 'und' copy while search() sorts on
+    // sort_X3b_<languages[0]>_<id>.
+    $builder = new DocumentBuilder(new FieldMapper(), $this->languageManager);
     $commitWithin = $this->getConfiguration()['commitWithin'] ?? 1000;
 
     $indexedIds = [];
