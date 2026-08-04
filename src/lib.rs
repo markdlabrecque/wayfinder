@@ -253,6 +253,12 @@ const SELECT_PARAMS: &[&str] = &[
     "group.truncate",
     "group.facet",
     "sort",
+    // #331: argless `geodist()` in `fl` is driven by these request params
+    // (finding 133's client-evidenced form). They must not 400 under
+    // strict_params the way every other geodist-relevant param Solr accepts
+    // still does (`d`, used only by the out-of-scope `{!geofilt}`/`{!bbox}`).
+    "sfield",
+    "pt",
     "hl",
     "hl.fl",
     "hl.snippets",
@@ -1682,6 +1688,10 @@ fn field_class_for_builtin(name: &str) -> &'static str {
         "float" => "wayfinder.FloatPointField",
         "double" => "wayfinder.DoublePointField",
         "date" => "wayfinder.DatePointField",
+        // Solr's `LatLonPointSpatialField` (#331): the class name is Solr's
+        // vocabulary, like every other entry, even though Wayfinder stores a
+        // point as two f64 fast columns rather than a BKD point tree.
+        "location" => "wayfinder.LatLonPointSpatialField",
         // `text_general`, `text_en` and every `text_<code>` preset: analyzed
         // text, which is Solr's `TextField`.
         _ => "wayfinder.TextField",
@@ -2962,6 +2972,90 @@ fn spellcheck(index: &CoreIndex, params: &Params) -> anyhow::Result<Value> {
     Ok(json!({ "suggestions": suggestions, "collations": collations }))
 }
 
+/// Parses `fl` entries of the form `<alias>:geodist()` into computed fields,
+/// resolving the argless `geodist()` against the `sfield`/`pt` request params
+/// (the client-evidenced form, finding 133). Returns `(alias, FuncQuery)`
+/// pairs the `/select` handler evaluates per doc and appends after the stored
+/// fields -- Solr appends computed/transformer fields last (verified against
+/// the `fl=*,dist:geodist()` capture). `sfield` must name a declared
+/// `location` field (its two synthetic columns back the distance); every other
+/// `fl` shape (literal name, `*`, `score`, `<alias>:<other-func>`) is not a
+/// computed field and yields nothing here. (#331)
+fn computed_fl_fields(
+    fl: Option<&[String]>,
+    params: &Params,
+    schema: &schema::WayfinderSchema,
+) -> Result<Vec<(String, function_query::FuncQuery)>, WfError> {
+    let mut out = Vec::new();
+    let Some(fl) = fl else {
+        return Ok(out);
+    };
+    for entry in fl {
+        let Some((alias, body)) = entry.split_once(':') else {
+            continue;
+        };
+        let alias = alias.trim();
+        let body = body.trim();
+        if body != "geodist()" {
+            // Only argless `geodist()` is supported in this tracer; an unknown
+            // function or the explicit-args form is left for render_doc to treat
+            // as a non-matching fl entry (no field, no output), matching Solr's
+            // own handling of an unrecognised transformer name only loosely.
+            continue;
+        }
+        if alias.is_empty() {
+            return Err(WfError::bad_request(
+                "wayfinder::SyntaxError",
+                format!("fl entry `{entry}` needs an alias before `:geodist()`"),
+            ));
+        }
+        let sfield = params.get("sfield").ok_or_else(|| {
+            WfError::bad_request(
+                "wayfinder::InvalidParam",
+                "geodist() requires the `sfield` request param".to_string(),
+            )
+        })?;
+        if schema.location_fields(sfield).is_none() {
+            return Err(WfError::bad_request(
+                "wayfinder::InvalidParam",
+                format!("geodist() sfield `{sfield}` is not a declared `location` field"),
+            ));
+        }
+        let pt = params.get("pt").ok_or_else(|| {
+            WfError::bad_request(
+                "wayfinder::InvalidParam",
+                "geodist() requires the `pt` request param".to_string(),
+            )
+        })?;
+        let (lat_s, lon_s) = pt.split_once(',').ok_or_else(|| {
+            WfError::bad_request(
+                "wayfinder::InvalidParam",
+                format!("geodist() pt `{pt}` is not a `lat,lon` point"),
+            )
+        })?;
+        let lat: f64 = lat_s.trim().parse().map_err(|_| {
+            WfError::bad_request(
+                "wayfinder::InvalidParam",
+                format!("geodist() pt `{pt}` has a non-numeric latitude"),
+            )
+        })?;
+        let lon: f64 = lon_s.trim().parse().map_err(|_| {
+            WfError::bad_request(
+                "wayfinder::InvalidParam",
+                format!("geodist() pt `{pt}` has a non-numeric longitude"),
+            )
+        })?;
+        out.push((
+            alias.to_string(),
+            function_query::FuncQuery::GeoDist {
+                sfield: sfield.to_string(),
+                pt: (lat, lon),
+            },
+        ));
+    }
+    Ok(out)
+}
+
 async fn select(
     State(state): State<Arc<AppState>>,
     AxPath(core): AxPath<String>,
@@ -3246,16 +3340,30 @@ async fn select(
         .as_deref()
         .is_some_and(|fl| fl.iter().any(|f| f == "score"));
 
+    // #331: `<alias>:geodist()` fl entries are computed fields, resolved from
+    // the `sfield`/`pt` request params and evaluated per doc below. Built once
+    // here so the page loop only does the per-doc fast-field read.
+    let computed = computed_fl_fields(fl.as_deref(), &params, &state.index.wf_schema)?;
+
     let mut docs = Vec::with_capacity(page.len());
     for (score, addr) in page.iter().copied() {
-        docs.push(
-            state
-                .index
-                .render_doc(addr, fl.as_deref(), Some(score))
-                .map_err(|e| {
-                    WfError::internal("wayfinder::DocError", e.to_string()).with_params(&params)
-                })?,
-        );
+        let mut doc = state
+            .index
+            .render_doc(addr, fl.as_deref(), Some(score))
+            .map_err(|e| {
+                WfError::internal("wayfinder::DocError", e.to_string()).with_params(&params)
+            })?;
+        // Computed fields append after the stored fields (Solr's transformer
+        // ordering; the `fl=*,dist:geodist()` capture places `dist` last).
+        for (alias, func) in &computed {
+            let value = state.index.eval_function(addr, func).map_err(|e| {
+                WfError::internal("wayfinder::DocError", e.to_string()).with_params(&params)
+            })?;
+            if let Value::Object(map) = &mut doc {
+                map.insert(alias.clone(), json!(value));
+            }
+        }
+        docs.push(doc);
     }
 
     // Key order in the fixtures is `numFound, start, maxScore, numFoundExact,

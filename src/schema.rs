@@ -77,6 +77,11 @@ const NON_LANGUAGE_BUILTIN_TYPES: &[&str] = &[
     "float",
     "double",
     "date",
+    // A `location` is a lat/lon point stored as two synthetic f64 fast
+    // columns (`<field>__lat`/`__lon`, see `parse`); `geodist()` reads them
+    // (#331). Listed here so a custom [[field_types]] chain named `location`
+    // is rejected like every other built-in (#170).
+    "location",
 ];
 
 /// Every built-in field type `resolve_type` accepts: the non-language types
@@ -207,6 +212,11 @@ pub enum ValueKind {
     I64,
     F64,
     Date,
+    /// A `location` point: indexed as two synthetic f64 fast columns
+    /// (`<field>__lat`/`__lon`) rather than one Tantivy field, so its values
+    /// do not flow through `add_values`' single-field path the way the other
+    /// kinds do (#331).
+    Location,
 }
 
 /// A parsed schema: the Tantivy `Schema`, the core config, the dynamic/copy
@@ -221,6 +231,12 @@ pub struct WayfinderSchema {
     pub field_types: Vec<FieldTypeConfig>,
     pub tokenizers: TokenizerManager,
     field_handles: HashMap<String, Field>,
+    /// Static `location` fields' two synthetic f64 columns, keyed by the
+    /// user-facing field name: `(lat_field, lon_field)`. Kept out of
+    /// `field_handles` (like `VERSION_FIELD`) so the synthetic `__lat`/`__lon`
+    /// columns never leak into the name-based resolver paths and are reachable
+    /// only through [`Self::location_fields`] (#331).
+    location_fields: HashMap<String, (Field, Field)>,
 }
 
 // `TokenizerManager` is not `Debug`, so derive is out; tests still need it for
@@ -239,6 +255,16 @@ impl std::fmt::Debug for WayfinderSchema {
 impl WayfinderSchema {
     pub fn field(&self, name: &str) -> Option<Field> {
         self.field_handles.get(name).copied()
+    }
+
+    /// The two synthetic f64 columns (`__lat`, `__lon`) backing a static
+    /// `location` field, or `None` if `name` is not a declared `location`
+    /// field. Dynamic `locs_*`-rule fields resolve to `Location` too but have
+    /// no synthetic columns (the name is unknown at build time), so they are
+    /// `None` here -- `geodist()` on a dynamic `sfield` is a documented
+    /// ceiling of this tracer, not a supported path (#331).
+    pub fn location_fields(&self, name: &str) -> Option<(Field, Field)> {
+        self.location_fields.get(name).copied()
     }
 
     pub fn field_config(&self, name: &str) -> Option<&FieldConfig> {
@@ -384,10 +410,17 @@ impl WayfinderSchema {
 /// What a schema `type = "..."` resolves to.
 enum ResolvedType {
     Str,
-    Text { tokenizer: String },
+    Text {
+        tokenizer: String,
+    },
     I64,
     F64,
     Date,
+    /// A lat/lon point backed by two synthetic f64 fast columns. The build
+    /// path creates `<field>__lat`/`<field>__lon` for it (see `parse`); it is
+    /// never a single Tantivy field, which is why `Location` has no arm in
+    /// the `field = match resolved { ... }` block below.
+    Location,
 }
 
 fn resolve_type(type_: &str, custom: &[FieldTypeConfig]) -> Result<ResolvedType> {
@@ -407,6 +440,9 @@ fn resolve_type(type_: &str, custom: &[FieldTypeConfig]) -> Result<ResolvedType>
         "int" | "long" => ResolvedType::I64,
         "float" | "double" => ResolvedType::F64,
         "date" => ResolvedType::Date,
+        // Solr's `LatLonPointSpatialField`: a point stored as two synthetic f64
+        // fast columns, addressable by `geodist()` (#331, #292 sizing report).
+        "location" => ResolvedType::Location,
         other => {
             let code = other.strip_prefix("text_").filter(|code| {
                 LANGUAGES
@@ -429,6 +465,7 @@ fn value_kind_of(type_: &str, custom: &[FieldTypeConfig]) -> Result<ValueKind> {
         ResolvedType::I64 => ValueKind::I64,
         ResolvedType::F64 => ValueKind::F64,
         ResolvedType::Date => ValueKind::Date,
+        ResolvedType::Location => ValueKind::Location,
     })
 }
 
@@ -807,6 +844,7 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
 
     let mut builder = Schema::builder();
     let mut field_handles = HashMap::new();
+    let mut location_fields: HashMap<String, (Field, Field)> = HashMap::new();
 
     // `_version_` is a Wayfinder-owned field, never a schema.toml field. It
     // is not stored, so default select responses cannot expose it. Keep it
@@ -817,6 +855,34 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     for fc in &parsed.fields {
         let resolved = resolve_type(&fc.type_, &parsed.field_types)
             .with_context(|| format!("on field `{}`", fc.name))?;
+        // A `location` field is not one Tantivy field but two synthetic f64
+        // fast columns (`<name>__lat`/`<name>__lon`), so it bypasses the
+        // single-field match and `field_handles` entirely: the columns are
+        // reachable only via `location_fields`, and the user-facing name never
+        // becomes a Tantivy field (#331, #292 sizing report). The columns are
+        // fast (column readers for `geodist()`) and not stored (the virtual
+        // `loc` field is not reconstructed into `fl` in this tracer).
+        if matches!(resolved, ResolvedType::Location) {
+            let lat_name = format!("{}__lat", fc.name);
+            let lon_name = format!("{}__lon", fc.name);
+            let lat = builder.add_f64_field(&lat_name, numeric_options(false, true));
+            let lon = builder.add_f64_field(&lon_name, numeric_options(false, true));
+            if location_fields
+                .insert(fc.name.clone(), (lat, lon))
+                .is_some()
+            {
+                // Two [[fields]] entries can only share a non-location name;
+                // the duplicate-name guard above keys on `name` alone, so this
+                // is belt-and-braces against a future `__lat`/`__lon` collision
+                // with a user-declared field of the same synthetic name.
+                bail!(
+                    "location field `{}` would create synthetic columns that collide with an \
+                     existing field; rename the location field",
+                    fc.name
+                );
+            }
+            continue;
+        }
         let field = match resolved {
             ResolvedType::Str => {
                 // Not Tantivy's own `STRING` const: that leaves fieldnorms
@@ -865,6 +931,10 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
                 }
                 builder.add_date_field(&fc.name, opts)
             }
+            // `Location` is handled above the match (two synthetic columns),
+            // so this arm is unreachable; present only to satisfy the match's
+            // exhaustiveness over `ResolvedType`.
+            ResolvedType::Location => unreachable!(),
         };
         field_handles.insert(fc.name.clone(), field);
     }
@@ -1024,6 +1094,7 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
         field_types: parsed.field_types,
         tokenizers,
         field_handles,
+        location_fields,
     })
 }
 

@@ -266,7 +266,7 @@ impl SegmentSortColumn {
             // Dates collapse into `I64` timestamps elsewhere in this module
             // (see `SortValue`'s doc comment); the epoch is timestamp 0.
             Some(ValueKind::Date) => Some(SortValue::I64(0)),
-            Some(ValueKind::Text) | None => None,
+            Some(ValueKind::Text) | Some(ValueKind::Location) | None => None,
         };
         Ok(SegmentSortColumn::Absent(missing))
     }

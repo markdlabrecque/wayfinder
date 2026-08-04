@@ -2780,3 +2780,22 @@ which is what closes the issue's decision point and descopes `/suggest`.
       `FieldMapper::fieldName()` — which already collapses every
       `solr_text_suggester` field to `twm_suggest` (#300), so a dedup keeps
       the dictionary from being requested twice.
+
+157. **Solr's `geodist()` returns Lucene's approximate `SloppyMath` haversine
+      on lossily-quantised BKD coords, not an exact distance.** Captured
+      against real `solr:9` (the `geo` block, #331): for a symmetric pair of
+      points 1° north and 1° south of the origin, `fl=dist:geodist()` returns
+      *different* km values (e.g. `111.195076` vs `111.19508`) — a true
+      haversine on full-precision coords is symmetric, so the asymmetry proves
+      the value is computed on lat/lon re-read through Lucene's 32-bit
+      `GeoEncodingUtils.encodeLatitude`/`decodeLatitude` quantisation, and via
+      `org.apache.lucene.util.SloppyMath.haversinMeters` (which Lucene's own
+      javadoc gives a ~40 cm error budget). Wayfinder stores a point as two
+      full-precision f64 fast columns and computes the exact haversine
+      (`src/function_query.rs::haversine_km`); the two agree to well under a
+      centimetre here, so the differential harness compares `geo_*` distances
+      at meter granularity (3 dp of km), the same float-magnitude category it
+      already tolerates for BM25 `score` and stats `sum`/`mean`
+      (`score_tolerance`). The encoding decision (two f64 columns, exact
+      precision) is unchanged — this finding records the *distance value's*
+      inherent approximation, not the storage.

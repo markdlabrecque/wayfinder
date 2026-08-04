@@ -1017,6 +1017,10 @@ fn range_buckets(
             "can not range facet on the text field `{field_name}`: \
              facet.range needs a numeric or date field"
         ),
+        ValueKind::Location => bail!(
+            "can not range facet on the location field `{field_name}`: \
+             facet.range needs a numeric or date field"
+        ),
     }
     Ok(out)
 }

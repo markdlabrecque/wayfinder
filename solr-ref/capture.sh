@@ -3540,3 +3540,74 @@ capfrange frange_err_bad_bool     'select?q=*:*&fq=%7B%21frange%20l%3D2%20u%3D6%
 if want_any '^frange_'; then
   release "$FRANGE_CONTAINER" "function-range core '$FRANGE_CORE'"
 fi
+
+# --- #331 spatial tracer: location field + geodist() in fl -------------------
+# The thinnest retained slice of #292's spatial sizing: a `location` field
+# stores a point and argless `geodist()` (driven by the `sfield`/`pt` request
+# params, the client-evidenced form per finding 133) returns each doc's
+# haversine distance in `fl`. Encoding decision (#292 sizing report): a
+# `location` field is two synthetic f64 fast columns `<field>__lat`/`__lon`,
+# reusing Wayfinder's existing fast-field machinery. `{!geofilt}`/`{!bbox}`
+# and `geodist()` in `sort` are deliberately out of scope for this tracer.
+#
+# Own container/port/core for the same reason every other appended block uses
+# one: the base `content` core has no `location` field. Port 9073: 9072 is the
+# `frange` block (#333). Rows land in `manifest-errors.tsv` (not
+# `manifest.tsv`) and get a dedicated `geo_app` in `tests/differential.rs`,
+# like `fnq`/`pf296`. Seven docs sit on a regular grid around NYC (40,-74):
+# the origin, one degree N/S/E/W, the NE corner, and a half-degree NW point.
+GEO_CONTAINER=wayfinder-solr-331
+GEO_SOLR=http://localhost:9073/solr
+GEO_CORE=geo
+if want_any '^geo_'; then
+  if ! docker ps --format '{{.Names}}' | grep -qx "$GEO_CONTAINER"; then
+    docker rm -f "$GEO_CONTAINER" >/dev/null 2>&1 || true
+    docker run -d --name "$GEO_CONTAINER" -p 9073:8983 \
+      solr:9 solr-precreate "$GEO_CORE" >/dev/null
+  fi
+  echo -n "waiting for geo solr"
+  for _ in $(seq 60); do
+    if curl -sf "$GEO_SOLR/$GEO_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n "."; sleep 1
+  done
+  # The `_default` configset ships the `location` (LatLonPointSpatialField)
+  # type and the `id` field; add `loc` as `location` *before* indexing so the
+  # schemaless auto-add does not retype it to `text_general` (Wayfinder runs
+  # with schemaless off; capture must match that, so the field is explicit).
+  curl -s "$GEO_SOLR/$GEO_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field": {"name":"loc","type":"location","indexed":true,"stored":true}
+  }' >/dev/null
+  curl -sf "$GEO_SOLR/$GEO_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"g1","loc":"40.0,-74.0"},
+    {"id":"g2","loc":"41.0,-74.0"},
+    {"id":"g3","loc":"40.0,-73.0"},
+    {"id":"g4","loc":"39.0,-74.0"},
+    {"id":"g5","loc":"40.0,-75.0"},
+    {"id":"g6","loc":"41.0,-73.0"},
+    {"id":"g7","loc":"40.5,-74.5"}
+  ]' >/dev/null
+fi
+
+capg331() {  # capg331 <name> <path-after-core>
+  local name=$1 suffix=$2
+  want "$name" || return 0
+  curl -sg "$GEO_SOLR/$GEO_CORE/$suffix" \
+    -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$GEO_CORE/$suffix" "" "$GEO_SOLR" \
+    >> "$MANIFEST_ERRORS"
+  rm -f "$OUT/$name.status"
+}
+
+# `fl=<alias>:geodist()` is Solr's computed-field-in-fl form: the argless
+# `geodist()` reads the point from `sfield` and the origin from `pt`, both
+# request params, and emits each doc's haversine distance under `<alias>`.
+# Two origins exercise the function: the grid origin (g1 -> 0.0) and the NE
+# corner (g6 -> 0.0). Suffixes are percent-encoded (`(`/`)`) to match the
+# encoded convention every `{!...}`/function manifest row uses.
+capg331 geo_geodist_fl    'select?q=*:*&fl=id,dist:geodist%28%29&sfield=loc&pt=40,-74&sort=id%20asc&wt=json'
+capg331 geo_geodist_fl_pt 'select?q=*:*&fl=id,dist:geodist%28%29&sfield=loc&pt=41,-73&sort=id%20asc&wt=json'
+
+if want_any '^geo_'; then
+  release "$GEO_CONTAINER" "geo core '$GEO_CORE'"
+fi
