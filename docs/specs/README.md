@@ -13,8 +13,8 @@ both are shared infrastructure that every branch in the batch depends on.
 
 | Order | Item | Why it blocks |
 |---|---|---|
-| 1 | `PREP-1-vendor-source.md` | Every spec below cites line numbers in `search_api_solr` 4.4.0 files that are **not in the repo**. Without it none of the premises are checkable. |
-| 2 | `357-online-snapshot-flake.md` | A parallel worktree batch is sustained CPU contention, which is exactly what makes this test flake. Fan out first and every branch's gate becomes unreliable. |
+| 1 | #368 — `PREP-1-vendor-source.md` | Every spec below cites line numbers in `search_api_solr` 4.4.0 files that are **not in the repo**. Without it none of the premises are checkable. |
+| 2 | #357 — `357-online-snapshot-flake.md` | A parallel worktree batch is sustained CPU contention, which is exactly what makes this test flake. Fan out first and every branch's gate becomes unreliable. |
 
 After both land, three groups. Within a group, branches are safe to run
 concurrently; across groups, respect the order.

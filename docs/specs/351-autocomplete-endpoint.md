@@ -50,7 +50,7 @@ itself to add `distrib`. Nothing in 4.4.0 requests `/terms`.
 ## Verify before implementing
 
 All of the above comes from the sweep, not from a read of this tree. With the
-full source now vendored (PREP-1), confirm and report real line numbers for:
+full source now vendored (PREP-1, #368), confirm and report real line numbers for:
 
 1. the `autocomplete` handler name on the Solarium query type
 2. the three components it carries

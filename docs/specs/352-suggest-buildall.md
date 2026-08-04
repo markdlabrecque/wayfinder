@@ -26,7 +26,7 @@ concludes "no `/suggest` server route is built". That was true of the three-file
 snapshot.
 
 Before writing any code, open `src/Hook/SearchApiSolrHooks.php` in the
-**now-vendored full source** (PREP-1) and confirm the cron path exists: a
+**now-vendored full source** (PREP-1, #368) and confirm the cron path exists: a
 `GET /<core>/suggest?suggest.buildAll=true` via `fireAndForget`
 (`SolrConnectorPluginBase.php:1154`), gated on Drupal-only-writeable + index
 updates since last build + >1800s since the last one. Record the real line

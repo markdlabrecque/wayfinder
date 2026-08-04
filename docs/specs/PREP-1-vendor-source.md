@@ -1,8 +1,7 @@
-# PREP-1 — Vendor the full `search_api_solr` 4.4.0 source
+# PREP-1 (#368) — Vendor the full `search_api_solr` 4.4.0 source
 
-**No issue number** (chore). Branch: `vendor-search-api-solr-4.4.0-source`.
-Say in the PR body why there is no issue: this is prep infrastructure for the
-2026-08-04 sweep batch, landed first so the sibling branches share it.
+Issue: **#368**. Branch: `368-vendor-source`. Claim the issue before starting
+(`gh issue edit 368 --add-assignee @me`) and open the PR with `Closes #368`.
 
 **Lands on `main` before any other spec in this batch starts.**
 
