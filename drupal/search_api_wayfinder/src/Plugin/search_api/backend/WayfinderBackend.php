@@ -60,7 +60,7 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
       'scheme' => 'http',
       'host' => 'localhost',
       'port' => 8983,
-      'path' => '/solr',
+      'path' => '/wayfinder',
       'core' => '',
       'timeout' => 5,
       'commitWithin' => 1000,
@@ -298,9 +298,9 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
       return $info;
     }
 
-    // Version lives at lucene.solr-spec-version -- ground truth
+    // Version lives at lucene.wayfinder-spec-version -- ground truth
     // solr-ref/responses/admin_system.json.
-    $version = $system['lucene']['solr-spec-version'] ?? NULL;
+    $version = $system['lucene']['wayfinder-spec-version'] ?? NULL;
     if (is_string($version) && $version !== '') {
       $info[] = [
         'label' => $this->t('Wayfinder version'),

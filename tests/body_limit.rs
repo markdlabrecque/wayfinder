@@ -78,7 +78,7 @@ fn oversized_update_body() -> String {
 async fn post_update(app: &Router, body: String) -> StatusCode {
     let req = Request::builder()
         .method("POST")
-        .uri(format!("/solr/{CORE}/update?commit=true"))
+        .uri(format!("/wayfinder/{CORE}/update?commit=true"))
         .header("content-type", "application/json")
         .body(Body::from(body))
         .unwrap();

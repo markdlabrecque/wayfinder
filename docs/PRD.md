@@ -208,16 +208,37 @@ chosen. Nothing may be added here without the same two things.
    gated on `fl` requesting `score`), and ranking order matches — not that the float values
    themselves match. (issue #34)
 
-5. **`/admin/info/system` and `/admin/system` report a configured Solr version, not the
-   captured Solr's own `9.10.1`, and serve static `jvm`/`system` placeholders instead of host
-   introspection.** `admin_info_system.json` and `admin_system.json` are verbatim copies of the
-   captured envelopes; the differences are `lucene.solr-spec-version`/`-impl-version` (config
-   choice, default `"9.0.0"` — resolves open question 2 above) and `jvm.*`/`system.*` (real host
-   JVM/OS stats with no Wayfinder equivalent to introspect). `core.schema` is **not** a
-   divergence: it is compared exactly against `"drupal-4.4.0-solr-9.x-0"`, because
-   `search_api_solr`'s `SolrConnectorPluginBase.php` `explode('-', $schema)`s that value and
-   indexes into it (finding 78) — getting it wrong breaks the client, not just cosmetics.
-   (issue #59)
+5. **`/admin/info/system` and `/admin/system` report a configured version, not the
+   captured Solr's own `9.10.1`, serve static `jvm`/`system` placeholders instead of host
+   introspection, and name their version, home, and schema values after Wayfinder rather than
+   Solr.** `admin_info_system.json` and `admin_system.json` are verbatim copies of the
+   captured envelopes; the differences, all permanent and all suppressed via the
+   `admin_system`/`admin_info_system` entries in `tests/differential.rs`, are:
+
+   - `lucene.solr-spec-version`/`-impl-version`. The *value* is a config choice, default
+     `"9.0.0"` (resolves open question 2 above); the *key* was renamed to
+     `wayfinder-spec-version`/`wayfinder-impl-version` by issue #325, which removed the literal
+     `solr` token from Wayfinder's own response keys. Solr's *impl* version additionally
+     carries a build hash and date that are unreproducible; Wayfinder emits a plain
+     `"<version> wayfinder"`.
+   - `jvm.*`/`system.*` — real host JVM/OS stats with no Wayfinder equivalent to introspect.
+   - `core.host`/`core.now`/`core.start`/`core.directory.*` on `/admin/system` — hostname,
+     timestamps, and real filesystem paths on the capture host.
+   - `solr_home`/`core_root` on `/admin/info/system`. Issue #325 renamed the emitted key to
+     `wayfinder_home`, so the top-level key set of that response deliberately no longer matches
+     the fixture's, and both `wayfinder_home` and `core_root` carry `/var/wayfinder/data` where
+     the captured Solr reports its own `solr`-rooted path.
+   - `core.schema` on `/admin/system`. This one **was** compared exactly against
+     `"drupal-4.4.0-solr-9.x-0"` and now is not: issue #325 renamed Wayfinder's reported value
+     to `"drupal-4.4.0-wayfinder-9.x-0"`. The parse is preserved deliberately, and the rename is
+     safe for exactly that reason: `search_api_solr`'s `SolrConnectorPluginBase.php`
+     `explode('-', $schema)`s that value and reads `$parts[1]` (`getSchemaVersion`, the module
+     version `4.4.0`), `$parts[3]` (`getSchemaTargetedSolrBranch`, `9.x`), and `$parts[4]`
+     (`isJumpStartConfigSet`, `0`) — it never reads `$parts[2]`, which is the only segment this
+     rename touches (finding 78). The hyphen arity and every consumed segment are unchanged; a
+     client that pins the whole literal string instead of parsing it owns that risk.
+
+   (issue #59; issue #325)
 
 6. **A local-params block in `q` naming any query parser other than `edismax`, `func`, or
    `boost` is a hard 400, where Solr parses it.** Real Solr registers a parser per type, so
@@ -263,13 +284,18 @@ chosen. Nothing may be added here without the same two things.
    `omit_header_update_error_true.json`. (issue #179; finding 112)
 
 9. **An authentication failure returns Wayfinder's JSON `WfError` envelope, where Solr's auth
-   filter returned Jetty HTML.** The issue #229 BasicAuthPlugin capture (finding 118) shows
+   filter returned Jetty HTML, and challenges with `realm="wayfinder"` where Solr sends
+   `realm="solr"`.** The issue #229 BasicAuthPlugin capture (finding 118) shows
    unauthenticated and wrong-credential `/solr/admin/info/system` requests returning 401 Jetty
    HTML, while a correct credential returns 200; both 401s carry `WWW-Authenticate: Basic
-   realm="solr"`. Wayfinder matches the 401 and challenge realm but returns its normal JSON error
-   envelope. This is the same client-facing choice as divergences 1 and 8: Wayfinder's response
-   surface is JSON-only and its clients parse JSON, so reproducing a servlet-container fallback
-   would add a second error format solely for authentication failures. (issue #229; finding 118)
+   realm="solr"`. Wayfinder matches the 401 status and the `WWW-Authenticate: Basic` challenge
+   shape, but issue #325 changed the realm token to `wayfinder`, and Wayfinder returns its normal
+   JSON error envelope rather than the HTML. The envelope half is the same client-facing choice
+   as divergences 1 and 8: Wayfinder's response surface is JSON-only and its clients parse JSON,
+   so reproducing a servlet-container fallback would add a second error format solely for
+   authentication failures. The realm half is safe because the realm string is a display label —
+   RFC 7617 clients key credentials on it but no `search_api_solr` code path compares it — so a
+   client re-prompts once at most. (issue #229; issue #325; finding 118)
 
 10. **`/update/extract` omits `X-Parsed-By`, omits Tika's injected `shape="rect"`,
     indexes Wayfinder's own extraction (not Tika's) on the Solr-Cell path, and extracts a
@@ -783,7 +809,7 @@ site did not configure an attachments integration. This is still a real client e
 but it weights the initial wire scope toward `extractOnly` rather than Solr Cell's much broader
 server-side indexing surface.
 
-The retained tracer bullet is therefore a multipart `POST /solr/{core}/update/extract` for plain
+The retained tracer bullet is therefore a multipart `POST /wayfinder/{core}/update/extract` for plain
 text and HTML, returning the captured `extractOnly=true` envelope. A following slice may apply
 `literal.<field>` and `fmap.<from>` and feed the existing update pipeline; those params are not
 required by the evidenced client path. The proposed format order is:
@@ -888,7 +914,8 @@ own scoping pass if ever pursued):
   process, one core.
 
 **Architecture.** New routes under `/ui` (resolved by issue #94; `/admin` was the other
-candidate), served by the same axum app, alongside the existing `/solr/*` API routes — not a
+candidate), served by the same axum app, alongside the existing `/wayfinder/*` API routes (issue
+#325 renamed them from `/solr/*`) — not a
 second process, not a second deployment artifact. Server-rendered HTML, compiled in via `askama`
 (compile-time-checked templates, no runtime template parsing, no JS build step) rather than a
 client-side framework — this keeps the "single static binary" goal intact the same way
@@ -1011,9 +1038,11 @@ Scoped to v1 features. Server TOML plus per-request params where Solr has them.
   simplicity without inventing a second certificate lifecycle. See `docs/deployment.md`.
 
 **Admin (config only, no per-request equivalent):**
-- `reported_solr_version` — the `lucene.solr-spec-version` served by `/admin/info/system` and
-  `<core>/admin/system`, default `"9.0.0"` (issue #59, §2 ratified divergence 5, §10 open
-  question 2). Unclamped: an operator who overrides it owns the compatibility risk.
+- `reported_server_version` — the `lucene.wayfinder-spec-version` served by `/admin/info/system`
+  and `<core>/admin/system`, default `"9.0.0"` (issue #59, §2 ratified divergence 5, §10 open
+  question 2). Issue #325 renamed the key from `reported_solr_version`, which is still accepted
+  as a serde alias, so existing config files keep parsing. Unclamped: an operator who overrides
+  it owns the compatibility risk.
 
 ---
 
@@ -1026,10 +1055,10 @@ iterated on, not a spike. No Drupal in it.
 (`string`, `fast`, `multi_valued`).
 
 1. TOML schema file → Tantivy schema.
-2. `POST /solr/<core>/update` — JSON add, `commit`.
-3. `GET /solr/<core>/select` — `q`, `fq`, `fl`, `rows`, `start`, one `facet.field`, correct
+2. `POST /wayfinder/<core>/update` — JSON add, `commit`.
+3. `GET /wayfinder/<core>/select` — `q`, `fq`, `fl`, `rows`, `start`, one `facet.field`, correct
    `numFound`, correct Solr JSON envelope.
-4. `GET /solr/<core>/admin/ping`.
+4. `GET /wayfinder/<core>/admin/ping`.
 
 **Done when:** `curl` a document in, `curl` a query out, and the response matches Solr's for
 the same corpus and query, modulo `QTime`.
@@ -1136,7 +1165,8 @@ operational simplicity are where this project wins, and those are the primary go
    admin UI (§5) is scoped around this — one core view, not a core list — and stays that way unless
    a future need forces multi-core, at which point this line reopens rather than silently drifting.
 2. ~~**Which Solr version to report** from `/admin/system`.~~ **Resolved by issue #59:**
-   `[admin] reported_solr_version` defaults to `"9.0.0"` — the lowest version in the 9.x branch
+   `[admin] reported_server_version` (issue #325's rename of `reported_solr_version`, still
+   accepted as an alias) defaults to `"9.0.0"` — the lowest version in the 9.x branch
    the Search API capture's generated `schema.xml` already targets (finding 78), and every
    `search_api_solr` `version_compare()` gate that unlocks a feature Wayfinder does not implement
    sits at or below Solr 8.x, so no 9.x value invites an unsupported feature. See ratified

@@ -31,7 +31,7 @@ async fn indexed_app_with_config(config: Option<&str>) -> (Router, TempDir, Path
     let (app, dir, data_dir) = build_app_with_config(config).expect("app must build");
     let req = Request::builder()
         .method("POST")
-        .uri(format!("/solr/{CORE}/update?commit=true"))
+        .uri(format!("/wayfinder/{CORE}/update?commit=true"))
         .header("content-type", "application/json")
         .body(Body::from(corpus().to_string()))
         .unwrap();
@@ -97,7 +97,7 @@ async fn missing_config_file_means_all_defaults() {
     let (app, _dir, _data) = build_app_with_missing_config().expect("missing config must be OK");
     let req = Request::builder()
         .method("POST")
-        .uri(format!("/solr/{CORE}/update?commit=true"))
+        .uri(format!("/wayfinder/{CORE}/update?commit=true"))
         .header("content-type", "application/json")
         .body(Body::from(corpus().to_string()))
         .unwrap();
@@ -229,7 +229,7 @@ async fn strict_params_still_accepts_the_commit_param_on_update() {
     // commit-only update must also pass strict mode.
     let req = Request::builder()
         .method("POST")
-        .uri(format!("/solr/{CORE}/update?commit=true"))
+        .uri(format!("/wayfinder/{CORE}/update?commit=true"))
         .header("content-type", "application/json")
         .body(Body::from("[]"))
         .unwrap();
@@ -246,7 +246,7 @@ async fn strict_params_rejects_unknown_param_on_update() {
     let (app, _dir, _data) = indexed_app_with_config(Some("strict_params = true\n")).await;
     let req = Request::builder()
         .method("POST")
-        .uri(format!("/solr/{CORE}/update?commit=true&notaparam=1"))
+        .uri(format!("/wayfinder/{CORE}/update?commit=true&notaparam=1"))
         .header("content-type", "application/json")
         .body(Body::from("[]"))
         .unwrap();

@@ -584,9 +584,9 @@ async fn an_empty_sort_param_behaves_as_no_sort() {
 // 5-doc `content`-core corpus, which has no numeric/float/date/multiValued-
 // numeric fields to sort on. `common::app_with_schema` is reusable as-is (it
 // takes an arbitrary schema TOML), but `common::get`/`common::post_docs` are
-// hardcoded to `/solr/{common::CORE}/...` where `CORE == "content"` — and the
+// hardcoded to `/wayfinder/{common::CORE}/...` where `CORE == "content"` — and the
 // captured fixtures' request paths, and the task spec, want a schema literally
-// named `sortdebt` at `/solr/sortdebt/...` (unlike `tests/faceting.rs::range_app`,
+// named `sortdebt` at `/wayfinder/sortdebt/...` (unlike `tests/faceting.rs::range_app`,
 // which sidesteps the same hardcoding by naming its mirror core `content`
 // instead). So `sortdebt_get`/`sortdebt_post_docs` below are line-for-line
 // mirrors of `common::get`/`common::post_docs`, retargeted at the `sortdebt`
@@ -674,12 +674,12 @@ fn sortdebt_doc(id: &str) -> Value {
     }
 }
 
-/// `POST /solr/sortdebt/update?commit=true` with `docs` as the body. See the
+/// `POST /wayfinder/sortdebt/update?commit=true` with `docs` as the body. See the
 /// section comment above for why this cannot be `common::post_docs`.
 async fn sortdebt_post_docs(app: &Router, docs: &Value) -> (StatusCode, Value) {
     let req = Request::builder()
         .method("POST")
-        .uri("/solr/sortdebt/update?commit=true")
+        .uri("/wayfinder/sortdebt/update?commit=true")
         .header("content-type", "application/json")
         .body(Body::from(docs.to_string()))
         .unwrap();
@@ -703,12 +703,12 @@ async fn sortdebt_post_docs(app: &Router, docs: &Value) -> (StatusCode, Value) {
     (status, body)
 }
 
-/// `GET /solr/sortdebt/<path_and_query>`. See the section comment above for
+/// `GET /wayfinder/sortdebt/<path_and_query>`. See the section comment above for
 /// why this cannot be `common::get`.
 async fn sortdebt_get(app: &Router, path_and_query: &str) -> (StatusCode, Value) {
     let req = Request::builder()
         .method("GET")
-        .uri(format!("/solr/sortdebt/{path_and_query}"))
+        .uri(format!("/wayfinder/sortdebt/{path_and_query}"))
         .body(Body::empty())
         .unwrap();
     let resp = app

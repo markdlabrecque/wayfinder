@@ -86,7 +86,7 @@ class WayfinderClient {
    *
    * Same transport and error handling as select(); only the endpoint differs.
    * The success envelope carries the version handshake under
-   * lucene.solr-spec-version -- ground truth
+   * lucene.wayfinder-spec-version -- ground truth
    * solr-ref/responses/admin_system.json.
    *
    * @return array

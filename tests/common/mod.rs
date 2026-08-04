@@ -112,7 +112,7 @@ pub async fn indexed_app() -> (Router, TempDir) {
 
     let req = Request::builder()
         .method("POST")
-        .uri(format!("/solr/{CORE}/update?commit=true"))
+        .uri(format!("/wayfinder/{CORE}/update?commit=true"))
         .header("content-type", "application/json")
         .body(Body::from(corpus().to_string()))
         .unwrap();
@@ -144,11 +144,11 @@ pub fn app_with_schema(dir: &Path, schema_toml: &str) -> anyhow::Result<Router> 
     wayfinder::app(&schema_path, &data_dir)
 }
 
-/// `POST /solr/<core>/update?commit=true` with `docs` as the body.
+/// `POST /wayfinder/<core>/update?commit=true` with `docs` as the body.
 pub async fn post_docs(app: &Router, docs: &Value) -> (StatusCode, Value) {
     let req = Request::builder()
         .method("POST")
-        .uri(format!("/solr/{CORE}/update?commit=true"))
+        .uri(format!("/wayfinder/{CORE}/update?commit=true"))
         .header("content-type", "application/json")
         .body(Body::from(docs.to_string()))
         .unwrap();
@@ -172,12 +172,12 @@ pub async fn post_docs(app: &Router, docs: &Value) -> (StatusCode, Value) {
     (status, body)
 }
 
-/// Issues `GET /solr/<core>/<path_and_query>` against `app` and returns the
+/// Issues `GET /wayfinder/<core>/<path_and_query>` against `app` and returns the
 /// HTTP status plus parsed JSON body.
 pub async fn get(app: &Router, path_and_query: &str) -> (StatusCode, Value) {
     let req = Request::builder()
         .method("GET")
-        .uri(format!("/solr/{CORE}/{path_and_query}"))
+        .uri(format!("/wayfinder/{CORE}/{path_and_query}"))
         .body(Body::empty())
         .unwrap();
     let resp = app
@@ -202,7 +202,7 @@ pub async fn get(app: &Router, path_and_query: &str) -> (StatusCode, Value) {
 
 /// Issues an arbitrary method/full-path request against `app` and returns
 /// the HTTP status plus parsed JSON body (or `Value::Null` for an empty
-/// body). "Full-path" means `path_and_query` is everything after `/solr/`,
+/// body). "Full-path" means `path_and_query` is everything after `/wayfinder/`,
 /// including the core segment — e.g. `content/update?commit=true&wt=json`
 /// or `nosuchcore/select?q=*:*&wt=json`. This is the variant the
 /// `manifest-errors.tsv` runner (`tests/differential.rs`) needs, since its
@@ -219,7 +219,7 @@ pub async fn request_full(
 ) -> (StatusCode, Value) {
     let req = Request::builder()
         .method(method)
-        .uri(format!("/solr/{path_and_query}"))
+        .uri(format!("/wayfinder/{path_and_query}"))
         .header("content-type", "application/json")
         .body(match body {
             Some(b) => Body::from(b.to_string()),
@@ -259,7 +259,7 @@ pub async fn request_full(
 pub const MULTIPART_BOUNDARY: &str = "WayfinderTestBoundary7f3a9c2e";
 
 /// Issues a single-file `multipart/form-data` POST against
-/// `/solr/<path_and_query>` (core-relative, like `request_full`'s counterpart
+/// `/wayfinder/<path_and_query>` (core-relative, like `request_full`'s counterpart
 /// is core-qualified) and returns the HTTP status plus parsed JSON body.
 ///
 /// Builds the multipart body by hand (RFC 2046) rather than depending on
@@ -312,7 +312,7 @@ pub async fn request_multipart_raw(
     let body = build_multipart_body(part_name, filename, mime, bytes);
     let req = Request::builder()
         .method("POST")
-        .uri(format!("/solr/{path_and_query}"))
+        .uri(format!("/wayfinder/{path_and_query}"))
         .header(
             "content-type",
             format!("multipart/form-data; boundary={MULTIPART_BOUNDARY}"),
@@ -367,7 +367,7 @@ pub async fn request_multipart_with_raw_body(
 ) -> (StatusCode, Value) {
     let req = Request::builder()
         .method("POST")
-        .uri(format!("/solr/{path_and_query}"))
+        .uri(format!("/wayfinder/{path_and_query}"))
         .header(
             "content-type",
             format!("multipart/form-data; boundary={MULTIPART_BOUNDARY}"),
@@ -413,10 +413,10 @@ pub async fn request(
 }
 
 /// Issues `GET <path>` against `app` and returns the HTTP status, response
-/// headers, and raw UTF-8 text body — for routes outside the JSON `/solr/*`
+/// headers, and raw UTF-8 text body — for routes outside the JSON `/wayfinder/*`
 /// wire API (e.g. the admin UI, issue #94), where the response is HTML, not
 /// JSON, so `get()`'s `serde_json::from_slice` would fail on a valid
-/// response. `path` is the full path (no `/solr/` prefix implied), unlike
+/// response. `path` is the full path (no `/wayfinder/` prefix implied), unlike
 /// `get()`.
 pub async fn get_text(app: &Router, path: &str) -> (StatusCode, axum::http::HeaderMap, String) {
     let req = Request::builder()

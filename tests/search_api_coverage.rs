@@ -211,13 +211,20 @@ fn normalized_endpoint(path: &str) -> String {
         .split('?')
         .next()
         .expect("trace URL has a path component");
-    if path.starts_with("/solr/admin/") {
-        path.to_owned()
+    // `path` is the literal URL captured off a real `solr:9` wire exchange
+    // (`solr-ref/search-api/trace/`), so the `/solr/` prefixes checked/stripped
+    // here are real Solr's, not Wayfinder's — they must not be renamed. The
+    // *returned* identifier, though, is compared against `trace.endpoint` from
+    // `coverage/search_api_coverage_contract.json`, which `src/coverage.rs`
+    // emits under Wayfinder's own `/wayfinder/{core}/...` vocabulary post-#325,
+    // so the output side is renamed to match.
+    if let Some(suffix) = path.strip_prefix("/solr/admin/") {
+        format!("/wayfinder/admin/{suffix}")
     } else {
         let suffix = path
             .strip_prefix("/solr/search_api_capture/")
             .unwrap_or_else(|| panic!("trace URL must address the captured core: {path}"));
-        format!("/solr/{{core}}/{suffix}")
+        format!("/wayfinder/{{core}}/{suffix}")
     }
 }
 
@@ -781,13 +788,13 @@ fn response_denominator_has_precise_search_api_solr_client_consumption_citations
         ("select.spellcheck.collations", "/spellcheck/collations"),
         ("mlt.response", "/response"),
         (
-            "admin.info-system.lucene.solr-spec-version",
+            "admin.info-system.lucene.wayfinder-spec-version",
             "/lucene/solr-spec-version",
         ),
         ("admin.system.core.schema", "/core/schema"),
         ("schema.fieldtypes.fieldTypes", "/fieldTypes"),
         ("admin.luke.index", "/index"),
-        ("admin.mbeans.solr-mbeans", "/solr-mbeans"),
+        ("admin.mbeans.wayfinder-mbeans", "/solr-mbeans"),
         ("terms.terms", "/terms"),
     ] {
         let field = contract
@@ -1298,7 +1305,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // unchanged -- no new semantics, one previously-uncovered one now
     // answered.
     // 46/75 -> 48/75 when issue #156 implemented `GET
-    // /solr/{core}/schema/fieldtypes` (resolving #142 as In), flipping two
+    // /wayfinder/{core}/schema/fieldtypes` (resolving #142 as In), flipping two
     // entries at once: the endpoint itself, now wired in
     // `search_api_routes!`, and the `schema.fieldtypes.fieldTypes` response
     // field, whose probe now gets an array derived from the live
@@ -1306,7 +1313,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // were already in the contract, just unmet. The rest of Solr's Schema API
     // is deliberately absent from the contract (PRD section 5 parity
     // roadmap), so this does not open a `/schema/*` family.
-    // 48/75 -> 50/75 when issue #157 implemented `GET /solr/{core}/admin/luke`
+    // 48/75 -> 50/75 when issue #157 implemented `GET /wayfinder/{core}/admin/luke`
     // (reversing the #57 descope for this endpoint), flipping two entries at
     // once: the endpoint itself, now wired in `search_api_routes!`, and the
     // `admin.luke.index` response field, whose probe now gets an `index{}`
@@ -1318,14 +1325,14 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // deliberately (PRD section 5 v2.75), which is why the endpoint carries no
     // `manifest.tsv` row and cannot be differentially diffed.
     // 50/75 -> 53/75 when issue #155 landed the TermsComponent endpoint
-    // (`GET /solr/{core}/terms`, `terms`/`terms.fl`, the inverted-index term
+    // (`GET /wayfinder/{core}/terms`, `terms`/`terms.fl`, the inverted-index term
     // dictionary read in `CoreIndex::field_terms`), flipping three entries in
-    // three different buckets at once: the `GET /solr/{core}/terms` route, the
+    // three different buckets at once: the `GET /wayfinder/{core}/terms` route, the
     // `terms.enumeration` request semantic, and the `terms.terms` response
     // field. Denominator unchanged -- no new contract items, three
     // previously-uncovered ones now answered.
-    // 53/75 -> 57/75 when issue #158 landed `GET /solr/{core}/admin/mbeans`:
-    // the endpoint, `admin.mbeans.stats`, and `admin.mbeans.solr-mbeans`
+    // 53/75 -> 57/75 when issue #158 landed `GET /wayfinder/{core}/admin/mbeans`:
+    // the endpoint, `admin.mbeans.stats`, and `admin.mbeans.wayfinder-mbeans`
     // entries the ticket named, PLUS `request.json-nl.repeated-map-and-flat`
     // (not named by the ticket, but its probe is gated on the same route --
     // see the comment on the request-semantics uncovered list above).
@@ -1483,17 +1490,17 @@ async fn hollow_container_response_fields_stay_covered_against_the_real_seeded_a
 /// Issue #167: `request.json-nl.repeated-map-and-flat`'s probe once checked
 /// only HTTP 200 on `content/admin/mbeans?json.nl=flat&json.nl=map`, the same
 /// class of bug #162 fixed for three response-field probes. The current probe
-/// requires object-shaped `solr-mbeans` and a discriminating `/select` facet
+/// requires object-shaped `wayfinder-mbeans` and a discriminating `/select` facet
 /// leg using `json.nl=map&json.nl=flat`. That tightening must not drop the
 /// fraction below `EXPECTED_FRACTION`: neither leg's *request* needs to change to reach
-/// real data -- `admin_mbeans` in `src/lib.rs` builds `solr-mbeans`
+/// real data -- `admin_mbeans` in `src/lib.rs` builds `wayfinder-mbeans`
 /// unconditionally, and the seeded probe corpus already facets `category` --
 /// so the item stays covered against the real seeded app.
 ///
 /// This is deliberately a live regression guard rather than a red test, for
 /// the same reason #162's sibling guard is: `src/coverage.rs`'s own
 /// `#[cfg(test)]` unit tests already pin the failing halves (a response
-/// missing `solr-mbeans` or shaping it as a non-object; a `category` facet
+/// missing `wayfinder-mbeans` or shaping it as a non-object; a `category` facet
 /// missing or rendered as `json.nl=flat`'s alternating array) with a stub
 /// router, since the real app cannot be coaxed into those shapes at these
 /// paths.
@@ -1518,7 +1525,7 @@ async fn repeated_map_and_flat_stays_covered_against_the_real_seeded_app() {
         item["covered"],
         Value::Bool(true),
         "request.json-nl.repeated-map-and-flat must remain covered against the \
-         real seeded app once its probe requires `solr-mbeans` to be a JSON \
+         real seeded app once its probe requires `wayfinder-mbeans` to be a JSON \
          object, got item: {item}"
     );
     // As with the sibling guard above, the constant tracks landed features
@@ -1542,7 +1549,7 @@ async fn repeated_map_and_flat_stays_covered_against_the_real_seeded_app() {
         Value::String(EXPECTED_FRACTION.to_string()),
         "tightening this probe's assertion must not, by itself, change the \
          coverage fraction -- the real handler already emits an object-shaped \
-         `solr-mbeans` regardless of `json.nl`, so nothing about the real \
+         `wayfinder-mbeans` regardless of `json.nl`, so nothing about the real \
          request needs to change to reach it"
     );
 }

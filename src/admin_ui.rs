@@ -32,7 +32,7 @@
 //! Issue #130 adds the fifth page, `GET /ui/ping`: this process's ping/health
 //! status. Like the query tester, it renders a real handler's real answer --
 //! `crate::ping_ui` calls `crate::ping`, the function
-//! `/solr/{core}/admin/ping` itself routes to, and this module only formats
+//! `/wayfinder/{core}/admin/ping` itself routes to, and this module only formats
 //! the status it returned. There is deliberately no second health-check code
 //! path.
 
@@ -137,7 +137,7 @@ struct QueryPage<'a> {
 ///
 /// `result` is `None` for the first/empty load and `Some((status, body))`
 /// after a submission, where both come straight from `crate::select` — the
-/// same handler `/solr/{core}/select` routes to. The body is pretty-printed
+/// same handler `/wayfinder/{core}/select` routes to. The body is pretty-printed
 /// and safe-escaped for the HTML context, and nothing else: no field is
 /// dropped, renamed, or summarised. What the page shows is the wire
 /// response, `responseHeader.QTime` and all. Normalising the *rendered*
@@ -290,7 +290,7 @@ struct PingPage<'a> {
 /// Renders the ping/health page.
 ///
 /// `status` and `http_status` both come from a real call to `crate::ping` —
-/// the very function `/solr/{core}/admin/ping` routes to (see
+/// the very function `/wayfinder/{core}/admin/ping` routes to (see
 /// `crate::ping_ui`) — so this module renders a health verdict it never
 /// computes. There is no second health-check path to keep in sync with the
 /// wire endpoint: if `/admin/ping` starts saying something other than `OK`,

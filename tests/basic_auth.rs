@@ -70,7 +70,7 @@ async fn assert_unauthorized(app: &Router, method: &str, path: &str, authorizati
         headers
             .get(header::WWW_AUTHENTICATE)
             .and_then(|value| value.to_str().ok()),
-        Some("Basic realm=\"solr\"")
+        Some("Basic realm=\"wayfinder\"")
     );
     let body: Value =
         serde_json::from_slice(&bytes).expect("401 must be a JSON Solr error envelope");
@@ -82,11 +82,14 @@ async fn assert_unauthorized(app: &Router, method: &str, path: &str, authorizati
 async fn ping_exemption_is_limited_to_the_configured_core_and_ui_ping() {
     let (app, _dir) = authenticated_app();
 
-    for ping in ["/solr/content/admin/ping", "/ui/ping"] {
+    for ping in ["/wayfinder/content/admin/ping", "/ui/ping"] {
         let (status, _headers, _bytes) = send(&app, "GET", ping, None, Body::empty()).await;
         assert_eq!(status, StatusCode::OK, "{ping} must remain unauthenticated");
     }
-    for path in ["/solr/other/admin/ping", "/solr/content/admin/ping/extra"] {
+    for path in [
+        "/wayfinder/other/admin/ping",
+        "/wayfinder/content/admin/ping/extra",
+    ] {
         assert_unauthorized(&app, "GET", path, None).await;
     }
 }
@@ -94,7 +97,7 @@ async fn ping_exemption_is_limited_to_the_configured_core_and_ui_ping() {
 #[tokio::test]
 async fn auth_protects_select_and_admin_ui() {
     let (app, _dir) = authenticated_app();
-    for path in ["/solr/content/select?q=*:*", "/ui"] {
+    for path in ["/wayfinder/content/select?q=*:*", "/ui"] {
         assert_unauthorized(&app, "GET", path, None).await;
     }
 }
@@ -102,7 +105,7 @@ async fn auth_protects_select_and_admin_ui() {
 #[tokio::test]
 async fn basic_auth_requires_well_formed_matching_credentials() {
     let (app, _dir) = authenticated_app();
-    let update = "/solr/content/update?commit=true";
+    let update = "/wayfinder/content/update?commit=true";
 
     for authorization in [
         "Basic b3BlcmF0b3I6d3Jvbmc=",

@@ -196,13 +196,13 @@ pub fn fixture_key_order(name: &str) -> KeyOrder {
     KeyOrder::parse(&fixture_text(name))
 }
 
-/// `GET /solr/<core>/<path_and_query>` returning the response body as **raw
+/// `GET /wayfinder/<core>/<path_and_query>` returning the response body as **raw
 /// text**. `common::get` parses to `Value`; that is the lossy step this module
 /// exists to avoid.
 pub async fn get_text(app: &Router, core: &str, path_and_query: &str) -> (StatusCode, String) {
     let req = Request::builder()
         .method("GET")
-        .uri(format!("/solr/{core}/{path_and_query}"))
+        .uri(format!("/wayfinder/{core}/{path_and_query}"))
         .body(Body::empty())
         .unwrap();
     let resp = app

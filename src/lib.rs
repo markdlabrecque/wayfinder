@@ -433,17 +433,17 @@ macro_rules! search_api_routes {
     ($apply:ident $(, $extra:expr)?) => {
         $apply! {
             $([$extra])?
-            ("/solr/{core}/update", update, update_method, inherit_body_limit),
-            ("/solr/{core}/update/extract", update_extract, update_method, extraction_body_limit),
-            ("/solr/{core}/select", select, any_method, inherit_body_limit),
-            ("/solr/{core}/mlt", mlt, any_method, inherit_body_limit),
-            ("/solr/{core}/terms", terms, any_method, inherit_body_limit),
-            ("/solr/{core}/admin/ping", ping, any_method, inherit_body_limit),
-            ("/solr/admin/info/system", admin_info_system, any_method, inherit_body_limit),
-            ("/solr/{core}/admin/system", core_admin_system, any_method, inherit_body_limit),
-            ("/solr/{core}/schema/fieldtypes", schema_fieldtypes, any_method, inherit_body_limit),
-            ("/solr/{core}/admin/luke", admin_luke, any_method, inherit_body_limit),
-            ("/solr/{core}/admin/mbeans", admin_mbeans, any_method, inherit_body_limit),
+            ("/wayfinder/{core}/update", update, update_method, inherit_body_limit),
+            ("/wayfinder/{core}/update/extract", update_extract, update_method, extraction_body_limit),
+            ("/wayfinder/{core}/select", select, any_method, inherit_body_limit),
+            ("/wayfinder/{core}/mlt", mlt, any_method, inherit_body_limit),
+            ("/wayfinder/{core}/terms", terms, any_method, inherit_body_limit),
+            ("/wayfinder/{core}/admin/ping", ping, any_method, inherit_body_limit),
+            ("/wayfinder/admin/info/system", admin_info_system, any_method, inherit_body_limit),
+            ("/wayfinder/{core}/admin/system", core_admin_system, any_method, inherit_body_limit),
+            ("/wayfinder/{core}/schema/fieldtypes", schema_fieldtypes, any_method, inherit_body_limit),
+            ("/wayfinder/{core}/admin/luke", admin_luke, any_method, inherit_body_limit),
+            ("/wayfinder/{core}/admin/mbeans", admin_mbeans, any_method, inherit_body_limit),
         }
     };
 }
@@ -582,7 +582,7 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
     // some methods (`err_update_put.json`), which it does itself, with Solr's
     // envelope for it.
     let router = search_api_routes!(wire_routes, extract_body_ceiling)
-        // Admin UI (issue #94, PRD §5 v2.5). Outside `/solr/*` on purpose:
+        // Admin UI (issue #94, PRD §5 v2.5). Outside `/wayfinder/*` on purpose:
         // this is Wayfinder's own surface, not part of the Solr wire API, so
         // it can never shadow a path a Solr client expects — deliberately
         // not part of `search_api_routes!`, which drives the coverage
@@ -616,7 +616,7 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
     // in `Cargo.toml` enables — a normal `cargo build`/`cargo build --release`
     // never compiles it in.
     #[cfg(feature = "test-support")]
-    let router = router.route("/solr/{core}/__test_panic__", any(test_panic));
+    let router = router.route("/wayfinder/{core}/__test_panic__", any(test_panic));
 
     // Defence in depth (#39): a handler panic (e.g. an unforeseen
     // `.unwrap()`/`.expect()` deep in a dependency, reachable from
@@ -694,14 +694,14 @@ async fn authenticate(
         .into_response();
         response.headers_mut().insert(
             header::WWW_AUTHENTICATE,
-            HeaderValue::from_static("Basic realm=\"solr\""),
+            HeaderValue::from_static("Basic realm=\"wayfinder\""),
         );
         response
     }
 }
 
 fn public_auth_path(path: &str, core_name: &str) -> bool {
-    path == "/ui/ping" || path == format!("/solr/{core_name}/admin/ping")
+    path == "/ui/ping" || path == format!("/wayfinder/{core_name}/admin/ping")
 }
 
 fn basic_credentials(header: &str) -> Option<Vec<u8>> {
@@ -835,7 +835,7 @@ async fn stats_ui(State(state): State<Arc<AppState>>) -> Response {
 /// `GET /ui/query` — the admin UI's query tester (issue #127, PRD §5 v2.5).
 ///
 /// A form over the core's own `/select` and nothing more: with a non-empty
-/// query string it calls [`select`] — the very function `/solr/{core}/select`
+/// query string it calls [`select`] — the very function `/wayfinder/{core}/select`
 /// routes to, with this process's single core name filled in — and renders
 /// that call's real status and JSON body. There is no second parsing,
 /// validation, or execution path, so nothing here can drift from the wire
@@ -919,7 +919,7 @@ async fn query_ui(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -
 /// v2.5).
 ///
 /// The health verdict is not computed here: this handler calls [`ping`] — the
-/// very function `/solr/{core}/admin/ping` routes to, with this process's
+/// very function `/wayfinder/{core}/admin/ping` routes to, with this process's
 /// single core name filled in — and renders that call's real `status` value
 /// and HTTP status. So there is no second health-check code path to keep in
 /// sync with the wire endpoint; a page that says `OK` says it because
@@ -1372,12 +1372,12 @@ fn admin_info_jvm_system_security() -> (Value, Value, Value) {
     (jvm, system, security)
 }
 
-/// `/solr/admin/info/system` — server-level version handshake (issue #59).
+/// `/wayfinder/admin/info/system` — server-level version handshake (issue #59).
 /// Not core-scoped: no `{core}` path segment, hence no `check_core` call.
 ///
-/// `lucene.solr-spec-version` is the ONE field `search_api_solr`'s
+/// `lucene.wayfinder-spec-version` is the ONE field `search_api_solr`'s
 /// `SolrConnector::getSolrVersion()` (finding 78) actually reads, and it is
-/// read here from `config.admin.reported_solr_version` — see
+/// read here from `config.admin.reported_server_version` — see
 /// `config::Admin` for the version-choice reasoning (PRD open question 2).
 async fn admin_info_system(
     State(state): State<Arc<AppState>>,
@@ -1386,11 +1386,11 @@ async fn admin_info_system(
     let params = Params::parse(query.as_deref().unwrap_or(""));
     check_params(&state, ADMIN_INFO_PARAMS, &params)?;
     let (jvm, system, security) = admin_info_jvm_system_security();
-    let version = &state.config.admin.reported_solr_version;
+    let version = &state.config.admin.reported_server_version;
     let mut lucene = Map::new();
-    lucene.insert("solr-spec-version".to_string(), json!(version));
+    lucene.insert("wayfinder-spec-version".to_string(), json!(version));
     lucene.insert(
-        "solr-impl-version".to_string(),
+        "wayfinder-impl-version".to_string(),
         json!(format!("{version} wayfinder")),
     );
     lucene.insert("lucene-spec-version".to_string(), json!("9.12.3"));
@@ -1401,8 +1401,8 @@ async fn admin_info_system(
             "QTime": 0,
         },
         "mode": "std",
-        "solr_home": "/var/solr/data",
-        "core_root": "/var/solr/data",
+        "wayfinder_home": "/var/wayfinder/data",
+        "core_root": "/var/wayfinder/data",
         "lucene": lucene,
         "jvm": jvm,
         "security": security,
@@ -1422,9 +1422,9 @@ async fn admin_info_system(
 /// the version handshake breaks for real (finding 78,
 /// docs/solr-ref-findings.md). A shorter placeholder like
 /// `"wayfinder-{core}"` only has 2 dash-separated parts and fails this.
-const CORE_ADMIN_SCHEMA: &str = "drupal-4.4.0-solr-9.x-0";
+const CORE_ADMIN_SCHEMA: &str = "drupal-4.4.0-wayfinder-9.x-0";
 
-/// `/solr/{core}/admin/system` — core-scoped fallback for the same
+/// `/wayfinder/{core}/admin/system` — core-scoped fallback for the same
 /// version-handshake (finding 78: `search_api_solr` tries this path first,
 /// falling back to `/admin/info/system`). Same envelope as
 /// `admin_info_system` plus the `core{}` object (`solr-ref/search-api/trace/00026.json`).
@@ -1437,7 +1437,7 @@ async fn core_admin_system(
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, ADMIN_INFO_PARAMS, &params)?;
     let (jvm, system, security) = admin_info_jvm_system_security();
-    let version = &state.config.admin.reported_solr_version;
+    let version = &state.config.admin.reported_server_version;
     let mut core_response = Map::new();
     core_response.insert("schema".to_string(), json!(CORE_ADMIN_SCHEMA));
     core_response.insert("host".to_string(), json!("wayfinder"));
@@ -1464,8 +1464,8 @@ async fn core_admin_system(
         "core": core_response,
         "mode": "std",
         "lucene": {
-            "solr-spec-version": version,
-            "solr-impl-version": format!("{version} wayfinder"),
+            "wayfinder-spec-version": version,
+            "wayfinder-impl-version": format!("{version} wayfinder"),
             "lucene-spec-version": "9.12.3",
             "lucene-impl-version": "9.12.3 wayfinder",
         },
@@ -1476,7 +1476,7 @@ async fn core_admin_system(
     Ok(axum::Json(body).into_response())
 }
 
-/// `/solr/{core}/admin/mbeans` -- the JMX-bean dump `search_api_solr`'s
+/// `/wayfinder/{core}/admin/mbeans` -- the JMX-bean dump `search_api_solr`'s
 /// "Solr server status" report reads (issue #158, reversing #57's descope for
 /// this endpoint).
 ///
@@ -1484,14 +1484,14 @@ async fn core_admin_system(
 /// `solr:9` output, of which `SolrConnectorPluginBase::getStatsSummary()`
 /// (`coverage/search_api_solr_4.4.0_source/src/SolrConnector/SolrConnectorPluginBase.php`,
 /// ~L775-820) reads exactly six leaves on its Solr >= 7.0 branch -- the branch
-/// that applies, since `config.admin.reported_solr_version` reports 9.x:
+/// that applies, since `config.admin.reported_server_version` reports 9.x:
 ///
-/// - `solr-mbeans.UPDATE.updateHandler.stats["UPDATE.updateHandler.docsPending"]`
+/// - `wayfinder-mbeans.UPDATE.updateHandler.stats["UPDATE.updateHandler.docsPending"]`
 /// - `...["UPDATE.updateHandler.softAutoCommitMaxTime"]`
 /// - `...["UPDATE.updateHandler.deletesById"]`
 /// - `...["UPDATE.updateHandler.deletesByQuery"]`
-/// - `solr-mbeans.CORE.core.stats["CORE.coreName"]`
-/// - `solr-mbeans.CORE.core.stats["INDEX.size"]`
+/// - `wayfinder-mbeans.CORE.core.stats["CORE.coreName"]`
+/// - `wayfinder-mbeans.CORE.core.stats["INDEX.size"]`
 ///
 /// All six are real state here, not placeholders: `docsPending` is the very
 /// counter `autocommit_max_docs` acts on (`CoreIndex::pending_docs`), the two
@@ -1610,7 +1610,7 @@ async fn admin_mbeans(
     let mut update_handler = Map::new();
     update_handler.insert(
         "class".to_string(),
-        json!("org.apache.solr.update.DirectUpdateHandler2"),
+        json!("dev.wayfinder.update.DirectUpdateHandler2"),
     );
     update_handler.insert(
         "description".to_string(),
@@ -1618,10 +1618,10 @@ async fn admin_mbeans(
     );
     let mut core_bean = Map::new();
     core_bean.insert("class".to_string(), json!(state.core_name));
-    core_bean.insert("description".to_string(), json!("SolrCore"));
+    core_bean.insert("description".to_string(), json!("WayfinderCore"));
     // The `stats` sub-object appears only under `stats=true` -- without it Solr
     // returns the bean list alone, and the coverage probe for
-    // `admin.mbeans.solr-mbeans` GETs the endpoint with no `stats` at all.
+    // `admin.mbeans.wayfinder-mbeans` GETs the endpoint with no `stats` at all.
     if want_stats {
         update_handler.insert("stats".to_string(), Value::Object(update_stats));
         core_bean.insert("stats".to_string(), core_stats);
@@ -1632,7 +1632,7 @@ async fn admin_mbeans(
             "status": 0,
             "QTime": 0,
         },
-        "solr-mbeans": {
+        "wayfinder-mbeans": {
             "CORE": { "core": core_bean },
             "UPDATE": { "updateHandler": update_handler },
         },
@@ -1645,17 +1645,17 @@ async fn admin_mbeans(
 /// describe Solr's taxonomy, not Wayfinder's storage: `int`/`long` are both
 /// an i64 in Tantivy, and `float`/`double` are both an f64. The distinction
 /// survives here only because the type *names* do.
-fn solr_class_for_builtin(name: &str) -> &'static str {
+fn field_class_for_builtin(name: &str) -> &'static str {
     match name {
-        "string" | "keyword" => "solr.StrField",
-        "int" => "solr.IntPointField",
-        "long" => "solr.LongPointField",
-        "float" => "solr.FloatPointField",
-        "double" => "solr.DoublePointField",
-        "date" => "solr.DatePointField",
+        "string" | "keyword" => "wayfinder.StrField",
+        "int" => "wayfinder.IntPointField",
+        "long" => "wayfinder.LongPointField",
+        "float" => "wayfinder.FloatPointField",
+        "double" => "wayfinder.DoublePointField",
+        "date" => "wayfinder.DatePointField",
         // `text_general`, `text_en` and every `text_<code>` preset: analyzed
         // text, which is Solr's `TextField`.
-        _ => "solr.TextField",
+        _ => "wayfinder.TextField",
     }
 }
 
@@ -1703,7 +1703,7 @@ fn field_type_entry(name: &str, class: &str) -> Value {
     })
 }
 
-/// `/solr/{core}/schema/fieldtypes` — the field types this core can actually
+/// `/wayfinder/{core}/schema/fieldtypes` — the field types this core can actually
 /// resolve (issue #156, resolving #142 as In).
 ///
 /// The one real consumer is `search_api_solr`'s
@@ -1744,7 +1744,7 @@ async fn schema_fieldtypes(
         .iter()
         // A custom chain is always analyzed text (`resolve_type` maps it to
         // `ResolvedType::Text`).
-        .map(|ft| field_type_entry(&ft.name, "solr.TextField"))
+        .map(|ft| field_type_entry(&ft.name, "wayfinder.TextField"))
         .collect();
     field_types.extend(
         schema::builtin_type_names()
@@ -1756,7 +1756,7 @@ async fn schema_fieldtypes(
             // this still keeps a duplicate out of the `in_array` name list
             // `isPartOfSchema` reads.
             .filter(|name| !custom.iter().any(|ft| &&ft.name == name))
-            .map(|name| field_type_entry(name, solr_class_for_builtin(name))),
+            .map(|name| field_type_entry(name, field_class_for_builtin(name))),
     );
 
     let body = json!({
@@ -1834,7 +1834,7 @@ fn luke_field_entry(field: &schema::FieldConfig) -> Value {
     })
 }
 
-/// `/solr/{core}/admin/luke` — index statistics and the field list (issue
+/// `/wayfinder/{core}/admin/luke` — index statistics and the field list (issue
 /// #157, reversing the #57 descope for this endpoint).
 ///
 /// The one real consumer is `search_api_solr`'s
@@ -2289,8 +2289,8 @@ const OCTET_STREAM: &str = "application/octet-stream";
 /// params override and extend: a request `fmap.<from>` wins over the default
 /// on the same `<from>` and adds new mappings; `lowernames`/`uprefix`/
 /// `captureAttr` are overridden outright when sent.
-const SOLR_CELL_DEFAULT_FMAP: &[(&str, &str)] = &[("a", "links"), ("div", "ignored_")];
-const SOLR_CELL_DEFAULT_UPREFIX: &str = "ignored_";
+const EXTRACT_DEFAULT_FMAP: &[(&str, &str)] = &[("a", "links"), ("div", "ignored_")];
+const EXTRACT_DEFAULT_UPREFIX: &str = "ignored_";
 
 /// Builds the indexed document's field map from an extraction and the
 /// request's Solr-Cell params (#259), in Solr's order: `lowernames` → `fmap`
@@ -2320,19 +2320,19 @@ const SOLR_CELL_DEFAULT_UPREFIX: &str = "ignored_";
 /// divergence 10 forbids fabricating `shape="rect"`, so `links` carries only
 /// the real attribute values. That divergence is recorded in the PRD and
 /// asserted by the route tests; this function is where it originates.
-fn solr_cell_fields(
+fn extract_cell_fields(
     doc: &extract::ExtractedDocument,
     params: &Params,
     schema: &schema::WayfinderSchema,
 ) -> Result<Vec<(String, Vec<Value>)>, WfError> {
     let lowernames = params.bool_or("lowernames", true)?;
     let capture_attr = params.bool_or("captureAttr", true)?;
-    let uprefix = params.get("uprefix").unwrap_or(SOLR_CELL_DEFAULT_UPREFIX);
+    let uprefix = params.get("uprefix").unwrap_or(EXTRACT_DEFAULT_UPREFIX);
     let uprefix_set = !uprefix.is_empty();
 
     // `fmap`: defaults merged with request params (request wins on conflict).
     let mut fmap: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
-    for (from, to) in SOLR_CELL_DEFAULT_FMAP {
+    for (from, to) in EXTRACT_DEFAULT_FMAP {
         fmap.insert(from, to);
     }
     for (from, to) in params.pairs_with_prefix("fmap.") {
@@ -2347,7 +2347,7 @@ fn solr_cell_fields(
 
     // Source fields: extracted text/metadata, plus captured element
     // attributes when `captureAttr` is on.
-    let mut source: Vec<(String, Vec<String>)> = doc.solr_cell_source_fields();
+    let mut source: Vec<(String, Vec<String>)> = doc.extract_source_fields();
     if capture_attr {
         for (element, value) in &doc.captured_attrs {
             if let Some(entry) = source.iter_mut().find(|(name, _)| name == element) {
@@ -2399,7 +2399,7 @@ fn solr_cell_fields(
 
 /// The indexing half of `/update/extract` (issue #259): takes the extraction
 /// and the request's Solr-Cell params, builds the document through
-/// [`solr_cell_fields`], and indexes it through the same commit path `/update`
+/// [`extract_cell_fields`], and indexes it through the same commit path `/update`
 /// uses — `add_documents` then the `commit`/`softCommit`/`commitWithin`
 /// semantics, answering the bare `responseHeader` envelope
 /// (`extract_html_index.json`).
@@ -2409,7 +2409,7 @@ fn solr_cell_fields(
 /// does. The bound-then-OR pattern is copied from there for the same reason:
 /// short-circuiting would let an invalid `softCommit` hide behind a true
 /// `commit`.
-async fn solr_cell_index(
+async fn extract_cell_index(
     state: &AppState,
     params: &Params,
     doc: &extract::ExtractedDocument,
@@ -2430,7 +2430,7 @@ async fn solr_cell_index(
         .map_err(|e| e.envelope(Envelope::NoParams))?;
     let commit_requested = commit || soft_commit;
 
-    let fields = solr_cell_fields(doc, params, &state.index.wf_schema)
+    let fields = extract_cell_fields(doc, params, &state.index.wf_schema)
         .map_err(|e| e.envelope(Envelope::NoParams))?;
     let mut obj = Map::new();
     for (name, values) in fields {
@@ -2463,7 +2463,7 @@ async fn solr_cell_index(
     Ok(update_success(params))
 }
 
-/// `POST /solr/{core}/update/extract` (issues #258 and #259).
+/// `POST /wayfinder/{core}/update/extract` (issues #258 and #259).
 ///
 /// Two modes share this one handler, selected by the resolved `extractOnly`
 /// boolean:
@@ -2473,7 +2473,7 @@ async fn solr_cell_index(
 /// - **`extractOnly` absent/false** (#259, Solr Cell indexing): apply the
 ///   extracted content to the index through the same commit path `/update`
 ///   uses, answering the bare `responseHeader` envelope
-///   (`extract_html_index.json`). See [`solr_cell_index`].
+///   (`extract_html_index.json`). See [`extract_cell_index`].
 ///
 /// #258 shipped requiring `extractOnly=true` (PRD divergence 10): indexing was
 /// out of v1 scope, so a 200 that silently indexed nothing was the worse
@@ -2689,7 +2689,7 @@ async fn update_extract(
     if !extract_only {
         // Indexing path (issue #259): apply Solr-Cell field mapping to the
         // extraction and index through the normal `/update` commit path.
-        return solr_cell_index(&state, &params, &doc).await;
+        return extract_cell_index(&state, &params, &doc).await;
     }
 
     let render = extract::ExtractRender {
@@ -3399,7 +3399,7 @@ async fn select(
     Ok(axum::Json(body).into_response())
 }
 
-/// `GET /solr/<core>/mlt` (issue #6, PRD §5). `q` resolves the source
+/// `GET /wayfinder/<core>/mlt` (issue #6, PRD §5). `q` resolves the source
 /// document the same way `/select`'s `q` does; `mlt.fl` names which stored
 /// fields to mine for interesting terms (every declared field if absent);
 /// `fl`/`rows`/`start` page the similar-docs result set exactly as
@@ -3678,7 +3678,7 @@ async fn mlt(
     Ok(axum::Json(body).into_response())
 }
 
-/// `GET /solr/<core>/terms` — Solr's TermsComponent (issue #155, PRD's
+/// `GET /wayfinder/<core>/terms` — Solr's TermsComponent (issue #155, PRD's
 /// contract-endpoint backlog). Enumerates a field's **analyzed** inverted-index
 /// term dictionary with per-term document frequency.
 ///

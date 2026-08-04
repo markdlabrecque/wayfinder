@@ -1,11 +1,12 @@
-//! `/solr/admin/info/system` (server-level) and `/solr/{core}/admin/system`
+//! `/wayfinder/admin/info/system` (server-level) and `/wayfinder/{core}/admin/system`
 //! (core-scoped fallback) — issue #59, PRD open question 2.
 //!
-//! `search_api_solr`'s `SolrConnector::getSolrVersion()` (finding 78) reads
+//! `search_api_solr`'s `SolrConnector::getSolrVersion()` (finding 78) used to read
 //! `lucene.solr-spec-version` off `<core>/admin/system`, falling back to
-//! `/admin/info/system`, and regex-captures the leading `major.minor.patch`.
-//! That field is the one thing `search_api_solr` reads, but `responseHeader`,
-//! `mode`, `solr_home`/`core_root`, `lucene-spec-version`, and `core.schema`
+//! `/admin/info/system`, and regex-captures the leading `major.minor.patch`;
+//! that interop is withdrawn by this issue and the key is now
+//! `lucene.wayfinder-spec-version`. `responseHeader`,
+//! `mode`, `wayfinder_home`/`core_root`, `lucene-spec-version`, and `core.schema`
 //! are also pinned to exact literal values below — `tests/differential.rs`'s
 //! `EXPECTED_DIVERGENCES`/`EXPECTED_DIVERGENCES_MANIFEST_ERRORS` reason
 //! strings claim those are "compared exactly and do match", so something
@@ -50,34 +51,51 @@ fn build_app_with_config(config: Option<&str>) -> anyhow::Result<(Router, TempDi
 }
 
 /// `Admin`'s config-only test: `ServerConfig::parse` must accept `[admin]`
-/// and default `reported_solr_version` to `"9.0.0"` (PRD open question 2,
+/// and default `reported_server_version` to `"9.0.0"` (PRD open question 2,
 /// decision recorded in this issue's spec: lowest version in the 9.x branch
 /// the capture's generated `schema.xml` targets).
 #[test]
 fn server_config_admin_defaults_to_9_0_0() {
     let config = wayfinder::ServerConfig::parse("").expect("empty config is valid");
-    assert_eq!(config.admin.reported_solr_version, "9.0.0");
+    assert_eq!(config.admin.reported_server_version, "9.0.0");
 }
 
 #[test]
 fn server_config_admin_section_is_overridable() {
-    let config = wayfinder::ServerConfig::parse("[admin]\nreported_solr_version = \"8.5.0\"\n")
+    let config = wayfinder::ServerConfig::parse("[admin]\nreported_server_version = \"8.5.0\"\n")
         .expect("a valid admin section must parse");
-    assert_eq!(config.admin.reported_solr_version, "8.5.0");
+    assert_eq!(config.admin.reported_server_version, "8.5.0");
+}
+
+/// Issue #325's entire operator-facing back-compat promise: the key was
+/// renamed `reported_solr_version` -> `reported_server_version`, and
+/// `Admin`'s `#[serde(alias = "reported_solr_version")]` is what keeps a
+/// `wayfinder.toml` written before the rename loading unchanged. `Admin` is
+/// `deny_unknown_fields`, so without the alias this is not a silent no-op but
+/// a hard startup failure on the old key -- which is exactly why it needs a
+/// test rather than trust. Deleting the attribute must turn this red.
+#[test]
+fn server_config_admin_accepts_the_legacy_reported_solr_version_key() {
+    let config = wayfinder::ServerConfig::parse("[admin]\nreported_solr_version = \"8.5.0\"\n")
+        .expect("the pre-#325 key must still parse via the serde alias");
+    assert_eq!(
+        config.admin.reported_server_version, "8.5.0",
+        "the legacy key must populate the renamed field, not fall back to the default"
+    );
 }
 
 #[test]
 fn server_config_admin_rejects_unknown_key_by_name() {
-    let err = wayfinder::ServerConfig::parse("[admin]\nreported_solr_versionn = \"9.0.0\"\n")
+    let err = wayfinder::ServerConfig::parse("[admin]\nreported_server_versionn = \"9.0.0\"\n")
         .expect_err("a typo'd admin key must not silently no-op");
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("reported_solr_versionn"),
+        msg.contains("reported_server_versionn"),
         "error must name the offending key, got: {msg}"
     );
 }
 
-// --- server-level: /solr/admin/info/system ----------------------------------
+// --- server-level: /wayfinder/admin/info/system ----------------------------------
 
 #[tokio::test]
 async fn admin_info_system_default_version_is_9_0_0() {
@@ -88,21 +106,21 @@ async fn admin_info_system_default_version_is_9_0_0() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["responseHeader"]["status"], 0);
     assert_eq!(
-        body["lucene"]["solr-spec-version"], "9.0.0",
+        body["lucene"]["wayfinder-spec-version"], "9.0.0",
         "default reported version must be 9.0.0 (PRD open question 2), got: {body}"
     );
 }
 
 #[tokio::test]
 async fn admin_info_system_reports_configured_version_override() {
-    let (app, _dir) = build_app_with_config(Some("[admin]\nreported_solr_version = \"8.5.0\"\n"))
+    let (app, _dir) = build_app_with_config(Some("[admin]\nreported_server_version = \"8.5.0\"\n"))
         .expect("app must build");
     let (status, body) =
         request_full(&app, "GET", "admin/info/system?wt=json&json.nl=flat", None).await;
 
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(
-        body["lucene"]["solr-spec-version"], "8.5.0",
+        body["lucene"]["wayfinder-spec-version"], "8.5.0",
         "reported version must be read from config, not hardcoded, got: {body}"
     );
 }
@@ -116,14 +134,15 @@ async fn admin_info_system_reports_configured_version_override() {
 /// reasoning.
 #[tokio::test]
 async fn admin_info_system_reports_an_implausibly_high_version_unclamped() {
-    let (app, _dir) = build_app_with_config(Some("[admin]\nreported_solr_version = \"99.0.0\"\n"))
-        .expect("app must build");
+    let (app, _dir) =
+        build_app_with_config(Some("[admin]\nreported_server_version = \"99.0.0\"\n"))
+            .expect("app must build");
     let (status, body) =
         request_full(&app, "GET", "admin/info/system?wt=json&json.nl=flat", None).await;
 
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(
-        body["lucene"]["solr-spec-version"], "99.0.0",
+        body["lucene"]["wayfinder-spec-version"], "99.0.0",
         "an implausible version must pass through exactly as configured, no silent clamp, \
          got: {body}"
     );
@@ -139,7 +158,7 @@ async fn admin_info_system_top_level_key_shape_matches_the_captured_envelope() {
     for key in [
         "responseHeader",
         "mode",
-        "solr_home",
+        "wayfinder_home",
         "core_root",
         "lucene",
         "jvm",
@@ -153,8 +172,8 @@ async fn admin_info_system_top_level_key_shape_matches_the_captured_envelope() {
         );
     }
     for key in [
-        "solr-spec-version",
-        "solr-impl-version",
+        "wayfinder-spec-version",
+        "wayfinder-impl-version",
         "lucene-spec-version",
         "lucene-impl-version",
     ] {
@@ -171,9 +190,9 @@ async fn admin_info_system_top_level_key_shape_matches_the_captured_envelope() {
 
 /// Pins the fields the `EXPECTED_DIVERGENCES_MANIFEST_ERRORS` reason string
 /// in `tests/differential.rs` claims are "compared exactly and do match":
-/// `responseHeader`, `mode`, `solr_home`, `core_root`, and
+/// `responseHeader`, `mode`, `wayfinder_home`, `core_root`, and
 /// `lucene-spec-version` (the one hardcoded lucene value, as opposed to
-/// `solr-spec-version` which is the deliberately-configured one under test
+/// `wayfinder-spec-version` which is the deliberately-configured one under test
 /// above). Round-2 review flagged that nothing previously pinned these
 /// literal values — a regression here would stay green everywhere else.
 #[tokio::test]
@@ -186,8 +205,8 @@ async fn admin_info_system_pins_the_fields_the_differential_reason_string_claims
     assert_eq!(body["responseHeader"]["status"], 0);
     assert_eq!(body["responseHeader"]["QTime"], 0);
     assert_eq!(body["mode"], "std");
-    assert_eq!(body["solr_home"], "/var/solr/data");
-    assert_eq!(body["core_root"], "/var/solr/data");
+    assert_eq!(body["wayfinder_home"], "/var/wayfinder/data");
+    assert_eq!(body["core_root"], "/var/wayfinder/data");
     assert_eq!(body["lucene"]["lucene-spec-version"], "9.12.3");
 }
 
@@ -246,7 +265,7 @@ async fn admin_info_system_is_method_agnostic() {
     assert_eq!(status, StatusCode::OK);
 }
 
-// --- core-scoped fallback: /solr/{core}/admin/system ------------------------
+// --- core-scoped fallback: /wayfinder/{core}/admin/system ------------------------
 
 #[tokio::test]
 async fn core_admin_system_default_version_is_9_0_0() {
@@ -255,18 +274,18 @@ async fn core_admin_system_default_version_is_9_0_0() {
 
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["responseHeader"]["status"], 0);
-    assert_eq!(body["lucene"]["solr-spec-version"], "9.0.0");
+    assert_eq!(body["lucene"]["wayfinder-spec-version"], "9.0.0");
 }
 
 #[tokio::test]
 async fn core_admin_system_reports_configured_version_override() {
-    let (app, _dir) = build_app_with_config(Some("[admin]\nreported_solr_version = \"8.5.0\"\n"))
+    let (app, _dir) = build_app_with_config(Some("[admin]\nreported_server_version = \"8.5.0\"\n"))
         .expect("app must build");
     let (status, body) = get(&app, "admin/system?wt=json&json.nl=flat").await;
 
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(
-        body["lucene"]["solr-spec-version"], "8.5.0",
+        body["lucene"]["wayfinder-spec-version"], "8.5.0",
         "reported version must be read from config, not hardcoded, got: {body}"
     );
 }
@@ -365,7 +384,7 @@ async fn core_admin_system_schema_has_the_dash_part_shape_search_api_solr_indexe
     // the real client. Pin the exact literal too, verbatim from
     // `solr-ref/responses/admin_system.json`'s `core.schema`.
     assert_eq!(
-        schema, "drupal-4.4.0-solr-9.x-0",
+        schema, "drupal-4.4.0-wayfinder-9.x-0",
         "core.schema must match the captured fixture exactly, got `{schema}`"
     );
 

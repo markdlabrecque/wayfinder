@@ -34,7 +34,7 @@
 //! reachable from a handler with untrusted input) to swap in instead.
 //!
 //! Resolution: the implementor added a test-only route,
-//! `GET /solr/{core}/__test_panic__`, gated behind a `test-support` Cargo
+//! `GET /wayfinder/{core}/__test_panic__`, gated behind a `test-support` Cargo
 //! feature that is off by default and enabled only by this crate's own
 //! `[dev-dependencies]` entry in `Cargo.toml` — so a normal `cargo build` or
 //! `cargo build --release` never compiles it in, and production gains no new
@@ -79,7 +79,7 @@ async fn panic_in_handler_is_caught_and_returns_solr_error_envelope() {
     // also fixes in this same change and so no longer panics.
     let req = Request::builder()
         .method("GET")
-        .uri(format!("/solr/{CORE}/__test_panic__"))
+        .uri(format!("/wayfinder/{CORE}/__test_panic__"))
         .body(Body::empty())
         .unwrap();
 

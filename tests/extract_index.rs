@@ -1,4 +1,4 @@
-//! `/solr/{core}/update/extract` Solr-Cell indexing path (issue #259).
+//! `/wayfinder/{core}/update/extract` Solr-Cell indexing path (issue #259).
 //!
 //! The companion to `extract_route.rs`: where that file covers #258's
 //! `extractOnly=true` extraction response, this one covers #259's
@@ -270,7 +270,7 @@ async fn literal_field_becomes_a_document_field() {
 /// `captureAttr=false` suppresses captured attribute fields: with the default
 /// `fmap.a=links`, `links` is populated when `captureAttr` is on (the default)
 /// and absent when a request turns it off. Mutation guard for the
-/// `captureAttr` gate in `solr_cell_fields`.
+/// `captureAttr` gate in `extract_cell_fields`.
 #[tokio::test]
 async fn capture_attr_false_omits_captured_attribute_fields() {
     let (app, _dir) = index_app().await;
