@@ -497,6 +497,49 @@ async fn multivalued_contains_inside_one_member_matches_both_docs() {
     assert_matches_fixture(body, "dr341_multi_contains_one");
 }
 
+/// End-to-end counterpart of `date_range::tests::
+/// contains_merges_adjacent_members_into_one_run`: `Contains` is a relation
+/// against the UNION of the members (finding 168), so two millisecond-adjacent
+/// members form ONE contiguous run and a query straddling their boundary is
+/// contained by it -- while the same query against members with a real hole
+/// between them is not. The committed corpus has no adjacent-member document,
+/// so this indexes its own two docs.
+///
+/// NOT fixture-derived: no `dr341_*` capture exercises adjacent members. The
+/// expectation comes from Lucene's `ContainsPrefixTreeQuery`, which for a
+/// multi-valued shape sets `multiOverlappingIndexedShapes` and therefore tests
+/// containment against the merged union rather than member by member. Recorded
+/// as inferred, not captured.
+#[tokio::test]
+async fn multivalued_contains_merges_adjacent_members_into_one_run() {
+    let dir = TempDir::new().expect("temp dir");
+    let app =
+        app_with_schema(dir.path(), DATE_RANGE_SCHEMA_TOML).expect("date_range app must build");
+    let (status, body) = post_docs(
+        &app,
+        &json!([
+            {"id":"adj","drm_x":["2010","2011"]},
+            {"id":"hole","drm_x":["2010","2012"]}
+        ]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = get(
+        &app,
+        "select?q=%7B%21field%20f%3Ddrm_x%20op%3DContains%7D%5B2010-06%20TO%202011-06%5D\
+         &fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec!["adj".to_string()],
+        "2010 and 2011 are millisecond-adjacent, so their union is one run that \
+         contains [2010-06 TO 2011-06]; 2010 + 2012 leaves a 2011 hole the query \
+         falls into, {body}"
+    );
+}
+
 /// `Within` requires EVERY member to fit inside the query: a 2020-only query
 /// matches d9 alone even though d8's `2020` member fits perfectly (d8's OTHER
 /// member, `2022-05`, does not) -- the case that rules out "any member

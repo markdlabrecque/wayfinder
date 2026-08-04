@@ -606,6 +606,44 @@ async fn dynamic_multivalued_contains_inside_one_member_matches_both_docs() {
     assert_matches_fixture(body, "dr341_multi_contains_one");
 }
 
+/// Dynamic mirror of
+/// `date_range::multivalued_contains_merges_adjacent_members_into_one_run`.
+/// Worth pinning separately: on the dynamic path the members live in two JSON
+/// sub-path fast columns, so the merge runs over ordinally paired column values
+/// rather than a declared field's two synthetic columns.
+///
+/// NOT fixture-derived -- see the static twin for the Lucene
+/// `ContainsPrefixTreeQuery` reasoning; recorded as inferred, not captured.
+#[tokio::test]
+async fn dynamic_multivalued_contains_merges_adjacent_members_into_one_run() {
+    let dir = TempDir::new().expect("temp dir");
+    let app = app_with_schema(dir.path(), DATE_RANGE_DYNAMIC_SCHEMA_TOML)
+        .expect("dynamic date_range app must build");
+    let (status, body) = post_docs(
+        &app,
+        &json!([
+            {"id":"adj","drm_x":["2010","2011"]},
+            {"id":"hole","drm_x":["2010","2012"]}
+        ]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = get(
+        &app,
+        "select?q=%7B%21field%20f%3Ddrm_x%20op%3DContains%7D%5B2010-06%20TO%202011-06%5D\
+         &fl=id&sort=id%20asc&rows=20&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        vec!["adj".to_string()],
+        "2010 and 2011 are millisecond-adjacent, so their union is one run that \
+         contains [2010-06 TO 2011-06]; 2010 + 2012 leaves a 2011 hole the query \
+         falls into, {body}"
+    );
+}
+
 // --- facet / sort / stats asymmetry (finding 172) ----------------------------
 //
 // Three surfaces, three behaviours: facet 200-with-no-buckets, sort 400, stats
