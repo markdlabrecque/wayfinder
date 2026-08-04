@@ -1,0 +1,18 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0,
+    "params":{
+      "q":"*:*",
+      "fl":"id",
+      "sort":"drs_x asc",
+      "rows":"20",
+      "wt":"json"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"Sorting not supported on SpatialField: drs_x, instead try sorting by query.",
+    "code":400
+  }
+}

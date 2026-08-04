@@ -95,6 +95,13 @@ const NON_LANGUAGE_BUILTIN_TYPES: &[&str] = &[
     // (columnar) side keeps the token verbatim so the payload can be read back
     // at score time (#340).
     "boost_term_payload",
+    // `date_range` is Solr's `DateRangeField` (#341): an interval-valued date
+    // whose verbatim text is kept in the field itself and whose endpoints live
+    // in two synthetic millisecond-precision date fast columns
+    // (`<field>__start`/`__end`, see `parse`). Listed here so a custom
+    // [[field_types]] chain named `date_range` is rejected like every other
+    // built-in (#170).
+    "date_range",
 ];
 
 /// Every built-in field type `resolve_type` accepts: the non-language types
@@ -254,6 +261,12 @@ pub enum ValueKind {
     /// not flow through `add_values`' single-field path the way the other
     /// kinds do (#331 owns the encoding; #334 reuses it for `location_rpt`).
     Location,
+    /// A `solr.DateRangeField` interval (#341): the verbatim value text is
+    /// stored in the field itself, and its resolved endpoints go into two
+    /// synthetic millisecond-precision date fast columns
+    /// (`<field>__start`/`__end`) that `crate::date_range`'s interval
+    /// predicates read back member by member.
+    DateRange,
 }
 
 /// A parsed schema: the Tantivy `Schema`, the core config, the dynamic/copy
@@ -274,6 +287,14 @@ pub struct WayfinderSchema {
     /// columns never leak into name-based resolver paths and are reachable
     /// only through [`Self::location_fields`] (#331; #334's heatmap reads them).
     location_fields: HashMap<String, (Field, Field)>,
+    /// Static `date_range` fields' two synthetic date columns, keyed by the
+    /// user-facing field name: `(start_field, end_field)`. Kept out of
+    /// `field_handles` for the same reason `location_fields` is — the
+    /// `<name>__start`/`__end` names must never reach a name-based resolver or
+    /// leak into `fl` output (#341). Unlike `location`, the user-facing name
+    /// *is* also a real Tantivy field here: it holds the verbatim value text
+    /// finding 179 requires to round-trip.
+    date_range_fields: HashMap<String, (Field, Field)>,
 }
 
 // `TokenizerManager` is not `Debug`, so derive is out; tests still need it for
@@ -302,6 +323,37 @@ impl WayfinderSchema {
     /// field are a documented ceiling, not a supported path.
     pub fn location_fields(&self, name: &str) -> Option<(Field, Field)> {
         self.location_fields.get(name).copied()
+    }
+
+    /// The two synthetic date columns (`__start`, `__end`) backing a declared
+    /// static `date_range` field, or `None` if `name` is not one (#341). A
+    /// dynamic `date_range` rule has no synthetic columns: its endpoints are
+    /// JSON sub-paths inside the catch-all instead
+    /// (`_dynamic.<name>.start`/`.end`, see
+    /// [`Self::resolved_date_range_columns`]).
+    pub fn date_range_fields(&self, name: &str) -> Option<(Field, Field)> {
+        self.date_range_fields.get(name).copied()
+    }
+
+    /// The pair of fast-field *column names* holding `name`'s interval
+    /// endpoints, resolved with the same static-before-dynamic precedence as
+    /// [`Self::resolved_fast_column`]: `<name>__start`/`__end` for a declared
+    /// `date_range` field, `_dynamic.<name>.start`/`.end` for one that only
+    /// matches a `[[dynamic_fields]]` rule. `None` if `name` is not a
+    /// `date_range` field at all (#341).
+    pub fn resolved_date_range_columns(&self, name: &str) -> Option<(String, String)> {
+        if self.resolved_value_kind(name) != Some(ValueKind::DateRange) {
+            return None;
+        }
+        if self.is_static(name) {
+            return Some((format!("{name}__start"), format!("{name}__end")));
+        }
+        let rule = self.match_dynamic(name)?;
+        let container = self.dynamic_target(rule);
+        Some((
+            format!("{container}.{name}.start"),
+            format!("{container}.{name}.end"),
+        ))
     }
 
     pub fn field_config(&self, name: &str) -> Option<&FieldConfig> {
@@ -484,6 +536,11 @@ enum ResolvedType {
     /// It takes JSON strings like any other text type, so it is a
     /// [`ValueKind::Text`] and needs no new arm anywhere downstream.
     BoostTermPayload,
+    /// A `solr.DateRangeField` interval (#341). The build path creates the
+    /// user-facing field (verbatim value text) *plus* two synthetic date fast
+    /// columns `<field>__start`/`<field>__end`, so like `Location` it is
+    /// handled above the `field = match resolved { ... }` block.
+    DateRange,
 }
 
 fn resolve_type(type_: &str, custom: &[FieldTypeConfig]) -> Result<ResolvedType> {
@@ -514,6 +571,9 @@ fn resolve_type(type_: &str, custom: &[FieldTypeConfig]) -> Result<ResolvedType>
         // `Text { tokenizer }`: the field needs a *different* analyzer on its
         // indexing and fast-field sides.
         "boost_term_payload" => ResolvedType::BoostTermPayload,
+        // Solr's `DateRangeField` (#341): an interval-valued date. Reported to
+        // `/schema/fieldtypes` as `wayfinder.DateRangeField`.
+        "date_range" => ResolvedType::DateRange,
         other => {
             let code = other.strip_prefix("text_").filter(|code| {
                 LANGUAGES
@@ -539,6 +599,7 @@ fn value_kind_of(type_: &str, custom: &[FieldTypeConfig]) -> Result<ValueKind> {
         ResolvedType::F64 => ValueKind::F64,
         ResolvedType::Date => ValueKind::Date,
         ResolvedType::Location => ValueKind::Location,
+        ResolvedType::DateRange => ValueKind::DateRange,
     })
 }
 
@@ -1154,6 +1215,7 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     let mut builder = Schema::builder();
     let mut field_handles = HashMap::new();
     let mut location_fields: HashMap<String, (Field, Field)> = HashMap::new();
+    let mut date_range_fields: HashMap<String, (Field, Field)> = HashMap::new();
 
     // `_version_` is a Wayfinder-owned field, never a schema.toml field. It
     // is not stored, so default select responses cannot expose it. Keep it
@@ -1192,6 +1254,49 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
                     fc.name
                 );
             }
+            continue;
+        }
+        // A `date_range` field (#341) is three physical fields: the
+        // user-facing one, holding the value's verbatim text so `fl` can
+        // round-trip it exactly (finding 179), plus two synthetic
+        // millisecond-precision date fast columns
+        // (`<name>__start`/`<name>__end`) holding the resolved endpoints of
+        // each interval member, appended in the same order so ordinal `i` of
+        // one pairs with ordinal `i` of the other -- which is what makes the
+        // hole-sensitive `Intersects`/`Contains` predicates possible on a
+        // multiValued field (finding 182). The two synthetic columns stay out
+        // of `field_handles`, so they can never be named by `fl`, `sort`,
+        // `facet.field` or a query.
+        if matches!(resolved, ResolvedType::DateRange) {
+            let raw_indexing = TextFieldIndexing::default()
+                .set_tokenizer("raw")
+                .set_index_option(IndexRecordOption::Basic)
+                .set_fieldnorms(false);
+            let mut raw_opts = TextOptions::default().set_indexing_options(raw_indexing);
+            if fc.stored {
+                raw_opts = raw_opts.set_stored();
+            }
+            let raw = builder.add_text_field(&fc.name, raw_opts);
+            let endpoint_opts = DateOptions::default()
+                .set_indexed()
+                .set_fast()
+                .set_precision(DateTimePrecision::Milliseconds);
+            let start =
+                builder.add_date_field(&format!("{}__start", fc.name), endpoint_opts.clone());
+            let end = builder.add_date_field(&format!("{}__end", fc.name), endpoint_opts);
+            if date_range_fields
+                .insert(fc.name.clone(), (start, end))
+                .is_some()
+            {
+                // Same belt-and-braces guard `location` carries: the
+                // duplicate-name check above keys on `name` alone.
+                bail!(
+                    "date_range field `{}` would create synthetic columns that collide with an \
+                     existing field; rename the date_range field",
+                    fc.name
+                );
+            }
+            field_handles.insert(fc.name.clone(), raw);
             continue;
         }
         let field = match resolved {
@@ -1263,6 +1368,9 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
             // so this arm is unreachable; present only to satisfy the match's
             // exhaustiveness over `ResolvedType`.
             ResolvedType::Location => unreachable!(),
+            // Same reason as `Location`: handled above the match (one stored
+            // raw field plus two synthetic date columns).
+            ResolvedType::DateRange => unreachable!(),
         };
         field_handles.insert(fc.name.clone(), field);
     }
@@ -1423,6 +1531,7 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
         tokenizers,
         field_handles,
         location_fields,
+        date_range_fields,
     })
 }
 

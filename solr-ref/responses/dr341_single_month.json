@@ -1,0 +1,29 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"drs_x:2020-06",
+      "fl":"id",
+      "sort":"id asc",
+      "rows":"20",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"d1"
+    },{
+      "id":"d2"
+    },{
+      "id":"d3"
+    },{
+      "id":"d4"
+    },{
+      "id":"d7"
+    }]
+  }
+}

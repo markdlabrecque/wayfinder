@@ -4074,6 +4074,87 @@ cappls() {  # cappls <name> <path-after-core>
     -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$(cat "$OUT/$name.status")" GET "$PLS_CORE/$suffix" "" "$PLS_SOLR" \
+# --- solr.DateRangeField intervals (issue #341) ------------------------------
+# Appended block; nothing above is edited. Own container/port/core, per the
+# wayfinder-solr-24 precedent: `date_range` is NOT in solr:9's `_default`
+# configset (probed: no fieldType of class solr.DateRangeField ships there), so
+# this block must `add-field-type` both types itself, and the `drs_*`/`drm_*`
+# dynamic rules with them. Adding either to the `content` core would rewrite
+# ground truth for every doc-returning fixture. Same caveat as the other
+# appended blocks: NOT runnable standalone -- `$OUT`/`$HERE` come from the top
+# of the script -- so run the whole script, or `--only '^dr341_'`.
+#
+# Types and dynamic rules are declared exactly as the captured Drupal configset
+# has them (solr-ref/search-api/configset/schema.xml:199-200,340-341):
+# `date_range` / `date_ranges` (multiValued), `drs_*` / `drm_*`, both
+# indexed+stored with NO docValues.
+#
+# The corpus deliberately mixes every input form the type accepts, because Solr
+# stores the value VERBATIM (d1 comes back as "2020", not as an expanded
+# interval) and because a date literal denotes the whole interval of its stated
+# precision -- which is the single rule the whole comparison surface follows:
+#   d1 "2020"                 -> [2020-01-01T00:00:00Z .. 2020-12-31T23:59:59.999Z]
+#   d2 "2020-06"              -> [2020-06-01T00:00:00Z .. 2020-06-30T23:59:59.999Z]
+#   d3 explicit closed interval, Mar-Sep 2020
+#   d4 "2020-06-15T12:00:00Z" -> that whole SECOND, not an instant
+#   d5 open lower bound, d6 open upper bound, d7 fully open
+#   d8 the multiValued case (drm_x), two DISJOINT intervals on one doc
+#   d9 the same field with a SINGLE member, "2020"
+# d5/d6 are what make Intersects distinguishable from a naive overlap test, and
+# d7 is what pins that a fully-open interval intersects everything. d8-vs-d9 is
+# what pins the multiValued rule (see the multiValued block below): they differ
+# only in whether the extra 2022-05 member is present, so a predicate that
+# separates them can only be reading the whole value set, not one member.
+DR341_CONTAINER=wayfinder-solr-341
+DR341_SOLR=http://localhost:9341/solr
+DR341_CORE=daterange
+# Like the heatmap block and unlike the older siblings, this ALWAYS recreates its
+# container (rm -f + run) rather than reusing a running one. The corpus IS the
+# ground truth of every fixture here, and the reuse path would re-POST d1..d8
+# without clearing what is there, so a leftover wayfinder-solr-341 would
+# silently contaminate every fixture with stale docs.
+if want_any '^dr341_'; then
+  docker rm -f "$DR341_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$DR341_CONTAINER" -p 9341:8983 \
+    solr:9 solr-precreate "$DR341_CORE" >/dev/null
+  echo -n "waiting for date-range solr"
+  for _ in $(seq 60); do
+    if curl -sf "$DR341_SOLR/$DR341_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n "."; sleep 1
+  done
+  # Two separate schema calls: `add-field-type` for a type a dynamic rule in the
+  # SAME payload references is accepted by Solr, but keeping the single-valued
+  # and multiValued halves apart makes a failure in either attributable.
+  curl -s "$DR341_SOLR/$DR341_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field-type": {"name":"date_range", "class":"solr.DateRangeField"},
+    "add-dynamic-field": {"name":"drs_*", "type":"date_range", "indexed":true, "stored":true, "multiValued":false}
+  }' >/dev/null
+  curl -s "$DR341_SOLR/$DR341_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field-type": {"name":"date_ranges", "class":"solr.DateRangeField", "multiValued":true},
+    "add-dynamic-field": {"name":"drm_*", "type":"date_ranges", "indexed":true, "stored":true, "multiValued":true}
+  }' >/dev/null
+  curl -sf "$DR341_SOLR/$DR341_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"d1","drs_x":"2020"},
+    {"id":"d2","drs_x":"2020-06"},
+    {"id":"d3","drs_x":"[2020-03-01T00:00:00Z TO 2020-09-30T00:00:00Z]"},
+    {"id":"d4","drs_x":"2020-06-15T12:00:00Z"},
+    {"id":"d5","drs_x":"[* TO 2019-12-31T23:59:59Z]"},
+    {"id":"d6","drs_x":"[2021-01-01T00:00:00Z TO *]"},
+    {"id":"d7","drs_x":"[* TO *]"},
+    {"id":"d8","drm_x":["2020","2022-05"]},
+    {"id":"d9","drm_x":["2020"]}
+  ]' >/dev/null
+fi
+
+# Same 6-column manifest-errors.tsv contract as caph334/capg338n: own core, so
+# never manifest.tsv (the differential harness GETs manifest.tsv rows against the
+# `content` core, which has no drs_* field).
+capdr341() {  # capdr341 <name> <url-after-/solr/>
+  local name=$1 suffix=$2
+  want "$name" || return 0
+  curl -sg "$DR341_SOLR/$suffix" -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$suffix" "" "$DR341_SOLR" \
     >> "$MANIFEST_ERRORS"
   rm -f "$OUT/$name.status"
 }
@@ -4414,4 +4495,137 @@ capjf343 jf343_terms_sort_index    '{"siteHashes":{"limit":-1,"field":"index_id"
 
 if want_any '^jf343_'; then
   release "$JF343_CONTAINER" "json-facet core '$JF343_CORE'"
+DR341_TAIL='fl=id&sort=id%20asc&rows=20&wt=json'
+# The query interval every predicate fixture below uses, so the three ops are
+# directly comparable on one corpus: May 1 -- Jul 1 2020.
+DR341_Q='%5B2020-05-01T00%3A00%3A00Z%20TO%202020-07-01T00%3A00%3A00Z%5D'
+
+# Stored values round-trip VERBATIM -- Solr does not normalise "2020" into an
+# expanded interval, and drm_x keeps both members in input order. This is the
+# fixture the response writer is derived from.
+capdr341 dr341_roundtrip "$DR341_CORE/select?q=*:*&fl=id,drs_x,drm_x&sort=id%20asc&rows=20&wt=json"
+
+# Plain `field:[a TO b]` and an explicit `op=Intersects` are the SAME query:
+# both -> d1,d2,d3,d4,d7. d5 (ends 2019) and d6 (starts 2021) are the docs that
+# make this a real interval test rather than a bounds comparison.
+capdr341 dr341_intersects_plain "$DR341_CORE/select?q=drs_x%3A$DR341_Q&$DR341_TAIL"
+capdr341 dr341_op_intersects    "$DR341_CORE/select?q=%7B%21field%20f%3Ddrs_x%20op%3DIntersects%7D$DR341_Q&$DR341_TAIL"
+# `{!field f=...}` with NO op at all also defaults to Intersects.
+capdr341 dr341_op_default       "$DR341_CORE/select?q=%7B%21field%20f%3Ddrs_x%7D2020-06&$DR341_TAIL"
+# Contains: the doc's interval must contain the whole query interval ->
+# d1 (all 2020), d3 (Mar-Sep), d7 (open). Within: the doc's interval must fit
+# inside the query -> d2 (June), d4 (one second). The two are not complements.
+capdr341 dr341_op_contains      "$DR341_CORE/select?q=%7B%21field%20f%3Ddrs_x%20op%3DContains%7D$DR341_Q&$DR341_TAIL"
+capdr341 dr341_op_within        "$DR341_CORE/select?q=%7B%21field%20f%3Ddrs_x%20op%3DWithin%7D$DR341_Q&$DR341_TAIL"
+# `IsWithin` is an accepted alias of `Within` (identical result), and the op
+# value is matched case-INSENSITIVELY (`contains` == `Contains`).
+capdr341 dr341_op_iswithin      "$DR341_CORE/select?q=%7B%21field%20f%3Ddrs_x%20op%3DIsWithin%7D$DR341_Q&$DR341_TAIL"
+capdr341 dr341_op_lowercase     "$DR341_CORE/select?q=%7B%21field%20f%3Ddrs_x%20op%3Dcontains%7D$DR341_Q&$DR341_TAIL"
+
+# A bare date literal is a range at its own precision, so `drs_x:2020-06` and
+# `drs_x:2020` are interval queries, not term queries -- both intersect the same
+# five docs as the explicit May-Jul range above.
+capdr341 dr341_single_year  "$DR341_CORE/select?q=drs_x%3A2020&$DR341_TAIL"
+capdr341 dr341_single_month "$DR341_CORE/select?q=drs_x%3A2020-06&$DR341_TAIL"
+# `[* TO *]` is every doc that HAS the field: d1-d7, and not d8 (drm_x only).
+capdr341 dr341_star_both    "$DR341_CORE/select?q=drs_x%3A%5B*%20TO%20*%5D&$DR341_TAIL"
+# The multiValued field: a doc matches if ANY of its intervals does.
+capdr341 dr341_multi_intersects "$DR341_CORE/select?q=drm_x%3A2022-05&$DR341_TAIL"
+capdr341 dr341_multi_contains   "$DR341_CORE/select?q=%7B%21field%20f%3Ddrm_x%20op%3DContains%7D2022-05&$DR341_TAIL"
+
+# Exclusive-brace syntax is ACCEPTED and IGNORED: `{a TO b}` returns exactly
+# what `[a TO b]` does. DateRangeField parses the interval string itself and has
+# no notion of an exclusive endpoint, so this is a real trap for any
+# implementation that routes the query through a lucene range parser first.
+capdr341 dr341_excl_braces "$DR341_CORE/select?q=drs_x%3A%7B2020-05-01T00%3A00%3A00Z%20TO%202020-07-01T00%3A00%3A00Z%7D&$DR341_TAIL"
+
+# Millisecond-resolution, end-INCLUSIVE precision expansion. d2 is "2020-06":
+# a Within query ending at 23:59:59.999 on Jun 30 still contains it, one
+# millisecond earlier (.998) does not. This pair is what pins the expansion to
+# ms rather than seconds.
+capdr341 dr341_within_ms_exact "$DR341_CORE/select?q=%7B%21field%20f%3Ddrs_x%20op%3DWithin%7D%5B2020-06-01T00%3A00%3A00Z%20TO%202020-06-30T23%3A59%3A59.999Z%5D&$DR341_TAIL"
+capdr341 dr341_within_ms_short "$DR341_CORE/select?q=%7B%21field%20f%3Ddrs_x%20op%3DWithin%7D%5B2020-06-01T00%3A00%3A00Z%20TO%202020-06-30T23%3A59%3A59.998Z%5D&$DR341_TAIL"
+# The same rule applied to an interval ENDPOINT: d5 ends "2019-12-31T23:59:59Z",
+# which is that whole second, so a query starting one millisecond past it still
+# intersects d5. Both fixtures -> d1,d5,d7.
+capdr341 dr341_touch_endpoint "$DR341_CORE/select?q=drs_x%3A%5B2019-12-31T23%3A59%3A59Z%20TO%202020-01-01T00%3A00%3A00Z%5D&$DR341_TAIL"
+capdr341 dr341_touch_past_ms  "$DR341_CORE/select?q=drs_x%3A%5B2019-12-31T23%3A59%3A59.001Z%20TO%202020-01-01T00%3A00%3A00Z%5D&$DR341_TAIL"
+
+# --- multiValued: set operations on the UNION of the doc's intervals --------
+# These five exist because dr341_multi_intersects/_contains above cannot tell a
+# correct implementation from a broken one: d8 was the only doc with drm_x, so a
+# single expected id proves nothing about HOW it matched.
+#
+# The rule every one of them is consistent with is that a multiValued
+# DateRangeField behaves as ONE point set --- the union of its members, holes
+# included --- and each op is a set relation against the query interval:
+#   Intersects  union intersects query
+#   Contains    union CONTAINS query   (so a hole in the union defeats it)
+#   Within      union is WITHIN query  (so EVERY member must fit)
+# For a single-valued field all three collapse to the obvious per-interval test,
+# which is why only drm_x can distinguish them.
+#
+# d8 = {"2020", "2022-05"} (a hole covering all of 2021), d9 = {"2020"}.
+#
+#   _gap          Intersects [2021-01 TO 2021-06] -> NEITHER. Lands in d8's
+#                 hole. An implementation that collapses the field to one span
+#                 (min start .. max end = 2020-01-01 .. 2022-05-31) matches d8.
+#                 That collapse is the tempting shortcut, because a columnar
+#                 store does not record which start pairs with which end.
+#   _no_contains  Contains [2020-06 TO 2022-01] -> NEITHER. Spans d8's hole, so
+#                 the union does not cover it; the merged span would.
+#   _within_one   Within [2020-01-01 TO 2020-12-31.999] -> d9 ONLY. This is the
+#                 decisive one: d8's "2020" member fits perfectly, so an
+#                 "any member is within" reading matches d8 too. Real Solr does
+#                 not --- d8's 2022-05 member is outside the query, and Within
+#                 is about the whole union.
+#   _within_both  Within [2019 TO 2023.999] -> BOTH. The same query widened
+#                 until d8's union does fit, which is what makes _within_one's
+#                 exclusion of d8 attributable to the union rule rather than to
+#                 multiValued fields being broken for Within generally.
+#   _contains_one Contains 2020-06 -> BOTH. A query inside a single member DOES
+#                 match, confirming Contains is not itself demanding all members.
+capdr341 dr341_multi_gap         "$DR341_CORE/select?q=drm_x%3A%5B2021-01%20TO%202021-06%5D&$DR341_TAIL"
+capdr341 dr341_multi_no_contains "$DR341_CORE/select?q=%7B%21field%20f%3Ddrm_x%20op%3DContains%7D%5B2020-06%20TO%202022-01%5D&$DR341_TAIL"
+capdr341 dr341_multi_within_one  "$DR341_CORE/select?q=%7B%21field%20f%3Ddrm_x%20op%3DWithin%7D%5B2020-01-01T00%3A00%3A00Z%20TO%202020-12-31T23%3A59%3A59.999Z%5D&$DR341_TAIL"
+capdr341 dr341_multi_within_both "$DR341_CORE/select?q=%7B%21field%20f%3Ddrm_x%20op%3DWithin%7D%5B2019-01-01T00%3A00%3A00Z%20TO%202023-12-31T23%3A59%3A59.999Z%5D&$DR341_TAIL"
+capdr341 dr341_multi_contains_one "$DR341_CORE/select?q=%7B%21field%20f%3Ddrm_x%20op%3DContains%7D2020-06&$DR341_TAIL"
+
+# Date math resolves against NOW, so a committed fixture is only ground truth
+# for as long as its result set does not depend on a boundary NOW has crossed.
+# Both of these are chosen so that window is longer than the project:
+#   dr341_datemath_year `[NOW/YEAR TO NOW/YEAR+1YEAR]` -> d6 ([2021 TO *]) and
+#     d7 ([* TO *]). The corpus has no interval starting between 2023 and 2100,
+#     so this holds for every NOW in that span.
+#   dr341_datemath_now `[NOW-100YEARS TO NOW]` -> all 7. Holds until the lower
+#     bound passes d5's end (2019-12-31), i.e. until the year 2119.
+# Do NOT add a date-math fixture whose result set turns over sooner: the failure
+# mode is a fixture that silently stops being ground truth years from now, with
+# nothing pointing at the cause.
+capdr341 dr341_datemath_year  "$DR341_CORE/select?q=drs_x%3A%5BNOW%2FYEAR%20TO%20NOW%2FYEAR%2B1YEAR%5D&$DR341_TAIL"
+capdr341 dr341_datemath_now   "$DR341_CORE/select?q=drs_x%3A%5BNOW-100YEARS%20TO%20NOW%5D&$DR341_TAIL"
+
+# facet.field on a DateRangeField is NOT an error -- it returns an EMPTY bucket
+# list with HTTP 200. Sorting and stats DO 400, each with its own message.
+capdr341 dr341_facet_empty "$DR341_CORE/select?q=*:*&rows=0&facet=true&facet.field=drs_x&wt=json"
+capdr341 dr341_err_sort    "$DR341_CORE/select?q=*:*&fl=id&sort=drs_x%20asc&rows=20&wt=json"
+capdr341 dr341_err_stats   "$DR341_CORE/select?q=*:*&rows=0&stats=true&stats.field=drs_x&wt=json"
+
+# Error surface, and the 400-vs-500 split is ground truth, not an accident:
+# a value Solr cannot PARSE is a 400; a structurally valid query asking for an
+# operation DateRangeField does not implement is a 500.
+capdr341 dr341_err_bad_date  "$DR341_CORE/select?q=drs_x%3A%5B2020-13%20TO%202021%5D&fl=id&wt=json"
+capdr341 dr341_err_bad_math  "$DR341_CORE/select?q=drs_x%3A%5BNOW%2FBOGUS%20TO%20NOW%5D&fl=id&wt=json"
+capdr341 dr341_err_reversed  "$DR341_CORE/select?q=drs_x%3A%5B2021%20TO%202020%5D&fl=id&wt=json"
+capdr341 dr341_err_bad_op    "$DR341_CORE/select?q=%7B%21field%20f%3Ddrs_x%20op%3DBogus%7D%5B2020%20TO%202021%5D&fl=id&wt=json"
+capdr341 dr341_err_disjoint  "$DR341_CORE/select?q=%7B%21field%20f%3Ddrs_x%20op%3DIsDisjointTo%7D$DR341_Q&fl=id&wt=json"
+capdr341 dr341_err_overlaps  "$DR341_CORE/select?q=%7B%21field%20f%3Ddrs_x%20op%3DOverlaps%7D$DR341_Q&fl=id&wt=json"
+capdr341 dr341_err_equals    "$DR341_CORE/select?q=%7B%21field%20f%3Ddrs_x%20op%3DEquals%7D$DR341_Q&fl=id&wt=json"
+
+# The type's own declaration as /schema/fieldtypes reports it, which is what
+# `field_class_for_builtin` is derived from.
+capdr341 dr341_fieldtypes "$DR341_CORE/schema/fieldtypes?wt=json"
+
+if want_any '^dr341_'; then
+  release "$DR341_CONTAINER" "date-range core '$DR341_CORE'"
 fi

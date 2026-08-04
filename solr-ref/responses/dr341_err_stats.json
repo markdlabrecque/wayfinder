@@ -1,0 +1,18 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":2,
+    "params":{
+      "q":"*:*",
+      "stats":"true",
+      "rows":"0",
+      "wt":"json",
+      "stats.field":"drs_x"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"Field type date_range{class=org.apache.solr.schema.DateRangeField,analyzer=org.apache.solr.schema.FieldType$DefaultAnalyzer,args={class=solr.DateRangeField}} is not currently supported",
+    "code":400
+  }
+}

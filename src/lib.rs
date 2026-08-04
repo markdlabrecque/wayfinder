@@ -29,6 +29,8 @@ mod collector;
 mod config;
 mod core_index;
 mod coverage;
+/// `solr.DateRangeField` — interval-valued dates and their set predicates (#341).
+mod date_range;
 pub mod edismax;
 mod error;
 pub mod extract;
@@ -1244,6 +1246,20 @@ pub(crate) fn parse_sort_spec(
             // column it is actually indexed into (mirrors
             // `CoreIndex::rewrite_dynamic_fields`'s resolution for the query
             // path), not the bare field name.
+            // #341/finding 186: a `date_range` field is a spatial field in
+            // Solr's type hierarchy, and Solr refuses to sort on one with its
+            // own message -- checked BEFORE the fast/docValues check, since the
+            // refusal does not depend on whether the field has fast values
+            // (the dynamic path's catch-all column does).
+            if schema.resolved_value_kind(field_name) == Some(schema::ValueKind::DateRange) {
+                return Err(WfError::bad_request(
+                    "wayfinder::BadSort",
+                    format!(
+                        "Sorting not supported on SpatialField: {field_name}, instead try sorting by query."
+                    ),
+                )
+                .with_params(params));
+            }
             match schema.resolved_fast(field_name) {
                 None => {
                     return Err(WfError::bad_request(
@@ -1778,6 +1794,10 @@ fn field_class_for_builtin(name: &str) -> &'static str {
         // two synthetic f64 columns, not one Tantivy field.
         "location" => "wayfinder.LatLonPointSpatialField",
         "location_rpt" => "wayfinder.SpatialRecursivePrefixTreeFieldType",
+        // #341: Solr's interval-valued date type. Like the spatial types it is
+        // more than one physical field (verbatim text plus two synthetic date
+        // columns), which the reported class name does not attempt to describe.
+        "date_range" => "wayfinder.DateRangeField",
         // `text_general`, `text_en` and every `text_<code>` preset: analyzed
         // text, which is Solr's `TextField`.
         _ => "wayfinder.TextField",
@@ -3634,9 +3654,16 @@ async fn select(
         // reporting the full, ungrouped figures (`g338_groupfacet_stats`),
         // unlike `group.truncate`, which reaches `stats` through `base` above.
         Some(stats::stats(&state.index, &params, &base).map_err(|e| {
-            attach_response(
-                WfError::bad_request("wayfinder::StatsError", e.to_string()).with_params(&params),
-            )
+            let err =
+                WfError::bad_request("wayfinder::StatsError", e.to_string()).with_params(&params);
+            // Same pre-/post-query split `facet_counts` makes just above: a
+            // refusal Solr raises before the base query runs carries no
+            // `response` block (`dr341_err_stats`, #341).
+            if e.downcast_ref::<stats::PreQueryStatsError>().is_some() {
+                err
+            } else {
+                attach_response(err)
+            }
         })?)
     } else {
         None

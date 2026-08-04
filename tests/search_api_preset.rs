@@ -312,6 +312,25 @@ const DYNAMIC_FIELDS: &[DynamicExpectation] = &[
         stored: true,
         fast: true,
     },
+    // #341: DateRangeField-style interval type. The captured configset
+    // (`solr-ref/search-api/configset/schema.xml:199-200`) declares
+    // `drs_*`/`drm_*` as `indexed="true" stored="true"`, with NO `docValues`
+    // -- unlike every other dynamic prefix above, so `fast` must be `false`
+    // here.
+    DynamicExpectation {
+        name: "drs_created",
+        type_: "date_range",
+        multi_valued: false,
+        stored: true,
+        fast: false,
+    },
+    DynamicExpectation {
+        name: "drm_created",
+        type_: "date_range",
+        multi_valued: true,
+        stored: true,
+        fast: false,
+    },
     DynamicExpectation {
         name: "bs_status",
         // Wayfinder has no boolean type (`ResolvedType` in `src/schema.rs`
@@ -745,6 +764,119 @@ async fn dm_field_is_queryable_by_date_range() {
         resp.pointer("/response/numFound"),
         Some(&json!(1)),
         "{resp}"
+    );
+}
+
+// -- issue #341: drs_*/drm_* must be more than parseable rules ---------------
+//
+// The `DYNAMIC_FIELDS` table above only pins that the preset DECLARES the two
+// rules with the right type/multi_valued/stored/fast. These three add the part
+// that actually matters through the real preset: the value round-trips verbatim
+// (finding 179) and the field is interval-queryable (findings 180/181),
+// including the multiValued union case (finding 182). Semantics are pinned
+// against the `dr341_*` fixtures in `tests/date_range.rs` /
+// `tests/date_range_dynamic.rs`; these three are preset-integration smoke tests
+// over their own doc, so no fixture id list applies.
+//
+// They deliberately do NOT extend `representative_doc()`: the preset has no `*`
+// catch-all dynamic rule, so a `drs_created` key in that doc 400s with
+// `unknown field 'drs_created'` until the preset gains the rules, turning every
+// other test in this file red and hiding real regressions. A separate doc keeps
+// the failure scoped to #341.
+
+/// A doc carrying only `id` plus the two #341 prefixes. The bare `"2026-07"` is
+/// deliberate: finding 179 says it must come back as `"2026-07"`, and finding
+/// 180 says it must still be found by an interval query covering July 2026.
+/// `drm_created`'s two members have a hole covering August 2026.
+fn date_range_doc() -> Value {
+    json!([{
+        "id": "dr1",
+        "drs_created": "2026-07",
+        "drm_created": ["2026-07", "2026-09-01T00:00:00Z"]
+    }])
+}
+
+async fn preset_app_with_date_range_doc() -> (axum::Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), &preset_toml())
+        .expect("presets/search-api.toml must build a working app");
+    let (status, resp) = common::post_docs(&app, &date_range_doc()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a doc with drs_*/drm_* values must index cleanly against the preset: {resp}"
+    );
+    (app, dir)
+}
+
+#[tokio::test]
+async fn drs_field_round_trips_the_date_range_value_verbatim() {
+    // Finding 165: the raw string is what comes back -- "2026-07", NOT an
+    // expanded "2026-07-01T00:00:00Z" or an interval.
+    let (app, _dir) = preset_app_with_date_range_doc().await;
+    let (status, resp) =
+        common::get(&app, "select?q=id:dr1&fl=drs_created,drm_created&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        resp.pointer("/response/docs/0/drs_created"),
+        Some(&json!("2026-07")),
+        "drs_* must round-trip verbatim through the preset: {resp}"
+    );
+    assert_eq!(
+        resp.pointer("/response/docs/0/drm_created"),
+        Some(&json!(["2026-07", "2026-09-01T00:00:00Z"])),
+        "drm_* must round-trip its members verbatim, in input order: {resp}"
+    );
+}
+
+#[tokio::test]
+async fn drs_field_is_interval_queryable_through_the_preset() {
+    // Findings 166/167: a plain `field:[a TO b]` on a drs_* field is an
+    // Intersects interval query, and the stored "2026-07" denotes all of July
+    // 2026, so a query covering part of that month finds it.
+    let (app, _dir) = preset_app_with_date_range_doc().await;
+    let (status, resp) = common::get(
+        &app,
+        "select?q=drs_created:[2026-07-15T00:00:00Z+TO+2026-08-01T00:00:00Z]&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        resp.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "{resp}"
+    );
+}
+
+#[tokio::test]
+async fn drm_field_is_interval_queryable_on_the_union_of_its_members() {
+    // Finding 168: the field is the union of its members, so a query hitting
+    // only the SECOND member (2026-09-01, a whole second) still matches, while
+    // one landing in the hole between the two members (August 2026) does not.
+    let (app, _dir) = preset_app_with_date_range_doc().await;
+    let (status, resp) = common::get(
+        &app,
+        "select?q=drm_created:[2026-09-01T00:00:00Z+TO+2026-09-02T00:00:00Z]&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        resp.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "a query hitting only drm_*'s second member must match: {resp}"
+    );
+
+    let (status, resp) = common::get(
+        &app,
+        "select?q=drm_created:[2026-08-02T00:00:00Z+TO+2026-08-20T00:00:00Z]&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        resp.pointer("/response/numFound"),
+        Some(&json!(0)),
+        "a query landing in the hole between drm_*'s members must not match \
+         (union, not min-start/max-end span): {resp}"
     );
 }
 

@@ -1,0 +1,16 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0,
+    "params":{
+      "q":"drs_x:[NOW/BOGUS TO NOW]",
+      "fl":"id",
+      "wt":"json"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","java.text.ParseException"],
+    "msg":"Invalid Date Math String:'NOW/BOGUS'",
+    "code":400
+  }
+}

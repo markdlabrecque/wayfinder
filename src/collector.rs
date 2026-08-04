@@ -283,7 +283,13 @@ impl SegmentSortColumn {
             // Dates collapse into `I64` timestamps elsewhere in this module
             // (see `SortValue`'s doc comment); the epoch is timestamp 0.
             Some(ValueKind::Date) => Some(SortValue::I64(0)),
-            Some(ValueKind::Text) | Some(ValueKind::Location) | None => None,
+            // `date_range` never reaches here: `parse_sort_spec` refuses to
+            // sort on one at all (finding 186's `Sorting not supported on
+            // SpatialField`), so no `SortClause` can carry the kind.
+            Some(ValueKind::Text)
+            | Some(ValueKind::Location)
+            | Some(ValueKind::DateRange)
+            | None => None,
         };
         Ok(SegmentSortColumn::Absent(missing))
     }

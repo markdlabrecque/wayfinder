@@ -3190,3 +3190,99 @@ the only way the four payload functions are distinguishable from each other.
       `facet.rs`'s `PreQueryFacetError` already models: the two parse-time
       failures emit `responseHeader, error` with **no `response` block**, while
       the field-resolution failure emits `responseHeader, response, error`.
+
+## Findings from the #341 date-range capture (`solr.DateRangeField`, `drs_*`/`drm_*`)
+
+Captured by the `dr341_*` block appended to `solr-ref/capture.sh` (own core
+`daterange` on port 9341, 36 fixtures, 9-doc corpus). solr:9's `_default`
+configset ships **no** `solr.DateRangeField` type, so the block declares
+`date_range` / `date_ranges` and the `drs_*` / `drm_*` dynamic rules itself,
+exactly as `solr-ref/search-api/configset/schema.xml:199-200,340-341` has them:
+`indexed="true" stored="true"`, no docValues.
+
+179. **A `DateRangeField` value is stored verbatim, not normalised.** `"2020"`
+     round-trips as `"2020"`, `"2020-06"` as `"2020-06"`, and a `drm_*` field
+     returns its members in input order (`dr341_roundtrip`). Solr keeps the
+     original string for the stored field and derives the interval only for
+     indexing, so a Wayfinder implementation cannot render the expanded bounds
+     back out -- it must keep the raw string alongside whatever it indexes.
+
+180. **Every date literal denotes the whole interval of its stated precision,
+     at millisecond resolution, end-inclusive.** `"2020"` is
+     `[2020-01-01T00:00:00Z .. 2020-12-31T23:59:59.999Z]` and `"2020-06"` is
+     that month; a `Within` query ending `2020-06-30T23:59:59.999Z` contains
+     `"2020-06"` (`dr341_within_ms_exact`) and one ending `.998Z` does not
+     (`dr341_within_ms_short`). The rule applies to interval **endpoints** too,
+     not just bare values: `d5` is `[* TO 2019-12-31T23:59:59Z]`, whose end is
+     that whole second, so a query starting `2019-12-31T23:59:59.001Z` still
+     intersects it (`dr341_touch_past_ms` = `dr341_touch_endpoint`). This is why
+     a bare `drs_x:2020` is an interval query, not a term query, and intersects
+     the same five docs as an explicit May-Jul 2020 range
+     (`dr341_single_year`, `dr341_single_month`, `dr341_intersects_plain`).
+
+181. **`{!field f=<field> op=<op>}<interval>` is how the predicate is selected,
+     and `Intersects` is the default.** Plain `drs_x:[a TO b]`,
+     `{!field f=drs_x}<interval>` with no `op`, and `op=Intersects` are the same
+     query (`dr341_intersects_plain`, `dr341_op_default`, `dr341_op_intersects`
+     -- all d1,d2,d3,d4,d7). `IsWithin` is an accepted alias of `Within`
+     (`dr341_op_iswithin` = `dr341_op_within`), and the op value is matched
+     **case-insensitively** (`op=contains` = `op=Contains`,
+     `dr341_op_lowercase`). `Contains` and `Within` are not complements:
+     over the same May-Jul 2020 query, `Contains` -> d1,d3,d7 and `Within` ->
+     d2,d4.
+
+182. **A multiValued `DateRangeField` is one point set -- the union of its
+     members, holes included -- and each op is a set relation against the
+     query interval.** Not "any member matches", and not a collapse to a single
+     `min(start)..max(end)` span. `d8` = {`2020`, `2022-05`} (a hole covering
+     2021) and `d9` = {`2020`} differ only by that extra member:
+     - `Intersects` intersects the union: a query in d8's hole matches neither
+       (`dr341_multi_gap` -> 0), which the merged span would have matched.
+     - `Contains` must cover the query: spanning the hole matches neither
+       (`dr341_multi_no_contains` -> 0), but a query inside one member matches
+       both (`dr341_multi_contains_one` -> d8,d9).
+     - `Within` requires **every** member to fit: a 2020-only query matches d9
+       alone even though d8's `2020` member fits perfectly
+       (`dr341_multi_within_one` -> d9), and widening the query until d8's whole
+       union fits brings d8 back (`dr341_multi_within_both` -> d8,d9).
+     Consequence for implementation: `Within` reduces to `min(start) >= qStart
+     AND max(end) <= qEnd`, computable straight off two multiValued columns, but
+     `Intersects` and `Contains` are hole-sensitive and need the doc's actual
+     interval set, which a columnar store cannot supply (it does not record
+     which start pairs with which end).
+
+183. **Exclusive-brace range syntax is accepted and silently ignored.**
+     `drs_x:{a TO b}` returns exactly what `drs_x:[a TO b]` returns
+     (`dr341_excl_braces` = `dr341_intersects_plain`). `DateRangeField` parses
+     the interval string itself and has no notion of an exclusive endpoint. Any
+     implementation that routes the clause through a Lucene range parser before
+     looking at the field type will silently get this wrong.
+
+184. **The 400/500 split is by failure kind, not severity.** A value Solr cannot
+     parse is a **400**: `Couldn't parse date because: Improperly formatted
+     datetime: 2020-13` (`dr341_err_bad_date`), `Invalid Date Math
+     String:'NOW/BOGUS'` (`dr341_err_bad_math`). A structurally valid query
+     asking for something `DateRangeField` does not implement is a **500**,
+     whose `error.msg` is bare: `Disjoint` (`dr341_err_disjoint`), `Overlaps`
+     (`dr341_err_overlaps`), `Equals` (`dr341_err_equals`), `Unknown Operation:
+     Bogus` (`dr341_err_bad_op`), and `Wrong order: 2021 TO 2020` for a reversed
+     interval (`dr341_err_reversed`). So the only ops that work are Intersects,
+     Contains, Within/IsWithin -- the three the type actually supports.
+
+185. **Date math resolves normally in a date-range query.** `NOW`, `NOW/YEAR`,
+     `NOW/YEAR+1YEAR` and `NOW-100YEARS` all parse
+     (`dr341_datemath_year`, `dr341_datemath_now`). This is the first captured
+     evidence of date math anywhere in the corpus, and Wayfinder supports none
+     of it today (`src/lib.rs:296-315` notes that `TZ` is inert *only because*
+     date math does not exist). Both fixtures were chosen so their result sets
+     do not turn over until 2100 and 2119; a `NOW`-based fixture whose window is
+     shorter stops being ground truth with nothing pointing at the cause.
+
+186. **`facet.field` on a `DateRangeField` is not an error -- it returns an
+     empty bucket list with HTTP 200** (`dr341_facet_empty`:
+     `"facet_fields":{"drs_x":[]}` over 9 matching docs). Sorting and stats do
+     fail, each with its own 400: `Sorting not supported on SpatialField:
+     drs_x, instead try sorting by query` (`dr341_err_sort`) and a
+     `Field type date_range{class=org.apache.solr.schema.DateRangeField,...}`
+     message for stats (`dr341_err_stats`). The asymmetry is worth preserving:
+     three surfaces, three different behaviours.
