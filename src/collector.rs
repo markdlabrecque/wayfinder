@@ -33,19 +33,24 @@ use tantivy::collector::{Collector, SegmentCollector};
 use tantivy::columnar::{Column, StrColumn};
 use tantivy::{DateTime, DocAddress, DocId, Score, SegmentOrdinal, SegmentReader};
 
+use crate::function_query::{self, FuncQuery};
 use crate::schema::ValueKind;
 
 /// What a single sort clause orders by.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SortKey {
     /// Relevance score. Solr's `score` pseudo-field.
     Score,
     /// A `fast = true` schema field, by name.
     Field(String),
+    /// A function query (argless `geodist()` is the client-evidenced form,
+    /// finding 133), evaluated per document. `sort=geodist() asc` ranks by
+    /// ascending haversine distance (#332).
+    Function(FuncQuery),
 }
 
 /// One `<key> <asc|desc>` clause of a `sort` spec.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SortClause {
     pub key: SortKey,
     pub descending: bool,
@@ -212,6 +217,13 @@ enum SegmentSortColumn {
     I64(Column<i64>),
     F64(Column<f64>),
     Date(Column<DateTime>),
+    /// A function query (argless `geodist()` for #332) opened against this
+    /// segment's columns, evaluated per doc. A doc whose function does not
+    /// exist (a `geodist()` over a `location` point the doc lacks) is `None`
+    /// here, so it sorts last regardless of direction -- the same
+    /// missing-last rule a string field uses, rather than the bogus `0.0`
+    /// distance the origin would give a missing point.
+    Function(function_query::FunctionColumns),
     /// Live and reachable via dynamic-only fields (issue #66): a
     /// dynamic-only column (e.g. Drupal's `its_`/`ds_` classes matched only
     /// through `check_sort`'s dynamic-field fallback, not a schema-declared
@@ -242,6 +254,11 @@ impl SegmentSortColumn {
     fn open(segment: &SegmentReader, clause: &SortClause) -> tantivy::Result<SegmentSortColumn> {
         let name = match &clause.key {
             SortKey::Score => return Ok(SegmentSortColumn::Score),
+            SortKey::Function(func) => {
+                return Ok(SegmentSortColumn::Function(
+                    function_query::FunctionColumns::open(segment, func.clone())?,
+                ));
+            }
             SortKey::Field(name) => name,
         };
         let fast = segment.fast_fields();
@@ -292,6 +309,13 @@ impl SegmentSortColumn {
         match self {
             SegmentSortColumn::Score => Some(SortValue::F64(score as f64)),
             SegmentSortColumn::Absent(missing) => missing.clone(),
+            SegmentSortColumn::Function(cols) => {
+                if cols.exists(doc) {
+                    Some(SortValue::F64(cols.value(doc)))
+                } else {
+                    None
+                }
+            }
             SegmentSortColumn::Str(col) => {
                 // The term dictionary is ordered, so selecting the min/max
                 // ordinal selects the min/max string.

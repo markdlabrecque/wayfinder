@@ -62,7 +62,21 @@ want() { [ -z "$ONLY" ] || [[ $1 =~ $ONLY ]]; }
 # (`--only '^facet_ex'` must still enter the block whose prefix is `facet_`).
 # Over-entering a block costs a container start; under-entering would silently
 # capture nothing, so the bias is toward entering.
-want_any() { [ -z "$ONLY" ] || [[ $ONLY =~ $1 ]] || [[ $1 =~ $ONLY ]]; }
+#
+# The block prefix and `--only` are both conventionally `^prefix_` patterns.
+# Their leading carets defeat a bare `[[ =~ ]]` for the exact-match case (a
+# literal `^` in the string is not the regex anchor, so `[[ '^geo_' =~ ^geo_ ]]`
+# is false), which silently skipped a block's container setup under the very
+# `--only '^geo_'` form every appended block uses to re-capture itself -- the
+# captures then ran against a container that was never started. The final
+# string-prefix fallback (leading `^` stripped) covers the documented form
+# without weakening the regex path for genuine regex `--only` values.
+want_any() {
+  [ -z "$ONLY" ] && return 0
+  [[ $ONLY =~ $1 || $1 =~ $ONLY ]] && return 0
+  local o="${ONLY#^}" b="${1#^}"
+  [[ $o == "$b"* || $b == "$o"* ]]
+}
 
 # --- releasing a block's own container --------------------------------------
 # Every block that stands up its own container used to leave it running, on the
@@ -3607,6 +3621,26 @@ capg331() {  # capg331 <name> <path-after-core>
 # encoded convention every `{!...}`/function manifest row uses.
 capg331 geo_geodist_fl    'select?q=*:*&fl=id,dist:geodist%28%29&sfield=loc&pt=40,-74&sort=id%20asc&wt=json'
 capg331 geo_geodist_fl_pt 'select?q=*:*&fl=id,dist:geodist%28%29&sfield=loc&pt=41,-73&sort=id%20asc&wt=json'
+
+# `{!geofilt}`/`{!bbox}` as `fq` and `geodist()` in `sort` (issue #332), driven
+# by the `sfield`/`pt`/`d` request params. `d=130` is chosen to make the
+# circle-vs-square distinction observable on this 7-doc grid: the circle
+# (haversine <= 130 km from 40,-74) holds g1/g2/g3/g4/g5/g7 (g2/g4 are
+# ~111 km, g6 is ~140 km), while the bbox rectangle also contains g6 -- g6
+# sits in the NE corner of the rectangle but outside the circle, the one doc
+# `{!bbox}` returns that `{!geofilt}` does not. A second `{!geofilt}` at
+# `d=70` pins the haversine boundary on g7 (~69.94 km, just inside). The
+# circle/bbox blocks carry no body (their args are entirely request params),
+# so the whole `fq` value is the percent-encoded `{!...}` block.
+capg331 geo_geofilt        'select?q=*:*&fq=%7B%21geofilt%7D&sfield=loc&pt=40,-74&d=130&fl=id&sort=id%20asc&wt=json'
+capg331 geo_bbox           'select?q=*:*&fq=%7B%21bbox%7D&sfield=loc&pt=40,-74&d=130&fl=id&sort=id%20asc&wt=json'
+capg331 geo_geofilt_tight  'select?q=*:*&fq=%7B%21geofilt%7D&sfield=loc&pt=40,-74&d=70&fl=id&sort=id%20asc&wt=json'
+# `sort=geodist() asc` ranks by ascending haversine distance (nearest first);
+# the argless `geodist()` reads `sfield`/`pt`. `fl=id,dist:geodist()` shows
+# the distance each doc sorts on, so the ordering is self-evident in the
+# fixture. Ties (g3/g5 and g2/g4 are equidistant E/W of the origin) are broken
+# by Solr's own (Lucene-internal) order, captured as ground truth.
+capg331 geo_geodist_sort   'select?q=*:*&sfield=loc&pt=40,-74&fl=id,dist:geodist%28%29&sort=geodist%28%29%20asc&wt=json'
 
 if want_any '^geo_'; then
   release "$GEO_CONTAINER" "geo core '$GEO_CORE'"

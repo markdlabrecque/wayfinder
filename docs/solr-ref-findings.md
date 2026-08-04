@@ -2799,3 +2799,18 @@ which is what closes the issue's decision point and descopes `/suggest`.
       (`score_tolerance`). The encoding decision (two f64 columns, exact
       precision) is unchanged — this finding records the *distance value's*
       inherent approximation, not the storage.
+
+158. **`{!bbox}` is the axis-aligned lat/lon rectangle of the `{!geofilt}`
+      circle, not the circle.** Captured against real `solr:9` (the `geo`
+      block, #332): with centre `(40,-74)` and `d=130` km, `fq={!geofilt}`
+      returns the 6 grid docs within 130 km while `fq={!bbox}` returns all 7 —
+      the 7th, `(41,-73)` (~140 km, the NE corner), is outside the circle but
+      inside its bounding rectangle. That corner doc is the whole observable
+      difference and is what the captured `geo_bbox`/`geo_geofilt` pair pins.
+      Solr's rectangle is `lat ± d/KM_PER_DEG`, `lon ± d/(KM_PER_DEG·cos lat)`
+      (`LatLonPointSpatialField`'s circle-to-bbox), which Wayfinder reproduces
+      exactly (`src/function_query.rs::geo_matches`, `GeoShape::Rectangle`);
+      the circle (`GeoShape::Circle`) is the exact haversine ≤ `d`. A document
+      with no `location` point matches neither — confirmed by the
+      `exists`-gated scorer (`tests/spatial.rs`), since a missing point would
+      otherwise read back as the origin.

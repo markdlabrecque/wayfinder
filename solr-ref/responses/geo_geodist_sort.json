@@ -1,0 +1,41 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":0,
+    "params":{
+      "q":"*:*",
+      "pt":"40,-74",
+      "fl":"id,dist:geodist()",
+      "sort":"geodist() asc",
+      "sfield":"loc",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":7,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"g1",
+      "dist":0.0
+    },{
+      "id":"g7",
+      "dist":69.94052
+    },{
+      "id":"g3",
+      "dist":85.179924
+    },{
+      "id":"g5",
+      "dist":85.17993
+    },{
+      "id":"g2",
+      "dist":111.195076
+    },{
+      "id":"g4",
+      "dist":111.19508
+    },{
+      "id":"g6",
+      "dist":139.68883
+    }]
+  }
+}

@@ -253,12 +253,14 @@ const SELECT_PARAMS: &[&str] = &[
     "group.truncate",
     "group.facet",
     "sort",
-    // #331: argless `geodist()` in `fl` is driven by these request params
-    // (finding 133's client-evidenced form). They must not 400 under
-    // strict_params the way every other geodist-relevant param Solr accepts
-    // still does (`d`, used only by the out-of-scope `{!geofilt}`/`{!bbox}`).
+    // #331/#332: `geodist()` (in `fl`/`sort`) and `{!geofilt}`/`{!bbox}` are
+    // driven by these request params (finding 133's client-evidenced form).
+    // They must not 400 under strict_params the way every other geodist-relevant
+    // param Solr accepts still does.
     "sfield",
     "pt",
+    // #332: `{!geofilt}`/`{!bbox}` radius, in kilometres.
+    "d",
     "hl",
     "hl.fl",
     "hl.snippets",
@@ -1204,6 +1206,14 @@ pub(crate) fn parse_sort_spec(
 
         let key = if field_name == "score" {
             SortKey::Score
+        } else if field_name == "geodist()" {
+            // #332: `sort=geodist() asc` ranks by ascending haversine distance.
+            // The argless `geodist()` reads `sfield`/`pt` from the request
+            // params (finding 133), exactly like `fl=dist:geodist()`; `sfield`
+            // must name a declared `location` field. Direction-first still
+            // holds (a bad direction 400s before this), matching `score`'s
+            // special-casing.
+            SortKey::Function(geodist_sort_func(schema, params)?)
         } else {
             // Resolved with the same static-before-dynamic precedence
             // indexing already uses (issue #66): a declared `[[fields]]`
@@ -1247,7 +1257,7 @@ pub(crate) fn parse_sort_spec(
         // original `field_name`, not the (possibly rewritten) column in
         // `key`, since a dynamic column's own name carries no schema entry.
         let value_kind = match &key {
-            SortKey::Score => None,
+            SortKey::Score | SortKey::Function(_) => None,
             SortKey::Field(_) => schema.resolved_value_kind(field_name),
         };
         clauses.push(SortClause::new(key, descending, value_kind));
@@ -1263,6 +1273,59 @@ pub(crate) fn parse_sort_spec(
         }
     }
     Ok(clauses)
+}
+
+/// Resolves the argless `geodist()` a `sort=geodist() ...` clause ranks by,
+/// reading `sfield`/`pt` from the request params (finding 133) exactly as
+/// `computed_fl_fields` does for `fl=dist:geodist()`. `sfield` must name a
+/// declared `location` field; `pt` is `lat,lon`. The missing-/bad-param paths
+/// carry no fixture (the capture always sends both), so they are the correct
+/// 400 rather than a panic.
+fn geodist_sort_func(
+    schema: &schema::WayfinderSchema,
+    params: &Params,
+) -> Result<function_query::FuncQuery, WfError> {
+    let sfield = params.get("sfield").ok_or_else(|| {
+        WfError::bad_request(
+            "wayfinder::BadSort",
+            "geodist() sort requires the `sfield` request param".to_string(),
+        )
+    })?;
+    if schema.location_fields(sfield).is_none() {
+        return Err(WfError::bad_request(
+            "wayfinder::BadSort",
+            format!("geodist() sort sfield `{sfield}` is not a declared `location` field"),
+        )
+        .with_params(params));
+    }
+    let pt = params.get("pt").ok_or_else(|| {
+        WfError::bad_request(
+            "wayfinder::BadSort",
+            "geodist() sort requires the `pt` request param".to_string(),
+        )
+    })?;
+    let (lat_s, lon_s) = pt.split_once(',').ok_or_else(|| {
+        WfError::bad_request(
+            "wayfinder::BadSort",
+            format!("geodist() sort pt `{pt}` is not a `lat,lon` point"),
+        )
+    })?;
+    let lat: f64 = lat_s.trim().parse().map_err(|_| {
+        WfError::bad_request(
+            "wayfinder::BadSort",
+            format!("geodist() sort pt `{pt}` has a non-numeric latitude"),
+        )
+    })?;
+    let lon: f64 = lon_s.trim().parse().map_err(|_| {
+        WfError::bad_request(
+            "wayfinder::BadSort",
+            format!("geodist() sort pt `{pt}` has a non-numeric longitude"),
+        )
+    })?;
+    Ok(function_query::FuncQuery::GeoDist {
+        sfield: sfield.to_string(),
+        pt: (lat, lon),
+    })
 }
 
 /// Under `strict_params`, rejects the first request param Wayfinder does not
@@ -3106,7 +3169,7 @@ async fn select(
             // their own right (issue #289).
             let query = if let Some(func_q) = state
                 .index
-                .parse_function_query_q(q, &default_field)
+                .parse_function_query_q(q, &default_field, Some(&params))
                 .map_err(|e| query_parse_error(anyhow::Error::from(e), &params))?
             {
                 func_q
@@ -3157,12 +3220,26 @@ async fn select(
 
             let mut filter_queries = Vec::new();
             for fq in params.get_all("fq") {
-                filter_queries.push(
+                // `{!geofilt}`/`{!bbox}`/`{!func}`/`{!frange}`/`{!boost}` are
+                // position-0 query parsers in their own right (#289/#333/#332);
+                // like the `q` path above, try the function-query dispatcher
+                // (with request params, which the geo filters need) before the
+                // plain grammar. `parse_query` re-runs the same dispatcher with
+                // `None`, so a non-geo block costs one redundant `parse_block`
+                // here and nothing more.
+                let parsed = if let Some(g) = state
+                    .index
+                    .parse_function_query_q(fq, &default_field, Some(&params))
+                    .map_err(|e| query_parse_error(anyhow::Error::from(e), &params))?
+                {
+                    g
+                } else {
                     state
                         .index
                         .parse_query(fq, &default_field)
-                        .map_err(|e| query_parse_error(e, &params))?,
-                );
+                        .map_err(|e| query_parse_error(e, &params))?
+                };
+                filter_queries.push(parsed);
             }
             Some((query, filter_queries))
         }

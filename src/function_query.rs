@@ -203,11 +203,16 @@ impl FuncQuery {
     }
 }
 
+/// Earth's mean radius in kilometres, the value Solr/Lucene use for both
+/// `geodist()` (`DistanceUtils.EARTH_EQUATORIAL_RADIUS_KM`) and the `{!geofilt}`
+/// circle-to-bbox conversion (`SloppyMath`'s `TO_METERS`) -- `6371008.7714` m,
+/// a mean radius despite the legacy "equatorial" name. Module-level so the
+/// haversine (#331) and the bounding-rectangle math (#332) share one source of
+/// truth.
+const EARTH_RADIUS_KM: f64 = 6_371.008_771_4;
+
 /// Great-circle distance in kilometres, the quantity Solr's `geodist()` returns
-/// for a `LatLonPointSpatialField`. Standard haversine over the earth radius
-/// Solr/Lucene use (`DistanceUtils.EARTH_EQUATORIAL_RADIUS_KM` /
-/// `SloppyMath`'s `TO_METERS`, both `6371008.7714` m -- a mean radius despite
-/// the legacy "equatorial" name).
+/// for a `LatLonPointSpatialField`. Standard haversine over [`EARTH_RADIUS_KM`].
 ///
 /// Solr computes this through Lucene's `SloppyMath.haversinMeters`, a
 /// speed-optimised approximation that is itself only accurate to ~40 cm, on
@@ -217,13 +222,12 @@ impl FuncQuery {
 /// different floating-point path" category the differential harness already
 /// tolerates for BM25 `score` magnitudes and stats `sum`/`mean` (#331).
 fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    const R_KM: f64 = 6_371.008_771_4;
     let dlat = (lat2 - lat1).to_radians();
     let dlon = (lon2 - lon1).to_radians();
     let lat1r = lat1.to_radians();
     let lat2r = lat2.to_radians();
     let h = (dlat / 2.0).sin().powi(2) + lat1r.cos() * lat2r.cos() * (dlon / 2.0).sin().powi(2);
-    R_KM * 2.0 * h.sqrt().asin()
+    EARTH_RADIUS_KM * 2.0 * h.sqrt().asin()
 }
 
 /// A parse error carrying a Solr-shaped `SyntaxError` message. The message is
@@ -683,6 +687,47 @@ impl Scorer for FunctionScoreScorer {
     }
 }
 
+// --- per-document function evaluation for sort (#332) --------------------
+
+/// A function query opened against one segment's fast-field columns, for
+/// per-document evaluation outside a scorer -- the sort path needs this for
+/// `sort=geodist() asc` (#332). Unlike [`eval_doc`] (which reopens the columns
+/// on every call, fine for the small `rows` page `fl=dist:geodist()` walks),
+/// this opens them once and evaluates reusing them, which matters when the
+/// collector asks for a value per collected document.
+pub struct FunctionColumns {
+    columns: FieldColumns,
+    func: Arc<FuncQuery>,
+}
+
+impl FunctionColumns {
+    /// Opens the fast-field columns `func` references for `reader`'s segment.
+    pub fn open(reader: &SegmentReader, func: FuncQuery) -> tantivy::Result<FunctionColumns> {
+        let fields = func.fields();
+        Ok(FunctionColumns {
+            columns: FieldColumns::open(reader, &fields)?,
+            func: Arc::new(func),
+        })
+    }
+
+    /// The function value for one document (missing numeric → `0.0`, Solr's
+    /// function-query default; a doc whose `geodist()` location is absent still
+    /// returns a value here -- see [`Self::exists`] for the missing-point case
+    /// the sort path handles separately).
+    pub fn value(&self, doc: DocId) -> f64 {
+        self.func.eval(&|name| self.columns.value(name, doc))
+    }
+
+    /// Whether the function *exists* for this document -- for `geodist()`, that
+    /// both synthetic columns backing its `location` field are present. A doc
+    /// with no point does not exist, so the sort path treats it as missing
+    /// (sorts last) rather than ranking it at the (bogus) `0.0` distance the
+    /// origin would otherwise give it.
+    pub fn exists(&self, doc: DocId) -> bool {
+        self.func.exists(&|name| self.columns.exists(name, doc))
+    }
+}
+
 // --- per-document range filtering (#333) -------------------------------------
 
 /// Whether a function value that may or may not exist falls in a
@@ -935,6 +980,252 @@ impl Scorer for FunctionRangeScorer {
     }
 }
 
+// --- spatial circle / rectangle filters (#332) ------------------------------
+
+/// The shape a `{!geofilt}` / `{!bbox}` filter selects points within, both
+/// driven by the same request-param circle of radius `d` around `pt`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeoShape {
+    /// `{!geofilt}`: the circle itself -- haversine distance to `pt` ≤ `d`.
+    Circle,
+    /// `{!bbox}`: the lat/lon axis-aligned bounding rectangle of that circle.
+    /// A cheaper superset of [`GeoShape::Circle`] Solr offers for "roughly
+    /// within `d`" filtering; the corner a circle excludes is the observable
+    /// difference (`geo_bbox` returns the doc `geo_geofilt` drops).
+    Rectangle,
+}
+
+/// Kilometres per degree of latitude at [`EARTH_RADIUS_KM`] -- the conversion
+/// both the circle (via haversine) and the rectangle bounds use.
+const KM_PER_DEG_LAT: f64 = EARTH_RADIUS_KM * std::f64::consts::PI / 180.0;
+
+/// Whether a point `(lat, lon)` falls inside the `d`-km circle (or its bounding
+/// rectangle) around `pt`. Pure so the circle-vs-rectangle distinction is
+/// unit-testable and mutation-testable without an index (#332).
+///
+/// The rectangle is the axis-aligned bounding box of the `d`-km circle: `d` km
+/// is `d / KM_PER_DEG_LAT` degrees of latitude, and
+/// `d / (KM_PER_DEG_LAT * cos(pt.lat))` degrees of longitude (longitude degrees
+/// shrink with latitude). This is the conversion Solr's
+/// `LatLonPointSpatialField` circle-to-bbox uses, so `geo_bbox`'s captured
+/// membership matches; polar `pt` (where `cos` → 0) degenerates to "every
+/// longitude", a documented site-scale descope (no polar data).
+fn geo_matches(shape: GeoShape, lat: f64, lon: f64, pt: (f64, f64), d_km: f64) -> bool {
+    match shape {
+        GeoShape::Circle => haversine_km(lat, lon, pt.0, pt.1) <= d_km,
+        GeoShape::Rectangle => {
+            let lat_ext = d_km / KM_PER_DEG_LAT;
+            if (lat - pt.0).abs() > lat_ext {
+                return false;
+            }
+            let cos_lat = pt.0.to_radians().cos();
+            let lon_ext = if cos_lat.abs() < 1e-12 {
+                180.0
+            } else {
+                d_km / (KM_PER_DEG_LAT * cos_lat)
+            };
+            (lon - pt.1).abs() <= lon_ext
+        }
+    }
+}
+
+/// A Tantivy [`Query`] matching the documents whose `location` point (held in
+/// the two synthetic columns `sfield__lat`/`sfield__lon`, #331) falls inside the
+/// `d`-km circle (`{!geofilt}`) or its bounding rectangle (`{!bbox}`) around
+/// `pt`. Constant-score `1.0` (a filter), driven exactly like
+/// [`FunctionRangeQuery`] by enumerating every alive document and keeping those
+/// [`geo_matches`] accepts. A document with no point (neither synthetic column
+/// has a value for it) never matches -- the same `exists` rule that makes
+/// `{!frange}` drop a missing field (#333), so `{!geofilt}` does not silently
+/// admit a doc whose missing point reads back as the equator/prime-meridian.
+///
+/// The shape predicate and bounds are [#332]; the two-column encoding,
+/// haversine, and column reader are [#331].
+pub struct GeoFilterQuery {
+    shape: GeoShape,
+    /// The two synthetic columns are `<sfield>__lat` / `<sfield>__lon`.
+    sfield: String,
+    pt: (f64, f64),
+    d: f64,
+}
+
+impl GeoFilterQuery {
+    /// `{!geofilt}` (`Circle`) or `{!bbox}` (`Rectangle`): select documents
+    /// whose `sfield` point is within `d` km of `pt` (circle) or inside that
+    /// circle's bounding rectangle.
+    pub fn new(shape: GeoShape, sfield: String, pt: (f64, f64), d: f64) -> GeoFilterQuery {
+        GeoFilterQuery {
+            shape,
+            sfield,
+            pt,
+            d,
+        }
+    }
+}
+
+impl Clone for GeoFilterQuery {
+    fn clone(&self) -> Self {
+        GeoFilterQuery {
+            shape: self.shape,
+            sfield: self.sfield.clone(),
+            pt: self.pt,
+            d: self.d,
+        }
+    }
+}
+
+impl fmt::Debug for GeoFilterQuery {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("GeoFilterQuery")
+            .field("shape", &self.shape)
+            .field("sfield", &self.sfield)
+            .field("pt", &self.pt)
+            .field("d", &self.d)
+            .finish()
+    }
+}
+
+impl Query for GeoFilterQuery {
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+        // `AllQuery` enumerates every alive document; the shape predicate
+        // narrows it. `enable_scoring` is ignored: a filter is constant-score.
+        let child = tantivy::query::AllQuery.weight(enable_scoring)?;
+        Ok(Box::new(GeoFilterWeight {
+            child,
+            shape: self.shape,
+            sfield: self.sfield.clone(),
+            pt: self.pt,
+            d: self.d,
+        }))
+    }
+
+    fn query_terms<'a>(&'a self, _visitor: &mut dyn FnMut(&'a Term, bool)) {
+        // Membership is decided by scanning the two fast-field columns, like
+        // `FunctionRangeQuery`; no term-dictionary clauses.
+    }
+}
+
+struct GeoFilterWeight {
+    child: Box<dyn Weight>,
+    shape: GeoShape,
+    sfield: String,
+    pt: (f64, f64),
+    d: f64,
+}
+
+impl Weight for GeoFilterWeight {
+    fn scorer(&self, reader: &SegmentReader, boost: Score) -> tantivy::Result<Box<dyn Scorer>> {
+        let child = self.child.scorer(reader, boost)?;
+        let columns = FieldColumns::open(reader, &self.columns_for(&self.sfield))?;
+        let mut scorer = GeoFilterScorer {
+            child,
+            columns,
+            shape: self.shape,
+            sfield: self.sfield.clone(),
+            pt: self.pt,
+            d: self.d,
+        };
+        // `DocSet` iteration is `doc()`-first, so a fresh scorer must be
+        // positioned AT its first match (see `FunctionRangeScorer`).
+        scorer.position_at_first_match();
+        Ok(Box::new(scorer))
+    }
+
+    fn explain(&self, reader: &SegmentReader, doc: DocId) -> tantivy::Result<Explanation> {
+        let columns = FieldColumns::open(reader, &self.columns_for(&self.sfield))?;
+        let lat = columns.value(&format!("{}__lat", self.sfield), doc);
+        let lon = columns.value(&format!("{}__lon", self.sfield), doc);
+        let exists = columns.exists(&format!("{}__lat", self.sfield), doc)
+            && columns.exists(&format!("{}__lon", self.sfield), doc);
+        let matches = exists && geo_matches(self.shape, lat, lon, self.pt, self.d);
+        let dist = haversine_km(lat, lon, self.pt.0, self.pt.1);
+        let mut explanation =
+            Explanation::new_with_string("geofilt".to_string(), if matches { 1.0 } else { 0.0 });
+        explanation.add_detail(Explanation::new_with_string(
+            format!(
+                "lat={lat} lon={lon} dist={dist} d={} exists={exists}",
+                self.d
+            ),
+            dist as Score,
+        ));
+        Ok(explanation)
+    }
+
+    fn count(&self, reader: &SegmentReader) -> tantivy::Result<u32> {
+        // The matched set is a subset of `AllQuery`'s; scan the scorer for an
+        // exact count, exactly as `FunctionRangeWeight` does.
+        let mut scorer = self.scorer(reader, 1.0)?;
+        let mut n = 0u32;
+        while scorer.advance() != TERMINATED {
+            n += 1;
+        }
+        Ok(n)
+    }
+}
+
+impl GeoFilterWeight {
+    fn columns_for(&self, sfield: &str) -> [String; 2] {
+        [format!("{sfield}__lat"), format!("{sfield}__lon")]
+    }
+}
+
+struct GeoFilterScorer {
+    child: Box<dyn Scorer>,
+    columns: FieldColumns,
+    shape: GeoShape,
+    sfield: String,
+    pt: (f64, f64),
+    d: f64,
+}
+
+impl GeoFilterScorer {
+    fn matches_at(&self, doc: DocId) -> bool {
+        let lat = self.columns.value(&format!("{}__lat", self.sfield), doc);
+        let lon = self.columns.value(&format!("{}__lon", self.sfield), doc);
+        let exists = self.columns.exists(&format!("{}__lat", self.sfield), doc)
+            && self.columns.exists(&format!("{}__lon", self.sfield), doc);
+        exists && geo_matches(self.shape, lat, lon, self.pt, self.d)
+    }
+
+    /// Advance the child to its first matching document (or exhaustion). See
+    /// `FunctionRangeScorer::position_at_first_match`.
+    fn position_at_first_match(&mut self) {
+        while self.child.doc() != TERMINATED && !self.matches_at(self.child.doc()) {
+            self.child.advance();
+        }
+    }
+}
+
+impl DocSet for GeoFilterScorer {
+    fn advance(&mut self) -> DocId {
+        loop {
+            let doc = self.child.advance();
+            if doc == TERMINATED {
+                return TERMINATED;
+            }
+            if self.matches_at(doc) {
+                return doc;
+            }
+        }
+    }
+    fn doc(&self) -> DocId {
+        // The child is always positioned on a match (or TERMINATED) by
+        // `position_at_first_match` and the filtering `advance`.
+        self.child.doc()
+    }
+    fn size_hint(&self) -> u32 {
+        self.child.size_hint()
+    }
+}
+
+impl Scorer for GeoFilterScorer {
+    fn score(&mut self) -> Score {
+        // Constant-score 1.0, matching Solr's `ConstantScoreScorer` for a
+        // parsed `{!geofilt}`/`{!bbox}`.
+        1.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1122,5 +1413,62 @@ mod tests {
             _ => 0.0,
         };
         assert_eq!(f.eval(&one_deg_n), f.eval(&one_deg_s));
+    }
+
+    #[test]
+    fn geo_matches_circle_vs_rectangle_on_the_corner_doc() {
+        // The fixture design (#332 capture block): origin (40,-74), d=130 km.
+        // g6 at (41,-73) is ~139.7 km away -- outside the circle but inside its
+        // bounding rectangle. That corner doc is the whole observable
+        // difference between `{!geofilt}` and `{!bbox}`.
+        let pt = (40.0, -74.0);
+        let d = 130.0;
+        // The corner doc: rectangle admits it, the circle does not.
+        assert!(!geo_matches(GeoShape::Circle, 41.0, -73.0, pt, d));
+        assert!(geo_matches(GeoShape::Rectangle, 41.0, -73.0, pt, d));
+        // g2/g4 (~111 km N/S) are inside both the circle and the rectangle.
+        assert!(geo_matches(GeoShape::Circle, 41.0, -74.0, pt, d));
+        assert!(geo_matches(GeoShape::Rectangle, 41.0, -74.0, pt, d));
+        // The origin is inside both (distance 0).
+        assert!(geo_matches(GeoShape::Circle, 40.0, -74.0, pt, d));
+        assert!(geo_matches(GeoShape::Rectangle, 40.0, -74.0, pt, d));
+    }
+
+    #[test]
+    fn geo_matches_pins_the_haversine_boundary() {
+        // The `geo_geofilt_tight` fixture: d=70 km, g7 at (40.5,-74.5) is
+        // ~69.95 km -- just inside the circle, so `{!geofilt d=70}` returns it.
+        // A radius just below that distance excludes it: the boundary is the
+        // haversine value, not a rounded one.
+        let pt = (40.0, -74.0);
+        assert!(geo_matches(GeoShape::Circle, 40.5, -74.5, pt, 70.0));
+        assert!(!geo_matches(GeoShape::Circle, 40.5, -74.5, pt, 69.0));
+    }
+
+    #[test]
+    fn geo_matches_rectangle_is_a_superset_of_the_circle() {
+        // The lat/lon deltas of any point inside the circle are each ≤ the
+        // circle's radius, so the rectangle (which checks them independently)
+        // admits every point the circle does. The rectangle only ever ADDS the
+        // diagonal-corner docs the circle excludes. Sampling the 7-doc grid at
+        // the capture radius d=130: every circle hit is also a rectangle hit.
+        let pt = (40.0, -74.0);
+        let grid = [
+            (40.0, -74.0),
+            (41.0, -74.0),
+            (40.0, -73.0),
+            (39.0, -74.0),
+            (40.0, -75.0),
+            (41.0, -73.0),
+            (40.5, -74.5),
+        ];
+        for (la, lo) in grid {
+            if geo_matches(GeoShape::Circle, la, lo, pt, 130.0) {
+                assert!(
+                    geo_matches(GeoShape::Rectangle, la, lo, pt, 130.0),
+                    "rectangle must admit every circle point: ({la},{lo})"
+                );
+            }
+        }
     }
 }
