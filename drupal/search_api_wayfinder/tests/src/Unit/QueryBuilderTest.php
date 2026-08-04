@@ -505,7 +505,11 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    $this->assertSame('sm_tags asc,ss_search_api_datasource desc,ss_search_api_language asc', $params['sort']);
+    // Issue #358: a string sort resolves to the language-specific sort_*/
+    // copy (default 'und' here), not the mapped sm_* field -- the index now
+    // writes that copy from the first value. Reserved Search API pseudo-fields
+    // keep their columns.
+    $this->assertSame('sort_X3b_und_tags asc,ss_search_api_datasource desc,ss_search_api_language asc', $params['sort']);
   }
 
   /**
