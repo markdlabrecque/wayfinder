@@ -412,3 +412,129 @@ async fn payload_score_on_a_non_payload_field_is_400_not_500() {
          unsupported-parser message for a non-payload field: {got_msg:?}"
     );
 }
+
+// --- payload-free occurrences and the block boost ---------------------------
+
+/// A three-doc corpus over the same schema, mirroring `capture.sh`'s `plsz`
+/// core (finding 172): z1's only `dog` occurrence is a *bare* token, z2 is the
+/// payloaded control, and z3 carries both forms of `cat`.
+/// Fixture name, `v`, `func`, expected `(id, score)` order — the same shape as
+/// [`FuncCase`], plus the `v` these rows vary.
+type PayloadFreeCase<'a> = (&'a str, &'a str, &'a str, &'a [(&'a str, f64)]);
+
+async fn plsz_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = app_with_schema(dir.path(), PLS_SCHEMA_TOML).expect("plsz app must build");
+    let corpus = json!([
+        {"id":"z1","boost_term":["dog"]},
+        {"id":"z2","boost_term":["dog|3.0"]},
+        {"id":"z3","boost_term":["cat","cat|2.0"]}
+    ]);
+    let (status, body) = post_docs(&app, &corpus).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the plsz corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
+/// `plsz_bare_*` / `plsz_mixed_*`: a payload-free occurrence contributes the
+/// factor `1.0` — Solr's `PayloadDecoder` decodes a null payload to `1f`
+/// rather than skipping the position (finding 172).
+///
+/// The `mixed_min` case is the one that actually discriminates: z3 aggregates
+/// `[1.0, 2.0]`, so skipping the bare occurrence would give `2.0` and
+/// contributing gives `1.0`. Scoring the bare occurrence `0.0` instead — the
+/// natural but wrong reading — would drop `bare_*` z1 to 0.0 and `mixed_min`
+/// to 0.0 as well.
+#[tokio::test]
+async fn payload_free_occurrence_contributes_one() {
+    let (app, _dir) = plsz_app().await;
+    let cases: &[PayloadFreeCase] = &[
+        ("plsz_bare_max", "dog", "max", &[("z2", 3.0), ("z1", 1.0)]),
+        ("plsz_bare_min", "dog", "min", &[("z2", 3.0), ("z1", 1.0)]),
+        (
+            "plsz_bare_average",
+            "dog",
+            "average",
+            &[("z2", 3.0), ("z1", 1.0)],
+        ),
+        ("plsz_bare_sum", "dog", "sum", &[("z2", 3.0), ("z1", 1.0)]),
+        ("plsz_mixed_max", "cat", "max", &[("z3", 2.0)]),
+        ("plsz_mixed_min", "cat", "min", &[("z3", 1.0)]),
+        ("plsz_mixed_average", "cat", "average", &[("z3", 1.5)]),
+        ("plsz_mixed_sum", "cat", "sum", &[("z3", 3.0)]),
+    ];
+    for (name, v, func, expected) in cases {
+        let qs = format!(
+            "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22{v}%22%20func%3D{func}%7D&fl=id,score&sort=score%20desc,id%20asc&wt=json"
+        );
+        let (status, body) = get(&app, &qs).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+        assert_scores_close(&doc_scores(&body), expected, name);
+    }
+}
+
+/// A `^n` on an **inline** `{!payload_score}` clause must multiply the payload
+/// aggregate.
+///
+/// The clause must be **parenthesised** for the boost to reach the query, and
+/// that is a property of the local-params extractor, not of this feature:
+/// `local_params::bound_token_len` ends a block's bound token only at
+/// whitespace or `)`, so in `{!payload_score ...}^2` the `^2` is swallowed into
+/// the bound token and then discarded with it, while in
+/// `({!payload_score ...})^2` it lands outside and the grammar parses it as a
+/// boost. (At position 0 the `^2` is likewise swallowed, there as part of the
+/// remainder a position-0 block discards — finding 168.) Only the
+/// parenthesised shape is asserted here; the bare-`^2` shape is an
+/// extractor-wide ceiling shared with `{!edismax}` and has no fixture either
+/// way, so this test pins the path that does reach the scorer rather than
+/// blessing the one that does not.
+///
+/// No fixture: the module never boosts a payload_score clause, so this pins an
+/// internal invariant rather than a captured wire value. It is a real
+/// regression guard all the same — `PayloadScoreScorer` deliberately never
+/// reads its child's score, so forwarding the Tantivy weight boost into the
+/// child (the obvious wiring, and what `BoostQuery` does for every other
+/// query) silently drops it.
+///
+/// Asserted as a ratio against the unboosted form rather than as absolute
+/// numbers, so the guard is exactly "the boost is applied" and does not also
+/// encode the `*:*`-plus-clause sum that `pls_client_shape` already covers.
+#[tokio::test]
+async fn inline_payload_score_block_boost_multiplies_the_aggregate() {
+    let (app, _dir) = pls_app().await;
+    let tail = "&fl=id,score&sort=score%20desc,id%20asc&wt=json";
+    let clause = "%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Dmax%7D";
+    let mut scores = Vec::new();
+    for suffix in ["", "%5E2"] {
+        let qs = format!("select?q=*%3A*%20%28{clause}%29{suffix}{tail}");
+        let (status, body) = get(&app, &qs).await;
+        assert_eq!(status, StatusCode::OK, "inline boost {suffix:?}: {body}");
+        scores.push(doc_scores(&body));
+    }
+    // `*:*` contributes a constant 1.0 to every document, so the payload part
+    // of a score is `score - 1.0`. d3's max payload is 4.5 and d2's is 3.0.
+    for (id, payload) in [("d3", 4.5f64), ("d2", 3.0)] {
+        let plain = scores[0]
+            .iter()
+            .find(|(d, _)| d == id)
+            .unwrap_or_else(|| panic!("{id} missing from unboosted run: {:?}", scores[0]))
+            .1;
+        let boosted = scores[1]
+            .iter()
+            .find(|(d, _)| d == id)
+            .unwrap_or_else(|| panic!("{id} missing from boosted run: {:?}", scores[1]))
+            .1;
+        assert!(
+            (plain - (1.0 + payload)).abs() < 1e-3,
+            "{id}: unboosted inline score {plain} should be 1.0 + {payload}"
+        );
+        assert!(
+            (boosted - (1.0 + 2.0 * payload)).abs() < 1e-3,
+            "{id}: ^2 inline score {boosted} should be 1.0 + 2*{payload}, so the \
+             block boost reaches the payload aggregate"
+        );
+    }
+}

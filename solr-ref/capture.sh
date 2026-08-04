@@ -4239,3 +4239,7 @@ capplsz plsz_mixed_max     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D
 capplsz plsz_mixed_min     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Dmin%7D&$PLSZ_TAIL"
 capplsz plsz_mixed_average "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Daverage%7D&$PLSZ_TAIL"
 capplsz plsz_mixed_sum     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Dsum%7D&$PLSZ_TAIL"
+
+if want_any '^plsz_'; then
+  release "$PLSZ_CONTAINER" "payload-free core '$PLSZ_CORE'"
+fi

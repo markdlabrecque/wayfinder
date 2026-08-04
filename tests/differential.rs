@@ -1021,6 +1021,32 @@ fn pls_corpus() -> Value {
     ])
 }
 
+/// The 3-doc corpus `capture.sh`'s plsz block indexes into the `plsz` core
+/// (finding 172). z1's only occurrence of `dog` is a *bare* token; z2 is the
+/// payloaded control; z3 carries both forms of `cat`, which is what separates
+/// "a payload-free occurrence contributes 1.0" from "it is skipped". Reuses
+/// `PLS_SCHEMA_TOML` -- a superset of what these docs need, and the same
+/// `boost_term_payload` field config the live `plsz` core was given.
+fn plsz_corpus() -> Value {
+    json!([
+        {"id":"z1","boost_term":["dog"]},
+        {"id":"z2","boost_term":["dog|3.0"]},
+        {"id":"z3","boost_term":["cat","cat|2.0"]}
+    ])
+}
+
+async fn plsz_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), PLS_SCHEMA_TOML).expect("plsz app must build");
+    let (status, body) = post_docs(&app, &plsz_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the plsz corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
 async fn pls_app() -> (Router, TempDir) {
     let dir = TempDir::new().expect("temp dir");
     let app = common::app_with_schema(dir.path(), PLS_SCHEMA_TOML).expect("pls app must build");
@@ -2748,6 +2774,7 @@ fn app_and_request_url<'a>(
     geo_app: &'a Router,
     heatmap_app: &'a Router,
     pls_app: &'a Router,
+    plsz_app: &'a Router,
 ) -> (&'a Router, String) {
     match entry.url.split_once('/') {
         Some(("content", rest)) => (content_app, format!("content/{rest}")),
@@ -2764,6 +2791,7 @@ fn app_and_request_url<'a>(
         Some(("geo", rest)) => (geo_app, format!("content/{rest}")),
         Some(("heatmap", rest)) => (heatmap_app, format!("content/{rest}")),
         Some(("pls", rest)) => (pls_app, format!("content/{rest}")),
+        Some(("plsz", rest)) => (plsz_app, format!("content/{rest}")),
         Some(("sortdebt", _)) => (sortdebt_app, entry.url.clone()),
         Some(("update9", _)) => (update9_app, entry.url.clone()),
         Some(("stats", _)) => (stats_app, entry.url.clone()),
@@ -2817,6 +2845,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let (geo_app, _geo_dir) = geo_app().await;
     let (heatmap_app, _heatmap_dir) = heatmap_app().await;
     let (pls_app, _pls_dir) = pls_app().await;
+    let (plsz_app, _plsz_dir) = plsz_app().await;
 
     let mut ran = 0usize;
     let mut diffed = 0usize;
@@ -2847,6 +2876,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
             &geo_app,
             &heatmap_app,
             &pls_app,
+            &plsz_app,
         );
         // `update_select_commitwithin_visible` follows a `commitWithin=500`
         // row with no settle delay in this hermetic replay, unlike

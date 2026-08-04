@@ -1258,9 +1258,12 @@ impl PayloadFunction {
         }
     }
 
-    /// Folds one document's matching payload values. `None` for a document with
-    /// no payload for the term at all — Solr's `PayloadFunction` accumulators
-    /// never see a value there, and the caller scores it `0.0`.
+    /// Folds one document's matching payload factors. `None` only for a
+    /// document that carries no occurrence of the term in the field at all,
+    /// which the child query already excludes from the doc set — see
+    /// [`PayloadColumn::payloads_for_doc`], which contributes `1.0` per
+    /// payload-free occurrence, so a matching document always has at least one
+    /// factor.
     fn apply(self, values: &[f32]) -> Option<f32> {
         if values.is_empty() {
             return None;
@@ -1292,9 +1295,10 @@ impl PayloadFunction {
 /// *fast column*, which `boost_term_payload` populates with the verbatim
 /// `<term>|<boost>` tokens (`schema::BOOST_TERM_PAYLOAD_VERBATIM_TOKENIZER`).
 /// A text fast column stores term ordinals, so each segment's scorer first
-/// resolves the ordinals whose term is `<v>|<float>` — one prefix scan of the
-/// column's term dictionary, not a per-document string decode — and then reads
-/// the ordinals per document.
+/// resolves the ordinals whose term is `<v>|<float>`, plus the bare `<v>`
+/// ordinal (factor `1.0`, finding 172) — one prefix scan of the column's term
+/// dictionary and one exact lookup, not a per-document string decode — and then
+/// reads the ordinals per document.
 ///
 /// ponytail: single-term `v` only. Real Solr turns a multi-term `v` into an
 /// ordered `SpanNearQuery` over the payload field (finding 171, fixture
@@ -1387,6 +1391,10 @@ impl Weight for PayloadScoreWeight {
             child: self.child.scorer(reader, boost)?,
             column: self.columns(reader)?,
             func: self.func,
+            // The child's score is never read (payload-only scoring), so
+            // forwarding `boost` into it would silently drop a `^n` on the
+            // block. Apply it here instead, as `BoostQuery` would.
+            boost,
             values: Vec::new(),
         }))
     }
@@ -1395,7 +1403,9 @@ impl Weight for PayloadScoreWeight {
         let column = self.columns(reader)?;
         let mut values = Vec::new();
         column.payloads_for_doc(doc, &mut values);
-        let score = self.func.apply(&values).unwrap_or(0.0);
+        // No boost factor here: when a `^n` wraps this query, tantivy's
+        // `BoostWeight::explain` multiplies this explanation's value itself.
+        let score = self.func.apply(&values).unwrap_or(1.0);
         Ok(Explanation::new_with_string(
             format!("payload_score({}, {:?})", self.term, self.func),
             score,
@@ -1410,11 +1420,12 @@ impl Weight for PayloadScoreWeight {
 
 /// One segment's payload lookup for a single term: the field's text fast column
 /// plus the term ordinals in it that decode to `<term>|<float>`, mapped to the
-/// float. Built once per segment (a prefix scan of the column's dictionary),
-/// then read per document.
+/// float, and the bare `<term>` ordinal mapped to `1.0`. Built once per segment
+/// (a prefix scan of the column's dictionary plus one exact lookup), then read
+/// per document.
 struct PayloadColumn {
     column: Option<tantivy::columnar::StrColumn>,
-    /// Ordinal -> payload. A `Vec` of pairs rather than a `HashMap`: a term
+    /// Ordinal -> payload factor. A `Vec` of pairs rather than a `HashMap`: a term
     /// carries one payload per distinct boost value written for it (three in the
     /// whole captured corpus), so a linear scan beats hashing.
     payloads: Vec<(u64, f32)>,
@@ -1424,7 +1435,8 @@ impl PayloadColumn {
     fn open(reader: &SegmentReader, field: &str, term: &str) -> tantivy::Result<PayloadColumn> {
         let Some(column) = reader.fast_fields().str(field)? else {
             // No column in this segment (e.g. no document in it has a value):
-            // every document scores 0.0, and the child still decides membership.
+            // every document scores the payload-free default, and the child
+            // still decides membership.
             return Ok(PayloadColumn {
                 column: None,
                 payloads: Vec::new(),
@@ -1432,6 +1444,15 @@ impl PayloadColumn {
         };
         let prefix = format!("{term}{}", crate::schema::BOOST_TERM_PAYLOAD_DELIMITER);
         let mut payloads = Vec::new();
+        // An occurrence written *without* a `|<float>` suffix still counts, as
+        // the factor `1.0`: Solr decodes a null payload to 1f rather than
+        // skipping the position, so `["cat", "cat|2.0"]` aggregates `[1.0, 2.0]`
+        // (finding 172 — `min` 1.0, `average` 1.5, `sum` 3.0, `max` 2.0, all
+        // fixture-backed in the `plsz` rows). The bare term is its own ordinal,
+        // so it needs its own dictionary lookup.
+        if let Some(ord) = column.dictionary().term_ord(term.as_bytes())? {
+            payloads.push((ord, 1.0));
+        }
         let mut stream = column
             .dictionary()
             .prefix_range(prefix.as_bytes())
@@ -1475,6 +1496,10 @@ struct PayloadScoreScorer {
     child: Box<dyn Scorer>,
     column: PayloadColumn,
     func: PayloadFunction,
+    /// The Tantivy weight boost reaching this scorer — a `^n` on the block,
+    /// which `BoostQuery` hands down through `Weight::scorer`. Applied here
+    /// because the child's (boosted) score is never read.
+    boost: Score,
     /// Scratch buffer for one document's payloads, reused across `score()`
     /// calls rather than allocated per scored document.
     values: Vec<f32>,
@@ -1512,8 +1537,10 @@ impl Scorer for PayloadScoreScorer {
         let doc = self.child.doc();
         self.column.payloads_for_doc(doc, &mut self.values);
         // Payload-only: the child's BM25 score is never read, because
-        // `includeSpanScore` defaults to false (finding 165).
-        self.func.apply(&self.values).unwrap_or(0.0)
+        // `includeSpanScore` defaults to false (finding 165). The `unwrap_or`
+        // is defensive — `payloads_for_doc` yields a factor for every
+        // occurrence, and the child only admits documents that have one.
+        self.func.apply(&self.values).unwrap_or(1.0) * self.boost
     }
 }
 
