@@ -4154,3 +4154,88 @@ cappls pls_err_nonpayload    "select?q=%7B%21payload_score%20f%3Dbody%20v%3D%22d
 if want_any '^pls_'; then
   release "$PLS_CONTAINER" "payload_score core '$PLS_CORE'"
 fi
+
+# --- payload-free occurrences in a boost_term_payload field (#340, finding 172)
+# The `pls` corpus writes every value as `<term>|<boost>`, because that is all
+# the module ever emits (`sprintf('%s|%.1F')`). It therefore says nothing about
+# what a *payload-free* occurrence scores -- and the natural guesses are both
+# wrong. Solr's PayloadDecoder decodes a null payload to `1f` rather than
+# skipping the position, so a bare token contributes the factor 1.0 and takes
+# part in the aggregate like any other.
+#
+# Own container/port/core rather than three more docs in `pls`, so none of the
+# committed `pls_*` fixtures move.
+#
+# z1 has the bare token alone; z2 is the payloaded control; z3 carries both
+# forms of the same term, which is the row that distinguishes "contributes 1.0"
+# from "is skipped" -- under `min`, skipping would give 2.0 and contributing
+# gives 1.0.
+PLSZ_CONTAINER=wayfinder-solr-340z
+PLSZ_SOLR=http://localhost:9077/solr
+PLSZ_CORE=plsz
+if want_any '^plsz_'; then
+  if ! docker ps --format '{{.Names}}' | grep -qx "$PLSZ_CONTAINER"; then
+    docker rm -f "$PLSZ_CONTAINER" >/dev/null 2>&1 || true
+    docker run -d --name "$PLSZ_CONTAINER" -p 9077:8983 \
+      solr:9 solr-precreate "$PLSZ_CORE" >/dev/null
+  fi
+  echo -n "waiting for payload-free solr"
+  for _ in $(seq 60); do
+    if curl -sf "$PLSZ_SOLR/$PLSZ_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n "."; sleep 1
+  done
+  # Field type identical to the `pls` block's -- same verbatim copy of the
+  # module's configset, so the only variable under test is the corpus.
+  curl -s "$PLSZ_SOLR/$PLSZ_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field-type": {
+      "name":"boost_term_payload","class":"solr.TextField","stored":false,"indexed":true,
+      "analyzer":{
+        "tokenizer":{"class":"solr.WhitespaceTokenizerFactory"},
+        "filters":[
+          {"class":"solr.LengthFilterFactory","min":"2","max":"100"},
+          {"class":"solr.LowerCaseFilterFactory"},
+          {"class":"solr.RemoveDuplicatesTokenFilterFactory"},
+          {"class":"solr.DelimitedPayloadTokenFilterFactory","encoder":"float"}
+        ]
+      }
+    }
+  }' >/dev/null
+  curl -s "$PLSZ_SOLR/$PLSZ_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field": [
+      {"name":"boost_term","type":"boost_term_payload","indexed":true,"stored":false,"multiValued":true}
+    ]
+  }' >/dev/null
+  curl -sf "$PLSZ_SOLR/$PLSZ_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"z1","boost_term":["dog"]},
+    {"id":"z2","boost_term":["dog|3.0"]},
+    {"id":"z3","boost_term":["cat","cat|2.0"]}
+  ]' >/dev/null
+fi
+
+capplsz() {  # capplsz <name> <path-after-core>
+  local name=$1 suffix=$2
+  want "$name" || return 0
+  curl -sg "$PLSZ_SOLR/$PLSZ_CORE/$suffix" \
+    -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$PLSZ_CORE/$suffix" "" "$PLSZ_SOLR" \
+    >> "$MANIFEST_ERRORS"
+  rm -f "$OUT/$name.status"
+}
+
+PLSZ_TAIL='fl=id,score&sort=score%20desc,id%20asc&wt=json'
+
+# `dog`: z1 (bare) against z2 (payload 3.0). z1 scores 1.0 under all four
+# functions -- not 0.0, and not absent from the results.
+capplsz plsz_bare_max     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Dmax%7D&$PLSZ_TAIL"
+capplsz plsz_bare_min     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Dmin%7D&$PLSZ_TAIL"
+capplsz plsz_bare_average "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Daverage%7D&$PLSZ_TAIL"
+capplsz plsz_bare_sum     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22dog%22%20func%3Dsum%7D&$PLSZ_TAIL"
+
+# `cat`: z3 alone, carrying both `cat` and `cat|2.0`. The aggregate runs over
+# [1.0, 2.0] -- max 2.0, min 1.0, average 1.5, sum 3.0. These four values are
+# the whole evidence for the "decodes to 1f, does not skip" rule.
+capplsz plsz_mixed_max     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Dmax%7D&$PLSZ_TAIL"
+capplsz plsz_mixed_min     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Dmin%7D&$PLSZ_TAIL"
+capplsz plsz_mixed_average "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Daverage%7D&$PLSZ_TAIL"
+capplsz plsz_mixed_sum     "select?q=%7B%21payload_score%20f%3Dboost_term%20v%3D%22cat%22%20func%3Dsum%7D&$PLSZ_TAIL"

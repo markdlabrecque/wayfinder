@@ -3082,3 +3082,22 @@ the only way the four payload functions are distinguishable from each other.
       it writes is a single `sprintf('%s|%.1F')` token
       (`SearchApiSolrBackend.php:1502-1503`). Single-term `v` is therefore the
       supported form and this row is a named descope with an expiring guard.
+
+172. **A payload-free occurrence contributes the factor `1.0`; it is not skipped
+      and it does not score `0`.** Solr's `PayloadDecoder` decodes a *null*
+      payload to `1f` rather than passing the position over, so a `boost_term`
+      value written as a bare token takes part in the aggregate like any other
+      occurrence. A document whose only occurrence is bare scores `1.0` under
+      **all four** functions including `sum` (`plsz_bare_*`, z1), and a document
+      carrying both forms of one term -- `["cat", "cat|2.0"]` -- aggregates
+      `[1.0, 2.0]`: max `2.0`, min `1.0`, average `1.5`, sum `3.0`
+      (`plsz_mixed_*`, z3). The `min` row is the discriminating one -- skipping
+      the bare occurrence would give `2.0`.
+
+      The module never writes a bare token (every value is
+      `sprintf('%s|%.1F')`, `SearchApiSolrBackend.php:1502-1503`), so this is
+      off the client path -- but it is reachable by anyone indexing a
+      `boost_term_payload` field directly, and both natural guesses about it
+      ("the accumulator never sees a value, so the document scores 0" and "only
+      `sum` returns 0") are wrong. Captured on a dedicated `plsz` core so the
+      `pls_*` fixtures stay put.
