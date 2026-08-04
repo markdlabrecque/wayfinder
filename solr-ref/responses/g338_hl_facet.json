@@ -1,0 +1,66 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2,
+    "params":{
+      "df":"body",
+      "facet.field":["type","category"],
+      "hl":"true",
+      "group.limit":"2",
+      "fl":"id",
+      "sort":"id asc",
+      "group.ngroups":"true",
+      "q":"lazy",
+      "hl.fl":"body",
+      "facet":"true",
+      "wt":"json",
+      "group.field":"type",
+      "group":"true"
+    }
+  },
+  "grouped":{
+    "type":{
+      "matches":2,
+      "ngroups":2,
+      "groups":[{
+        "groupValue":"article",
+        "doclist":{
+          "numFound":1,
+          "start":0,
+          "numFoundExact":true,
+          "docs":[{
+            "id":"g1"
+          }]
+        }
+      },{
+        "groupValue":"page",
+        "doclist":{
+          "numFound":1,
+          "start":0,
+          "numFoundExact":true,
+          "docs":[{
+            "id":"g2"
+          }]
+        }
+      }]
+    }
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{
+      "type":["article",1,"page",1],
+      "category":["news",2,"blog",0]
+    },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  },
+  "highlighting":{
+    "g1":{
+      "body":["<em>lazy</em> dog brown"]
+    },
+    "g2":{
+      "body":["<em>lazy</em> garden afternoon"]
+    }
+  }
+}

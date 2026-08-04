@@ -1,0 +1,65 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "q":"*:*",
+      "facet.field":["type","category"],
+      "group.truncate":"false",
+      "fl":"id",
+      "sort":"id asc",
+      "group.ngroups":"true",
+      "facet":"true",
+      "wt":"json",
+      "group.field":"type",
+      "group":"true"
+    }
+  },
+  "grouped":{
+    "type":{
+      "matches":6,
+      "ngroups":3,
+      "groups":[{
+        "groupValue":"article",
+        "doclist":{
+          "numFound":3,
+          "start":0,
+          "numFoundExact":true,
+          "docs":[{
+            "id":"g1"
+          }]
+        }
+      },{
+        "groupValue":"page",
+        "doclist":{
+          "numFound":2,
+          "start":0,
+          "numFoundExact":true,
+          "docs":[{
+            "id":"g2"
+          }]
+        }
+      },{
+        "groupValue":null,
+        "doclist":{
+          "numFound":1,
+          "start":0,
+          "numFoundExact":true,
+          "docs":[{
+            "id":"g6"
+          }]
+        }
+      }]
+    }
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{
+      "type":["article",3,"page",2],
+      "category":["blog",2,"news",2]
+    },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  }
+}
