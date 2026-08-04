@@ -1397,4 +1397,102 @@ class QueryBuilderTest extends TestCase {
     $this->assertArrayNotHasKey('group.field', $params);
   }
 
+  /**
+   * #291: autocomplete builds a /terms request, not /suggest. The evidenced
+   * wire (finding 154/131) is exactly terms=true, terms.fl (the query's
+   * fulltext fields, mapped through FieldMapper), terms.prefix (the
+   * incomplete key), terms.limit (the query's suggestion limit, default 10),
+   * plus omitHeader=true as search_api_solr's standard envelope convention.
+   * No q, no fq: the Terms component reads the indexed dictionary, it does
+   * not run a search.
+   *
+   * @covers ::buildAutocompleteTerms
+   */
+  public function testBuildAutocompleteTermsSendsTermsPrefixFlAndLimit(): void {
+    $index = $this->mockIndex(['title'], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+    ]);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], ['limit' => 5]);
+
+    $params = (new QueryBuilder())->buildAutocompleteTerms($query, 'roc');
+
+    $this->assertSame('true', $params['terms']);
+    $this->assertSame('ts_title', $params['terms.fl']);
+    $this->assertSame('roc', $params['terms.prefix']);
+    $this->assertSame(5, $params['terms.limit']);
+    $this->assertSame('true', $params['omitHeader']);
+    // The terms component scans the dictionary; no query/filters apply.
+    $this->assertArrayNotHasKey('q', $params);
+    $this->assertArrayNotHasKey('fq', $params);
+  }
+
+  /**
+   * @covers ::buildAutocompleteTerms
+   */
+  public function testBuildAutocompleteTermsDefaultsLimitToTen(): void {
+    $index = $this->mockIndex(['title'], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+    ]);
+    $query = $this->mockQuery(NULL, NULL, $index);
+
+    $params = (new QueryBuilder())->buildAutocompleteTerms($query, 'r');
+
+    $this->assertSame(10, $params['terms.limit']);
+  }
+
+  /**
+   * #300 integration: every solr_text_suggester field indexes into the one
+   * fixed sink field 'twm_suggest' (finding 151), so two such fields must
+   * collapse to a single terms.fl value rather than request the dictionary
+   * twice. This is the field the SuggestComponent would read too, but the
+   * terms component reaches it via terms.fl (finding 154).
+   *
+   * @covers ::buildAutocompleteTerms
+   */
+  public function testBuildAutocompleteTermsDedupesTwmSuggestAcrossSuggesterFields(): void {
+    $index = $this->mockIndex(['suggest_a', 'suggest_b'], [
+      'suggest_a' => $this->mockIndexField('suggest_a', 'solr_text_suggester', FALSE),
+      'suggest_b' => $this->mockIndexField('suggest_b', 'solr_text_suggester', TRUE),
+    ]);
+    $query = $this->mockQuery(NULL, NULL, $index);
+
+    $params = (new QueryBuilder())->buildAutocompleteTerms($query, 'r');
+
+    $this->assertSame('twm_suggest', $params['terms.fl']);
+  }
+
+  /**
+   * @covers ::buildAutocompleteTerms
+   */
+  public function testBuildAutocompleteTermsEmitsMultipleFieldsAsRepeatedFl(): void {
+    $index = $this->mockIndex(['title', 'body'], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+      'body' => $this->mockIndexField('body', 'text', TRUE),
+    ]);
+    $query = $this->mockQuery(NULL, NULL, $index);
+
+    $params = (new QueryBuilder())->buildAutocompleteTerms($query, 'r');
+
+    $this->assertSame(['ts_title', 'tm_body'], $params['terms.fl']);
+  }
+
+  /**
+   * The Server suggester calls $query->setFulltextFields() with the
+   * configured autocomplete fields (search_api_autocomplete Server.php), so
+   * buildAutocompleteTerms must honour that subset, not the whole index.
+   *
+   * @covers ::buildAutocompleteTerms
+   */
+  public function testBuildAutocompleteTermsHonoursQueryFulltextFieldSubset(): void {
+    $index = $this->mockIndex(['title', 'body'], [
+      'title' => $this->mockIndexField('title', 'text', FALSE),
+      'body' => $this->mockIndexField('body', 'text', TRUE),
+    ]);
+    $query = $this->mockQuery(NULL, ['title'], $index);
+
+    $params = (new QueryBuilder())->buildAutocompleteTerms($query, 'r');
+
+    $this->assertSame('ts_title', $params['terms.fl']);
+  }
+
 }

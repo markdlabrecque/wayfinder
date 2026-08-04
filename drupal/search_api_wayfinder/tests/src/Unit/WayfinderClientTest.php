@@ -448,4 +448,56 @@ class WayfinderClientTest extends TestCase {
     $this->assertSame('Basic ' . base64_encode('alice:s3cr3t'), $history[0]['request']->getHeaderLine('Authorization'));
   }
 
+  /**
+   * #291: the autocomplete surface reads the indexed term dictionary through
+   * Solr's Terms component (finding 154: stock search_api_autocomplete is
+   * terms-based; the SuggestComponent is not on any evidenced client path).
+   * WayfinderClient needs a select()-shaped sibling for "GET {core}/terms".
+   * Success envelope shape ({terms: {<field>: [<term>, <count>, ...]}}) is
+   * ground truth from solr-ref/responses/terms_prefix_body_multi.json.
+   *
+   * @covers ::terms
+   */
+  public function testTermsReturnsDecodedBodyOn200(): void {
+    $body = (string) file_get_contents(__DIR__ . '/../../../../../solr-ref/responses/terms_prefix_body_multi.json');
+    $client = $this->clientWithResponses([new Response(200, [], $body)]);
+
+    $result = $client->terms(['terms' => 'true', 'terms.fl' => 'body', 'terms.prefix' => 'd']);
+
+    $this->assertSame(['dog', 2, 'dai', 1], $result['terms']['body']);
+  }
+
+  /**
+   * @covers ::terms
+   */
+  public function testTermsRequestsTheTermsEndpointNotSelect(): void {
+    $history = [];
+    $mock = new MockHandler([new Response(200, [], '{"terms":{"body":[]}}')]);
+    $handlerStack = HandlerStack::create($mock);
+    $handlerStack->push(\GuzzleHttp\Middleware::history($history));
+    $client = new WayfinderClient(new Client(['handler' => $handlerStack]), 'http://localhost:8983/wayfinder/mycore');
+
+    $client->terms(['terms' => 'true', 'terms.fl' => 'body', 'terms.prefix' => 'd', 'terms.limit' => 10, 'omitHeader' => 'true']);
+
+    $request = $history[0]['request'];
+    $this->assertSame('GET', $request->getMethod());
+    $this->assertSame('/wayfinder/mycore/terms', $request->getUri()->getPath());
+    // wt=json is appended by the client like every other endpoint, and a
+    // repeated terms.fl stays a repeated key (not PHP's fq[0] bracket form).
+    $this->assertSame('terms=true&terms.fl=body&terms.prefix=d&terms.limit=10&omitHeader=true&wt=json', $request->getUri()->getQuery());
+  }
+
+  /**
+   * @covers ::terms
+   */
+  public function testTermsThrowsSearchApiExceptionWithErrorMsgOnNon200(): void {
+    $body = (string) file_get_contents(__DIR__ . '/../../../../../solr-ref/responses/err_bad_sort.json');
+    $client = $this->clientWithResponses([new Response(400, [], $body)]);
+
+    $this->expectException(SearchApiException::class);
+    $this->expectExceptionMessage('can not sort on a field w/o docValues unless it is indexed=true uninvertible=true and the type supports Uninversion: body');
+
+    $client->terms(['terms' => 'true', 'terms.fl' => 'body']);
+  }
+
 }

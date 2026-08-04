@@ -101,8 +101,10 @@ Deliberate descopes, each with its reason. (Each is also marked with a
   existing schema types are supported (issue #300):
   `solr_string_storage`, `solr_string_docvalues`, `solr_text_unstemmed`,
   `solr_text_omit_norms`, `solr_text_wstoken`, and `solr_text_suggester` (which
-  indexes into the fixed sink field `twm_suggest` that `#291`'s SuggestComponent
-  reads).
+  indexes into the fixed sink field `twm_suggest` that the autocomplete path
+  reads through the *terms* component, `terms.fl=twm_suggest` — issue #291,
+  finding 154: the SuggestComponent `/suggest` is not on any evidenced client
+  path).
 
   Two indexability divergences on the newly-supported types are accepted and
   documented at their `ponytail:` sites, not silently papered over:

@@ -59,6 +59,28 @@ class WayfinderClient {
   }
 
   /**
+   * GET {core}/terms with the given params.
+   *
+   * The autocomplete transport (#291): search_api_autocomplete's stock Server
+   * suggester reads the indexed term dictionary through Solr's Terms component
+   * (finding 154 -- the SuggestComponent is not on any evidenced client path),
+   * so the backend's getAutocompleteSuggestions() GETs /terms with
+   * terms=true, terms.fl, terms.prefix, terms.limit. Same transport and error
+   * handling as select()/mlt(); only the endpoint differs. The success
+   * envelope is {terms: {<field>: [<term>, <count>, ...]}} -- ground truth
+   * solr-ref/responses/terms_prefix_body_multi.json.
+   *
+   * @return array
+   *   The decoded JSON response body.
+   *
+   * @throws \Drupal\search_api\SearchApiException
+   */
+  public function terms(array $params): array {
+    $params['wt'] = 'json';
+    return $this->request('GET', 'terms', ['query' => $this->encodeQuery($params)]);
+  }
+
+  /**
    * POST {core}/update with the given command body.
    *
    * @param array $command

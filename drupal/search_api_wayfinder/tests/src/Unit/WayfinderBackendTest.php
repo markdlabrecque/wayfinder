@@ -17,6 +17,8 @@ use Drupal\search_api\Query\QueryInterface;
 use Drupal\search_api\Query\ResultSet;
 use Drupal\search_api\SearchApiException;
 use Drupal\search_api\Utility\FieldsHelper;
+use Drupal\search_api_autocomplete\SearchInterface;
+use Drupal\search_api_autocomplete\Suggestion\SuggestionInterface;
 use Drupal\search_api_wayfinder\Plugin\search_api\backend\WayfinderBackend;
 use Drupal\search_api_wayfinder\WayfinderClient;
 use GuzzleHttp\Client;
@@ -269,6 +271,22 @@ class WayfinderBackendTest extends TestCase {
     $backend = new WayfinderBackend([], 'wayfinder', []);
 
     $this->assertContains('search_api_grouping', $backend->getSupportedFeatures());
+  }
+
+  /**
+   * #291: the backend advertises 'search_api_autocomplete' so the
+   * search_api_autocomplete Server suggester activates this backend
+   * (Server::getBackend() gates on supportsFeature('search_api_autocomplete'),
+   * OR-ed with the instanceof checks -- finding 155). The method itself is
+   * duck-typed, matching search_api_solr, which does NOT formally implement
+   * the (documentation-only) AutocompleteBackendInterface.
+   *
+   * @covers ::getSupportedFeatures
+   */
+  public function testGetSupportedFeaturesIncludesSearchApiAutocomplete(): void {
+    $backend = new WayfinderBackend([], 'wayfinder', []);
+
+    $this->assertContains('search_api_autocomplete', $backend->getSupportedFeatures());
   }
 
   /**
@@ -667,6 +685,128 @@ class WayfinderBackendTest extends TestCase {
       'empty version string' => ['{"lucene":{"wayfinder-spec-version":""}}'],
       'non-string version' => ['{"lucene":{"wayfinder-spec-version":{"nested":"object"}}}'],
       'empty body' => [''],
+    ];
+  }
+
+  /**
+   * #291: getAutocompleteSuggestions() builds a /terms request through
+   * QueryBuilder, sends it via WayfinderClient::terms(), and folds the
+   * interleaved [term, count, ...] list into SuggestionInterface[] via
+   * SuggestionFactory::createFromSuggestionSuffix(suffix, count) -- mirroring
+   * search_api_solr's getAutocompleteTermSuggestions (finding 156). The suffix
+   * is the term minus the typed prefix: 'rocket' with incomplete 'roc' ->
+   * suffix 'ket', count 5.
+   *
+   * @covers ::getAutocompleteSuggestions
+   */
+  public function testGetAutocompleteSuggestionsBuildsTermsQueryAndParsesSuggestions(): void {
+    $index = $this->mockIndex();
+    $query = $this->mockQuery($index, ['limit' => 10]);
+    $search = $this->createMock(SearchInterface::class);
+
+    $client = $this->createMock(WayfinderClient::class);
+    $client->expects($this->once())
+      ->method('terms')
+      ->with($this->callback(function (array $params): bool {
+        return $params['terms'] === 'true'
+          && $params['terms.fl'] === 'ts_title'
+          && $params['terms.prefix'] === 'roc'
+          && $params['terms.limit'] === 10
+          && $params['omitHeader'] === 'true';
+      }))
+      ->willReturn(['terms' => ['ts_title' => ['rocket', 5, 'rocker', 2]]]);
+
+    $backend = $this->backendWithClient($client);
+    $suggestions = $backend->getAutocompleteSuggestions($query, $search, 'roc', 'roc');
+
+    $this->assertCount(2, $suggestions);
+    $this->assertContainsOnlyInstancesOf(SuggestionInterface::class, $suggestions);
+    $this->assertSame('ket', $suggestions[0]->getSuggestionSuffix());
+    $this->assertSame(5, $suggestions[0]->getResultsCount());
+    $this->assertSame('ker', $suggestions[1]->getSuggestionSuffix());
+    $this->assertSame(2, $suggestions[1]->getResultsCount());
+  }
+
+  /**
+   * A failing /terms request (transport error, non-200 error envelope) degrades
+   * to an empty suggestion list rather than throwing out of the autocomplete
+   * widget -- mirroring search_api_solr's SearchApiException catch around the
+   * autocomplete query (SearchApiSolrBackend.php:3981-3992). This is the
+   * backend's one acceptance guard, so it is mutation-tested: remove the
+   * catch and this test fails because the exception propagates.
+   *
+   * @covers ::getAutocompleteSuggestions
+   */
+  public function testGetAutocompleteSuggestionsReturnsEmptyArrayOnTransportError(): void {
+    $index = $this->mockIndex();
+    $query = $this->mockQuery($index);
+    $search = $this->createMock(SearchInterface::class);
+
+    $client = $this->createMock(WayfinderClient::class);
+    $client->method('terms')
+      ->willThrowException(new SearchApiException('connection refused'));
+
+    $backend = $this->backendWithClient($client);
+    $this->assertSame([], $backend->getAutocompleteSuggestions($query, $search, 'roc', 'roc'));
+  }
+
+  /**
+   * Terms from every terms.fl field are merged into one term->count map
+   * (search_api_solr's getAutocompleteTermSuggestions, finding 156), so a
+   * multi-field response yields one flat suggestion list.
+   *
+   * @covers ::getAutocompleteSuggestions
+   */
+  public function testGetAutocompleteSuggestionsMergesTermsAcrossFields(): void {
+    $index = $this->mockIndex();
+    $query = $this->mockQuery($index);
+    $search = $this->createMock(SearchInterface::class);
+
+    $client = $this->createMock(WayfinderClient::class);
+    $client->method('terms')->willReturn([
+      'terms' => [
+        'ts_title' => ['rocket', 5],
+        'tm_body' => ['rocker', 2],
+      ],
+    ]);
+
+    $backend = $this->backendWithClient($client);
+    $suggestions = $backend->getAutocompleteSuggestions($query, $search, 'roc', 'roc');
+
+    $suffixes = array_map(fn (SuggestionInterface $s) => $s->getSuggestionSuffix(), $suggestions);
+    sort($suffixes);
+    $this->assertSame(['ker', 'ket'], $suffixes);
+  }
+
+  /**
+   * A response with no term dictionary to offer (empty list, or no terms block
+   * at all) degrades to an empty suggestion array rather than throwing -- the
+   * widget simply renders nothing. This mirrors search_api_solr, which
+   * returns the (empty) merged map unchanged.
+   *
+   * @dataProvider emptyTermsResponseProvider
+   * @covers ::getAutocompleteSuggestions
+   */
+  public function testGetAutocompleteSuggestionsReturnsEmptyArrayWhenTermsBlockIsEmpty(array $response): void {
+    $index = $this->mockIndex();
+    $query = $this->mockQuery($index);
+    $search = $this->createMock(SearchInterface::class);
+
+    $client = $this->createMock(WayfinderClient::class);
+    $client->method('terms')->willReturn($response);
+
+    $backend = $this->backendWithClient($client);
+    $this->assertSame([], $backend->getAutocompleteSuggestions($query, $search, 'roc', 'roc'));
+  }
+
+  /**
+   * @return array<string, array{0: array}>
+   */
+  public static function emptyTermsResponseProvider(): array {
+    return [
+      'empty list per field' => [['terms' => ['ts_title' => []]]],
+      'no terms key' => [['responseHeader' => ['status' => 0]]],
+      'empty body' => [[]],
     ];
   }
 

@@ -2703,3 +2703,80 @@ are special-cased to fixed sink fields before the prefix logic ever runs.
       recorded no-op, pinned by `DocumentBuilderTest` with an input whose
       first value is neither its min nor its max (so a future "fix" to
       min/max selection would fail the test, not pass it).
+
+## Findings from the #291 SuggestComponent decision
+
+Fetched the `search_api_autocomplete` source (`8.x-1.x`, the same Drupal
+project family the coverage's three-file `search_api_solr` snapshot belongs
+to) to pin the contract the Drupal-side autocomplete surface must meet, and
+re-read the backend's autocomplete path to answer the issue's first scope
+question: `terms`-based, `suggest`-based, or both. The answer is unchanged
+from finding 131 — terms-only — but the mechanism is now pinned end to end,
+which is what closes the issue's decision point and descopes `/suggest`.
+
+154. **The SuggestComponent (`/suggest`) is not on any evidenced client path:
+      `getSuggesterQuery()` is defined but never called, and autocomplete
+      reads the dictionary through the terms component.** `SolrConnectorPluginBase
+      ::getSuggesterQuery()` (`coverage/search_api_solr_4.4.0_source/...
+      SolrConnectorPluginBase.php:935-937`) returns `$this->solr
+      ->createSuggester()`, but a sweep of the backend finds zero callers —
+      the only other "Suggester" mentions are a UI warning string (line 546)
+      and the comment marking `twm_suggest` as the suggester's backing field
+      (line 2435). `getAutocompleteSuggestions()` (3973-3994) routes through
+      `setAutocompleteTermQuery()` (4033-4039), which sets exactly
+      `terms.fl`/`terms.prefix`/`terms.limit` on Solarium's Terms component
+      and reads results back at 4055-4075; the `twm_suggest` sink field is
+      *reached as a `terms.fl` value* (4011-4012: "We explicit allow to get
+      terms from twm_suggest"), never as a `suggest.dictionary`. So
+      `search_api_solr` 4.4.0 has no `/suggest` emission, and the captured
+      `terms_prefix_*`/`terms_limit_*` fixtures (#308, findings 141/142) are
+      the wire evidence for the path that is actually used. **#291 therefore
+      builds no `/suggest` route**: there is no client evidence to build it
+      from, and adding one without a capture would violate the compatibility
+      contract. The remaining work is the Drupal-side surface over the
+      already-shipped `/terms` endpoint.
+
+155. **`search_api_autocomplete`'s discovery is the feature flag, not the
+      interface; the backend method is duck-typed.** The `Server` suggester
+      (`src/Plugin/search_api_autocomplete/suggester/Server.php:193-207`,
+      `getBackend()`) activates a backend iff
+      `$server->supportsFeature('search_api_autocomplete') || $backend
+      instanceof NewAutocompleteBackendInterface || $backend instanceof
+      OldAutocompleteBackendInterface` — the three are OR-ed, so the feature
+      flag alone is sufficient. It then calls
+      `$backend->getAutocompleteSuggestions($query, $this->getSearch(),
+      $incomplete_key, $user_input)` duck-typed. Both interface candidates
+      (`\Drupal\search_api\Contrib\AutocompleteBackendInterface`, hosted in
+      search_api core, and the deprecated
+      `\Drupal\search_api_autocomplete\AutocompleteBackendInterface`) declare
+      in their docblocks that they are "purely for the purpose of
+      documentation. You should not, and cannot, implement it explicitly";
+      `SearchApiSolrBackend` accordingly does **not** implement either
+      (`class ... implements SolrBackendInterface, PluginFormInterface;`,
+      line 121), it just adds the method. So WayfinderBackend advertises
+      `'search_api_autocomplete'` in `getSupportedFeatures()` and adds the
+      method by signature match — no `implements`, and therefore no hard
+      requirement that `search_api_autocomplete` be installed for the backend
+      class to load (the `SuggestionFactory`/`SearchInterface` types it names
+      are only autoloaded when the method runs, which is only ever from
+      inside an installed `search_api_autocomplete`).
+
+156. **The suggestion contract is `createFromSuggestionSuffix(suffix,
+      count)`, with the suffix computed as the term minus the typed prefix.**
+      `SuggestionFactory::createFromSuggestionSuffix()` (the fetched
+      `src/Suggestion/SuggestionFactory.php`) builds a `Suggestion` carrying
+      the user input and a completion suffix; `getAutocompleteTermSuggestions`
+      (4055-4075) calls it with `$suggestion_suffix = mb_substr($term,
+      mb_strlen($incomplete_key))` and the term's document frequency as
+      `$count`, after merging every `terms.fl` field's results into one
+      term→count map keyed by term (last field wins on a cross-field
+      collision). The Wayfinder backend mirrors that: build
+      `terms=true&terms.fl=<fulltext fields incl. twm_suggest>&terms.prefix=
+      <incomplete_key>&terms.limit=<query limit ?? 10>&omitHeader=true` via
+      `QueryBuilder`, GET it on `/terms`, and fold the interleaved
+      `["term", count, ...]` lists into `SuggestionInterface[]`. The field set
+      is `$query->getFulltextFields()` intersected with the index
+      (`BackendPluginBase::getQueryFulltextFields()`), mapped through
+      `FieldMapper::fieldName()` — which already collapses every
+      `solr_text_suggester` field to `twm_suggest` (#300), so a dedup keeps
+      the dictionary from being requested twice.

@@ -12,6 +12,8 @@ use Drupal\search_api\Backend\BackendPluginBase;
 use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Query\QueryInterface;
 use Drupal\search_api\SearchApiException;
+use Drupal\search_api_autocomplete\SearchInterface;
+use Drupal\search_api_autocomplete\Suggestion\SuggestionFactory;
 use Drupal\search_api_wayfinder\DocumentBuilder;
 use Drupal\search_api_wayfinder\FieldMapper;
 use Drupal\search_api_wayfinder\QueryBuilder;
@@ -208,6 +210,13 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
       'search_api_facets_operator_or',
       'search_api_grouping',
       'search_api_mlt',
+      // #291: advertises the search_api_autocomplete feature. The Server
+      // suggester gates on supportsFeature('search_api_autocomplete') (OR-ed
+      // with the instanceof checks -- finding 155) and then duck-types
+      // getAutocompleteSuggestions(); like search_api_solr, the backend does
+      // NOT formally implement the (documentation-only)
+      // AutocompleteBackendInterface, so this flag is what activates it.
+      'search_api_autocomplete',
     ];
   }
 
@@ -369,6 +378,87 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
     }
 
     (new ResponseParser())->parse($response, $query);
+  }
+
+  /**
+   * Retrieves autocomplete suggestions for partial user input (#291).
+   *
+   * This is the duck-typed implementation of search_api_autocomplete's
+   * AutocompleteBackendInterface contract (finding 155): the Server suggester
+   * calls it after checking supportsFeature('search_api_autocomplete'), and
+   * search_api_solr -- the parity target -- implements it the same way, by
+   * signature match rather than a formal `implements` (the interface is
+   * documentation-only). The SuggestionFactory/SearchInterface types it names
+   * are autoloaded only when this runs, which is only ever from inside an
+   * installed search_api_autocomplete, so the backend has no hard dependency
+   * on that module.
+   *
+   * The path is the Terms component, not the SuggestComponent (finding 154):
+   * QueryBuilder::buildAutocompleteTerms() emits terms=true/terms.fl/
+   * terms.prefix/terms.limit, WayfinderClient::terms() GETs /terms, and the
+   * interleaved [term, count, ...] lists are folded into SuggestionInterface[]
+   * via SuggestionFactory::createFromSuggestionSuffix(suffix, count) --
+   * mirroring search_api_solr's getAutocompleteTermSuggestions (finding 156),
+   * including the cross-field term merge.
+   *
+   * A transport failure degrades to an empty suggestion list rather than
+   * throwing out of the widget, mirroring search_api_solr's catch around the
+   * autocomplete query (SearchApiSolrBackend.php:3981-3992).
+   *
+   * @param \Drupal\search_api\Query\QueryInterface $query
+   *   A query representing the base search, with all completely entered words
+   *   in the user input so far as the search keys.
+   * @param \Drupal\search_api_autocomplete\SearchInterface $search
+   *   An object containing details about the search the user is on, and
+   *   settings for the autocompletion.
+   * @param string $incomplete_key
+   *   The start of another fulltext keyword for the search, which should be
+   *   completed.
+   * @param string $user_input
+   *   The complete user input for the fulltext search keywords so far.
+   *
+   * @return \Drupal\search_api_autocomplete\Suggestion\SuggestionInterface[]
+   *   An array of autocomplete suggestions.
+   */
+  public function getAutocompleteSuggestions(QueryInterface $query, SearchInterface $search, string $incomplete_key, string $user_input): array {
+    try {
+      $params = (new QueryBuilder())->buildAutocompleteTerms($query, $incomplete_key);
+      $response = $this->getClient()->terms($params);
+    }
+    catch (SearchApiException $e) {
+      // A failing autocomplete query must not break the search widget --
+      // return no suggestions, as search_api_solr does.
+      return [];
+    }
+
+    // Merge every terms.fl field's [term, count, ...] list into one term->count
+    // map (search_api_solr's getAutocompleteTermSuggestions, finding 156). The
+    // default Terms response shape is the interleaved flat list (finding 142:
+    // only json.nl=map rewrites it to an object, and this client sends no
+    // json.nl). A collision across fields keeps the last field's count, as the
+    // upstream loop does.
+    $terms = [];
+    foreach ($response['terms'] ?? [] as $list) {
+      if (!is_array($list)) {
+        continue;
+      }
+      for ($i = 0, $n = count($list); $i + 1 < $n; $i += 2) {
+        $term = $list[$i];
+        if (is_string($term)) {
+          $terms[$term] = $list[$i + 1];
+        }
+      }
+    }
+
+    $factory = new SuggestionFactory($user_input);
+    $suggestions = [];
+    foreach ($terms as $term => $count) {
+      // The suggestion is the typed prefix's completion: the term minus the
+      // incomplete key the user already entered.
+      $suffix = mb_substr($term, mb_strlen($incomplete_key));
+      $suggestions[] = $factory->createFromSuggestionSuffix($suffix, is_numeric($count) ? (int) $count : NULL);
+    }
+    return $suggestions;
   }
 
   /**

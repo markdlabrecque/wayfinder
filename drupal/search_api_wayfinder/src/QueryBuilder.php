@@ -130,6 +130,42 @@ class QueryBuilder {
   }
 
   /**
+   * Builds the /terms param array for an autocomplete request (#291).
+   *
+   * search_api_autocomplete's stock Server suggester reads the indexed term
+   * dictionary through the Terms component, not the SuggestComponent (finding
+   * 153 -- the SuggestComponent is not on any evidenced client path). This
+   * mirrors search_api_solr's setAutocompleteTermQuery() + getAutocompleteFields()
+   * (coverage/search_api_solr_4.4.0_source ... 4011-4039): terms.fl is the
+   * query's fulltext fields mapped to their Wayfinder names -- every
+   * solr_text_suggester field collapses to the fixed sink 'twm_suggest'
+   * (#300/finding 151), deduped so the dictionary is not requested twice --
+   * terms.prefix is the incomplete key the user typed, and terms.limit is the
+   * query's suggestion limit (default 10, finding 142).
+   *
+   * No q/fq: the Terms component scans the dictionary, it does not run a
+   * search, so unlike build()/buildMlt() there is no index scope filter.
+   * omitHeader=true follows search_api_solr's standard envelope convention on
+   * every endpoint (e.g. MLT_PARAMS' omitHeader/TZ note).
+   *
+   * @return array<string, string|int|array<int, string>>
+   */
+  public function buildAutocompleteTerms(QueryInterface $query, string $incomplete_key): array {
+    $index = $query->getIndex();
+    $fields = array_values(array_unique(
+      $this->mapFieldNames($this->fulltextFieldIds($query, $index), $index)
+    ));
+
+    return [
+      'terms' => 'true',
+      'terms.fl' => count($fields) === 1 ? $fields[0] : $fields,
+      'terms.prefix' => $incomplete_key,
+      'terms.limit' => (int) ($query->getOption('limit') ?? 10),
+      'omitHeader' => 'true',
+    ];
+  }
+
+  /**
    * The index scope filter both build() and buildMlt() seed their fq with
    * (locked decision 2, core multi-index-per-core wiring). Shared so the two
    * call sites cannot drift apart.
