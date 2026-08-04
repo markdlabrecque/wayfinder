@@ -33,8 +33,16 @@ use Drupal\search_api\SearchApiException;
  * search_api_data_type_info_alter hook in src/Hook/SearchApiSolrHooks.php (the
  * solr_* types). What is NOT here is an explicit descope, recorded with its
  * reason in README "Not supported": solr_date_range (needs a server-side
- * date-range type), solr_text_spellcheck (language-specific fixed sink),
- * solr_text_custom* (site-defined analyzer escape hatch), location/rpt (#292).
+ * date-range type), solr_text_custom* (site-defined analyzer escape hatch),
+ * location/rpt (#292).
+ *
+ * issue #342 made the naming language-aware, mirroring search_api_solr's
+ * formatSolrFieldNames()
+ * (SearchApiSolrBackend.php:2398-2538): every type whose *prefix* starts with
+ * 't' is named '<prefix>m_X3b_<enc-lang>_<fieldId>' -- the infix is always 'm'
+ * and the cardinality is ignored (:2450-2473) -- while every other prefix
+ * keeps its plain '<prefix><s|m>_<fieldId>' name (:2474-2506). That is a
+ * breaking rename of every text field on the wire; see README.
  */
 class FieldMapper {
 
@@ -73,6 +81,27 @@ class FieldMapper {
   private const SUGGESTER_SINK_FIELD = 'twm_suggest';
 
   /**
+   * The language separator search_api_solr puts between a text field's infix
+   * and its language id, before encoding:
+   * SolrBackendInterface::SEARCH_API_SOLR_LANGUAGE_SEPARATOR is ';', which
+   * encodeSolrName() turns into 'X3b' (SearchApiSolrBackend.php:2470,
+   * '$pref .= "m" . SEPARATOR . $language_id'). SolrBackendInterface is not
+   * vendored in coverage/, so the constant's value is pinned here from the
+   * captured client traces instead: every text field name in
+   * solr-ref/search-api/trace/*.json reads 'tm_X3b_<lang>_<field id>'.
+   */
+  private const LANGUAGE_SEPARATOR = ';';
+
+  /**
+   * The language id used when a caller names none:
+   * LanguageInterface::LANGCODE_NOT_SPECIFIED. This is also the language
+   * search_api_solr's own facet path resolves to
+   * (getLanguageSpecificSolrFieldNames(LANGCODE_NOT_SPECIFIED, ...),
+   * SearchApiSolrBackend.php:2582-2585).
+   */
+  public const LANGUAGE_UNSPECIFIED = 'und';
+
+  /**
    * Whether a Search API field type is a text type whose values are fulltext.
    *
    * Mirrors search_api_solr's addIndexField() normalisation
@@ -102,19 +131,107 @@ class FieldMapper {
 
   /**
    * Maps a Search API field to its Wayfinder dynamic field name.
+   *
+   * `$language` defaults to 'und' so callers with no language in hand (the
+   * facet path, and every pre-#342 call site) keep working: 'und' is
+   * search_api_solr's own language-unspecific choice
+   * (SearchApiSolrBackend.php:2582-2585).
    */
-  public function fieldName(string $fieldId, string $type, bool $multiValued): string {
-    // solr_text_suggester is the one type that does NOT follow the
+  public function fieldName(string $fieldId, string $type, bool $multiValued, string $language = self::LANGUAGE_UNSPECIFIED): string {
+    // solr_text_suggester is one of the two types that do NOT follow the
     // prefix+infix dynamic-field convention: every field of this type indexes
-    // into the fixed sink field the SuggestComponent reads, regardless of id
-    // or cardinality. See SUGGESTER_SINK_FIELD.
+    // into the fixed sink field the SuggestComponent reads, regardless of id,
+    // cardinality or language. See SUGGESTER_SINK_FIELD; search_api_solr
+    // special-cases it at SearchApiSolrBackend.php:2433-2437, before both the
+    // generic prefix logic and encodeSolrName().
     if ($type === 'solr_text_suggester') {
       return self::SUGGESTER_SINK_FIELD;
     }
 
+    // solr_text_spellcheck is the other one: a fixed per-language sink, whose
+    // name is deliberately NOT built with the language separator or run
+    // through encodeSolrName() -- SearchApiSolrBackend.php:2440-2446, "Don't
+    // use the language separator here! This field name is used without in
+    // solrconfig.xml." A hyphen in the langcode becomes an underscore, so
+    // 'de-AT' gives 'spellcheck_de_AT' where a text field gives
+    // 'tm_X3b_de_X2d_AT_*'.
+    if ($type === 'solr_text_spellcheck') {
+      return 'spellcheck_' . str_replace('-', '_', $language);
+    }
+
     $prefix = self::TYPE_PREFIXES[$type] ?? $type;
-    $infix = $multiValued ? 'm' : 's';
-    return $prefix . $infix . '_' . $fieldId;
+    if ($this->isTextPrefix($prefix)) {
+      // Every text type is multi-valued on the wire and language-tagged:
+      // "$pref .= 'm' . SEPARATOR . $language_id" runs unconditionally, with
+      // no single/multi branch at all (SearchApiSolrBackend.php:2450-2473),
+      // because Search API processors can produce several boosted string
+      // tokens for one single-valued Drupal field.
+      $infix = 'm' . self::LANGUAGE_SEPARATOR . $language;
+    }
+    else {
+      $infix = $multiValued ? 'm' : 's';
+    }
+
+    // The whole assembled name is encoded, exactly as upstream does at
+    // SearchApiSolrBackend.php:2504-2505 ("$name = $pref . '_' .
+    // $search_api_name; ... Utility::encodeSolrName($name)").
+    return $this->encodeSolrName($prefix . $infix . '_' . $fieldId);
+  }
+
+  /**
+   * Whether a Search API field type is named language-specifically, i.e. maps
+   * to one '<prefix>m_X3b_<lang>_<id>' name per language rather than a single
+   * language-free name.
+   *
+   * This is the naming question, deliberately NOT the value-formatting one
+   * isTextType() answers: the two fixed sinks (solr_text_suggester,
+   * solr_text_spellcheck) format their values as text but are named by
+   * SearchApiSolrBackend.php:2433-2446's earlier special cases, and their
+   * type names carry no 't' prefix in TYPE_PREFIXES, so they answer FALSE
+   * here.
+   */
+  public function isLanguageSpecificTextType(string $type): bool {
+    return $this->isTextPrefix(self::TYPE_PREFIXES[$type] ?? $type);
+  }
+
+  /**
+   * Whether a type prefix belongs to the text family, which is what decides
+   * the language-tagged 'm' infix.
+   *
+   * search_api_solr's test is on the *prefix*, not the type name:
+   * "strpos($pref, 't') === 0" (SearchApiSolrBackend.php:2450). Derived from
+   * TYPE_PREFIXES rather than a hand-written type list so a future 't*' type
+   * is covered automatically -- and so 'it' (integer) and the two 's'-prefixed
+   * fixed sinks are correctly left out, since only the prefix's FIRST
+   * character counts.
+   */
+  private function isTextPrefix(string $prefix): bool {
+    return str_starts_with($prefix, 't');
+  }
+
+  /**
+   * Encodes a Solr field name, mirroring search_api_solr's
+   * Utility::encodeSolrName(): every character outside [a-zA-Z0-9_] is
+   * replaced by '_X' + the lowercase hex of its byte + '_', so the encoded
+   * run stays a separate underscore-delimited segment of the name.
+   *
+   * Utility is not vendored in coverage/, so the rule is pinned from the
+   * captured client traces rather than copied from the method
+   * (solr-ref/search-api/trace/*.json):
+   * - ';' (SEARCH_API_SOLR_LANGUAGE_SEPARATOR) -> '_X3b_', which is why
+   *   'tm' + 'm;en_body' reads 'tm_X3b_en_body' there;
+   * - '/' -> '_X2f_' and ':' -> '_X3a_', which is why the index id
+   *   'search_api/index:capture_index' reads
+   *   'search_api_X2f_index_X3a_capture_index' there;
+   * - '-' -> '_X2d_', the case SearchApiSolrBackend.php:2466-2468 spells out
+   *   itself: 'de-AT' gives 'tm_X3b_de_X2d_AT_*'.
+   */
+  private function encodeSolrName(string $name): string {
+    return (string) preg_replace_callback(
+      '/[^a-zA-Z0-9_]/',
+      static fn (array $match): string => '_X' . bin2hex($match[0]) . '_',
+      $name
+    );
   }
 
   /**
@@ -175,11 +292,17 @@ class FieldMapper {
    * Text fields sort through their dedicated sort_* dynamic field; every
    * other type sorts on the actual mapped field, preserving cardinality so
    * Wayfinder can use its native multi-value min/max selection.
+   *
+   * issue #342: the text sort field is language-specific too --
+   * encodeSolrName('sort' . SEPARATOR . $sort_language_id . '_' . $name),
+   * SearchApiSolrBackend.php:1483 -- so 'title' in English sorts on
+   * 'sort_X3b_en_title'. Non-text types are unaffected: their sort field IS
+   * their mapped field, which carries no language.
    */
-  public function sortFieldName(string $fieldId, string $type, bool $multiValued): string {
-    return $this->isTextType($type)
-      ? 'sort_' . $fieldId
-      : $this->fieldName($fieldId, $type, $multiValued);
+  public function sortFieldName(string $fieldId, string $type, bool $multiValued, string $language = self::LANGUAGE_UNSPECIFIED): string {
+    return $this->isTextPrefix(self::TYPE_PREFIXES[$type] ?? $type)
+      ? $this->encodeSolrName('sort' . self::LANGUAGE_SEPARATOR . $language . '_' . $fieldId)
+      : $this->fieldName($fieldId, $type, $multiValued, $language);
   }
 
   /**

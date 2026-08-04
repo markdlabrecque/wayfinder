@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Drupal\search_api_wayfinder;
 
+use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Query\ConditionGroupInterface;
 use Drupal\search_api\Query\ConditionInterface;
@@ -15,12 +16,41 @@ use Drupal\search_api\Query\QueryInterface;
  * Fulltext keys become q/qf/defType. The index filter is core
  * multi-index-per-core wiring; Search API condition groups, sorts, and paging
  * are translated to the corresponding Solr-wire select parameters.
+ *
+ * issue #342: every text field now has one name per language
+ * (tm_X3b_<lang>_<id>), so each context applies the query's resolved language
+ * set the way search_api_solr does:
+ * - qf / hl.fl / mlt.fl / terms.fl emit every variant;
+ * - a condition on a text field ORs across the variants (createFilterQuery(),
+ *   SearchApiSolrBackend.php:3392);
+ * - a sort uses the FIRST resolved language only (:1483 takes one
+ *   $sort_language_id);
+ * - a facet is language-unspecific, i.e. 'und'
+ *   (getSolrFieldNames() -> getLanguageSpecificSolrFieldNames(
+ *   LANGCODE_NOT_SPECIFIED, ...), :4424/:4524 -> :2582-2585).
+ * See LanguageResolver for where the set itself comes from.
  */
 class QueryBuilder {
 
+  /**
+   * The resolved language set for the query currently being built.
+   *
+   * @var array<int, string>
+   */
+  private array $languages = [FieldMapper::LANGUAGE_UNSPECIFIED];
+
+  private readonly LanguageResolver $languageResolver;
+
+  /**
+   * The language manager is optional (NULL from every plain
+   * `new QueryBuilder()`); WayfinderBackend::create() injects the container's.
+   */
   public function __construct(
     private readonly FieldMapper $fieldMapper = new FieldMapper(),
-  ) {}
+    ?LanguageManagerInterface $languageManager = NULL,
+  ) {
+    $this->languageResolver = new LanguageResolver($languageManager);
+  }
 
   /**
    * Builds the /select param array for the given query.
@@ -39,6 +69,7 @@ class QueryBuilder {
    */
   public function build(QueryInterface $query, bool $highlighting = FALSE): array {
     $index = $query->getIndex();
+    $this->languages = $this->languageResolver->resolve($query);
     $params = [];
 
     $keys = $query->getKeys();
@@ -48,7 +79,17 @@ class QueryBuilder {
     else {
       $params['q'] = $this->flattenKeys($keys);
       $params['defType'] = 'edismax';
-      $params['qf'] = $this->buildQf($query, $index);
+    }
+
+    // qf is built for every select query, keys or not: search_api_solr sets
+    // the edismax query fields unconditionally for any non-MLT select
+    // (SearchApiSolrBackend.php:1764-1791 -- the setQueryFields() call sits
+    // outside every keys check), and only the *defType* switch is keyed off
+    // the keys. It is dropped when the query searches no fulltext field at
+    // all, rather than sent empty.
+    $qf = $this->buildQf($query, $index);
+    if ($qf !== '') {
+      $params['qf'] = $qf;
     }
 
     $filters = [$this->indexScopeFilter($index)];
@@ -80,6 +121,56 @@ class QueryBuilder {
     }
 
     $params += $this->buildPaging($query);
+
+    $params += $this->buildSpellcheck($query);
+
+    return $params;
+  }
+
+  /**
+   * Builds the spellcheck.* params from the query's 'search_api_spellcheck'
+   * option (issue #342).
+   *
+   * The option's shape is search_api_solr's setSpellcheck() input
+   * (SearchApiSolrBackend.php:4639-4670): ['keys' => <array of entered
+   * words>, 'count' => int, 'collate' => bool].
+   *
+   * spellcheck.dictionary is one repeated value per resolved language, in
+   * resolved order -- upstream's own per-language dictionary selection --
+   * emitted with the same "scalar when there is one, array when there are
+   * several" convention fq/facet.field/terms.fl already use here.
+   *
+   * ponytail: the option's 'count' is deliberately dropped. Wayfinder's
+   * server does not list spellcheck.count in SELECT_PARAMS (src/lib.rs:286-292
+   * has spellcheck, spellcheck.q, spellcheck.dictionary, spellcheck.collate,
+   * spellcheck.accuracy, spellcheck.maxCollations only), and the server runs
+   * strict_params = true, so sending it would 400 the whole query rather than
+   * be ignored. The ceiling is therefore "the server's default suggestion
+   * count", until spellcheck.count is added server-side; adding it to the
+   * Rust allowlist is out of scope for this issue.
+   *
+   * @return array<string, string|array<int, string>>
+   */
+  private function buildSpellcheck(QueryInterface $query): array {
+    $options = $query->getOption('search_api_spellcheck');
+    if (!is_array($options)) {
+      return [];
+    }
+
+    $params = ['spellcheck' => 'true'];
+
+    $keys = $options['keys'] ?? [];
+    if (is_array($keys) && $keys !== []) {
+      $params['spellcheck.q'] = implode(' ', array_map('strval', $keys));
+    }
+
+    $params['spellcheck.dictionary'] = count($this->languages) === 1
+      ? $this->languages[0]
+      : $this->languages;
+
+    if (!empty($options['collate'])) {
+      $params['spellcheck.collate'] = 'true';
+    }
 
     return $params;
   }
@@ -115,6 +206,7 @@ class QueryBuilder {
    */
   public function buildMlt(QueryInterface $query): array {
     $index = $query->getIndex();
+    $this->languages = $this->languageResolver->resolve($query);
     $option = $query->getOption('search_api_mlt');
     if (!is_array($option) || !isset($option['id'])) {
       throw new \InvalidArgumentException('The search_api_mlt option must provide a seed item id.');
@@ -152,6 +244,7 @@ class QueryBuilder {
    */
   public function buildAutocompleteTerms(QueryInterface $query, string $incomplete_key): array {
     $index = $query->getIndex();
+    $this->languages = $this->languageResolver->resolve($query);
     $fields = array_values(array_unique(
       $this->mapFieldNames($this->fulltextFieldIds($query, $index), $index)
     ));
@@ -219,6 +312,11 @@ class QueryBuilder {
    * Maps Search API field ids to their Wayfinder dynamic field names,
    * skipping ids that are not part of the index.
    *
+   * issue #342: a text field contributes one name per resolved language --
+   * hl.fl/mlt.fl/terms.fl all name the fields to read, and a document only
+   * ever carries the variant it was indexed in, so every variant has to be
+   * listed for the field to be found at all.
+   *
    * @param array<int|string, string> $fieldIds
    *
    * @return array<int, string>
@@ -230,9 +328,28 @@ class QueryBuilder {
       if (!$field) {
         continue;
       }
-      $names[] = $this->fieldMapper->fieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
+      foreach ($this->fieldNameVariants((string) $fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field)) as $name) {
+        $names[] = $name;
+      }
     }
     return $names;
+  }
+
+  /**
+   * Every name one Search API field maps to under the resolved language set:
+   * one per language for a text field, a single language-free name for
+   * anything else.
+   *
+   * @return array<int, string>
+   */
+  private function fieldNameVariants(string $fieldId, string $type, bool $multiValued): array {
+    if (!$this->fieldMapper->isLanguageSpecificTextType($type)) {
+      return [$this->fieldMapper->fieldName($fieldId, $type, $multiValued)];
+    }
+    return array_map(
+      fn (string $language): string => $this->fieldMapper->fieldName($fieldId, $type, $multiValued, $language),
+      $this->languages
+    );
   }
 
   /**
@@ -353,10 +470,34 @@ class QueryBuilder {
       throw new \InvalidArgumentException('Condition field is missing or is not part of the index.');
     }
 
-    $fieldName = $this->fieldMapper->fieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
+    // issue #342: a text field has one name per resolved language, and a
+    // document carries only the one it was indexed in, so the condition has
+    // to match ANY of them -- search_api_solr ORs the same way in
+    // createFilterQuery() (SearchApiSolrBackend.php:3392). A single resolved
+    // language (the common case) produces exactly the pre-#342 string, with
+    // no added parentheses.
+    $fieldNames = $this->fieldNameVariants($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
     $operator = strtoupper(trim((string) $condition->getOperator()));
     $value = $condition->getValue();
 
+    $parts = array_map(
+      fn (string $fieldName): string => $this->buildConditionForFieldName($fieldName, $field->getType(), $operator, $value, $condition),
+      $fieldNames
+    );
+
+    return count($parts) === 1 ? $parts[0] : '(' . implode(' OR ', $parts) . ')';
+  }
+
+  /**
+   * Translates one Search API condition against one concrete field name.
+   *
+   * Split out of buildCondition() for #342: the operator/value handling is
+   * identical for every language variant of a text field, only the field name
+   * differs.
+   *
+   * @param mixed $value
+   */
+  private function buildConditionForFieldName(string $fieldName, string $type, string $operator, $value, ConditionInterface $condition): string {
     if (in_array($operator, ['BETWEEN', 'NOT BETWEEN'], TRUE)) {
       if (!is_array($value) || $value === [] || count($value) > 2) {
         throw new \InvalidArgumentException('BETWEEN requires an array of one or two values.');
@@ -383,16 +524,16 @@ class QueryBuilder {
     }
 
     return match ($operator) {
-      '=' => $fieldName . ':' . ($value === '*' ? '*' : $this->fieldMapper->filterValue($value, $field->getType())),
-      '<>' => '(*:* -' . $fieldName . ':' . $this->fieldMapper->filterValue($value, $field->getType()) . ')',
-      '<' => $fieldName . ':[* TO ' . $this->fieldMapper->filterValue($value, $field->getType()) . '}',
-      '<=' => $fieldName . ':[* TO ' . $this->fieldMapper->filterValue($value, $field->getType()) . ']',
-      '>' => $fieldName . ':{' . $this->fieldMapper->filterValue($value, $field->getType()) . ' TO *]',
-      '>=' => $fieldName . ':[' . $this->fieldMapper->filterValue($value, $field->getType()) . ' TO *]',
-      'BETWEEN' => $fieldName . ':[' . $this->rangeValues($value, $field->getType()) . ']',
-      'NOT BETWEEN' => '(*:* -' . $fieldName . ':[' . $this->rangeValues($value, $field->getType()) . '])',
-      'IN' => $this->inQuery($fieldName, $value, $field->getType()),
-      'NOT IN' => $this->notInQuery($fieldName, $value, $field->getType()),
+      '=' => $fieldName . ':' . ($value === '*' ? '*' : $this->fieldMapper->filterValue($value, $type)),
+      '<>' => '(*:* -' . $fieldName . ':' . $this->fieldMapper->filterValue($value, $type) . ')',
+      '<' => $fieldName . ':[* TO ' . $this->fieldMapper->filterValue($value, $type) . '}',
+      '<=' => $fieldName . ':[* TO ' . $this->fieldMapper->filterValue($value, $type) . ']',
+      '>' => $fieldName . ':{' . $this->fieldMapper->filterValue($value, $type) . ' TO *]',
+      '>=' => $fieldName . ':[' . $this->fieldMapper->filterValue($value, $type) . ' TO *]',
+      'BETWEEN' => $fieldName . ':[' . $this->rangeValues($value, $type) . ']',
+      'NOT BETWEEN' => '(*:* -' . $fieldName . ':[' . $this->rangeValues($value, $type) . '])',
+      'IN' => $this->inQuery($fieldName, $value, $type),
+      'NOT IN' => $this->notInQuery($fieldName, $value, $type),
       default => throw new \InvalidArgumentException(sprintf('Unsupported condition operator "%s".', $condition->getOperator())),
     };
   }
@@ -532,6 +673,13 @@ class QueryBuilder {
         throw new \InvalidArgumentException('Facet field is missing or is not part of the index.');
       }
 
+      // issue #342: facets are language-UNSPECIFIC. search_api_solr's facet
+      // path calls getSolrFieldNames($index)
+      // (SearchApiSolrBackend.php:4424, :4524), which is
+      // getLanguageSpecificSolrFieldNames(LANGCODE_NOT_SPECIFIED, ...)
+      // (:2582-2585), so a facet on a text field targets tm_X3b_und_<id>
+      // whatever the query's resolved languages are -- hence the default
+      // 'und' language here, and no variant expansion.
       $fieldName = $this->fieldMapper->fieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
       // Local-params prefix for this facet.field: always {!key=<delta>} (#299)
       // so two facets on one field answer under distinct keys, plus
@@ -739,7 +887,11 @@ class QueryBuilder {
     if (!$field) {
       throw new \InvalidArgumentException('Sort field is not part of the index.');
     }
-    return $this->fieldMapper->sortFieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
+    // issue #342: a sort takes ONE field name, so a text field sorts on the
+    // first resolved language's sort_X3b_<lang>_<id> -- search_api_solr
+    // likewise passes a single $sort_language_id into the sort field name
+    // (SearchApiSolrBackend.php:1483). Non-text fields ignore the language.
+    return $this->fieldMapper->sortFieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field), $this->languages[0]);
   }
 
   /**
@@ -753,9 +905,16 @@ class QueryBuilder {
       if (!$field) {
         continue;
       }
-      $name = $this->fieldMapper->fieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field));
-      $boost = $field->getBoost();
-      $qf[] = $boost != 1.0 ? $name . '^' . $this->formatBoost($boost) : $name;
+      // getBoost() is nullable on FieldInterface (an unset boost is NULL, not
+      // 1.0), and qf is now built for keyless queries too -- so normalise
+      // before comparing, rather than passing NULL into formatBoost().
+      $boost = (float) ($field->getBoost() ?? 1.0);
+      // issue #342: one qf entry per language variant, each carrying the
+      // field's boost -- a document only ever holds the variant it was
+      // indexed in, so all of them have to be searched.
+      foreach ($this->fieldNameVariants((string) $fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field)) as $name) {
+        $qf[] = $boost != 1.0 ? $name . '^' . $this->formatBoost($boost) : $name;
+      }
     }
 
     return implode(' ', $qf);

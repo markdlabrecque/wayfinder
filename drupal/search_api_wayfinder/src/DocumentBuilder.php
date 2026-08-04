@@ -68,16 +68,26 @@ class DocumentBuilder {
       // not from how many values this particular item happens to carry --
       // see FieldMapper::isMultiValued() for why.
       $multiValued = $this->fieldMapper->isMultiValued($field);
-      $name = $this->fieldMapper->fieldName($field->getFieldIdentifier(), $type, $multiValued);
+      // issue #342: the item's own language decides every text field's name
+      // (tm_X3b_<lang>_<id>) and the spellcheck sink it feeds -- indexing is
+      // the one context where the language is unambiguous, mirroring
+      // search_api_solr's getLanguageSpecificSolrFieldNames($item_language...)
+      // in indexItems() (SearchApiSolrBackend.php:2169).
+      $language = $item->getLanguage();
+      $name = $this->fieldMapper->fieldName($field->getFieldIdentifier(), $type, $multiValued, $language);
 
-      if ($type === 'solr_text_suggester') {
+      if ($type === 'solr_text_suggester' || $type === 'solr_text_spellcheck') {
         // Every solr_text_suggester field collapses to the ONE fixed sink
-        // field twm_suggest (FieldMapper::fieldName(), FieldMapper.php:106-118),
-        // so a plain `$doc[$name] = ...` assign lets the second such field on
+        // field twm_suggest, and every solr_text_spellcheck field on an item
+        // of one language to the ONE fixed sink spellcheck_<lang>
+        // (FieldMapper::fieldName(); SearchApiSolrBackend.php:2433-2446), so a
+        // plain `$doc[$name] = ...` assign lets the second such field on
         // an item silently overwrite the first. search_api_solr never hits
         // this because addIndexField() goes through Solarium's
         // Document::addField(), which APPENDS when the key already exists.
         // Issue #339: accumulate instead, in item-field iteration order.
+        // Issue #342: the spellcheck sink is the same kind of fixed sink, so
+        // it reuses this branch rather than duplicating it.
         //
         // ponytail: the sink is always an array, regardless of each contributing
         // field's cardinality: the preset declares twm_suggest as
@@ -90,7 +100,14 @@ class DocumentBuilder {
         continue;
       }
 
-      $doc[$name] = $multiValued ? array_values($formatted) : $formatted[0];
+      // issue #342: a text field is multi-valued on the wire whatever its
+      // Drupal cardinality -- FieldMapper::fieldName() forces the 'm' infix
+      // for every text-family prefix (SearchApiSolrBackend.php:2450-2473) --
+      // so its value must always be written as an array, or a single-valued
+      // text field would send a scalar to a multi_valued dynamic field.
+      $doc[$name] = $multiValued || $this->fieldMapper->isLanguageSpecificTextType($type)
+        ? array_values($formatted)
+        : $formatted[0];
 
       if ($type === 'text') {
         // Confirmed-correct, not a descope: a multi-valued text field's
@@ -110,7 +127,7 @@ class DocumentBuilder {
         // finding #153 in docs/solr-ref-findings.md; pinned by
         // DocumentBuilderTest with an input whose first value is neither its
         // min nor its max. See issue #302.
-        $doc[$this->fieldMapper->sortFieldName($field->getFieldIdentifier(), $type, $multiValued)] = $formatted[0];
+        $doc[$this->fieldMapper->sortFieldName($field->getFieldIdentifier(), $type, $multiValued, $language)] = $formatted[0];
       }
     }
 

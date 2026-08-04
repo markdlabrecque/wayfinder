@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Drupal\search_api_wayfinder\Plugin\search_api\backend;
 
 use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\Core\Plugin\PluginFormInterface;
 use Drupal\Core\StringTranslation\TranslatableMarkup;
 use Drupal\search_api\Attribute\SearchApiBackend;
@@ -45,12 +46,24 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
   protected ClientInterface $httpClient;
 
   /**
+   * The language manager, injected via the container (issue #342).
+   *
+   * QueryBuilder/ResponseParser use it to resolve "every enabled site
+   * language" when a query carries no search_api_language condition -- step 2
+   * of LanguageResolver's order. It stays NULL for a plugin built without a
+   * container (`new WayfinderBackend(...)` in unit tests), which simply skips
+   * that step.
+   */
+  protected ?LanguageManagerInterface $languageManager = NULL;
+
+  /**
    * {@inheritdoc}
    */
   public static function create(ContainerInterface $container, array $configuration, $plugin_id, $plugin_definition) {
     /** @var static $plugin */
     $plugin = parent::create($container, $configuration, $plugin_id, $plugin_definition);
     $plugin->httpClient = $container->get('http_client');
+    $plugin->languageManager = $container->get('language_manager');
     return $plugin;
   }
 
@@ -217,6 +230,11 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
       // NOT formally implement the (documentation-only)
       // AutocompleteBackendInterface, so this flag is what activates it.
       'search_api_autocomplete',
+      // #342: real suggestions and collations are answered by the server
+      // (spellcheck.* params in QueryBuilder, the spellcheck envelope in
+      // ResponseParser), so the backend advertises the feature the same way
+      // search_api_solr does (SearchApiSolrBackend.php:777).
+      'search_api_spellcheck',
     ];
   }
 
@@ -238,8 +256,6 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
     // index time -- the silent-loss bug #300 exists to fix:
     // - solr_date_range: needs a server-side date-range type (Wayfinder's
     //   'date' holds a single instant, not a [start TO end] range).
-    // - solr_text_spellcheck: maps to the language-specific fixed sink
-    //   'spellcheck_<lang>'; FieldMapper has no language-aware naming yet.
     // - solr_text_custom / solr_text_custom_omit_norms: site-defined analyzer
     //   escape hatch (SolrFieldType entities); the preset has no equivalent.
     // - location / rpt: spatial types, belong to #292.
@@ -256,6 +272,10 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
       'solr_text_omit_norms',
       'solr_text_wstoken',
       'solr_text_suggester',
+      // #342: FieldMapper is language-aware now, so this type maps cleanly to
+      // its fixed per-language sink 'spellcheck_<lang>'
+      // (SearchApiSolrBackend.php:2440-2446).
+      'solr_text_spellcheck',
     ];
     return in_array($type, $supported, TRUE);
   }
@@ -361,7 +381,7 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
    * {@inheritdoc}
    */
   public function search(QueryInterface $query): void {
-    $queryBuilder = new QueryBuilder();
+    $queryBuilder = new QueryBuilder(new FieldMapper(), $this->languageManager);
     $client = $this->getClient();
 
     // A More Like This query names a seed document rather than search keys,
@@ -377,7 +397,7 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
       $response = $client->select($queryBuilder->build($query, $highlight));
     }
 
-    (new ResponseParser())->parse($response, $query);
+    (new ResponseParser(new FieldMapper(), $this->languageManager))->parse($response, $query);
   }
 
   /**
@@ -422,7 +442,7 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
    */
   public function getAutocompleteSuggestions(QueryInterface $query, SearchInterface $search, string $incomplete_key, string $user_input): array {
     try {
-      $params = (new QueryBuilder())->buildAutocompleteTerms($query, $incomplete_key);
+      $params = (new QueryBuilder(new FieldMapper(), $this->languageManager))->buildAutocompleteTerms($query, $incomplete_key);
       $response = $this->getClient()->terms($params);
     }
     catch (SearchApiException $e) {
