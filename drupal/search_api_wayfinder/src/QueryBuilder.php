@@ -498,35 +498,57 @@ class QueryBuilder {
       return $parts[0];
     }
 
-    // issue #342 (MF-1): a NEGATED condition joins its variants with AND, not
-    // OR. Since a document carries only one variant, the variants it lacks
-    // satisfy "-<other-lang field>:x" unconditionally, so OR-ing negations
-    // matches every document -- `body <> "hello"` would return the document
-    // whose body IS "hello", and an exclusion filter would silently do
-    // nothing. Upstream picks the conjunction by polarity for exactly this
-    // reason (SearchApiSolrBackend.php:3455-3459).
+    // issue #342 (MF-1, MF-4): the conjunction follows the per-variant
+    // clause's polarity -- a clause an ABSENT variant satisfies trivially
+    // joins with AND, anything else with OR. See isNegatedClause() for the
+    // rule and the full table. A document carries only the variant it was
+    // indexed in, so OR-ing such a clause matches every document: `body <>
+    // "hello"` would return the document whose body IS "hello", and an
+    // exclusion filter would silently do nothing.
     $conjunction = $this->isNegatedClause($operator, $value) ? ' AND ' : ' OR ';
 
     return '(' . implode($conjunction, $parts) . ')';
   }
 
   /**
-   * Whether a condition's per-variant clause is a pure negation, i.e. a clause
-   * that a document lacking the field satisfies trivially (issue #342, MF-1).
+   * Whether a condition's per-variant clause is satisfied trivially by a
+   * document that lacks that language variant (issue #342, MF-1 and MF-4).
    *
-   * Ground truth is upstream's rule for a fulltext field checked against NULL,
-   * "'=' === $condition->getOperator() ? 'AND' : 'OR'"
-   * (SearchApiSolrBackend.php:3455-3459): `= NULL` ("field is missing") joins
-   * with AND, `<> NULL` ("field exists") with OR. Generalised to the operators
-   * this class also supports, the test is on the emitted clause, not the
-   * operator name:
-   * - `= NULL`, `IN [NULL]` emit "-field:[* TO *]" (missing) -> negated;
-   * - `<>`, `NOT BETWEEN`, and `NOT IN` without a NULL member emit
-   *   "*:* -field:..." -> negated;
-   * - `<> NULL` and `NOT IN` WITH a NULL member both keep a "field:[* TO *]"
-   *   existence requirement (notInQuery()), which already pins the clause to
-   *   the one variant the document actually carries, so those join with OR --
-   *   AND would require every variant to exist and exclude every document.
+   * THE GOVERNING RULE, and the only question to ask when changing this
+   * method or adding an operator: *does a document lacking this language
+   * variant satisfy the per-variant clause?* If yes, the variants must be
+   * combined with AND -- otherwise the variants the document does not carry
+   * make the whole disjunction true and the condition matches everything. If
+   * no, combine with OR, so the one variant the document does carry can
+   * satisfy it. The question is about the emitted CLAUSE, never the
+   * operator's name: `= NULL` and `<> NULL` answer it in opposite directions
+   * from the same operator pair, and so do `IN [a, NULL]` and `IN [a, b]`.
+   *
+   * Ground truth is upstream's own version of the rule for a fulltext field
+   * checked against NULL, "'=' === $condition->getOperator() ? 'AND' : 'OR'"
+   * (SearchApiSolrBackend.php:3450-3459): `= NULL` ("field is missing") joins
+   * with AND, `<> NULL` ("field exists") with OR.
+   *
+   * The full table over the operators this class supports -- an absent
+   * variant satisfies the clause, so AND:
+   * - `= NULL` and `IN [NULL]`, which emit the bare missing-field clause
+   *   "-field:[* TO *]";
+   * - `<>` and `NOT BETWEEN`, and `NOT IN` without a NULL member, which emit
+   *   "*:* -field:...";
+   * - `IN` with ANY NULL member, which emits
+   *   "(field:(...) OR -field:[* TO *])" (inQuery()) -- the missing-field
+   *   disjunct is true for every variant the document lacks, so this ANDs
+   *   despite `IN` being a positive operator and despite the clause also
+   *   having non-NULL values to match. This is MF-4: keying the `IN` arm off
+   *   "has no non-NULL value" instead made `body IN ['a', NULL]` match every
+   *   document.
+   *
+   * An absent variant does NOT satisfy the clause, so OR:
+   * - `=`, `BETWEEN`, `IN` without a NULL member -- plain value matches;
+   * - `<> NULL`, `NOT IN [NULL]`, and `NOT IN` WITH a NULL member, which all
+   *   keep a "field:[* TO *]" existence requirement (notInQuery()) that pins
+   *   the clause to the one variant the document actually carries. AND would
+   *   require every variant to exist and would exclude every document.
    *
    * @param mixed $value
    */
@@ -536,9 +558,11 @@ class QueryBuilder {
     }
 
     if (($operator === 'IN' || $operator === 'NOT IN') && is_array($value)) {
+      // A NULL member adds the missing-field alternative to IN and removes it
+      // from NOT IN (inQuery()/notInQuery()), so it flips the answer in
+      // opposite directions for the two operators.
       $hasNull = in_array(NULL, $value, TRUE);
-      $hasValue = array_filter($value, static fn ($item): bool => $item !== NULL) !== [];
-      return $operator === 'NOT IN' ? !$hasNull : !$hasValue;
+      return $operator === 'NOT IN' ? !$hasNull : $hasNull;
     }
 
     return $operator === '<>' || $operator === 'NOT BETWEEN';
