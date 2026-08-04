@@ -3908,3 +3908,80 @@ capg338 g338_groupfacet_multi "select?q=*:*&group=true&group.field=type&group.fi
 if want_any '^g338_'; then
   release "$G338_CONTAINER" "g338 core '$G338_CORE'"
 fi
+
+# --- group.facet over a null group that HAS facet values (#338) --------------
+# The `grouping` corpus above cannot exercise one half of `group.facet`: its
+# only null-group document (g6) carries no `type` AND no `category`, so no
+# captured field facet ever has a term sitting on a document that is missing
+# the group field. A `group.field` terms sub-aggregation structurally cannot see
+# that group (it has no group term), so an implementation that forgets to add
+# the missing-value group back stays green on every `g338_*` row -- confirmed by
+# mutation-testing the correction away. This corpus closes that gap.
+#
+# `type` groups h1/h2 as article, h3 as page, and leaves h4/h5 in the null
+# group. `category` news is on h1 (article), h3 (page), h4 and h5 (both null) --
+# 4 documents but 3 groups, which is the number that only a correct null-group
+# correction produces. blog is on h2 alone: 1 document, 1 group.
+# Own container/port 9075 and own core `g338null`, so nothing above is disturbed.
+G338N_CONTAINER=wayfinder-solr-338-null
+G338N_SOLR=http://localhost:9075/solr
+G338N_CORE=g338null
+if want_any '^g338n_'; then
+  if ! docker ps --format '{{.Names}}' | grep -qx "$G338N_CONTAINER"; then
+    docker rm -f "$G338N_CONTAINER" >/dev/null 2>&1 || true
+    docker run -d --name "$G338N_CONTAINER" -p 9075:8983 \
+      solr:9 solr-precreate "$G338N_CORE" >/dev/null
+  fi
+  echo -n "waiting for g338null solr"
+  for _ in $(seq 60); do
+    if curl -sf "$G338N_SOLR/$G338N_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n "."; sleep 1
+  done
+  curl -s "$G338N_SOLR/$G338N_CORE/schema" -H 'Content-Type: application/json' -d '{
+    "add-field": [
+      {"name":"body",       "type":"text_en", "indexed":true, "stored":true},
+      {"name":"type",       "type":"string",  "indexed":true, "stored":true, "docValues":true},
+      {"name":"category",   "type":"string",  "indexed":true, "stored":true, "docValues":true, "multiValued":true},
+      {"name":"popularity", "type":"pint",    "indexed":true, "stored":true, "docValues":true}
+    ]
+  }' >/dev/null
+  curl -sf "$G338N_SOLR/$G338N_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"h1","type":"article","category":["news"],"body":"first","popularity":10},
+    {"id":"h2","type":"article","category":["blog"],"body":"second","popularity":20},
+    {"id":"h3","type":"page","category":["news"],"body":"third","popularity":30},
+    {"id":"h4","category":["news"],"body":"fourth","popularity":40},
+    {"id":"h5","category":["news"],"body":"fifth","popularity":50}
+  ]' >/dev/null
+fi
+
+capg338n() {  # capg338n <name> <path-after-core>
+  local name=$1 suffix=$2
+  want "$name" || return 0
+  curl -sg "$G338N_SOLR/$G338N_CORE/$suffix" \
+    -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" GET "$G338N_CORE/$suffix" "" "$G338N_SOLR" \
+    >> "$MANIFEST_ERRORS"
+  rm -f "$OUT/$name.status"
+}
+
+G338N_GRP='group=true&group.field=type&group.ngroups=true'
+G338N_FF='facet=true&facet.field=type&facet.field=category'
+G338N_TAIL='fl=id&sort=id%20asc&wt=json'
+
+# Baseline document counts, then the same request under `group.facet=true`.
+# `category` news must go 4 -> 3, which is only reachable by counting the null
+# group; blog stays 1 -> 1.
+capg338n g338n_facet      "select?q=*:*&$G338N_GRP&$G338N_FF&$G338N_TAIL"
+capg338n g338n_groupfacet "select?q=*:*&$G338N_GRP&group.facet=true&$G338N_FF&$G338N_TAIL"
+# `facet.missing=true` alongside `group.facet`: the `type` facet's missing
+# bucket covers h4/h5, which are one group (the null group), not two documents.
+capg338n g338n_groupfacet_missing "select?q=*:*&$G338N_GRP&group.facet=true&$G338N_FF&facet.missing=true&$G338N_TAIL"
+capg338n g338n_facet_missing      "select?q=*:*&$G338N_GRP&$G338N_FF&facet.missing=true&$G338N_TAIL"
+# And the truncate half on this corpus: collapsed set is {h1, h3, h4}
+# (`sort=id asc`), so `category` news = 3, blog = 0.
+capg338n g338n_truncate "select?q=*:*&$G338N_GRP&group.truncate=true&$G338N_FF&$G338N_TAIL"
+
+if want_any '^g338n_'; then
+  release "$G338N_CONTAINER" "g338null core '$G338N_CORE'"
+fi

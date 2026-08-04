@@ -2947,3 +2947,23 @@ as *grid math*, not storage).
       `g338_groupfacet_truncate`). Like `group.truncate`, it is
       paging-independent: `rows=1` returns one group and still counts over all
       of them (`g338_groupfacet_rows`).
+
+162. **Under `group.facet=true` the group of documents *missing* the
+      `group.field` counts as one group like any other, including in
+      `facet.missing`.** Captured against real `solr:9` (the `g338n_*` block,
+      #338, own core `g338null`) on a corpus built for exactly this: h1/h2 are
+      `type=article`, h3 is `type=page`, and h4/h5 have no `type` at all, while
+      `category=news` sits on h1, h3, h4 and h5. `facet.field=category` is
+      `news=4, blog=1` by document count and `news=3, blog=1` under
+      `group.facet=true` (`g338n_facet` vs `g338n_groupfacet`) -- article, page
+      and the null group. This is the one shape the #290 `grouping` corpus cannot
+      express (its only null-group document, g6, carries no facetable value at
+      all), and it is the shape a `group.field` terms sub-aggregation cannot see:
+      a document missing the group field produces no group term, so an
+      implementation that does not add the missing-value group back reports 2,
+      not 3. With `facet.missing=true` the `type` facet's `null` bucket is
+      likewise 2 documents but 1 group (`g338n_facet_missing` vs
+      `g338n_groupfacet_missing`), and `category`'s `null` bucket is 0 either way
+      (every document has a `category`). `group.truncate=true` on the same corpus
+      collapses to {h1, h3, h4} under `sort=id asc` -> `news=3, blog=0`
+      (`g338n_truncate`).
