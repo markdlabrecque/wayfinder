@@ -17,24 +17,77 @@
 //! rather than being silently accepted as a param Wayfinder does not
 //! implement.
 //!
+//! ## The other components, and the two flags that reshape them (issue #338)
+//!
+//! A grouped response is not `grouped`-only: it carries `facet_counts`,
+//! `stats`, `highlighting` and `spellcheck` exactly as an ungrouped one does,
+//! each gated by its own `facet`/`stats`/`hl`/`spellcheck` param, with
+//! `grouped` standing where `response` would (findings 159/160/161). `select`
+//! therefore *falls through* into the shared component code rather than
+//! returning early, and this module hands it back the pieces only the grouping
+//! pass can know:
+//!
+//! - [`GroupedOutcome::rendered`] — every document the doclists actually
+//!   rendered, deduplicated across all `group.field` blocks and all groups.
+//!   `highlighting` covers exactly that set, the way it covers `response.docs`
+//!   on the ungrouped path (`g338_hl`).
+//! - [`GroupedOutcome::truncate_docs`] — `group.truncate=true`'s *collapsed*
+//!   document set: each group's first document in `group.sort` order, from the
+//!   **first** `group.field`, taken straight off the collector's fruit and so
+//!   independent of `rows`/`start`/`group.limit`/`group.offset`. `select`
+//!   intersects it into the facet/stats base query (as a [`DocSetQuery`]), so
+//!   facets, `stats`, `facet.query` and `facet.range` are all computed over the
+//!   collapsed set while `grouped` itself stays untouched (`g338_truncate*`).
+//! - [`GroupedOutcome::group_facet`] — `group.facet=true`'s counting context:
+//!   every facet count becomes a count of *distinct matching groups* of the
+//!   first `group.field`, for field facets, `facet.query` and `facet.range`
+//!   alike. `stats` is deliberately unaffected (`g338_groupfacet_stats`).
+//!
+//! The two flags compose without a special case: `group.truncate` restricts the
+//! base query, `group.facet` counts groups over whatever base it is given, and
+//! in the collapsed set every document is its own group — which is why
+//! `g338_groupfacet_truncate`'s facet block equals `g338_truncate`'s.
+//!
 //! Ground truth: every shape decision here is pinned by a fixture in
-//! `solr-ref/responses/group_*.json`, captured against a dedicated `grouping`
-//! Solr core (`solr-ref/capture.sh`'s issue-#290 block).
+//! `solr-ref/responses/group_*.json` (issue #290) or
+//! `solr-ref/responses/g338_*.json` (issue #338), captured against a dedicated
+//! `grouping` Solr core (`solr-ref/capture.sh`).
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
-use tantivy::Score;
-use tantivy::query::Query;
+use tantivy::index::SegmentId;
+use tantivy::query::{BooleanQuery, EnableScoring, Explanation, Occur, Query, Scorer, Weight};
+use tantivy::{DocAddress, DocId, DocSet, Score, SegmentReader, TERMINATED, TantivyError, Term};
 
 use crate::collector::{GroupingFruit, SortClause, SortKey, SortValue};
-use crate::core_index::CoreIndex;
+use crate::core_index::{CoreIndex, FacetOrderKey};
 use crate::error::WfError;
 use crate::params::Params;
-use crate::schema::WayfinderSchema;
+use crate::schema::{ValueKind, WayfinderSchema};
 
 /// The already-parsed `q` plus its filter queries, borrowed. `None` when the
 /// request has no `q` (matches nothing). Named so the handler call site reads
 /// cleanly and clippy's `type_complexity` stays quiet.
 type ParsedQuery<'a> = Option<(&'a dyn Query, &'a [Box<dyn Query>])>;
+
+/// Everything a grouped request produces that the rest of `select` needs: the
+/// `grouped` block itself plus the three pieces only the grouping pass can
+/// know. See this module's doc comment for what each one is for.
+pub struct GroupedOutcome {
+    /// The `grouped` response object, keyed by `group.field` in request order.
+    pub block: Value,
+    /// Every document the rendered doclists returned, deduplicated, in
+    /// first-rendered order. `highlighting`'s doc set.
+    pub rendered: Vec<(Score, DocAddress)>,
+    /// `group.truncate=true`: the collapsed document set (one per group of the
+    /// first `group.field`). `None` when the flag is off or false.
+    pub truncate_docs: Option<Vec<DocAddress>>,
+    /// `group.facet=true`: the distinct-group counting context. `None` when the
+    /// flag is off or false.
+    pub group_facet: Option<GroupFacet>,
+}
 
 /// Builds the `grouped` response object when `group=true`, else `None`.
 ///
@@ -52,7 +105,7 @@ pub(crate) fn grouping(
     start: usize,
     fl: Option<&[String]>,
     wants_score: bool,
-) -> Result<Option<Value>, WfError> {
+) -> Result<Option<GroupedOutcome>, WfError> {
     // `group=true` gates the whole component, the same way `facet=true` gates
     // `facet_counts` (finding 4). Only literal `true` enables it.
     if !params.bool_or("group", false)? {
@@ -96,10 +149,19 @@ pub(crate) fn grouping(
         Some(spec) => crate::parse_sort_spec(&index.wf_schema, params, spec)?,
         None => main_sort.to_vec(),
     };
+    // Both #338 flags are gated exactly like `group`/`facet`/`stats`/`hl`: only
+    // a literal `true` turns them on, and `false` is byte-identical to omitting
+    // them (`g338_truncate_false`).
+    let truncate = params.bool_or("group.truncate", false)?;
+    let group_facet_requested = params.bool_or("group.facet", false)?;
 
     let schema = &index.wf_schema;
     let mut grouped = Map::new();
-    for field in &fields {
+    let mut rendered: Vec<(Score, DocAddress)> = Vec::new();
+    let mut rendered_seen: HashSet<DocAddress> = HashSet::new();
+    let mut truncate_docs = None;
+    let mut group_facet = None;
+    for (position, field) in fields.iter().enumerate() {
         let group_clause = validate_group_field(schema, params, field)?;
         // No `q` matches nothing, so every group is empty -- same empty-fruit
         // shortcut `select` takes for the ungrouped `response` block.
@@ -120,7 +182,24 @@ pub(crate) fn grouping(
                     WfError::internal("wayfinder::GroupingError", e.to_string()).with_params(params)
                 })?,
         };
-        let block = build_group_block(
+        // Both flags read the FIRST `group.field`'s grouping and no other
+        // (`g338_truncate_multi`, `g338_groupfacet_multi`), and both read the
+        // *fruit* -- every matching doc of every group, in `group.sort` order,
+        // unpaginated -- so neither can be perturbed by `rows`/`start` or
+        // `group.limit`/`group.offset` (`g338_truncate_rows`,
+        // `g338_groupfacet_rows`).
+        if position == 0 {
+            if truncate {
+                truncate_docs = Some(collapsed_docs(&fruit));
+            }
+            if group_facet_requested {
+                let column = schema
+                    .resolved_fast_column(field)
+                    .expect("validate_group_field confirmed this name resolves");
+                group_facet = Some(GroupFacet::from_fruit(&fruit, column));
+            }
+        }
+        let (block, block_docs) = build_group_block(
             index,
             params,
             &fruit,
@@ -132,9 +211,263 @@ pub(crate) fn grouping(
             wants_score,
             fl,
         )?;
+        // A document can be rendered by more than one `group.field` block (and,
+        // with `group.limit`, more than once within one); `highlighting` is a
+        // map keyed by unique key, so the union is deduplicated here rather
+        // than highlighting the same document twice.
+        for doc in block_docs {
+            if rendered_seen.insert(doc.1) {
+                rendered.push(doc);
+            }
+        }
         grouped.insert(field.clone(), block);
     }
-    Ok(Some(Value::Object(grouped)))
+    Ok(Some(GroupedOutcome {
+        block: Value::Object(grouped),
+        rendered,
+        truncate_docs,
+        group_facet,
+    }))
+}
+
+/// `group.truncate`'s collapsed document set: each group's first document in
+/// `group.sort` order. Read off the fruit, so it covers every group of the
+/// whole match set regardless of paging.
+fn collapsed_docs(fruit: &GroupingFruit) -> Vec<DocAddress> {
+    fruit
+        .groups
+        .iter()
+        .filter_map(|group| group.docs.first().map(|(_, addr)| *addr))
+        .collect()
+}
+
+/// `group.facet=true`'s counting context, derived from the first
+/// `group.field`'s fruit: which group each matching document belongs to, plus
+/// what is needed to count *distinct groups* per facet bucket.
+pub struct GroupFacet {
+    /// Matching document -> its group's index in the fruit. Drives
+    /// `facet.query` / `facet.range` (and `facet.missing`), where the bucket is
+    /// defined by a query and the answer is "how many distinct groups do the
+    /// matching documents fall into?".
+    doc_group: HashMap<DocAddress, usize>,
+    /// The Tantivy column of the group field, for the terms sub-aggregation
+    /// that answers the same question for a field facet without walking
+    /// documents in Wayfinder.
+    group_column: String,
+    /// The documents of the "field is absent" group. Solr's `null` group is a
+    /// real group and counts, but a terms sub-aggregation on the group column
+    /// cannot see documents with no value there, so these are counted
+    /// separately (see [`GroupFacet::term_facet`]).
+    null_docs: Vec<DocAddress>,
+}
+
+impl GroupFacet {
+    fn from_fruit(fruit: &GroupingFruit, group_column: String) -> GroupFacet {
+        let mut doc_group = HashMap::new();
+        let mut null_docs = Vec::new();
+        for (index, group) in fruit.groups.iter().enumerate() {
+            for (_, addr) in &group.docs {
+                doc_group.insert(*addr, index);
+                if group.value.is_none() {
+                    null_docs.push(*addr);
+                }
+            }
+        }
+        GroupFacet {
+            doc_group,
+            group_column,
+            null_docs,
+        }
+    }
+
+    /// How many distinct groups the documents matching `query` fall into — the
+    /// group-counting replacement for `CoreIndex::count` behind `facet.query`,
+    /// each `facet.range` bucket and `facet.missing`.
+    pub(crate) fn distinct_groups(
+        &self,
+        index: &CoreIndex,
+        query: &dyn Query,
+    ) -> anyhow::Result<usize> {
+        let mut seen: HashSet<usize> = HashSet::new();
+        for addr in index.doc_set(query)? {
+            // Every document matching `query` also matches the base query (`q`
+            // AND every `fq`), which is exactly the set the fruit bucketed, so
+            // this always hits. Skipping a miss is the conservative answer if
+            // the two ever disagreed.
+            if let Some(group) = self.doc_group.get(&addr) {
+                seen.insert(*group);
+            }
+        }
+        Ok(seen.len())
+    }
+
+    /// One field facet's buckets, counted in distinct groups instead of
+    /// documents. Delegates the aggregation (and all bucket-key rendering) to
+    /// `CoreIndex::term_facet_grouped`, then adds the one group that
+    /// aggregation structurally cannot see: the `null` group, whose documents
+    /// have no value in the group column at all. A term present on any
+    /// still-matching `null`-group document gains exactly +1, because those
+    /// documents are all one group.
+    ///
+    /// ponytail: the `null`-group correction below is unfixtured. The g338
+    /// `group.facet` corpus has exactly one `null`-group document (`g6`), and it
+    /// carries neither a `type` nor a `category` value, so no captured field
+    /// facet has a term on a `null`-group document and mutating this branch away
+    /// keeps the suite green. It is kept because the `null` group demonstrably
+    /// *is* a group elsewhere in the same fixtures (`g338_groupfacet_blog`'s
+    /// 0-25 range bucket counts 3, including `g6`'s group), so dropping it would
+    /// undercount by one on any corpus where such a document has a facet value.
+    pub(crate) fn term_facet(
+        &self,
+        index: &CoreIndex,
+        column: &str,
+        kind: Option<ValueKind>,
+        query: &dyn Query,
+    ) -> anyhow::Result<Vec<(String, FacetOrderKey, u64)>> {
+        let mut buckets = index.term_facet_grouped(column, kind, &self.group_column, query)?;
+        if self.null_docs.is_empty() {
+            return Ok(buckets);
+        }
+        let null_only = BooleanQuery::from(vec![
+            (Occur::Must, query.box_clone()),
+            (
+                Occur::Must,
+                Box::new(doc_set_query(index, &self.null_docs)) as Box<dyn Query>,
+            ),
+        ]);
+        let in_null_group: HashSet<String> = index
+            .term_facet(column, kind, &null_only)?
+            .into_iter()
+            .filter(|(_, _, count)| *count > 0)
+            .map(|(term, _, _)| term)
+            .collect();
+        for (term, _, count) in &mut buckets {
+            if in_null_group.contains(term) {
+                *count += 1;
+            }
+        }
+        Ok(buckets)
+    }
+}
+
+/// A [`DocSetQuery`] over `docs`, resolved against the index's current segment
+/// ordinals. The one construction path, so no caller has to know that the
+/// query keys its doc lists by `SegmentId` rather than by ordinal.
+pub(crate) fn doc_set_query(index: &CoreIndex, docs: &[DocAddress]) -> DocSetQuery {
+    DocSetQuery::new(&index.segment_ids(), docs)
+}
+
+/// A query matching exactly a fixed set of documents.
+///
+/// `group.truncate` needs the facet/stats base query restricted to the
+/// collapsed group set, which is a set of `DocAddress`es rather than anything
+/// the term dictionary can express. The alternative — a Boolean OR of one
+/// `unique_key` term per group — is O(groups) clauses and degrades badly on a
+/// real corpus, where the group count is unbounded; this is a flat per-segment
+/// sorted doc list, so a whole pass costs one linear walk of it.
+///
+/// Doc lists are keyed by `SegmentId`, not by the segment ordinal the
+/// `DocAddress`es carry: a `Weight` is handed a `&SegmentReader`, and the
+/// ordinal is only meaningful relative to the exact searcher the addresses came
+/// from. `SegmentId` is stable, so a searcher taken between collection and
+/// counting cannot silently shift the doc set onto the wrong segment.
+#[derive(Clone, Debug)]
+pub struct DocSetQuery {
+    docs: Arc<HashMap<SegmentId, Vec<DocId>>>,
+}
+
+impl DocSetQuery {
+    fn new(segment_ids: &[SegmentId], docs: &[DocAddress]) -> DocSetQuery {
+        let mut by_segment: HashMap<SegmentId, Vec<DocId>> = HashMap::new();
+        for addr in docs {
+            // An address whose ordinal is out of range cannot be matched
+            // against any segment of this searcher, so it is dropped rather
+            // than mapped onto the wrong one.
+            if let Some(segment_id) = segment_ids.get(addr.segment_ord as usize) {
+                by_segment.entry(*segment_id).or_default().push(addr.doc_id);
+            }
+        }
+        // `DocSet` requires ascending, distinct doc ids; the collector hands
+        // its groups back in `group.sort` order, which is neither.
+        for docs in by_segment.values_mut() {
+            docs.sort_unstable();
+            docs.dedup();
+        }
+        DocSetQuery {
+            docs: Arc::new(by_segment),
+        }
+    }
+}
+
+impl Query for DocSetQuery {
+    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> Result<Box<dyn Weight>, TantivyError> {
+        Ok(Box::new(DocSetWeight {
+            docs: Arc::clone(&self.docs),
+        }))
+    }
+
+    fn query_terms<'a>(&'a self, _visitor: &mut dyn FnMut(&'a Term, bool)) {
+        // Membership is an explicit doc list; there are no term clauses.
+    }
+}
+
+struct DocSetWeight {
+    docs: Arc<HashMap<SegmentId, Vec<DocId>>>,
+}
+
+impl Weight for DocSetWeight {
+    fn scorer(
+        &self,
+        reader: &SegmentReader,
+        _boost: Score,
+    ) -> Result<Box<dyn Scorer>, TantivyError> {
+        let docs = self
+            .docs
+            .get(&reader.segment_id())
+            .cloned()
+            .unwrap_or_default();
+        // Tantivy's `DocSet` iteration is `doc()`-first, so a fresh scorer must
+        // already sit ON its first match -- cursor 0 does.
+        Ok(Box::new(DocSetScorer { docs, cursor: 0 }))
+    }
+
+    fn explain(&self, reader: &SegmentReader, doc: DocId) -> Result<Explanation, TantivyError> {
+        let matches = self
+            .docs
+            .get(&reader.segment_id())
+            .is_some_and(|docs| docs.binary_search(&doc).is_ok());
+        Ok(Explanation::new_with_string(
+            "DocSetQuery".to_string(),
+            if matches { 1.0 } else { 0.0 },
+        ))
+    }
+}
+
+struct DocSetScorer {
+    docs: Vec<DocId>,
+    cursor: usize,
+}
+
+impl DocSet for DocSetScorer {
+    fn advance(&mut self) -> DocId {
+        self.cursor = self.cursor.saturating_add(1);
+        self.doc()
+    }
+
+    fn doc(&self) -> DocId {
+        self.docs.get(self.cursor).copied().unwrap_or(TERMINATED)
+    }
+
+    fn size_hint(&self) -> u32 {
+        u32::try_from(self.docs.len()).unwrap_or(u32::MAX)
+    }
+}
+
+impl Scorer for DocSetScorer {
+    fn score(&mut self) -> Score {
+        // Constant score: this query only ever restricts a base query.
+        1.0
+    }
 }
 
 /// Validates one `group.field` and returns the `SortClause` that reads its
@@ -200,7 +533,8 @@ fn resolved_multi_valued(schema: &WayfinderSchema, name: &str) -> bool {
 
 /// Shapes one `grouped.<field>` block from the collector's fruit, applying
 /// within-group paging (`limit`/`offset`) and group-list paging
-/// (`rows`/`start`).
+/// (`rows`/`start`). Also returns every document the block actually rendered,
+/// which is the set `highlighting` covers (issue #338).
 #[allow(clippy::too_many_arguments)]
 fn build_group_block(
     index: &CoreIndex,
@@ -213,8 +547,9 @@ fn build_group_block(
     ngroups: bool,
     wants_score: bool,
     fl: Option<&[String]>,
-) -> Result<Value, WfError> {
+) -> Result<(Value, Vec<(Score, DocAddress)>), WfError> {
     // Key order matches the fixtures: `matches`, `ngroups`, `groups`.
+    let mut rendered = Vec::new();
     let mut block = Map::new();
     block.insert("matches".to_string(), json!(fruit.matches));
     if ngroups {
@@ -256,6 +591,7 @@ fn build_group_block(
             docs.push(index.render_doc(*addr, fl, Some(*score)).map_err(|e| {
                 WfError::internal("wayfinder::DocError", e.to_string()).with_params(params)
             })?);
+            rendered.push((*score, *addr));
         }
         doclist.insert("docs".to_string(), json!(docs));
 
@@ -263,7 +599,7 @@ fn build_group_block(
         groups_arr.push(Value::Object(group_obj));
     }
     block.insert("groups".to_string(), json!(groups_arr));
-    Ok(Value::Object(block))
+    Ok((Value::Object(block), rendered))
 }
 
 /// Renders a group value the way Solr emits `groupValue`: the typed value, or

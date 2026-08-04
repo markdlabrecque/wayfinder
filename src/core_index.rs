@@ -3618,6 +3618,121 @@ impl CoreIndex {
         render_term_facet_buckets(field_name, kind, &results, AGG_NAME)
     }
 
+    /// [`term_facet`](Self::term_facet) with every bucket's count replaced by
+    /// the number of **distinct values of `group_column`** among the documents
+    /// in that bucket — Solr's `group.facet=true` (issue #338, finding 161).
+    ///
+    /// One pass, no per-document work in Wayfinder: a terms sub-aggregation on
+    /// the group column inside each outer bucket makes the distinct-group count
+    /// simply "how many sub-buckets did this bucket get?". The outer buckets
+    /// themselves are rendered by the same
+    /// [`render_term_facet_buckets`] the ungrouped path uses, so bucket-key
+    /// rendering (Java `Double.toString`, dates, the order key) cannot drift
+    /// between the two.
+    ///
+    /// Documents with **no** value in `group_column` are invisible to the
+    /// sub-aggregation (they belong to Solr's `null` group, which is a real
+    /// group and does count). The caller adds them, because only it knows which
+    /// documents those are — see `crate::grouping::GroupFacet::term_facet`.
+    ///
+    /// ponytail: two ceilings, both inherited from
+    /// [`terms_aggregation`]'s own `MAX_FACET_TERMS` sizing. A bucket holding
+    /// more than `MAX_FACET_TERMS` distinct group values undercounts, and the
+    /// per-request bucket budget is now charged `1 + <distinct groups>` per
+    /// outer bucket instead of 1 (`BucketEntry::get_bucket_count`), so a
+    /// high-cardinality `group.facet` request can trip Tantivy's bucket limit
+    /// where the same request without `group.facet` would not. Both need
+    /// streaming/paged faceting to lift, which is out of issue #338's scope.
+    pub fn term_facet_grouped(
+        &self,
+        field_name: &str,
+        kind: Option<ValueKind>,
+        group_column: &str,
+        query: &dyn Query,
+    ) -> Result<Vec<(String, FacetOrderKey, u64)>> {
+        const AGG_NAME: &str = "wf_terms";
+        const GROUP_AGG_NAME: &str = "wf_groups";
+
+        let mut outer = terms_aggregation(field_name);
+        // `min_doc_count: 1` (the default) is what makes the sub-bucket count
+        // an exact distinct-group count: a zero-count sub-bucket would be a
+        // group that is *not* in this facet bucket.
+        let mut group_agg = terms_aggregation(group_column);
+        if let AggregationVariants::Terms(terms) = &mut group_agg.agg {
+            terms.min_doc_count = Some(1);
+        }
+        outer
+            .sub_aggregation
+            .insert(GROUP_AGG_NAME.to_string(), group_agg);
+
+        let mut aggs = Aggregations::default();
+        aggs.insert(AGG_NAME.to_string(), outer);
+
+        let collector = AggregationCollector::from_aggs(
+            aggs,
+            AggContextParams::new(
+                AggregationLimitsGuard::default(),
+                self.index.tokenizers().clone(),
+            ),
+        );
+        let results = self.reader.searcher().search(query, &collector)?;
+        let rendered = render_term_facet_buckets(field_name, kind, &results, AGG_NAME)?;
+
+        let Some(AggregationResult::BucketResult(BucketResult::Terms { buckets, .. })) =
+            results.0.get(AGG_NAME)
+        else {
+            return Err(anyhow!(
+                "could not group-facet on field `{field_name}`: unexpected aggregation result"
+            ));
+        };
+        // `render_term_facet_buckets` maps the same bucket list in order, so
+        // the two zip 1:1.
+        let mut out = Vec::with_capacity(rendered.len());
+        for ((term, order, doc_count), bucket) in rendered.into_iter().zip(buckets.iter()) {
+            let groups = match bucket.sub_aggregation.0.get(GROUP_AGG_NAME) {
+                Some(AggregationResult::BucketResult(BucketResult::Terms { buckets, .. })) => {
+                    buckets.len() as u64
+                }
+                // A bucket the `min_doc_count: 0` term-dictionary fill added
+                // holds no documents at all, so it holds no groups either.
+                _ if doc_count == 0 => 0,
+                _ => {
+                    return Err(anyhow!(
+                        "could not group-facet on field `{field_name}`: bucket `{term}` \
+                         has no group sub-aggregation"
+                    ));
+                }
+            };
+            out.push((term, order, groups));
+        }
+        Ok(out)
+    }
+
+    /// Every document matching `query`, as an address set. The membership
+    /// primitive behind `group.facet`'s distinct-group counting (issue #338),
+    /// which needs the *identities* of a bucket's documents rather than only
+    /// how many there are.
+    pub fn doc_set(&self, query: &dyn Query) -> Result<std::collections::HashSet<DocAddress>> {
+        Ok(self.reader.searcher().search(query, &DocSetCollector)?)
+    }
+
+    /// The `SegmentId` of each segment behind the current searcher, indexed by
+    /// the same segment ordinal a `DocAddress` carries.
+    ///
+    /// `crate::grouping::DocSetQuery` needs it: a `Weight` is handed a
+    /// `&SegmentReader`, not an ordinal, so a query over a fixed set of
+    /// `DocAddress`es has to key its per-segment doc lists by the stable
+    /// `SegmentId` rather than by the ordinal the addresses were collected
+    /// under.
+    pub fn segment_ids(&self) -> Vec<tantivy::index::SegmentId> {
+        self.reader
+            .searcher()
+            .segment_readers()
+            .iter()
+            .map(|reader| reader.segment_id())
+            .collect()
+    }
+
     /// Solr's `stats.field`: min/max/count/sum/sumOfSquares/mean/stddev over a
     /// numeric or date fast field, computed only over docs that actually have
     /// a value in that field. Backed by Tantivy's `ExtendedStats` metric
