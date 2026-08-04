@@ -1415,6 +1415,103 @@ async fn g338null_app() -> (Router, TempDir) {
     (app, dir)
 }
 
+// --- duplicated schema/corpus for manifest-errors.tsv's `jf343_` rows ------
+// (issue #343, findings 165-168). `json.facet` was captured against its own
+// `jsonfacet343` core, so its 20 manifest-errors rows need their own hermetic
+// app the way `g338null_` does — without one they count as unrun and
+// `manifest_errors_every_row_runs_against_the_matching_hermetic_app` stays red.
+// Core name `jsonfacet343` matches those rows' URLs, so the runner below
+// routes them here.
+//
+// `body` is deliberately **not** `fast`: its non-fastness is exactly what
+// `jf343_err_no_docvalues` (a terms facet on it) and `jf343_err_agg_text`
+// (`max(body)`) exercise — the two ratified divergences of finding 168.
+const JSONFACET343_SCHEMA_TOML: &str = r#"
+[core]
+name = "jsonfacet343"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "hash"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "index_id"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "ss_search_api_datasource"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "popularity"
+type = "int"
+stored = true
+fast = true
+"#;
+
+/// The exact 6-doc corpus `solr-ref/capture.sh`'s `jf343_` block indexes,
+/// `jf6`'s `body` of `"zeta orphan"` included: `jf6` carries no
+/// `hash`/`index_id`/`ss_search_api_datasource` at all, which is what makes
+/// the default `mincount: 1` observable and what the client's
+/// `fq=+hash:* +index_id:*` excludes.
+fn jsonfacet343_corpus() -> Value {
+    json!([
+        {"id":"jf1","hash":"siteA","index_id":"index_a","ss_search_api_datasource":"entity:node","popularity":10,"body":"alpha"},
+        {"id":"jf2","hash":"siteA","index_id":"index_a","ss_search_api_datasource":"entity:node","popularity":30,"body":"beta"},
+        {"id":"jf3","hash":"siteA","index_id":"index_a","ss_search_api_datasource":"entity:user","popularity":20,"body":"gamma"},
+        {"id":"jf4","hash":"siteA","index_id":"index_b","ss_search_api_datasource":"entity:node","popularity":40,"body":"delta"},
+        {"id":"jf5","hash":"siteB","index_id":"index_c","ss_search_api_datasource":"entity:node","popularity":50,"body":"epsilon"},
+        {"id":"jf6","popularity":60,"body":"zeta orphan"}
+    ])
+}
+
+/// `POST /wayfinder/jsonfacet343/update?commit=true` — cannot be
+/// `common::post_docs`, which is hardcoded to `common::CORE` ("content").
+async fn jsonfacet343_post_docs(app: &Router, docs: &Value) -> (StatusCode, Value) {
+    common::request_full(
+        app,
+        "POST",
+        "jsonfacet343/update?commit=true",
+        Some(&docs.to_string()),
+    )
+    .await
+}
+
+/// Builds a fresh `jsonfacet343`-schema app and indexes the full `jf1..jf6`
+/// corpus in one commit, matching `solr-ref/capture.sh`'s `jf343_` block.
+async fn jsonfacet343_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app =
+        common::app_with_schema(dir.path(), JSONFACET343_SCHEMA_TOML).expect("app must build");
+    let (status, body) = jsonfacet343_post_docs(&app, &jsonfacet343_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the jsonfacet343 corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
 /// The issue-#99 capture uses a dedicated three-document core. Its version
 /// values are deliberately time-seeded, so the manifest row is run here for
 /// its request/envelope shape while `tests/version_field.rs` verifies the
@@ -1587,6 +1684,19 @@ const ACCEPTED_DIVERGENCES: &[(&str, &str)] = &[
         "finding 105 / PRD ratified-divergence 2, stored-only (non-indexed) field variant",
     ),
     (
+        "jf343_err_no_docvalues",
+        "finding 168 / spec 343 section 1c, same divergence family as facet_non_docvalues_text: a \
+         json.facet terms facet on a non-docValues field is 200 with empty buckets in Solr, \
+         Wayfinder 400s it consistently with the classic-facet behaviour of finding 105",
+    ),
+    (
+        "jf343_err_agg_text",
+        "finding 168 / spec 343 section 1c: Solr's max() over a text field returns the \
+         lexicographic maximum as a string; Wayfinder 400s instead, because the evidenced client \
+         reads an aggregation as a number and silently handing it a string yields wrong values \
+         that look right",
+    ),
+    (
         "update_unknown_core",
         "finding 49 / same divergence family as err_missing_core: an unknown core on POST \
          /update is Solr's 404 HTML easter egg, Wayfinder's normal 404 JSON error envelope",
@@ -1718,6 +1828,27 @@ const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[
         "issue #340 spec section D: a multi-term `v` (`v=\"dog quick\"`) is a named descope -- \
          real Solr treats it as an ordered SpanNearQuery (finding 171); Wayfinder supports \
          single-term `v` only. Self-expiring: remove this entry if multi-term `v` ever lands.",
+    ),
+    (
+        "jf343_agg_max_version",
+        "issue #343, same root cause as `stats_version_max` above: `json.facet={\"maxVersion\": \
+         \"max(_version_)\"}` returns a real maximum, but Solr's `_version_` values are \
+         update-log-derived while Wayfinder seeds per-core values from Unix-epoch milliseconds, so \
+         the magnitude can never be fixture-stable. The single suppressed diff is \
+         `facets.maxVersion`'s value; everything else about the row — status, the `facets` block's \
+         slot and key set, and the value's integer (not float) rendering — is still diffed for \
+         real. tests/json_facet.rs pins the envelope and asserts the value equals the index's \
+         actual `_version_` fast-field maximum",
+    ),
+    (
+        "jf343_deep_version",
+        "issue #343, same root cause as `jf343_agg_max_version` above, at the client's full \
+         4-level topology. The five suppressed diffs are `facets.maxVersion` and the four \
+         `facets.siteHashes.buckets[*].indexes.buckets[*].dataSources.buckets[*].\
+         maxVersionPerDataSource` leaves — i.e. values only. The bucket nesting, ordering, counts \
+         and key sets that this row is actually good for are all still diffed for real. \
+         tests/json_facet.rs pins the shape and checks each leaf against the real per-bucket \
+         fast-field maximum",
     ),
 ];
 
@@ -2774,6 +2905,7 @@ fn app_and_request_url<'a>(
     spellcheck_app: &'a Router,
     grouping_app: &'a Router,
     g338null_app: &'a Router,
+    jsonfacet343_app: &'a Router,
     fnq_app: &'a Router,
     pf296_app: &'a Router,
     geo_app: &'a Router,
@@ -2805,6 +2937,7 @@ fn app_and_request_url<'a>(
         Some(("spellcheck_223", _)) => (spellcheck_app, entry.url.clone()),
         Some(("grouping", _)) => (grouping_app, entry.url.clone()),
         Some(("g338null", _)) => (g338null_app, entry.url.clone()),
+        Some(("jsonfacet343", _)) => (jsonfacet343_app, entry.url.clone()),
         _ => (content_app, entry.url.clone()),
     }
 }
@@ -2845,6 +2978,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let (spellcheck_app, _spellcheck_dir) = spellcheck_223_app().await;
     let (grouping_app, _grouping_dir) = grouping_app().await;
     let (g338null_app, _g338null_dir) = g338null_app().await;
+    let (jsonfacet343_app, _jsonfacet343_dir) = jsonfacet343_app().await;
     let (fnq_app, _fnq_dir) = fnq_app().await;
     let (pf296_app, _pf296_dir) = pf296_app().await;
     let (geo_app, _geo_dir) = geo_app().await;
@@ -2876,6 +3010,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
             &spellcheck_app,
             &grouping_app,
             &g338null_app,
+            &jsonfacet343_app,
             &fnq_app,
             &pf296_app,
             &geo_app,
@@ -2949,6 +3084,28 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
                             "{}: Wayfinder matched the fixture's status — the documented \
                              unfacetable-field divergence no longer holds, remove this \
                              ACCEPTED_DIVERGENCES entry and update finding 105 ({reason})",
+                            entry.name
+                        ));
+                    }
+                }
+                "jf343_err_no_docvalues" | "jf343_err_agg_text" => {
+                    // Same self-expiring shape as the classic-facet arm above:
+                    // these two rows exist to make spec 343 section 1c's
+                    // deliberate 400-where-Solr-200s visible, so the entry
+                    // fails the moment Wayfinder starts agreeing with the
+                    // fixture. The fixture-status assertion keeps the excuse
+                    // honest if the fixture is ever re-captured differently.
+                    assert_eq!(
+                        entry.status, 200,
+                        "{}: fixture must be 200 for this accepted divergence to still name \
+                         the gap ({reason})",
+                        entry.name
+                    );
+                    if status.as_u16() == entry.status {
+                        failures.push(format!(
+                            "{}: Wayfinder matched the fixture's status — the documented \
+                             json.facet divergence no longer holds, remove this \
+                             ACCEPTED_DIVERGENCES entry and update finding 168 ({reason})",
                             entry.name
                         ));
                     }
