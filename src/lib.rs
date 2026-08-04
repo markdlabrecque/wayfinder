@@ -279,20 +279,27 @@ const SELECT_PARAMS: &[&str] = &[
 /// that do not implement the base param at all: `/update` has no
 /// `facet.missing`, so `f.x.facet.missing` still 400s there.
 ///
-/// ponytail: exactly one entry, and that is the ceiling, not an oversight.
-/// Every other `f.<field>.facet.*` Solr accepts (`.limit`, `.mincount`,
-/// `.sort`, `.prefix`) is unimplemented here and must keep 400ing under
+/// ponytail: exactly four entries, and that is the ceiling, not an oversight.
+/// `.limit`/`.mincount`/`.sort` joined `.missing` with issue #296, which
+/// implemented them in `FacetSettings::resolve` (`src/facet.rs`) in this same
+/// change. Every other `f.<field>.facet.*` Solr accepts (`.prefix`,
+/// `.method`, `.range.*`) is unimplemented here and must keep 400ing under
 /// `strict_params` — pinned by
 /// `strict_params_still_rejects_an_unrelated_f_dot_param`
 /// (`tests/facet_field_missing_override.rs`). Allowlisting a per-field param
 /// whose value is then ignored converts a loud 400 into a silently wrong
-/// answer: a client asking for `f.category.facet.limit=5` would get the global
-/// limit and no indication it was dropped. Upgrade path: implement the
-/// override where the global is read in `src/facet.rs` (the `facet.missing`
-/// resolution in `facet_fields` is the worked example — `Params::per_field_bool`
-/// wins over the global unconditionally, finding 97), *then* add the base param
-/// name here in the same change. Adding a name here alone is the bug.
-const PER_FIELD_PARAMS: &[&str] = &["facet.missing"];
+/// answer: a client asking for `f.category.facet.prefix=x` would get the whole
+/// bucket list and no indication the filter was dropped. Upgrade path:
+/// implement the override where the global is read in `src/facet.rs`
+/// (`FacetSettings::resolve` is the worked example — the addressed forms win
+/// over the global, findings 147/151), *then* add the base param name here in
+/// the same change. Adding a name here alone is the bug.
+const PER_FIELD_PARAMS: &[&str] = &[
+    "facet.missing",
+    "facet.limit",
+    "facet.mincount",
+    "facet.sort",
+];
 /// `commitWithin` / `overwrite` / `softCommit` landed with #9. `omitHeader`
 /// landed with #143 — `search_api_solr` sends `omitHeader=false` on every
 /// `/update` (`solr-ref/search-api/trace/00001.json`). `json.nl` landed with

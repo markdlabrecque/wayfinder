@@ -450,15 +450,36 @@ class QueryBuilder {
    * 'min_count' => int, 'missing' => bool, 'query_type' => string], plus an
    * optional 'sort'.
    *
-   * ponytail: Wayfinder's facet.limit/facet.mincount/facet.missing/facet.sort
-   * are *global* params applied to every facet.field entry (src/facet.rs,
-   * facet_fields()) -- there is no f.<field>.facet.* per-field override on the
-   * wire. So a query whose facets disagree on those settings cannot be
-   * expressed: the last facet's settings win for the whole request. That is
-   * the ceiling until Wayfinder grows per-field facet params.
+   * Issue #296: each facet's limit/min_count/sort/missing travel as local
+   * params on that facet's own facet.field value
+   * ({!key=<delta> facet.limit=10 ...}<field>), never as global facet.*
+   * params. Two reasons, both captured (findings 147-151,
+   * docs/solr-ref-findings.md): f.<field>.facet.* addresses the *Solr field*,
+   * never the {!key=} delta this module always sends (#299), and two facets
+   * over one field share that field -- so only the local-param form can give
+   * them different settings (finding 149, solr-ref/responses/
+   * facet_perfield_two_lp.json). That retires the previous "last facet's
+   * settings win for the whole request" ceiling.
+   *
+   * Precedence on the server is f.<field>.facet.X > local param > global
+   * facet.X (finding 151); this module emits only the local-param form, so a
+   * site that also sets a global facet.* elsewhere loses to these, which is
+   * the intended reading.
    *
    * 'operator' => 'or' translates to {!ex=facet:<field>} (#298); the matching
    * {!tag=facet:<field>} lands on the facet's own fq in build().
+   *
+   * ponytail: facet.query carries no settings here -- Solr does honour local
+   * params on facet.query too, but nothing captures it and this module emits
+   * no facet.query at all. Likewise nothing range-related: search_api_solr's
+   * only range facets are its 'search_api_granular' query type, which it
+   * builds through Solarium's createFacetRange(['local_key' => ..., 'start'
+   * => ..., 'end' => ..., 'gap' => ...]) rather than by writing any
+   * f.<field>.facet.range.* itself (coverage/search_api_solr_4.4.0_source,
+   * SearchApiSolrBackend::setFacets). What Solarium then puts on the wire for
+   * those is unverified -- Solarium is not vendored here -- and moot for now,
+   * since this module emits no facet.range at all and Wayfinder honours only
+   * global facet.range.* (src/facet.rs facet_ranges()).
    *
    * @return array<string, string|int|array<int, string>>
    */
@@ -469,7 +490,6 @@ class QueryBuilder {
     }
 
     $fields = [];
-    $params = [];
     foreach ($facets as $delta => $facet) {
       $fieldId = $facet['field'] ?? NULL;
       if (!is_string($fieldId) || $fieldId === '' || !($field = $index->getField($fieldId))) {
@@ -497,38 +517,71 @@ class QueryBuilder {
       if (preg_match('/^[A-Za-z0-9_:-]+$/', (string) $delta)) {
         $prefix .= ($prefix === '' ? '' : ' ') . 'key=' . $delta;
       }
-      $fields[] = $prefix === '' ? $fieldName : '{!' . $prefix . '}' . $fieldName;
 
+      // #296: this facet's own settings, appended to the same block, in the
+      // order they are read here.
+      $settings = [];
       if (isset($facet['limit'])) {
         // Search API uses limit <= 0 for "no limit" (every facet array in
         // BackendTestBase uses limit => 0 as the ordinary case), whereas
         // Wayfinder reads facet.limit=0 as "truncate to zero buckets" and only
-        // a negative limit as unlimited (src/facet.rs facet_fields(),
+        // a negative limit as unlimited (src/facet.rs BucketShaping::for_field,
         // solr-ref/responses/facet_limit_zero.json vs
         // facet_limit_unlimited.json). Translate rather than pass through.
         $limit = (int) $facet['limit'];
-        $params['facet.limit'] = $limit > 0 ? $limit : -1;
+        $settings['facet.limit'] = (string) ($limit > 0 ? $limit : -1);
       }
       if (isset($facet['min_count'])) {
-        $params['facet.mincount'] = (int) $facet['min_count'];
+        $settings['facet.mincount'] = (string) (int) $facet['min_count'];
       }
       if (isset($facet['sort'])) {
-        $params['facet.sort'] = (string) $facet['sort'];
+        $settings['facet.sort'] = (string) $facet['sort'];
       }
       if (isset($facet['missing'])) {
-        // Sent as the literal string Solr expects, never a PHP bool: the client
-        // casts params with (string), which would turn FALSE into ''. Guarded
-        // like the settings above so a later facet that omits 'missing' does
-        // not silently clobber an earlier facet's TRUE -- last facet that
-        // *states* a setting wins, consistently across all four.
-        $params['facet.missing'] = $facet['missing'] ? 'true' : 'false';
+        // Sent as the literal string Solr expects, never a PHP bool -- a bool
+        // cast to string would turn FALSE into '', which parse_bool rejects
+        // with a 400 (src/params.rs).
+        $settings['facet.missing'] = $facet['missing'] ? 'true' : 'false';
       }
+      foreach ($settings as $name => $value) {
+        $prefix .= ($prefix === '' ? '' : ' ') . $name . '=' . $this->localParamValue($value);
+      }
+
+      $fields[] = $prefix === '' ? $fieldName : '{!' . $prefix . '}' . $fieldName;
     }
 
     return [
       'facet' => 'true',
       'facet.field' => count($fields) === 1 ? $fields[0] : $fields,
-    ] + $params;
+    ];
+  }
+
+  /**
+   * One local-param value, safe to place inside a {!...} block.
+   *
+   * #296: a setting value is free-form input the same way a facet delta is
+   * (#299's guard covers only the key), and 'sort' in particular comes
+   * straight off the facet array. A value carrying whitespace would split
+   * into a bogus second local param and one carrying '}' would close the
+   * block early, letting the rest of the value become query-affecting wire
+   * text. Unlike the delta there is no safe fallback that keeps the setting's
+   * meaning -- dropping it silently changes the answer -- so an unsafe value
+   * is quoted instead of dropped.
+   *
+   * Double quotes are what the server's block grammar reads: find_block_end()
+   * skips a '}' inside a quoted value and read_value() stops at the matching
+   * unescaped closing quote, honouring backslash escapes on the way
+   * (src/local_params.rs). So '"' and '\' inside the value are backslash
+   * escaped, and everything else survives verbatim.
+   *
+   * Safe values are left bare so the ordinary wire stays byte-identical to
+   * what #298/#299 already captured.
+   */
+  private function localParamValue(string $value): string {
+    if (preg_match('/^[A-Za-z0-9_:.\/-]+$/', $value)) {
+      return $value;
+    }
+    return '"' . str_replace(['\\', '"'], ['\\\\', '\\"'], $value) . '"';
   }
 
   /**

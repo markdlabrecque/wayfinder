@@ -1055,6 +1055,11 @@ class QueryBuilderTest extends TestCase {
    * solr-ref/responses/facet_extag_both_facets.json: the facet counts run
    * against the base minus the tagged fq, and the result resolves by key.
    *
+   * The facet.field half also carries #296's settings, exactly as its sibling
+   * testOrOperatorFacetEmitsExclusionTagOnTheSearchApiField (same facet array)
+   * does -- what this test is *for* is the fq/facet.field pairing, which is
+   * unchanged.
+   *
    * @covers ::build
    */
   public function testOrFacetWithTaggedFilterEmitsBothHalves(): void {
@@ -1079,7 +1084,10 @@ class QueryBuilderTest extends TestCase {
     $params = (new QueryBuilder())->build($query);
 
     $this->assertSame('{!tag=facet:category}(ss_category:"animals" OR ss_category:"classic")', $params['fq'][1]);
-    $this->assertSame('{!ex=facet:category key=category}ss_category', $params['facet.field']);
+    $this->assertSame(
+      '{!ex=facet:category key=category facet.limit=10 facet.mincount=1 facet.missing=false}ss_category',
+      $params['facet.field'],
+    );
   }
 
   /**

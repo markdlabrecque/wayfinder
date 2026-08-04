@@ -1283,26 +1283,6 @@ const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[
          seeds per-core values from Unix-epoch milliseconds, so exact metrics cannot be fixture-stable; \
          tests/version_field.rs checks this row's envelope and the actual fast-field maximum",
     ),
-    (
-        "pf296_sort_field",
-        "issue #296 (finding 147): `f.topic.facet.sort=index` reorders that field's buckets to apple, mango, zebra. Wayfinder ignores per-field settings other than `facet.missing` and returns count order",
-    ),
-    (
-        "pf296_sort_field_wins",
-        "issue #296 (finding 147): a per-field `facet.sort=index` must beat a global `facet.sort=count`; with `facet.limit=1` that is `apple` rather than `zebra`",
-    ),
-    (
-        "pf296_sort_key_by_field",
-        "issue #296 (finding 147): with `{!key=k}topic`, `f.topic.facet.sort` (the field name) is honoured. Its twin `pf296_sort_key_by_key` (`f.k.facet.sort`) is not listed because Solr ignores the key address too, so both sides already agree",
-    ),
-    (
-        "pf296_sort_lp",
-        "issue #296 (finding 148): `facet.sort` carried as a local param on `facet.field`",
-    ),
-    (
-        "pf296_sort_two_lp",
-        "issue #296 (finding 149): two facets on one field, one ordered by count and one by index, each with its own limit -- expressible only as local params",
-    ),
 ];
 
 fn expected_divergence_manifest_errors_reason(name: &str) -> Option<&'static str> {
@@ -1931,83 +1911,6 @@ const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[
          stats); and `core.host`/`core.now`/`core.start`/`core.directory.*` (hostname, \
          timestamps, real filesystem paths on the capture host) — same permanent category as \
          `admin_info_system` in EXPECTED_DIVERGENCES_MANIFEST_ERRORS above and `ping`'s `rid`",
-    ),
-    (
-        "facet_perfield_limit",
-        "issue #296: Solr resolves `f.<field>.facet.limit` against the field name and applies it to that field only (`id`'s buckets are untouched here). Wayfinder implements exactly one per-field setting -- `f.<field>.facet.missing`, issue #140 -- and `f.category.facet.limit` is ignored, so the full 4-bucket list comes back",
-    ),
-    (
-        "facet_perfield_mincount",
-        "issue #296: same as `facet_perfield_limit` for `f.<field>.facet.mincount` -- Solr drops garden/misc from `category` and leaves `id` alone; Wayfinder ignores the override",
-    ),
-    (
-        "facet_perfield_overrides_global",
-        "issue #296: `f.category.facet.limit=-1` must beat a global `facet.limit=1` for `category` while `id` still honours the global. Wayfinder applies the global to both",
-    ),
-    (
-        "facet_perfield_key_by_field",
-        "issue #296 (finding 147): with `{!key=cat}category`, Solr honours `f.category.facet.limit` -- the *field* name, not the key. Wayfinder ignores it. Its twin `facet_perfield_key_by_key` (`f.cat.facet.limit`) is not listed because Solr ignores that address too, so both sides already agree",
-    ),
-    (
-        "facet_perfield_lp_limit",
-        "issue #296 (finding 148): `facet.limit` carried as a local param on `facet.field` (`{!key=cat facet.limit=1}category`) is honoured by Solr -- SimpleFacets wraps the local params over the request params. Wayfinder parses `key`/`ex` and ignores any other local param",
-    ),
-    (
-        "facet_perfield_lp_mincount",
-        "issue #296 (finding 148): `facet.mincount` as a local param on `facet.field`, same mechanism as `facet_perfield_lp_limit`",
-    ),
-    (
-        "facet_perfield_lp_missing",
-        "issue #296 (finding 148): `facet.missing` as a local param on `facet.field`. The `f.<field>.` form of this one setting Wayfinder does support (issue #140); the local-param form it does not",
-    ),
-    (
-        "facet_perfield_lp_no_key",
-        "issue #296 (finding 148): a local param with no `key` at all (`{!facet.limit=1}category`) still sets the limit in Solr, and the facet keeps its field name as its label",
-    ),
-    (
-        "facet_perfield_two_lp",
-        "issue #296 (finding 149): the row the feature exists for -- two facets on ONE field with different limits, told apart by `{!key}`, each carrying its own `facet.limit` local param. `f.<field>.facet.*` cannot express this (it addresses the field, which both share), so this row is the proof that local params are the mechanism, not per-field params. Its twin `facet_perfield_two_by_key` is not listed: Solr ignores `f.<key>.facet.limit` there, so both sides already agree",
-    ),
-    (
-        "facet_perfield_ex_limit",
-        "issue #296 (finding 150): `f.<field>.facet.limit` against an `{!ex=}` facet -- Solr applies the limit to the post-exclusion list. Wayfinder honours the exclusion (issue #295) but ignores the limit",
-    ),
-    (
-        "facet_perfield_ex_lp_limit",
-        "issue #296 (finding 150): the local-param form of `facet_perfield_ex_limit`",
-    ),
-    (
-        "facet_perfield_ex_limit_rank",
-        "issue #296 (finding 150): the decisive ordering row -- with `fq=category:garden`, ranking the *filtered* counts would put `garden` first and ranking the *excluded* counts puts `animals` first. Solr returns `animals`, so facet.limit is applied after the exclusion, not before",
-    ),
-    (
-        "facet_perfield_ex_lp_limit_rank",
-        "issue #296 (finding 150): the local-param form of `facet_perfield_ex_limit_rank`",
-    ),
-    (
-        "facet_perfield_ex_two_facets",
-        "issue #296: the full `search_api_solr` OR-facet shape -- the filtered facet and the excluded one told apart by key, with a limit on the excluded one only. Wayfinder gets the exclusion right and the limit wrong",
-    ),
-    (
-        "facet_perfield_err_bad_limit",
-        "issue #296: Solr 400s on a non-numeric per-field limit (`f.category.facet.limit=abc`); \
-         Wayfinder ignores the whole `f.<field>.facet.limit` param and returns 200, so this row \
-         also pins that the validation lands with the feature rather than after it",
-    ),
-    (
-        "facet_perfield_prec_lp_vs_field",
-        "issue #296 (finding 151): `f.category.facet.limit=3` beats a `{!key=cat facet.limit=1}` \
-         local param on the same facet -- `getFieldParam` tries the per-field name before the \
-         bare one, so a local param can only shadow the global. Wayfinder honours neither yet",
-    ),
-    (
-        "facet_perfield_prec_lp_vs_global",
-        "issue #296 (finding 151): the local param does beat the bare global `facet.limit`",
-    ),
-    (
-        "facet_perfield_prec_field_vs_global",
-        "issue #296 (finding 151): `f.<field>.facet.limit` beats the bare global, the ordinary \
-         Solr per-field precedence -- the same rule `f.<field>.facet.missing` already follows here",
     ),
 ];
 

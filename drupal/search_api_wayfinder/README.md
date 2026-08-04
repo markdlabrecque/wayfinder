@@ -98,11 +98,13 @@ Deliberate descopes, each with its reason. (Each is also marked with a
   collation-aware multi-value text selector needs a dedicated schema/type
   design first. Non-text types sort natively with Wayfinder's multi-value
   min/max selection.
-- **Per-field facet settings** (`QueryBuilder::buildFacets()`) —
-  `facet.limit`/`facet.mincount`/`facet.missing`/`facet.sort` are *global* on
-  the Wayfinder wire; there is no `f.<field>.facet.*` override. A query whose
-  facets disagree on those settings cannot be expressed: the last facet's
-  settings win for the whole request.
+- **Per-facet settings beyond the four** (`QueryBuilder::buildFacets()`) —
+  each facet's `limit`/`min_count`/`sort`/`missing` *is* expressed
+  independently, as local params on that facet's own `facet.field`
+  (`{!key=<delta> facet.limit=10 ...}<field>`, issue #296), so two facets on
+  one field keep their own settings. Nothing else is per-facet: Wayfinder
+  honours `facet.prefix`/`facet.method` in neither form, and `facet.range.*`
+  only globally, so a range facet cannot disagree with another one.
 
 ## Testing
 
