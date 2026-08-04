@@ -8,6 +8,7 @@ use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\Field\FieldStorageDefinitionInterface;
 use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Item\FieldInterface;
+use Drupal\search_api\Query\ConditionGroup;
 use Drupal\search_api\Query\QueryInterface;
 use Drupal\search_api\Query\ResultSet;
 use Drupal\search_api_wayfinder\ResponseParser;
@@ -115,7 +116,7 @@ class ResponseParserTest extends TestCase {
    * highlighting integration (which this module's locked decision 6 is
    * pinned to) populates that same per-item, per-field-id shape.
    */
-  private function mockQueryWithFields(array $typeByFieldId, string $indexId = 'my_index'): QueryInterface {
+  private function mockQueryWithFields(array $typeByFieldId, string $indexId = 'my_index', ?ConditionGroup $conditions = NULL): QueryInterface {
     $index = $this->createMock(IndexInterface::class);
     $index->method('id')->willReturn($indexId);
 
@@ -144,6 +145,7 @@ class ResponseParserTest extends TestCase {
 
     $query = $this->createMock(QueryInterface::class);
     $query->method('getIndex')->willReturn($index);
+    $query->method('getConditionGroup')->willReturn($conditions ?? new ConditionGroup());
     $resultSet = new ResultSet($query);
     $query->method('getResults')->willReturn($resultSet);
 
@@ -506,8 +508,13 @@ class ResponseParserTest extends TestCase {
         ],
       ],
       'highlighting' => [
+        // #342: no search_api_language condition and no language manager, so
+        // the resolved language is the 'und' fallback and the reverse map
+        // must be keyed by the 'und'-suffixed dynamic name
+        // (FieldMapper::fieldName('body', 'text', FALSE, 'und') ==
+        // 'tm_X3b_und_body' -- SearchApiSolrBackend.php:2450-2473).
         'my_index-doc1' => [
-          'ts_body' => ['the quick <em>fox</em>'],
+          'tm_X3b_und_body' => ['the quick <em>fox</em>'],
         ],
       ],
     ];
@@ -641,6 +648,221 @@ class ResponseParserTest extends TestCase {
 
     $this->assertSame(5, $result->getResultCount());
     $this->assertSame(['doc1'], array_keys($result->getResultItems()));
+  }
+
+  // --------------------------------------------------------------------
+  // issue #342: spellcheck envelope -> search_api_spellcheck extra data,
+  // and the language-variant doc field read for highlighting.
+  // --------------------------------------------------------------------
+
+  /**
+   * The client-side contract this shape must match is
+   * coverage/search_api_solr_4.4.0_source/src/SolrSpellcheckBackendTrait.php:24-42
+   * plus SearchApiSolrBackend.php:2022-2034:
+   * `['suggestions' => [<term> => [<word>, ...]], 'collation' => <string>]`.
+   *
+   * The server emits the flat named-list form by default (interleaved
+   * `[term, {...}, term, {...}]` for suggestions and `["collation", "..."]`
+   * for collations) -- ground truth read directly from
+   * solr-ref/responses/spellcheck_flat.json, not guessed.
+   *
+   * @covers ::parse
+   */
+  public function testParseSpellcheckFlatFormPopulatesSuggestionsAndCollation(): void {
+    $response = [
+      'response' => ['numFound' => 2, 'start' => 0, 'docs' => []],
+      'spellcheck' => [
+        'suggestions' => [
+          'qwick', ['numFound' => 1, 'startOffset' => 0, 'endOffset' => 5, 'suggestion' => ['quick']],
+          'roket', ['numFound' => 1, 'startOffset' => 6, 'endOffset' => 11, 'suggestion' => ['rocket']],
+        ],
+        'collations' => ['collation', 'quick rocket'],
+      ],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $this->mockQuery('my_index'));
+
+    $this->assertSame([
+      'suggestions' => [
+        'qwick' => ['quick'],
+        'roket' => ['rocket'],
+      ],
+      'collation' => 'quick rocket',
+    ], $resultSet->getExtraData('search_api_spellcheck'));
+  }
+
+  /**
+   * SolrSpellcheckBackendTrait.php:24-42's `if ($keys)` guard: a term whose
+   * suggestion list is empty is dropped entirely rather than surfaced as an
+   * empty array.
+   *
+   * @covers ::parse
+   */
+  public function testParseSpellcheckDropsTermsWithAnEmptySuggestionList(): void {
+    $response = [
+      'response' => ['numFound' => 1, 'start' => 0, 'docs' => []],
+      'spellcheck' => [
+        'suggestions' => [
+          'qwick', ['numFound' => 1, 'startOffset' => 0, 'endOffset' => 5, 'suggestion' => ['quick']],
+          // No correction found for this term: an empty suggestion list.
+          'zzz', ['numFound' => 0, 'startOffset' => 6, 'endOffset' => 9, 'suggestion' => []],
+        ],
+      ],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $this->mockQuery('my_index'));
+
+    $this->assertSame([
+      'suggestions' => ['qwick' => ['quick']],
+    ], $resultSet->getExtraData('search_api_spellcheck'));
+  }
+
+  /**
+   * `collation` takes the first collation only, per the trait's contract
+   * (SearchApiSolrBackend.php:2022-2034 reads `$data['collation']` as a
+   * single string, not a list) -- `spellcheck.maxCollations` > 1 would put
+   * more than one pair in the flat `collations` list, and only the first
+   * must surface.
+   *
+   * @covers ::parse
+   */
+  public function testParseSpellcheckTakesOnlyTheFirstCollation(): void {
+    $response = [
+      'response' => ['numFound' => 1, 'start' => 0, 'docs' => []],
+      'spellcheck' => [
+        'suggestions' => [],
+        'collations' => [
+          'collation', 'quick rocket',
+          'collation', 'quick rockets',
+        ],
+      ],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $this->mockQuery('my_index'));
+    // ?? [] guards the not-yet-implemented case the same way as
+    // testParseSpellcheckOmitsCollationKeyWhenNoCollationsWereReturned.
+    $extraData = $resultSet->getExtraData('search_api_spellcheck') ?? [];
+
+    $this->assertSame('quick rocket', $extraData['collation'] ?? NULL);
+  }
+
+  /**
+   * No `spellcheck` block at all (spellcheck was not requested): no
+   * `search_api_spellcheck` extra data, matching the same "absent means
+   * absent" convention as `search_api_facets`
+   * (testParseSetsNoFacetsExtraDataWhenNoFacetsWereRequested) and
+   * `highlighted_fields`.
+   *
+   * @covers ::parse
+   */
+  public function testParseSetsNoSpellcheckExtraDataWhenResponseHasNoSpellcheckBlock(): void {
+    $response = [
+      'response' => ['numFound' => 0, 'start' => 0, 'docs' => []],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $this->mockQuery('my_index'));
+
+    $this->assertFalse($resultSet->hasExtraData('search_api_spellcheck'));
+  }
+
+  /**
+   * No `collations` block present at all (collate was not requested): the
+   * extra data still carries `suggestions`, but must not carry a `collation`
+   * key at all -- collation is "only set when collation was requested and
+   * present" (deliverable #5).
+   *
+   * @covers ::parse
+   */
+  public function testParseSpellcheckOmitsCollationKeyWhenNoCollationsWereReturned(): void {
+    $response = [
+      'response' => ['numFound' => 1, 'start' => 0, 'docs' => []],
+      'spellcheck' => [
+        'suggestions' => [
+          'qwick', ['numFound' => 1, 'startOffset' => 0, 'endOffset' => 5, 'suggestion' => ['quick']],
+        ],
+      ],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $this->mockQuery('my_index'));
+    // ?? [] guards the not-yet-implemented case (getExtraData() returning
+    // NULL) so the assertion below fails for the right reason -- a missing
+    // key -- rather than a TypeError on a NULL $array argument.
+    $extraData = $resultSet->getExtraData('search_api_spellcheck') ?? [];
+
+    $this->assertArrayNotHasKey('collation', $extraData);
+  }
+
+  /**
+   * #342 "Applying the resolved language set": for a text field,
+   * ResponseParser must read whichever language variant is actually present
+   * on the doc, first match in resolved-language order. Here the query
+   * carries a `search_api_language IN (en, de)` condition, so the resolved
+   * order is `[en, de]`; the doc's highlighting entry carries BOTH the `en`
+   * and `de` dynamic names for the same field id, and the `en` snippets (the
+   * first-resolved language) must win, not whichever key the response
+   * happens to list first.
+   *
+   * @covers ::parse
+   */
+  public function testParseHighlightingPrefersTheFirstResolvedLanguageVariant(): void {
+    $conditions = (new ConditionGroup())->addCondition('search_api_language', ['en', 'de'], 'IN');
+    $query = $this->mockQueryWithFields(['body' => 'text'], 'my_index', $conditions);
+
+    $response = [
+      'response' => [
+        'numFound' => 1,
+        'start' => 0,
+        'docs' => [
+          ['id' => 'my_index-doc1', 'score' => 1.0],
+        ],
+      ],
+      'highlighting' => [
+        'my_index-doc1' => [
+          // Listed 'de' first on purpose: the response's own key order must
+          // NOT decide the winner, the resolved language order must.
+          'tm_X3b_de_body' => ['der schnelle <em>fuchs</em>'],
+          'tm_X3b_en_body' => ['the quick <em>fox</em>'],
+        ],
+      ],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $query);
+    $item = $resultSet->getResultItems()['doc1'];
+
+    $this->assertSame(['body' => ['the quick <em>fox</em>']], $item->getExtraData('highlighted_fields'));
+  }
+
+  /**
+   * Same resolved order `[en, de]`, but only the `de` variant is actually
+   * present on the doc (e.g. the item was indexed in German only) -- the
+   * parser must still fall back and find it rather than requiring the
+   * first-resolved language to be present.
+   *
+   * @covers ::parse
+   */
+  public function testParseHighlightingFallsBackToASecondResolvedLanguageVariantWhenTheFirstIsAbsent(): void {
+    $conditions = (new ConditionGroup())->addCondition('search_api_language', ['en', 'de'], 'IN');
+    $query = $this->mockQueryWithFields(['body' => 'text'], 'my_index', $conditions);
+
+    $response = [
+      'response' => [
+        'numFound' => 1,
+        'start' => 0,
+        'docs' => [
+          ['id' => 'my_index-doc1', 'score' => 1.0],
+        ],
+      ],
+      'highlighting' => [
+        'my_index-doc1' => [
+          'tm_X3b_de_body' => ['der schnelle <em>fuchs</em>'],
+        ],
+      ],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $query);
+    $item = $resultSet->getResultItems()['doc1'];
+
+    $this->assertSame(['body' => ['der schnelle <em>fuchs</em>']], $item->getExtraData('highlighted_fields'));
   }
 
 }

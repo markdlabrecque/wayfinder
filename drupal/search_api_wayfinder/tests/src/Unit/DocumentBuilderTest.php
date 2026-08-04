@@ -97,7 +97,12 @@ class DocumentBuilderTest extends TestCase {
     $this->assertSame('my_index', $doc['index_id']);
     $this->assertSame('en', $doc['ss_search_api_language']);
     $this->assertSame('entity:node', $doc['ss_search_api_datasource']);
-    $this->assertSame('Hello world', $doc['ts_title']);
+    // issue #342: text fields are now always tm_X3b_<lang>_<id> (infix
+    // always 'm', language from $item->getLanguage()) and ALWAYS written as
+    // an array, even single-valued -- FieldMapper::fieldName() forces the
+    // 'm' infix for every text-family prefix regardless of cardinality
+    // (SearchApiSolrBackend.php:2450-2473).
+    $this->assertSame(['Hello world'], $doc['tm_X3b_en_title']);
 
     // commitWithin is NOT part of this command: Wayfinder's /update parser
     // only reads add.doc from the body -- commitWithin is a query param on
@@ -167,8 +172,11 @@ class DocumentBuilderTest extends TestCase {
 
     $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
 
-    $this->assertSame('Single title', $doc['sort_title']);
-    $this->assertSame('First paragraph', $doc['sort_field_body']);
+    // issue #342: the sort_* field name now carries the item's language
+    // (sort_X3b_<lang>_<id>, FieldMapper::sortFieldName()) -- the sort
+    // value itself (a scalar, first value only) is unchanged.
+    $this->assertSame('Single title', $doc['sort_X3b_en_title']);
+    $this->assertSame('First paragraph', $doc['sort_X3b_en_field_body']);
   }
 
   /**
@@ -210,7 +218,7 @@ class DocumentBuilderTest extends TestCase {
 
     $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
 
-    $this->assertSame('mango', $doc['sort_field_pick']);
+    $this->assertSame('mango', $doc['sort_X3b_en_field_pick']);
   }
 
   /**
@@ -236,10 +244,32 @@ class DocumentBuilderTest extends TestCase {
     $builder = new DocumentBuilder(new FieldMapper());
     $doc = $builder->buildAddCommand($item, 'my_index')['add']['doc'];
 
-    $this->assertSame(['First paragraph', 'Second paragraph'], $doc['tm_field_body']);
+    $this->assertSame(['First paragraph', 'Second paragraph'], $doc['tm_X3b_en_field_body']);
 
     $encoded = json_decode(json_encode($doc), TRUE);
-    $this->assertSame(['First paragraph', 'Second paragraph'], $encoded['tm_field_body']);
+    $this->assertSame(['First paragraph', 'Second paragraph'], $encoded['tm_X3b_en_field_body']);
+  }
+
+  /**
+   * issue #342: a SINGLE-valued text field must still be written as a
+   * one-element JSON array, not a bare scalar -- FieldMapper::fieldName()
+   * now forces the 'm' infix for every text-family field regardless of
+   * cardinality (SearchApiSolrBackend.php:2450-2473, "$pref .= 'm'
+   * . SEPARATOR . $language_id" runs unconditionally), so the generic
+   * `$multiValued ? array_values($formatted) : $formatted[0]` branch
+   * (DocumentBuilder.php:93) must get a text-specific case that always
+   * writes an array.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandSingleValuedTextFieldIsStillAnArray(): void {
+    $item = $this->mockItem('node/342:en', 'entity:node', 'en', [
+      'title' => $this->mockField('title', 'text', [new TextValue('Only value')], FALSE),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    $this->assertSame(['Only value'], $doc['tm_X3b_en_title']);
   }
 
   /**
@@ -260,8 +290,8 @@ class DocumentBuilderTest extends TestCase {
     $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
 
     // The populated field is present ...
-    $this->assertSame('Has a value', $doc['ts_title']);
-    $this->assertArrayHasKey('sort_title', $doc);
+    $this->assertSame(['Has a value'], $doc['tm_X3b_en_title']);
+    $this->assertArrayHasKey('sort_X3b_en_title', $doc);
     // ... and the empty optional field is omitted entirely, not null/[], so
     // it can never be rejected as a null for a typed field.
     $this->assertArrayNotHasKey('ss_field_optional', $doc);
@@ -391,8 +421,8 @@ class DocumentBuilderTest extends TestCase {
     $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
 
     // Other fields keep their current shape exactly.
-    $this->assertSame('Plain title', $doc['ts_title']);
-    $this->assertSame('Plain title', $doc['sort_title']);
+    $this->assertSame(['Plain title'], $doc['tm_X3b_en_title']);
+    $this->assertSame('Plain title', $doc['sort_X3b_en_title']);
     $this->assertSame(9.99, $doc['fts_field_price']);
 
     // The sink field accumulates both suggester fields.
@@ -406,6 +436,112 @@ class DocumentBuilderTest extends TestCase {
     $this->assertArrayNotHasKey('twm_field_suggest_b', $doc);
     $this->assertArrayNotHasKey('tws_field_suggest_a', $doc);
     $this->assertArrayNotHasKey('tws_field_suggest_b', $doc);
+  }
+
+  /**
+   * issue #342: solr_text_spellcheck accumulates into its `spellcheck_<lang>`
+   * sink exactly the way solr_text_suggester accumulates into `twm_suggest`
+   * (DocumentBuilder.php:71-90, issue #339) -- two solr_text_spellcheck
+   * fields on one item, both with item language 'en', must not overwrite
+   * each other via a plain `$doc[$name] = ...` assign, since both map to the
+   * SAME sink field name `spellcheck_en`
+   * (FieldMapper::fieldName('...', 'solr_text_spellcheck', ..., 'en') ==
+   * 'spellcheck_en' regardless of field id/cardinality).
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandAccumulatesMultipleSpellcheckFieldsIntoLanguageSink(): void {
+    $item = $this->mockItem('node/342-sc1:en', 'entity:node', 'en', [
+      'field_spellcheck_a' => $this->mockField(
+        'field_spellcheck_a',
+        'solr_text_spellcheck',
+        [new TextValue('alpha')],
+      ),
+      'field_spellcheck_b' => $this->mockField(
+        'field_spellcheck_b',
+        'solr_text_spellcheck',
+        [new TextValue('bravo'), new TextValue('charlie')],
+        TRUE
+      ),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    $this->assertArrayHasKey('spellcheck_en', $doc);
+    $this->assertSame(
+      ['alpha', 'bravo', 'charlie'],
+      $doc['spellcheck_en'],
+      'spellcheck_en must accumulate every solr_text_spellcheck field value, in item-field iteration order.'
+    );
+  }
+
+  /**
+   * issue #342: a single solr_text_spellcheck field with cardinality 1 must
+   * still produce a one-element JSON array in its language sink -- the same
+   * "sink is always an array" rule #339 established for twm_suggest.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandSingleSpellcheckFieldIsOneElementArray(): void {
+    $item = $this->mockItem('node/342-sc2:en', 'entity:node', 'en', [
+      'field_spellcheck' => $this->mockField(
+        'field_spellcheck',
+        'solr_text_spellcheck',
+        [new TextValue('only value')],
+      ),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    $this->assertSame(['only value'], $doc['spellcheck_en']);
+  }
+
+  /**
+   * issue #342: a solr_text_spellcheck field with zero values must not
+   * create its language sink key at all -- the empty-value omission rule
+   * (DocumentBuilder.php:63) applies to this sink exactly like twm_suggest.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandOmitsSpellcheckSinkFieldWhenFieldHasNoValues(): void {
+    $item = $this->mockItem('node/342-sc3:en', 'entity:node', 'en', [
+      'field_spellcheck_empty' => $this->mockField(
+        'field_spellcheck_empty',
+        'solr_text_spellcheck',
+        [],
+      ),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    $this->assertArrayNotHasKey('spellcheck_en', $doc);
+  }
+
+  /**
+   * issue #342: solr_text_spellcheck and solr_text_suggester are two
+   * DIFFERENT fixed sinks (spellcheck_<lang> vs twm_suggest) -- one field of
+   * each type on the same item must accumulate independently, not collide.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandSpellcheckAndSuggesterSinksDoNotCollide(): void {
+    $item = $this->mockItem('node/342-sc4:en', 'entity:node', 'en', [
+      'field_spellcheck' => $this->mockField(
+        'field_spellcheck',
+        'solr_text_spellcheck',
+        [new TextValue('sc value')],
+      ),
+      'field_suggest' => $this->mockField(
+        'field_suggest',
+        'solr_text_suggester',
+        [new TextValue('sg value')],
+      ),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    $this->assertSame(['sc value'], $doc['spellcheck_en']);
+    $this->assertSame(['sg value'], $doc['twm_suggest']);
   }
 
 }
