@@ -883,7 +883,7 @@ async fn heatmap_app() -> (Router, TempDir) {
 // `error.trace`, and the four 400s carry `error.metadata`; `normalize()`
 // already drops `msg`/`metadata`/`trace` (finding 10, extended by 59), so the
 // generic differ compares only the envelope and `error.code` on those rows.
-// The verbatim `error.msg` strings finding 170 pins are asserted separately in
+// The verbatim `error.msg` strings finding 184 pins are asserted separately in
 // `tests/date_range.rs`, which this does not duplicate.
 const DR341_SCHEMA_TOML: &str = r#"
 [core]

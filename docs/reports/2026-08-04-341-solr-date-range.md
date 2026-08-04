@@ -47,7 +47,7 @@ A new `date_range` field type, reported as class `wayfinder.DateRangeField`
   existing `_dynamic` catch-all).
 - `facet.field` on a `date_range` field returns HTTP 200 with an empty
   bucket list; `sort` and `stats.field` on one both 400 with Solr's exact
-  messages (finding 172).
+  messages (finding 186).
 
 ### Files touched (production)
 
@@ -133,7 +133,7 @@ formality.
   `rest.split_at(1)` panic on a non-ASCII byte following `NOW` in
   `src/date_range.rs:393`, firing while the index-writer lock was held and
   bricking all further writes to the core (should have been a 400 per
-  finding 170); `try_date_range` (`src/core_index.rs`) being a
+  finding 184); `try_date_range` (`src/core_index.rs`) being a
   whole-query-string special case, so any non-bare clause was either a
   spurious 400 (`AND`/`OR`) or a *silently wrong* term query against the
   raw verbatim-string field (`(...)`, `+`/`-`, edismax, `df`, dynamic

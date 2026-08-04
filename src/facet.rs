@@ -488,7 +488,7 @@ fn facet_fields(
         // `group.facet=true` counts distinct groups per bucket rather than
         // documents (`g338_groupfacet`: `category` blog is on g3/g4, both
         // `article`, so 1 -- not 2).
-        // A `date_range` facet counts nothing at all (finding 172); it still
+        // A `date_range` facet counts nothing at all (finding 186); it still
         // goes through `shape_field` so the empty list gets the same `json.nl`
         // shaping every other facet's does.
         let counts = if field.date_range {
@@ -541,7 +541,7 @@ pub struct FacetFieldPlan {
     /// tags dropped. Empty for a plain `facet.field`, which counts the full
     /// set.
     pub ex: Vec<String>,
-    /// True for a `date_range` field (#341, finding 172): Solr answers 200 with
+    /// True for a `date_range` field (#341, finding 186): Solr answers 200 with
     /// an EMPTY bucket list rather than erroring, so this facet contributes no
     /// aggregation and renders no buckets. `column` is then the bare field name
     /// and is never read (`missing` is forced off).
@@ -729,7 +729,7 @@ pub fn plan_facet_fields(index: &CoreIndex, params: &Params) -> Result<FacetFiel
         if fields.iter().any(|f| f.label == label) {
             bail!("colliding facet.field response label: {label}");
         }
-        // #341/finding 172: `facet.field` on a `date_range` field is a 200 with
+        // #341/finding 186: `facet.field` on a `date_range` field is a 200 with
         // an empty bucket list -- not an error, and not real buckets either. It
         // has to be intercepted ahead of `check_facetable`, which would 400 both
         // the static form (declared but not `fast`) and, more insidiously, would
@@ -863,7 +863,7 @@ pub fn render_facet_fields(
     for field in &plan.fields {
         let shaping = BucketShaping::for_field(config, &field.settings);
         // See the unfused path: a `date_range` facet contributed no aggregation,
-        // so there is nothing to read back (finding 172).
+        // so there is nothing to read back (finding 186).
         let counts = if field.date_range {
             Vec::new()
         } else {
@@ -1099,7 +1099,7 @@ fn range_buckets(
         ),
         // #341: a `date_range` field has no single date column to walk gaps
         // over -- its endpoints are two synthetic columns. `facet.field` on one
-        // is Solr's own empty bucket list (finding 172); `facet.range` on one
+        // is Solr's own empty bucket list (finding 186); `facet.range` on one
         // carries no fixture, so it is the honest 400 rather than a panic.
         //
         // ponytail: no `facet.range` over a `date_range` field. Upgrade by

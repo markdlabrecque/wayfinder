@@ -136,7 +136,7 @@ fn check_statable(schema: &WayfinderSchema, field_name: &str) -> Result<()> {
     if field_name == VERSION_FIELD {
         return Ok(());
     }
-    // #341/finding 172: `stats.field` on a `date_range` field is Solr's own
+    // #341/finding 186: `stats.field` on a `date_range` field is Solr's own
     // "not currently supported" refusal, naming the field TYPE rather than the
     // field. Checked before the three generic paths below because it must fire
     // identically for a declared static `date_range` (which is not `fast`, so it
@@ -144,7 +144,7 @@ fn check_statable(schema: &WayfinderSchema, field_name: &str) -> Result<()> {
     // has no `field_config` at all, so it would hit "undefined field").
     //
     // The Java class names inside the message are reproduced verbatim because
-    // `dr341_err_stats` pins the whole string and finding 170 makes these `msg`
+    // `dr341_err_stats` pins the whole string and finding 184 makes these `msg`
     // values part of the contract -- deliberately inconsistent with
     // `/schema/fieldtypes`, which honestly reports `wayfinder.DateRangeField`.
     if schema.resolved_value_kind(field_name) == Some(ValueKind::DateRange) {

@@ -2,7 +2,7 @@
 //! literals, date math, and the `Intersects`/`Contains`/`Within` spatial-style
 //! predicates.
 //!
-//! Ground truth is `solr-ref/responses/dr341_*.json` and findings 165-172 in
+//! Ground truth is `solr-ref/responses/dr341_*.json` and findings 179-186 in
 //! `docs/solr-ref-findings.md`. The four rules this module exists to enforce:
 //!
 //! - **166** every literal denotes the whole interval of its stated precision,
@@ -49,14 +49,14 @@ use tantivy::{DateTime, DocId, DocSet, Score, SegmentReader, TERMINATED, Term};
 /// instants compare equal, and a literal wholly outside the range becomes a
 /// degenerate point at the bound (`9999` is `[MAX_MS, MAX_MS]`, not the year).
 /// No fixture goes anywhere near it (the corpus spans 2019..2022), and the raw
-/// string still round-trips verbatim either way (finding 165).
+/// string still round-trips verbatim either way (finding 179).
 pub const MIN_MS: i64 = i64::MIN / 1_000_000 + 1;
 /// The millisecond timestamp an open upper bound (`*`) resolves to. See
 /// [`MIN_MS`] for why this is not Solr's `9999-12-31T23:59:59.999Z`.
 pub const MAX_MS: i64 = i64::MAX / 1_000_000;
 
 /// A closed, end-inclusive millisecond interval — the only shape a
-/// `date_range` value or query ever has (finding 169: exclusive-brace syntax
+/// `date_range` value or query ever has (finding 183: exclusive-brace syntax
 /// is accepted and silently ignored, so there is no exclusive endpoint to
 /// model).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +65,7 @@ pub struct Interval {
     pub end_ms: i64,
 }
 
-/// A `date_range` failure, split by the kind finding 170 pins to a status
+/// A `date_range` failure, split by the kind finding 184 pins to a status
 /// code. The `Display` text is the wire `msg`, verbatim.
 #[derive(Debug)]
 pub enum DateRangeError {
@@ -89,7 +89,7 @@ impl std::error::Error for DateRangeError {}
 
 type DrResult<T> = Result<T, DateRangeError>;
 
-/// The three set relations `DateRangeField` actually implements (finding 167).
+/// The three set relations `DateRangeField` actually implements (finding 181).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
     Intersects,
@@ -98,7 +98,7 @@ pub enum Op {
 }
 
 /// Resolves Lucene's `SpatialOperation` name (or alias) for an `op=` value,
-/// case-insensitively (finding 167, `dr341_op_lowercase`).
+/// case-insensitively (finding 181, `dr341_op_lowercase`).
 ///
 /// Every name Lucene knows but `DateRangeField` does not implement is a 500
 /// carrying that operation's own bare name (`dr341_err_disjoint` -> `Disjoint`,
@@ -129,11 +129,11 @@ pub fn parse_op(raw: &str) -> DrResult<Op> {
 }
 
 /// Parses a `date_range` value or query text into the interval it denotes:
-/// either `[a TO b]` / `{a TO b}` (finding 169 — the brace form is accepted
+/// either `[a TO b]` / `{a TO b}` (finding 183 — the brace form is accepted
 /// and behaves identically), or a bare literal, which is the whole interval of
-/// its own precision (finding 166).
+/// its own precision (finding 180).
 ///
-/// A reversed interval is the finding-170 500, quoting the two endpoint tokens
+/// A reversed interval is the finding-184 500, quoting the two endpoint tokens
 /// exactly as written (`Wrong order: 2021 TO 2020`).
 pub fn parse_interval(text: &str) -> DrResult<Interval> {
     let s = text.trim();
@@ -141,7 +141,7 @@ pub fn parse_interval(text: &str) -> DrResult<Interval> {
     // pair (`[a TO b}`) is deliberately NOT accepted here: on the query path a
     // mixed pair never reaches this function at all (the Lucene grammar splits
     // the two bounds itself, and `interval_from_bounds` takes them already
-    // separated, exclusivity discarded per finding 169), and on the value/
+    // separated, exclusivity discarded per finding 183), and on the value/
     // `{!field}`-body path Lucene's own `NumberRangePrefixTree.parseShape`
     // requires the pair to match. No fixture sends a mixed pair to either path,
     // so this is the smaller claim; the earlier "Solr looks at the first and
@@ -168,11 +168,11 @@ pub fn parse_interval(text: &str) -> DrResult<Interval> {
 /// point the query path uses: `tantivy::query_grammar` has already split
 /// `<field>:[a TO b]` into its two bounds by the time a leaf reaches
 /// `CoreIndex::build_leaf`, and whether each bound was written inclusive or
-/// exclusive is discarded on the way in — finding 169, `DateRangeField` has no
+/// exclusive is discarded on the way in — finding 183, `DateRangeField` has no
 /// notion of an exclusive endpoint, so `{a TO b}`, `[a TO b}` and `[a TO b]` are
 /// all the same query. An open bound is the token `*`.
 ///
-/// A reversed interval is the finding-170 500, quoting the two tokens exactly as
+/// A reversed interval is the finding-184 500, quoting the two tokens exactly as
 /// written (`Wrong order: 2021 TO 2020`).
 pub fn interval_from_bounds(lo: &str, hi: &str) -> DrResult<Interval> {
     let (lo, hi) = (lo.trim(), hi.trim());
@@ -190,8 +190,8 @@ pub fn interval_from_bounds(lo: &str, hi: &str) -> DrResult<Interval> {
 }
 
 /// The interval one endpoint token denotes. `*` is the open bound; anything
-/// beginning `NOW` is date math (finding 171); everything else is a truncated
-/// or full date literal (finding 166).
+/// beginning `NOW` is date math (finding 185); everything else is a truncated
+/// or full date literal (finding 180).
 fn endpoint_interval(token: &str) -> DrResult<Interval> {
     let t = token.trim();
     if t == "*" {
@@ -224,7 +224,7 @@ fn bad_datetime(token: &str) -> DateRangeError {
 }
 
 /// Expands a truncated or full date literal into the whole interval of its
-/// stated precision, end-inclusive at millisecond resolution (finding 166):
+/// stated precision, end-inclusive at millisecond resolution (finding 180):
 /// `2020` -> `[2020-01-01T00:00:00.000Z, 2020-12-31T23:59:59.999Z]`,
 /// `2020-06-15T12:00:00Z` -> that whole second.
 ///
@@ -298,7 +298,7 @@ fn literal_interval(token: &str) -> DrResult<Interval> {
                             return Err(err());
                         }
                         // Sub-millisecond digits are truncated: the whole type
-                        // works at millisecond resolution (finding 166).
+                        // works at millisecond resolution (finding 180).
                         let mut digits = frac.to_string();
                         digits.truncate(3);
                         while digits.len() < 3 {
@@ -385,7 +385,7 @@ fn precision_end_ms(start: OffsetDateTime, precision: Precision) -> Option<i64> 
     };
     // Never below `start`. When `next` itself clamps to `MAX_MS`, the naive
     // `- 1` puts `end` one millisecond *before* `start`, and that inverted
-    // interval then reports finding 170's `Wrong order` for a query the client
+    // interval then reports finding 184's `Wrong order` for a query the client
     // wrote in the correct order (and rejects a document Solr accepts).
     // Guarding only the low side left every literal from 2263 to 9998 inverted;
     // `9999` escaped only because its end clamps to exactly `MAX_MS`.
@@ -393,7 +393,7 @@ fn precision_end_ms(start: OffsetDateTime, precision: Precision) -> Option<i64> 
     // The trade this makes, and it is a real one: when BOTH endpoints of an
     // interval land past `MAX_MS` they collapse to the same instant, so a
     // *reversed* far-future interval (`[9999 TO 2263]`) stops being finding
-    // 170's `Wrong order` 500 and answers as the point interval at the bound
+    // 184's `Wrong order` 500 and answers as the point interval at the bound
     // (`reversed_interval_past_the_upper_bound_collapses_instead_of_erroring`).
     // Reversal is still detected whenever at least one endpoint is
     // representable, which is every interval a client outside the ceiling zone
@@ -424,11 +424,11 @@ fn parse_num<T: std::str::FromStr>(
     raw.parse::<T>().map_err(|_| err())
 }
 
-/// Solr date math on `NOW` (finding 171): `NOW`, `NOW/DAY`, `NOW-2YEARS`,
+/// Solr date math on `NOW` (finding 185): `NOW`, `NOW/DAY`, `NOW-2YEARS`,
 /// `NOW/YEAR+1YEAR`, `NOW/DAY+1MONTH`. `/UNIT` rounds down to that unit;
 /// `+`/`-<n><UNIT>` shifts. Returns the resolved instant in milliseconds.
 ///
-/// An unparseable expression is the finding-170 400, quoting the whole
+/// An unparseable expression is the finding-184 400, quoting the whole
 /// expression: `Invalid Date Math String:'NOW/BOGUS'` (`dr341_err_bad_math`).
 ///
 /// ponytail: `NOW` is the only anchor — Solr also accepts date math suffixed
@@ -444,7 +444,7 @@ fn date_math(expr: &str) -> DrResult<i64> {
         // a multi-byte first character panics ("byte index 1 is not a char
         // boundary"). On the index path that panic fired while the index-writer
         // lock was held, poisoning it and bricking every subsequent write to the
-        // core, so this must be a plain finding-170 400 instead. Every other
+        // core, so this must be a plain finding-184 400 instead. Every other
         // byte-index split in this function is guarded by a `find` on an ASCII
         // needle, which always lands on a boundary.
         let op = rest.chars().next().ok_or_else(&err)?;
@@ -550,7 +550,7 @@ fn shift(dt: OffsetDateTime, unit: Unit, count: i64) -> Option<OffsetDateTime> {
         // count panics -- in release builds too, not just debug. On the index
         // path that panic fired while the index-writer lock was held, poisoning
         // it and bricking every subsequent write to the core, so an
-        // out-of-range count must be `None` here (the finding-170 400) instead.
+        // out-of-range count must be `None` here (the finding-184 400) instead.
         // `Duration::milliseconds` is the one constructor that divides rather
         // than multiplies and so cannot overflow.
         Unit::Week => dt.checked_add(Duration::milliseconds(count.checked_mul(604_800_000)?)),
@@ -576,7 +576,7 @@ pub fn millis_to_rfc3339(ms: i64) -> Option<String> {
 
 /// Whether a document whose `date_range` field holds `members` (one
 /// `(start_ms, end_ms)` pair per value, in index order) satisfies `op` against
-/// the query interval `q` — finding 168's union-of-members set relations.
+/// the query interval `q` — finding 182's union-of-members set relations.
 ///
 /// A document with no member matches nothing, which is what keeps
 /// `drs_x:[* TO *]` to the docs that actually HAVE the field
@@ -595,7 +595,7 @@ pub fn matches(op: Op, members: &[(i64, i64)], q: Interval) -> bool {
         // The union must fit inside the query, so EVERY member must
         // (`dr341_multi_within_one`: d8's 2022-05 member disqualifies it even
         // though its 2020 member fits). Equivalent to min(start)/max(end),
-        // which is the reduction finding 168 states.
+        // which is the reduction finding 182 states.
         Op::Within => members
             .iter()
             .all(|(s, e)| *s >= q.start_ms && *e <= q.end_ms),
@@ -625,7 +625,7 @@ pub fn matches(op: Op, members: &[(i64, i64)], q: Interval) -> bool {
 /// A `date_range` interval predicate as a Tantivy query: `AllQuery` narrowed
 /// by [`matches`] over the two endpoint fast columns, read member by member so
 /// the pairing between a multiValued field's starts and ends survives (finding
-/// 168). Modelled on `crate::function_query::GeoFilterQuery`, which filters
+/// 182). Modelled on `crate::function_query::GeoFilterQuery`, which filters
 /// `AllQuery` by two synthetic columns the same way.
 ///
 /// The column names are resolved by
@@ -1006,7 +1006,7 @@ mod tests {
         // Order must not matter: the merge sorts first.
         let reversed = [adjacent[1], adjacent[0]];
         assert!(matches(Op::Contains, &reversed, straddling));
-        // But a real hole still breaks the run (finding 168's
+        // But a real hole still breaks the run (finding 182's
         // `dr341_multi_no_contains` direction).
         let with_hole = [
             (ms("2010-01-01T00:00:00Z"), ms("2010-12-31T23:59:59.999Z")),

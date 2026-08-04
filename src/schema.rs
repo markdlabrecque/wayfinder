@@ -293,7 +293,7 @@ pub struct WayfinderSchema {
     /// `<name>__start`/`__end` names must never reach a name-based resolver or
     /// leak into `fl` output (#341). Unlike `location`, the user-facing name
     /// *is* also a real Tantivy field here: it holds the verbatim value text
-    /// finding 165 requires to round-trip.
+    /// finding 179 requires to round-trip.
     date_range_fields: HashMap<String, (Field, Field)>,
 }
 
@@ -1258,13 +1258,13 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
         }
         // A `date_range` field (#341) is three physical fields: the
         // user-facing one, holding the value's verbatim text so `fl` can
-        // round-trip it exactly (finding 165), plus two synthetic
+        // round-trip it exactly (finding 179), plus two synthetic
         // millisecond-precision date fast columns
         // (`<name>__start`/`<name>__end`) holding the resolved endpoints of
         // each interval member, appended in the same order so ordinal `i` of
         // one pairs with ordinal `i` of the other -- which is what makes the
         // hole-sensitive `Intersects`/`Contains` predicates possible on a
-        // multiValued field (finding 168). The two synthetic columns stay out
+        // multiValued field (finding 182). The two synthetic columns stay out
         // of `field_handles`, so they can never be named by `fl`, `sort`,
         // `facet.field` or a query.
         if matches!(resolved, ResolvedType::DateRange) {

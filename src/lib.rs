@@ -1246,7 +1246,7 @@ pub(crate) fn parse_sort_spec(
             // column it is actually indexed into (mirrors
             // `CoreIndex::rewrite_dynamic_fields`'s resolution for the query
             // path), not the bare field name.
-            // #341/finding 172: a `date_range` field is a spatial field in
+            // #341/finding 186: a `date_range` field is a spatial field in
             // Solr's type hierarchy, and Solr refuses to sort on one with its
             // own message -- checked BEFORE the fast/docValues check, since the
             // refusal does not depend on whether the field has fast values

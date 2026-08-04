@@ -17,7 +17,7 @@
 //! `tests/differential.rs` manifest-errors dispatcher: the five `dr341_err_*`
 //! 500-error fixtures carry a full Java stack trace under `error.trace` that
 //! this compatibility contract does not pin at all (finding 10: only
-//! `error.code`/HTTP status, plus here `error.msg` per finding 170, are in
+//! `error.code`/HTTP status, plus here `error.msg` per finding 184, are in
 //! scope) -- a generic byte-for-byte differ against those fixtures could never
 //! pass even for a correct implementation, so they need the narrower,
 //! trace-blind comparison this file's `assert_error_matches` provides.
@@ -111,7 +111,7 @@ fn ids(body: &Value) -> Vec<String> {
 /// Java-internal class names and a JVM stack trace Wayfinder cannot and need
 /// not reproduce (finding 10: only `error.code`/HTTP status is part of the
 /// compatibility contract). `error.msg` is asserted verbatim here
-/// specifically because finding 170 pins these exact strings as the
+/// specifically because finding 184 pins these exact strings as the
 /// discriminating evidence for the 400/500 split, the same reasoning
 /// `tests/sort.rs::direction_error_messages_match_solr_verbatim_including_pos`
 /// uses for the sort direction message.
@@ -133,7 +133,7 @@ fn assert_error_matches(status: StatusCode, body: &Value, fixture_name: &str) {
     assert_eq!(
         body["error"]["msg"].as_str(),
         expected["error"]["msg"].as_str(),
-        "{fixture_name}: error.msg must match Solr verbatim (finding 170), body: {body}"
+        "{fixture_name}: error.msg must match Solr verbatim (finding 184), body: {body}"
     );
     // The presence or absence of a `response` block is part of the captured
     // envelope, not decoration: every `dr341_err_*` fixture has keys
@@ -151,7 +151,7 @@ fn assert_error_matches(status: StatusCode, body: &Value, fixture_name: &str) {
     );
 }
 
-// --- storage: verbatim round-trip (finding 165) -----------------------------
+// --- storage: verbatim round-trip (finding 179) -----------------------------
 
 /// `"2020"` round-trips as `"2020"`, not an expanded interval; `drm_x`
 /// returns its members in input order. Pinned against the exact captured
@@ -168,7 +168,7 @@ async fn roundtrip_stores_the_value_verbatim() {
     assert_matches_fixture(body, "dr341_roundtrip");
 }
 
-// --- single-valued predicates (finding 167) ---------------------------------
+// --- single-valued predicates (finding 181) ---------------------------------
 
 /// Plain `drs_x:[a TO b]` is `Intersects` by default -> d1,d2,d3,d4,d7 (d5
 /// ends in 2019, d6 starts in 2021, both excluded).
@@ -272,7 +272,7 @@ async fn op_value_is_matched_case_insensitively() {
     assert_matches_fixture(body, "dr341_op_lowercase");
 }
 
-// --- bare-literal precision expansion (finding 166) -------------------------
+// --- bare-literal precision expansion (finding 180) -------------------------
 
 /// A bare `drs_x:2020` is an interval query at year precision, not a term
 /// query -- it intersects the same five docs as the explicit May-Jul 2020
@@ -384,7 +384,7 @@ async fn interval_endpoint_precision_still_touches_one_ms_past_the_second() {
     assert_matches_fixture(body, "dr341_touch_past_ms");
 }
 
-// --- exclusive-brace syntax is accepted and ignored (finding 169) -----------
+// --- exclusive-brace syntax is accepted and ignored (finding 183) -----------
 
 /// `{a TO b}` is accepted and returns EXACTLY what `[a TO b]` returns --
 /// `DateRangeField` parses the interval string itself and has no notion of
@@ -414,7 +414,7 @@ async fn exclusive_brace_syntax_is_silently_treated_as_inclusive() {
     assert_matches_fixture(body, "dr341_excl_braces");
 }
 
-// --- multiValued: union-of-members set relations (finding 168) -------------
+// --- multiValued: union-of-members set relations (finding 182) -------------
 
 /// A single member's intersect (`drm_x:2022-05`) -> only d8 (d9 has no
 /// `2022-05` member).
@@ -499,7 +499,7 @@ async fn multivalued_contains_inside_one_member_matches_both_docs() {
 
 /// End-to-end counterpart of `date_range::tests::
 /// contains_merges_adjacent_members_into_one_run`: `Contains` is a relation
-/// against the UNION of the members (finding 168), so two millisecond-adjacent
+/// against the UNION of the members (finding 182), so two millisecond-adjacent
 /// members form ONE contiguous run and a query straddling their boundary is
 /// contained by it -- while the same query against members with a real hole
 /// between them is not. The committed corpus has no adjacent-member document,
@@ -577,7 +577,7 @@ async fn multivalued_within_matches_both_once_the_query_covers_the_whole_union()
     assert_matches_fixture(body, "dr341_multi_within_both");
 }
 
-// --- date math (finding 171) -------------------------------------------------
+// --- date math (finding 185) -------------------------------------------------
 
 /// `NOW/YEAR` and `NOW/YEAR+1YEAR` resolve, and the resulting interval
 /// matches d6 (`[2021-01-01T00:00:00Z TO *]`) and d7 (fully open) -- true for
@@ -622,7 +622,7 @@ async fn date_math_now_minus_years_resolves_in_a_date_range_query() {
     assert_matches_fixture(body, "dr341_datemath_now");
 }
 
-// --- facet/sort/stats asymmetry (finding 172) -------------------------------
+// --- facet/sort/stats asymmetry (finding 186) -------------------------------
 
 /// `facet.field` on a `date_range` field is NOT an error -- 200 with an
 /// EMPTY bucket list, over 9 matching docs.
@@ -648,7 +648,7 @@ async fn sort_on_date_range_is_400() {
 }
 
 /// `stats` on a `date_range` field is a 400 too, but with its own distinct
-/// message naming the field type -- the asymmetry finding 172 calls out:
+/// message naming the field type -- the asymmetry finding 186 calls out:
 /// three surfaces (facet/sort/stats), three different behaviours.
 #[tokio::test]
 async fn stats_on_date_range_is_400() {
@@ -661,7 +661,7 @@ async fn stats_on_date_range_is_400() {
     assert_error_matches(status, &body, "dr341_err_stats");
 }
 
-// --- error surface: 400 (unparseable) vs 500 (unimplemented op) (finding 170)
+// --- error surface: 400 (unparseable) vs 500 (unimplemented op) (finding 184)
 
 /// A value Solr cannot PARSE at all is a 400.
 #[tokio::test]
@@ -690,7 +690,7 @@ async fn unparseable_date_math_is_400() {
 
 /// A structurally valid but reversed interval (`2021 TO 2020`) is a 500, not
 /// a 400 -- the value parses fine, the ORDER is what `DateRangeField` cannot
-/// handle. This is the finding-170 case that most easily gets miscategorised
+/// handle. This is the finding-184 case that most easily gets miscategorised
 /// as a plain parse error.
 #[tokio::test]
 async fn reversed_interval_is_500_not_400() {
@@ -970,7 +970,7 @@ async fn multivalued_date_range_leaf_inside_a_compound_query() {
 // --- must-fix 1: a non-ASCII byte after `NOW` must not panic -----------------
 
 /// A `NOW`-prefixed value whose next character is multi-byte UTF-8 is the
-/// finding-170 parse 400, never a panic. On the INDEX path the panic fired
+/// finding-184 parse 400, never a panic. On the INDEX path the panic fired
 /// while the index-writer lock was held, poisoning it and bricking every later
 /// write to the core -- so the clean doc indexed *after* the rejected one is the
 /// regression this test exists for.
@@ -995,7 +995,7 @@ async fn non_ascii_date_math_on_the_index_path_is_400_and_leaves_the_core_writab
     assert_eq!(ids(&body), vec!["ok".to_string()], "{body}");
 }
 
-/// The same value on the QUERY path is the finding-170 400 with the date-math
+/// The same value on the QUERY path is the finding-184 400 with the date-math
 /// message shape, not the 500 a caught panic produced.
 #[tokio::test]
 async fn non_ascii_date_math_on_the_query_path_is_400() {
@@ -1006,7 +1006,7 @@ async fn non_ascii_date_math_on_the_query_path_is_400() {
     assert_eq!(
         body["error"]["msg"].as_str(),
         Some("Invalid Date Math String:'NOW\u{e9}'"),
-        "finding 170: an unparseable date-math expression is a 400 quoting the \
+        "finding 184: an unparseable date-math expression is a 400 quoting the \
          whole expression, body: {body}"
     );
 }
@@ -1047,7 +1047,7 @@ async fn out_of_range_endpoints_clamp_on_the_index_path() {
     assert_eq!(
         body["response"]["docs"][0]["drs_x"].as_str(),
         Some("[* TO 9999-12-31T23:59:59Z]"),
-        "finding 165: the sentinel still round-trips verbatim, {body}"
+        "finding 179: the sentinel still round-trips verbatim, {body}"
     );
 }
 
@@ -1081,7 +1081,7 @@ async fn far_future_sentinel_endpoint_answers_as_the_open_bound() {
 /// And the too-EARLY endpoint: `0001-01-01T00:00:00Z` clamps to `MIN_MS`, so
 /// `[0001-01-01T00:00:00Z TO 2019-12-31T23:59:59Z]` answers as
 /// `[* TO 2019-12-31T23:59:59Z]` does -- d5 (which ends in that second) and d7
-/// (fully open). Derived from the 9-doc corpus plus finding 166, not from a
+/// (fully open). Derived from the 9-doc corpus plus finding 180, not from a
 /// fixture of its own.
 #[tokio::test]
 async fn far_past_sentinel_endpoint_answers_as_the_open_bound() {
@@ -1107,7 +1107,7 @@ async fn far_past_sentinel_endpoint_answers_as_the_open_bound() {
 /// exactly what the closed form does.
 ///
 /// This test encodes an INFERRED rule, not a captured one: no `dr341_*` fixture
-/// sends a mixed pair. It is derived from finding 169 (exclusivity is silently
+/// sends a mixed pair. It is derived from finding 183 (exclusivity is silently
 /// ignored) plus the grammar's own acceptance of the mixed form, and its
 /// expected value is `dr341_intersects_plain`'s.
 #[tokio::test]
@@ -1168,7 +1168,7 @@ async fn fl_star_does_not_leak_synthetic_start_end_keys() {
 /// internally, so an unbounded user-supplied count panics -- in release builds
 /// too. On the index path that panic fires while the index-writer lock is held,
 /// poisoning it: one such `/update` and every subsequent write to the core
-/// fails for the process lifetime. It must be the finding-170 400 instead, and
+/// fails for the process lifetime. It must be the finding-184 400 instead, and
 /// the core must still be writable afterwards.
 ///
 /// Not fixture-derived: Solr's own limit is a `NumberFormatException` on a
@@ -1203,7 +1203,7 @@ async fn date_math_overflow_on_the_index_path_is_400_and_leaves_the_core_writabl
 }
 
 /// The query-path half of the same defect: a 400 quoting the whole expression
-/// (finding 170), never the 500 a caught panic produces.
+/// (finding 184), never the 500 a caught panic produces.
 #[tokio::test]
 async fn date_math_overflow_on_the_query_path_is_400() {
     let (app, _dir) = date_range_app().await;
@@ -1216,14 +1216,14 @@ async fn date_math_overflow_on_the_query_path_is_400() {
     assert_eq!(
         body["error"]["msg"].as_str(),
         Some("Invalid Date Math String:'NOW+9223372036854775807DAYS'"),
-        "finding 170's message shape, quoting the whole expression: {body}"
+        "finding 184's message shape, quoting the whole expression: {body}"
     );
 }
 
 /// Round 2's clamp guards the low side of a truncated literal's end
 /// (`.max(MIN_MS)`) but not the high side, so a literal whose *next* unit
 /// exceeds `MAX_MS` gets `end = MAX_MS - 1` while `start` is already `MAX_MS` --
-/// an inverted interval, which then reports the finding-170 `Wrong order` error
+/// an inverted interval, which then reports the finding-184 `Wrong order` error
 /// for a correctly ordered query. Year 9999 happened to escape it (its end
 /// clamps to exactly `MAX_MS`); everything from 2263 to 9998 did not.
 ///
@@ -1283,7 +1283,7 @@ async fn far_future_truncated_endpoints_index_without_inverting() {
 
 /// A field-LESS literal under `edismax`/`dismax` never reaches `build_leaf` --
 /// it is routed to the `qf` disjunction, which builds a term query against the
-/// raw text field carrying the verbatim string (finding 165). So
+/// raw text field carrying the verbatim string (finding 179). So
 /// `qf=drs_x&q=2020` matched only the doc whose stored string is literally
 /// `2020`, exactly the silently-wrong-term-query class round 2 was meant to
 /// close. Solr routes a `qf` field through `FieldType::getFieldQuery`, i.e. the
@@ -1380,7 +1380,7 @@ async fn qf_naming_only_a_date_range_field_with_a_non_date_literal_is_zero_hits(
 
 /// The documented consequence of clamping both ends: when BOTH endpoints land
 /// past `MAX_MS` they collapse to the same instant, so an interval written in
-/// reversed order stops being finding 170's `Wrong order` 500 and answers as
+/// reversed order stops being finding 184's `Wrong order` 500 and answers as
 /// the point interval at the bound. Pinned here so it is a recorded choice
 /// rather than a side effect -- reversal is still detected whenever at least
 /// one endpoint is representable (`drs_x:[2022 TO 1677]`,
@@ -1404,7 +1404,7 @@ async fn reversed_interval_past_the_upper_bound_collapses_instead_of_erroring() 
         "the point interval at MAX_MS: {body}"
     );
     // The other direction is untouched: with a representable endpoint, a
-    // reversed interval is still the finding-170 500.
+    // reversed interval is still the finding-184 500.
     let (status, body) = get(
         &app,
         "select?q=drs_x%3A%5B2022%20TO%201677%5D&fl=id&rows=20&wt=json",

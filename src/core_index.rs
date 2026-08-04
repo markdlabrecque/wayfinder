@@ -354,7 +354,7 @@ fn as_location(field: &str, v: &Value) -> Result<(f64, f64)> {
 
 /// Pulls the verbatim `raw` string back out of the `{start,end,raw}` object (or
 /// array of them) `coerce_json` builds for a dynamic `date_range` value, so `fl`
-/// returns exactly what was sent (finding 165) and the synthetic endpoints stay
+/// returns exactly what was sent (finding 179) and the synthetic endpoints stay
 /// invisible.
 ///
 /// ponytail: an RFC3339-shaped `raw` is re-detected as a date by Tantivy's JSON
@@ -409,11 +409,11 @@ fn coerce_json(field: &str, kind: ValueKind, value: &Value) -> Result<Value> {
         // synthetic `__start`/`__end` fields, so it carries its own endpoints
         // as a nested object inside the catch-all JSON: `start`/`end` become
         // date sub-columns (`_dynamic.<name>.start`, `.end`) that the interval
-        // predicates read, and `raw` preserves the verbatim string finding 165
+        // predicates read, and `raw` preserves the verbatim string finding 179
         // requires `fl` to return. A multiValued value arrives here one member
         // at a time (the array arm above), so it becomes an array of these
         // objects, which Tantivy flattens into two same-order value lists and
-        // so keeps member pairing (finding 168).
+        // so keeps member pairing (finding 182).
         ValueKind::DateRange => {
             let raw = as_text(field, value)?;
             let interval = date_range::parse_interval(raw)
@@ -1267,10 +1267,10 @@ impl CoreIndex {
             }
             return Ok(());
         }
-        // A `date_range` field is the verbatim string (finding 165) PLUS two
+        // A `date_range` field is the verbatim string (finding 179) PLUS two
         // synthetic ms-precision date columns holding the interval it denotes
-        // (finding 166), appended in value order so member pairing survives for
-        // the hole-sensitive predicates (finding 168).
+        // (finding 180), appended in value order so member pairing survives for
+        // the hole-sensitive predicates (finding 182).
         if kind == ValueKind::DateRange {
             let raw_field = self
                 .wf_schema
@@ -1643,12 +1643,12 @@ impl CoreIndex {
                     shape, sfield, pt, d,
                 ))))
             }
-            // `{!field f=<field> op=<op>}<interval>` (issue #341, finding 167):
+            // `{!field f=<field> op=<op>}<interval>` (issue #341, finding 181):
             // Solr's `FieldQParser`, whose only client-evidenced use is the
             // `DateRangeField` interval predicate. `op` defaults to
             // `Intersects` and is case-insensitive; `IsWithin` aliases
             // `Within`; an unimplemented or unknown op is a 500 and an
-            // unparseable body a 400 (finding 170).
+            // unparseable body a 400 (finding 184).
             //
             // ponytail: `date_range` fields only. Solr's `{!field}` is generic
             // -- on any other field type it is an exact single-term query
@@ -1679,7 +1679,7 @@ impl CoreIndex {
         }
     }
 
-    /// Maps a `date_range` failure onto the status split finding 170 pins: a
+    /// Maps a `date_range` failure onto the status split finding 184 pins: a
     /// parse failure is a 400 (`QueryError::Syntax`), a valid-but-unsupported
     /// op or a reversed interval a 500 (`QueryError::Internal`). The `msg` is
     /// the error's own `Display`, which is the fixture string verbatim.
@@ -1712,13 +1712,13 @@ impl CoreIndex {
     }
 
     /// One `date_range` leaf (#341): a bare literal (`drs_x:2020`), an interval
-    /// (`drs_x:[a TO b]`, any bracket combination -- finding 169 discards
+    /// (`drs_x:[a TO b]`, any bracket combination -- finding 183 discards
     /// exclusivity), or the field-exists idiom (`drs_x:*`). Always the
-    /// finding-167 default `Intersects`; `{!field f= op=}` is the only way to
+    /// finding-181 default `Intersects`; `{!field f= op=}` is the only way to
     /// select another op.
     ///
     /// Tantivy cannot build any of these itself: a `date_range` field is a raw
-    /// text field carrying the verbatim string (finding 165) plus two endpoint
+    /// text field carrying the verbatim string (finding 179) plus two endpoint
     /// columns, so the grammar's own conversion would answer `drs_x:2020` as a
     /// term query matching only the doc whose stored string is literally
     /// `2020`, rather than the five docs whose interval intersects that year.
@@ -1733,7 +1733,7 @@ impl CoreIndex {
             UserInputLeaf::Literal(lit) => {
                 // The grammar peels a trailing `*` off into `prefix`; put it
                 // back rather than silently querying the truncated literal, so
-                // a wildcard on a `date_range` field is the finding-170
+                // a wildcard on a `date_range` field is the finding-184
                 // unparseable-value 400 it would be in Solr.
                 let text = if lit.prefix {
                     format!("{}*", lit.phrase)
@@ -1746,7 +1746,7 @@ impl CoreIndex {
                 // `term_str()` renders an `Unbounded` bound as `*`, the same
                 // open-bound token the interval parser takes, and drops the
                 // inclusive/exclusive distinction the grammar recorded --
-                // exactly finding 169's rule.
+                // exactly finding 183's rule.
                 date_range::interval_from_bounds(lower.term_str(), upper.term_str())
                     .map_err(Self::date_range_error)?
             }
@@ -2343,7 +2343,7 @@ impl CoreIndex {
             // A field-LESS literal never reaches `build_leaf`, so #341's
             // per-leaf interception does not cover it: a `date_range` field
             // named in `qf` would otherwise contribute a term query against the
-            // raw text field holding the verbatim string (finding 165), i.e. it
+            // raw text field holding the verbatim string (finding 179), i.e. it
             // would match only the document whose stored string happens to be
             // literally the query text -- the same silently-wrong-term-query
             // failure that interception exists to prevent. Solr routes a `qf`
@@ -3184,7 +3184,7 @@ impl CoreIndex {
                     // `{start,end,raw}` object `coerce_json` built, so that
                     // Tantivy gives its endpoints their own date sub-columns.
                     // Only the verbatim `raw` string is part of the wire
-                    // contract (finding 165); the endpoints are Wayfinder's own
+                    // contract (finding 179); the endpoints are Wayfinder's own
                     // storage, exactly like a static field's `__start`/`__end`,
                     // and must not leak into `fl`.
                     if self.wf_schema.resolved_value_kind(&name) == Some(ValueKind::DateRange) {

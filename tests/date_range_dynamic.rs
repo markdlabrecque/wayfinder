@@ -15,7 +15,7 @@
 //! `[[dynamic_fields]]` rules. Same fixtures, second schema -- no expected
 //! value here is invented.
 //!
-//! The multiValued union block (finding 168) matters MORE here than on the
+//! The multiValued union block (finding 182) matters MORE here than on the
 //! static path: the dynamic path has no `fast` columns of its own and the naive
 //! `_dynamic.<name>.start`/`.end` term-range implementation is precisely the
 //! pairing-blind one that `dr341_multi_gap`, `dr341_multi_no_contains`,
@@ -120,7 +120,7 @@ fn ids(body: &Value) -> Vec<String> {
 /// `error.metadata`/`error.trace`, which are Java-internal class names and a
 /// JVM stack trace Wayfinder cannot and need not reproduce (finding 10: only
 /// `error.code`/HTTP status is in the compatibility contract). `error.msg` is
-/// asserted verbatim because finding 170 pins these exact strings as the
+/// asserted verbatim because finding 184 pins these exact strings as the
 /// discriminating evidence for the 400/500 split.
 fn assert_error_matches(status: StatusCode, body: &Value, fixture_name: &str) {
     let expected = fixture(fixture_name);
@@ -140,7 +140,7 @@ fn assert_error_matches(status: StatusCode, body: &Value, fixture_name: &str) {
     assert_eq!(
         body["error"]["msg"].as_str(),
         expected["error"]["msg"].as_str(),
-        "{fixture_name}: error.msg must match Solr verbatim (finding 170), body: {body}"
+        "{fixture_name}: error.msg must match Solr verbatim (finding 184), body: {body}"
     );
     // Presence/absence of the `response` block is part of the captured envelope
     // (see the same assertion in `tests/date_range.rs`): every `dr341_err_*`
@@ -154,9 +154,9 @@ fn assert_error_matches(status: StatusCode, body: &Value, fixture_name: &str) {
     );
 }
 
-// --- storage: verbatim round-trip through the dynamic path (finding 165) -----
+// --- storage: verbatim round-trip through the dynamic path (finding 179) -----
 
-/// Fixture `dr341_roundtrip`, finding 165. The dynamic path is the one that
+/// Fixture `dr341_roundtrip`, finding 179. The dynamic path is the one that
 /// most easily loses this: whatever nested `_dynamic.<name>.start`/`.end`
 /// representation carries the parsed endpoints, `fl` must still render exactly
 /// what was sent -- `"2020"` as `"2020"` (not an expanded interval), `"[* TO
@@ -174,9 +174,9 @@ async fn dynamic_roundtrip_stores_the_value_verbatim() {
     assert_matches_fixture(body, "dr341_roundtrip");
 }
 
-// --- bare literal / bracket interval Intersects (findings 166, 167) ----------
+// --- bare literal / bracket interval Intersects (findings 180, 181) ----------
 
-/// Fixture `dr341_intersects_plain`, finding 167: a plain `drs_x:[a TO b]` on a
+/// Fixture `dr341_intersects_plain`, finding 181: a plain `drs_x:[a TO b]` on a
 /// DYNAMIC `date_range` field is an Intersects interval query, not a term query
 /// and not the `_dynamic` catch-all's string comparison -> d1,d2,d3,d4,d7.
 #[tokio::test]
@@ -191,7 +191,7 @@ async fn dynamic_plain_range_query_is_intersects_by_default() {
     assert_matches_fixture(body, "dr341_intersects_plain");
 }
 
-/// Fixture `dr341_single_year`, finding 166: a bare `drs_x:2020` denotes the
+/// Fixture `dr341_single_year`, finding 180: a bare `drs_x:2020` denotes the
 /// whole year interval, so it intersects the same five docs as the explicit
 /// May-Jul 2020 range above.
 #[tokio::test]
@@ -206,7 +206,7 @@ async fn dynamic_bare_year_literal_expands_to_the_whole_year_interval() {
     assert_matches_fixture(body, "dr341_single_year");
 }
 
-/// Fixture `dr341_single_month`, finding 166: the same rule at month precision.
+/// Fixture `dr341_single_month`, finding 180: the same rule at month precision.
 #[tokio::test]
 async fn dynamic_bare_month_literal_expands_to_the_whole_month_interval() {
     let (app, _dir) = dynamic_date_range_app().await;
@@ -219,7 +219,7 @@ async fn dynamic_bare_month_literal_expands_to_the_whole_month_interval() {
     assert_matches_fixture(body, "dr341_single_month");
 }
 
-/// Fixture `dr341_star_both`, finding 166: `[* TO *]` matches every doc that
+/// Fixture `dr341_star_both`, finding 180: `[* TO *]` matches every doc that
 /// HAS the field -- d1-d7, and not d8/d9, which only carry `drm_x`. On the
 /// dynamic path this also pins that the two prefixes stay distinct sub-paths
 /// inside the shared `_dynamic` catch-all rather than merging.
@@ -235,7 +235,7 @@ async fn dynamic_fully_open_interval_matches_every_doc_with_the_field() {
     assert_matches_fixture(body, "dr341_star_both");
 }
 
-/// Fixture `dr341_touch_endpoint`, finding 166: the precision rule applies to
+/// Fixture `dr341_touch_endpoint`, finding 180: the precision rule applies to
 /// interval ENDPOINTS too. d5 is `[* TO 2019-12-31T23:59:59Z]`, whose end is
 /// that whole second, so a query starting exactly at that second intersects it
 /// -> d1,d5,d7.
@@ -251,7 +251,7 @@ async fn dynamic_interval_endpoint_precision_touches_the_whole_stated_second() {
     assert_matches_fixture(body, "dr341_touch_endpoint");
 }
 
-/// Fixture `dr341_touch_past_ms`, finding 166: one millisecond past that
+/// Fixture `dr341_touch_past_ms`, finding 180: one millisecond past that
 /// second's start still intersects d5 -- same result set as
 /// `dr341_touch_endpoint`, which is what proves the endpoint was expanded
 /// rather than treated as an instant.
@@ -273,9 +273,9 @@ async fn dynamic_interval_endpoint_precision_still_touches_one_ms_past_the_secon
     assert_matches_fixture(body, "dr341_touch_past_ms");
 }
 
-// --- `{!field f= op=}` predicates, aliases and casing (finding 167) ----------
+// --- `{!field f= op=}` predicates, aliases and casing (finding 181) ----------
 
-/// Fixture `dr341_op_default`, finding 167: `{!field f=drs_x}` with NO `op` at
+/// Fixture `dr341_op_default`, finding 181: `{!field f=drs_x}` with NO `op` at
 /// all defaults to Intersects, on a dynamic field.
 #[tokio::test]
 async fn dynamic_field_query_parser_with_no_op_defaults_to_intersects() {
@@ -289,7 +289,7 @@ async fn dynamic_field_query_parser_with_no_op_defaults_to_intersects() {
     assert_matches_fixture(body, "dr341_op_default");
 }
 
-/// Fixture `dr341_op_intersects`, finding 167: an explicit `op=Intersects` is
+/// Fixture `dr341_op_intersects`, finding 181: an explicit `op=Intersects` is
 /// the same query as the plain bracket form.
 #[tokio::test]
 async fn dynamic_explicit_op_intersects_matches_plain_form() {
@@ -303,7 +303,7 @@ async fn dynamic_explicit_op_intersects_matches_plain_form() {
     assert_matches_fixture(body, "dr341_op_intersects");
 }
 
-/// Fixture `dr341_op_contains`, finding 167: `Contains` -> d1,d3,d7.
+/// Fixture `dr341_op_contains`, finding 181: `Contains` -> d1,d3,d7.
 #[tokio::test]
 async fn dynamic_op_contains_requires_the_doc_to_cover_the_query_interval() {
     let (app, _dir) = dynamic_date_range_app().await;
@@ -316,7 +316,7 @@ async fn dynamic_op_contains_requires_the_doc_to_cover_the_query_interval() {
     assert_matches_fixture(body, "dr341_op_contains");
 }
 
-/// Fixture `dr341_op_within`, finding 167: `Within` -> d2,d4 over the identical
+/// Fixture `dr341_op_within`, finding 181: `Within` -> d2,d4 over the identical
 /// query interval, disjoint from `Contains`'s d1,d3,d7 -- the two ops are not
 /// complements.
 #[tokio::test]
@@ -336,7 +336,7 @@ async fn dynamic_op_within_requires_the_doc_to_fit_inside_the_query_interval() {
     assert_matches_fixture(body, "dr341_op_within");
 }
 
-/// Fixture `dr341_op_iswithin`, finding 167: `IsWithin` is an accepted alias of
+/// Fixture `dr341_op_iswithin`, finding 181: `IsWithin` is an accepted alias of
 /// `Within` -- identical result set.
 #[tokio::test]
 async fn dynamic_op_iswithin_is_an_alias_of_within() {
@@ -350,7 +350,7 @@ async fn dynamic_op_iswithin_is_an_alias_of_within() {
     assert_matches_fixture(body, "dr341_op_iswithin");
 }
 
-/// Fixture `dr341_op_lowercase`, finding 167: the `op` value is matched
+/// Fixture `dr341_op_lowercase`, finding 181: the `op` value is matched
 /// case-INSENSITIVELY, so `op=contains` behaves exactly like `op=Contains`.
 #[tokio::test]
 async fn dynamic_op_value_is_matched_case_insensitively() {
@@ -364,9 +364,9 @@ async fn dynamic_op_value_is_matched_case_insensitively() {
     assert_matches_fixture(body, "dr341_op_lowercase");
 }
 
-// --- millisecond-boundary discrimination (finding 166) ----------------------
+// --- millisecond-boundary discrimination (finding 180) ----------------------
 
-/// Fixture `dr341_within_ms_exact`, finding 166: d2's `"2020-06"` ends
+/// Fixture `dr341_within_ms_exact`, finding 180: d2's `"2020-06"` ends
 /// `.999Z`, so a `Within` query ending exactly there contains it -> d2,d4.
 #[tokio::test]
 async fn dynamic_within_query_ending_exactly_at_ms_boundary_contains_the_bare_month_literal() {
@@ -381,7 +381,7 @@ async fn dynamic_within_query_ending_exactly_at_ms_boundary_contains_the_bare_mo
     assert_matches_fixture(body, "dr341_within_ms_exact");
 }
 
-/// Fixture `dr341_within_ms_short`, finding 166: one millisecond earlier
+/// Fixture `dr341_within_ms_short`, finding 180: one millisecond earlier
 /// (`.998Z`) drops d2. This pair is what pins the expansion to millisecond
 /// rather than second resolution -- and on the dynamic path, that the nested
 /// endpoint representation keeps millisecond precision.
@@ -402,9 +402,9 @@ async fn dynamic_within_query_one_ms_short_of_the_boundary_excludes_the_bare_mon
     assert_matches_fixture(body, "dr341_within_ms_short");
 }
 
-// --- brace-equivalence (finding 169) ----------------------------------------
+// --- brace-equivalence (finding 183) ----------------------------------------
 
-/// Fixture `dr341_excl_braces`, finding 169: `{a TO b}` is accepted and
+/// Fixture `dr341_excl_braces`, finding 183: `{a TO b}` is accepted and
 /// returns exactly what `[a TO b]` returns. An implementation that routes the
 /// clause through a Lucene-style range parser before consulting the dynamic
 /// rule's type gets this wrong.
@@ -431,9 +431,9 @@ async fn dynamic_exclusive_brace_syntax_is_silently_treated_as_inclusive() {
     assert_matches_fixture(body, "dr341_excl_braces");
 }
 
-// --- date math (finding 171) -------------------------------------------------
+// --- date math (finding 185) -------------------------------------------------
 
-/// Fixture `dr341_datemath_year`, finding 171: `[NOW/YEAR TO NOW/YEAR+1YEAR]`
+/// Fixture `dr341_datemath_year`, finding 185: `[NOW/YEAR TO NOW/YEAR+1YEAR]`
 /// resolves -> d6,d7. Stable for every `NOW` through 2100, per the capture
 /// site's own recorded expiry.
 #[tokio::test]
@@ -449,7 +449,7 @@ async fn dynamic_date_math_now_slash_year_resolves_in_a_date_range_query() {
     assert_matches_fixture(body, "dr341_datemath_year");
 }
 
-/// Fixture `dr341_datemath_now`, finding 171: `[NOW-100YEARS TO NOW]` resolves
+/// Fixture `dr341_datemath_now`, finding 185: `[NOW-100YEARS TO NOW]` resolves
 /// -> all 7 single-valued docs. Stable until 2119, per the capture site.
 #[tokio::test]
 async fn dynamic_date_math_now_minus_years_resolves_in_a_date_range_query() {
@@ -475,7 +475,7 @@ async fn dynamic_date_math_now_minus_years_resolves_in_a_date_range_query() {
     assert_matches_fixture(body, "dr341_datemath_now");
 }
 
-// --- multiValued: union-of-members set relations (finding 168) ---------------
+// --- multiValued: union-of-members set relations (finding 182) ---------------
 //
 // This whole block is the trap, and it is sharper on the dynamic path than the
 // static one: with no per-field fast columns, the obvious dynamic
@@ -483,7 +483,7 @@ async fn dynamic_date_math_now_minus_years_resolves_in_a_date_range_query() {
 // `_dynamic.drm_x.end`, which loses which start pairs with which end. Every
 // assertion below is a fixture-derived id list; none may be relaxed.
 
-/// Fixture `dr341_multi_intersects`, finding 168: a query matching exactly one
+/// Fixture `dr341_multi_intersects`, finding 182: a query matching exactly one
 /// of d8's members -> only d8 (d9 has no `2022-05` member).
 #[tokio::test]
 async fn dynamic_multivalued_intersects_a_query_matching_one_member() {
@@ -497,7 +497,7 @@ async fn dynamic_multivalued_intersects_a_query_matching_one_member() {
     assert_matches_fixture(body, "dr341_multi_intersects");
 }
 
-/// Fixture `dr341_multi_contains`, finding 168: `Contains 2022-05` -> only d8.
+/// Fixture `dr341_multi_contains`, finding 182: `Contains 2022-05` -> only d8.
 #[tokio::test]
 async fn dynamic_multivalued_contains_a_query_matching_one_member() {
     let (app, _dir) = dynamic_date_range_app().await;
@@ -510,7 +510,7 @@ async fn dynamic_multivalued_contains_a_query_matching_one_member() {
     assert_matches_fixture(body, "dr341_multi_contains");
 }
 
-/// Fixture `dr341_multi_gap`, finding 168: **0 hits**. A query landing entirely
+/// Fixture `dr341_multi_gap`, finding 182: **0 hits**. A query landing entirely
 /// inside d8's hole (2021, between its `2020` and `2022-05` members) intersects
 /// neither doc. A start/end column pair that has lost member pairing collapses
 /// d8 to the single span `2020-01-01 .. 2022-05-31` and wrongly matches it --
@@ -534,7 +534,7 @@ async fn dynamic_multivalued_intersects_is_hole_sensitive_not_a_min_max_span() {
     assert_matches_fixture(body, "dr341_multi_gap");
 }
 
-/// Fixture `dr341_multi_no_contains`, finding 168: **0 hits**. `Contains` over
+/// Fixture `dr341_multi_no_contains`, finding 182: **0 hits**. `Contains` over
 /// a query spanning d8's hole matches neither doc -- the query interval sits
 /// inside d8's merged SPAN but inside no real member, so this rules out both
 /// the span collapse and an "any member overlaps the query" reading.
@@ -551,7 +551,7 @@ async fn dynamic_multivalued_contains_spanning_the_hole_matches_neither_doc() {
     assert_matches_fixture(body, "dr341_multi_no_contains");
 }
 
-/// Fixture `dr341_multi_within_one`, finding 168: **only d9**. `Within`
+/// Fixture `dr341_multi_within_one`, finding 182: **only d9**. `Within`
 /// requires EVERY member to fit: d8's `2020` member fits the 2020-only query
 /// perfectly, but its `2022-05` member does not, so d8 is excluded. This is the
 /// case that rules out "any member fits".
@@ -572,7 +572,7 @@ async fn dynamic_multivalued_within_requires_every_member_to_fit() {
     assert_matches_fixture(body, "dr341_multi_within_one");
 }
 
-/// Fixture `dr341_multi_within_both`, finding 168: widening the query until
+/// Fixture `dr341_multi_within_both`, finding 182: widening the query until
 /// d8's whole union fits brings d8 back alongside d9 -- which makes
 /// `dr341_multi_within_one`'s exclusion of d8 attributable to the union rule
 /// rather than to multiValued `Within` being broken generally.
@@ -589,7 +589,7 @@ async fn dynamic_multivalued_within_matches_both_once_the_query_covers_the_whole
     assert_matches_fixture(body, "dr341_multi_within_both");
 }
 
-/// Fixture `dr341_multi_contains_one`, finding 168: `Contains 2020-06` matches
+/// Fixture `dr341_multi_contains_one`, finding 182: `Contains 2020-06` matches
 /// BOTH d8 and d9 -- `Contains` is satisfied when the union covers the query,
 /// which one member alone can do; it does not demand all members (unlike
 /// `Within`).
@@ -644,7 +644,7 @@ async fn dynamic_multivalued_contains_merges_adjacent_members_into_one_run() {
     );
 }
 
-// --- facet / sort / stats asymmetry (finding 172) ----------------------------
+// --- facet / sort / stats asymmetry (finding 186) ----------------------------
 //
 // Three surfaces, three behaviours: facet 200-with-no-buckets, sort 400, stats
 // 400 with its own distinct message. All three are worth pinning on the DYNAMIC
@@ -659,7 +659,7 @@ async fn dynamic_multivalued_contains_merges_adjacent_members_into_one_run() {
 // path and apply here verbatim. That is exactly why the pair belongs in this
 // file and not only in `tests/date_range.rs`.
 
-/// Fixture `dr341_facet_empty`, finding 172: `facet.field` on a `date_range`
+/// Fixture `dr341_facet_empty`, finding 186: `facet.field` on a `date_range`
 /// field is NOT an error -- HTTP 200 with an EMPTY bucket list, over 9 matching
 /// docs. On the dynamic path this is the interesting one, because the `_dynamic`
 /// catch-all IS fast, so a `date_range` dynamic field must be excluded from
@@ -676,7 +676,7 @@ async fn dynamic_facet_field_on_date_range_is_200_with_empty_buckets() {
     assert_matches_fixture(body, "dr341_facet_empty");
 }
 
-/// Fixture `dr341_err_sort`, finding 172: `sort` on a `date_range` field is a
+/// Fixture `dr341_err_sort`, finding 186: `sort` on a `date_range` field is a
 /// 400 with Solr's exact spatial-field wording (`Sorting not supported on
 /// SpatialField: drs_x, instead try sorting by query.`). The message names
 /// `drs_x`, and in the captured core `drs_x` is itself a dynamic field, so this
@@ -690,9 +690,9 @@ async fn dynamic_sort_on_date_range_is_400() {
     assert_error_matches(status, &body, "dr341_err_sort");
 }
 
-/// Fixture `dr341_err_stats`, finding 172: `stats.field` on a `date_range`
+/// Fixture `dr341_err_stats`, finding 186: `stats.field` on a `date_range`
 /// field is a 400 too, but with its own distinct message naming the field TYPE
-/// rather than the field -- the asymmetry finding 172 calls out. Same dynamic
+/// rather than the field -- the asymmetry finding 186 calls out. Same dynamic
 /// provenance as `dr341_err_sort` above: `drs_x` was a dynamic field in the
 /// captured core.
 #[tokio::test]
@@ -706,9 +706,9 @@ async fn dynamic_stats_on_date_range_is_400() {
     assert_error_matches(status, &body, "dr341_err_stats");
 }
 
-// --- error surface: 400 (unparseable) vs 500 (unimplemented op) (finding 170)
+// --- error surface: 400 (unparseable) vs 500 (unimplemented op) (finding 184)
 
-/// Fixture `dr341_err_bad_date`, finding 170: a value Solr cannot PARSE is a
+/// Fixture `dr341_err_bad_date`, finding 184: a value Solr cannot PARSE is a
 /// 400, `msg` = `Couldn't parse date because: Improperly formatted datetime:
 /// 2020-13`.
 #[tokio::test]
@@ -722,7 +722,7 @@ async fn dynamic_unparseable_date_literal_is_400() {
     assert_error_matches(status, &body, "dr341_err_bad_date");
 }
 
-/// Fixture `dr341_err_bad_math`, finding 170: an unparseable date-math
+/// Fixture `dr341_err_bad_math`, finding 184: an unparseable date-math
 /// expression is also a 400 (parse-kind failure), `msg` = `Invalid Date Math
 /// String:'NOW/BOGUS'`.
 #[tokio::test]
@@ -736,7 +736,7 @@ async fn dynamic_unparseable_date_math_is_400() {
     assert_error_matches(status, &body, "dr341_err_bad_math");
 }
 
-/// Fixture `dr341_err_reversed`, finding 170: a structurally valid but reversed
+/// Fixture `dr341_err_reversed`, finding 184: a structurally valid but reversed
 /// interval is a **500**, not a 400 -- the value parses; the ORDER is what the
 /// type cannot handle. `msg` = `Wrong order: 2021 TO 2020`.
 #[tokio::test]
@@ -750,7 +750,7 @@ async fn dynamic_reversed_interval_is_500_not_400() {
     assert_error_matches(status, &body, "dr341_err_reversed");
 }
 
-/// Fixture `dr341_err_bad_op`, finding 170: an unrecognised `op` is a 500,
+/// Fixture `dr341_err_bad_op`, finding 184: an unrecognised `op` is a 500,
 /// `msg` = `Unknown Operation: Bogus`.
 #[tokio::test]
 async fn dynamic_unknown_op_is_500() {
@@ -763,7 +763,7 @@ async fn dynamic_unknown_op_is_500() {
     assert_error_matches(status, &body, "dr341_err_bad_op");
 }
 
-/// Fixture `dr341_err_disjoint`, finding 170: `IsDisjointTo` is a valid
+/// Fixture `dr341_err_disjoint`, finding 184: `IsDisjointTo` is a valid
 /// operation name the type does not implement -- 500, bare `msg` = `Disjoint`.
 #[tokio::test]
 async fn dynamic_op_disjoint_is_500() {
@@ -776,7 +776,7 @@ async fn dynamic_op_disjoint_is_500() {
     assert_error_matches(status, &body, "dr341_err_disjoint");
 }
 
-/// Fixture `dr341_err_overlaps`, finding 170: 500, bare `msg` = `Overlaps`.
+/// Fixture `dr341_err_overlaps`, finding 184: 500, bare `msg` = `Overlaps`.
 #[tokio::test]
 async fn dynamic_op_overlaps_is_500() {
     let (app, _dir) = dynamic_date_range_app().await;
@@ -788,7 +788,7 @@ async fn dynamic_op_overlaps_is_500() {
     assert_error_matches(status, &body, "dr341_err_overlaps");
 }
 
-/// Fixture `dr341_err_equals`, finding 170: 500, bare `msg` = `Equals`.
+/// Fixture `dr341_err_equals`, finding 184: 500, bare `msg` = `Equals`.
 #[tokio::test]
 async fn dynamic_op_equals_is_500() {
     let (app, _dir) = dynamic_date_range_app().await;
@@ -995,7 +995,7 @@ async fn dynamic_non_ascii_date_math_on_the_index_path_is_400_and_leaves_the_cor
     assert_eq!(ids(&body), vec!["ok".to_string()], "{body}");
 }
 
-/// The same value on the dynamic QUERY path is the finding-170 400.
+/// The same value on the dynamic QUERY path is the finding-184 400.
 #[tokio::test]
 async fn dynamic_non_ascii_date_math_on_the_query_path_is_400() {
     let (app, _dir) = dynamic_date_range_app().await;
@@ -1010,7 +1010,7 @@ async fn dynamic_non_ascii_date_math_on_the_query_path_is_400() {
 }
 
 /// The far-future open-ended sentinel clamps on the dynamic path too, both as an
-/// indexed value (still round-tripping verbatim, finding 165) and as a query
+/// indexed value (still round-tripping verbatim, finding 179) and as a query
 /// endpoint (answering `dr341_star_both`'s d1-d7).
 #[tokio::test]
 async fn dynamic_out_of_range_endpoints_clamp() {
@@ -1053,7 +1053,7 @@ async fn dynamic_out_of_range_endpoints_clamp() {
     assert_eq!(
         body["response"]["docs"][0]["drs_x"].as_str(),
         Some("[* TO 9999-12-31T23:59:59Z]"),
-        "finding 165: the sentinel still round-trips verbatim, {body}"
+        "finding 179: the sentinel still round-trips verbatim, {body}"
     );
 }
 

@@ -772,8 +772,8 @@ async fn dm_field_is_queryable_by_date_range() {
 // The `DYNAMIC_FIELDS` table above only pins that the preset DECLARES the two
 // rules with the right type/multi_valued/stored/fast. These three add the part
 // that actually matters through the real preset: the value round-trips verbatim
-// (finding 165) and the field is interval-queryable (findings 166/167),
-// including the multiValued union case (finding 168). Semantics are pinned
+// (finding 179) and the field is interval-queryable (findings 180/181),
+// including the multiValued union case (finding 182). Semantics are pinned
 // against the `dr341_*` fixtures in `tests/date_range.rs` /
 // `tests/date_range_dynamic.rs`; these three are preset-integration smoke tests
 // over their own doc, so no fixture id list applies.
@@ -785,8 +785,8 @@ async fn dm_field_is_queryable_by_date_range() {
 // the failure scoped to #341.
 
 /// A doc carrying only `id` plus the two #341 prefixes. The bare `"2026-07"` is
-/// deliberate: finding 165 says it must come back as `"2026-07"`, and finding
-/// 166 says it must still be found by an interval query covering July 2026.
+/// deliberate: finding 179 says it must come back as `"2026-07"`, and finding
+/// 180 says it must still be found by an interval query covering July 2026.
 /// `drm_created`'s two members have a hole covering August 2026.
 fn date_range_doc() -> Value {
     json!([{
