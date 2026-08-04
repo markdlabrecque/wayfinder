@@ -1,0 +1,49 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":19,
+    "params":{
+      "json.facet":"{\"maxPopularity\":\"max(popularity)\"}",
+      "q":"*:*",
+      "facet.field":"hash",
+      "stats":"true",
+      "rows":"0",
+      "wt":"json",
+      "facet":"true",
+      "stats.field":"popularity"
+    }
+  },
+  "response":{
+    "numFound":6,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[ ]
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{
+      "hash":["siteA",4,"siteB",1]
+    },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  },
+  "facets":{
+    "count":6,
+    "maxPopularity":60
+  },
+  "stats":{
+    "stats_fields":{
+      "popularity":{
+        "min":10.0,
+        "max":60.0,
+        "count":6,
+        "missing":0,
+        "sum":210.0,
+        "sumOfSquares":9100.0,
+        "mean":35.0,
+        "stddev":18.708286933869708
+      }
+    }
+  }
+}

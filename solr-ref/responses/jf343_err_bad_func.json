@@ -1,0 +1,17 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0,
+    "params":{
+      "json.facet":"{\"x\":\"nosuchfunc(popularity)\"}",
+      "q":"*:*",
+      "rows":"0",
+      "wt":"json"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.apache.solr.search.SyntaxError"],
+    "msg":"org.apache.solr.search.SyntaxError: Unknown aggregation 'nosuchfunc' in input ('nosuchfunc(popularity)', pos=11)",
+    "code":400
+  }
+}

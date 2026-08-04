@@ -873,7 +873,8 @@ a new client whose capture shows real usage, the same bar every descope above al
 
 | Solr 9.x feature | Note |
 |---|---|
-| JSON Request API / JSON Facet API | The module uses classic `facet.*` params for search; Solarium's JSON Facet API (`createJsonFacetAggregation`, e.g. `max(_version_)`) appears only on admin diagnostics screens (finding 132), never on a search path. So JSON faceting has client evidence, just non-search evidence — which is why it is deferred (see the v3 `_version_` subsection), not listed here as zero-evidence. |
+| JSON Request API | Requests arrive as query params; no captured request uses a JSON request body. Distinct from the JSON *Facet* API below, which is a single param and has shipped. |
+| ~~JSON Facet API~~ — **shipped, #343** | Not unscheduled any more. Solarium's JSON Facet API (`createJsonFacetAggregation`, e.g. `max(_version_)`) appears only on admin diagnostics screens (finding 132), never on a search path — client evidence, just non-search evidence. The evidenced surface landed in #343: `json.facet` with `type: terms` (`field`, `limit`, `mincount`, `sort`), arbitrary `facet`-key nesting, and `max()` aggregations, to the 4-level topology `doGetMaxDocumentVersions()` sends. Everything unevidenced (`type: query`/`range`, other aggregation functions, `domain`/`offset`/`numBuckets`/…) returns 400 rather than being silently ignored — findings 175-178. |
 | `facet.pivot`, `facet.interval` | Only field, query, and heatmap faceting is emitted. `facet.range` is equally unemitted, but v1 already shipped it — kept as surplus, not unshipped. |
 | Collapse & Expand (`fq={!collapse}`, `expand=true`) | The module's "collapse" identifiers drive Solr grouping (`group=true`), which stays in v3. |
 | Query Elevation (`/elevate`) | Relevance tweaks travel as `bq`/`boost` function queries; no elevation params. |
@@ -992,17 +993,25 @@ defined, not user-visible in `schema.toml`, and stripped from `/response/docs` e
 is (§2 envelope fact 8). The field is also statable — `stats.field=_version_` (and the
 `function=max(_version_)` phrasing) works through the existing stats component (`src/stats.rs`,
 #5) via `check_statable`'s deliberate `_version_` exception. That is a correct general capability
-of the field; it is not what the diagnostics screens use (they use the JSON facet above), but both
-stay because they are the right shape for whenever the real dependency below lands. The execution
-record lives in `tests/version_field.rs` and `docs/reports/` (see #293's report).
+of the field; it is not what the diagnostics screens use (they use the JSON facet above), and both
+stay — the two render differently on the wire (the stats component emits a float, a JSON facet
+aggregation a raw integer, finding 177), so they are separate paths, not one behind the other. The
+execution record lives in `tests/version_field.rs` and `docs/reports/` (see #293's and #343's
+reports).
 
-**The real dependency, deferred (and rescoped to its own future item).** The only path that touches
-`_version_` is **JSON faceting with aggregation functions and nesting** (`json.facet`, `type: terms`
-nesting, `max()`). That is a considerably larger and differently shaped feature than a version
-counter, and its only client is an admin diagnostics screen — nothing a site *searches* depends on
-`_version_`. It is not v1 work; track it under JSON faceting, not here. The delivered field is
-exactly what that feature will aggregate over, so landing it later costs nothing extra at this
-layer.
+**The real dependency, since landed (#343).** The only path that touches `_version_` is **JSON
+faceting with aggregation functions and nesting** (`json.facet`, `type: terms` nesting, `max()`).
+It was rescoped out of #293 as its own item because it is a considerably larger and differently
+shaped feature than a version counter, and because its only client is an admin diagnostics screen —
+nothing a site *searches* depends on `_version_`. It shipped in **#343**: `json.facet` as a
+standalone param (no `facet=true`), `type: terms` over fast fields with `field`/`limit`/`mincount`/
+`sort`, arbitrary nesting via the `facet` key, `max()` aggregations including `max(_version_)`, and
+the implicit `count` — the full 4-level topology `doGetMaxDocumentVersions()` sends. The delivered
+field turned out to be exactly the right shape to aggregate over, as this section predicted: #343
+needed no change to `_version_` itself. Ground truth is the 20 `jf343_*` fixtures; findings 175-178
+record the envelope, and 168 records the two Solr behaviours Wayfinder deliberately 400s on instead
+(terms on a non-docValues field, `max()` over a text field). `_version_` remains non-facetable and
+non-sortable — `tests/version_field.rs` still asserts both are 400.
 
 **Out of scope, explicitly** (each needs its own evidence before it's worth building):
 
@@ -1018,11 +1027,13 @@ layer.
   opaque `long` tied to its update log; a `max(_version_)` watermark only needs "bigger means
   newer," which the per-core counter already gives).
 
-**Guard.** `tests/version_descope_guard.rs` is a self-deleting guard over both evidence channels
-(the 28 traces and the frozen 4.4.0 source): it fails the day a captured request sends `_version_`,
-`versions=true`, or `json.facet`, or the source stops reading `_version_` through a JSON facet
-aggregation. When it goes red, revisit this decision (#293) with the new evidence — do not weaken
-the guard.
+**Guard.** `tests/version_write_descope_guard.rs` guards what is *still* descoped after #343 — the
+**write side** only. Over both evidence channels (the 28 traces and the frozen 4.4.0 source) it
+fails the day a captured request sends `_version_` or `versions=true`, or the source stops writing
+whole documents through `addDocument(s)`. It was narrowed from the wider `version_descope_guard.rs`
+when #343 landed: the read-path needles and framing came out, while the write-side descopes above
+and the finding-132 PRD tripwires stayed, because #343 touched neither. When it goes red, revisit
+this decision (#293) with the new evidence — do not weaken the guard.
 
 ---
 

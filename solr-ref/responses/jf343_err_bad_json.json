@@ -1,0 +1,17 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0,
+    "params":{
+      "json.facet":"{\"siteHashes\":{\"field\":",
+      "q":"*:*",
+      "rows":"0",
+      "wt":"json"
+    }
+  },
+  "error":{
+    "metadata":["error-class","org.apache.solr.common.SolrException","root-error-class","org.noggit.JSONParser$ParseException"],
+    "msg":"org.noggit.JSONParser$ParseException: Premature EOF: char=(EOF),position=23 AFTER='{\"siteHashes\":{\"field\":'",
+    "code":400
+  }
+}

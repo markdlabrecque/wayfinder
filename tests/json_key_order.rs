@@ -608,3 +608,190 @@ async fn select_fl_reversed_doc_key_order_matches_solr() {
     assert_keys_match_fixture(&text, "select_fl_reversed", "response.docs[0]", false);
     assert_same_key_order(&text, "select_fl_reversed");
 }
+
+// --- 8. `json.facet` (issue #343): top-level slot + `facets` sub-object order --
+//
+// `facets` is a top-level sibling emitted *after* `facet_counts` and *before*
+// `stats` (`jf343_with_classic_stats.json`'s top level is `responseHeader,
+// response, facet_counts, facets, stats`). Its own sub-object order —
+// `count` first, then each aggregation/terms key in request order, with
+// nested `buckets` before an inline sub-facet as siblings of `val`/`count` —
+// comes from `jf343_deep_max.json`.
+//
+// Schema/corpus duplicated locally from `tests/json_facet.rs::JF_SCHEMA_TOML`
+// / `jf_corpus`, per this suite's own precedent (`FACETS_SCHEMA_TOML` above)
+// of not sharing schema/corpus helpers across integration-test binaries.
+
+const JF_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "hash"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "index_id"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "ss_search_api_datasource"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "popularity"
+type = "int"
+stored = true
+fast = true
+"#;
+
+fn jf_corpus() -> Value {
+    json!([
+        {"id":"jf1","hash":"siteA","index_id":"index_a","ss_search_api_datasource":"entity:node","popularity":10,"body":"alpha"},
+        {"id":"jf2","hash":"siteA","index_id":"index_a","ss_search_api_datasource":"entity:node","popularity":30,"body":"beta"},
+        {"id":"jf3","hash":"siteA","index_id":"index_a","ss_search_api_datasource":"entity:user","popularity":20,"body":"gamma"},
+        {"id":"jf4","hash":"siteA","index_id":"index_b","ss_search_api_datasource":"entity:node","popularity":40,"body":"delta"},
+        {"id":"jf5","hash":"siteB","index_id":"index_c","ss_search_api_datasource":"entity:node","popularity":50,"body":"epsilon"},
+        {"id":"jf6","popularity":60,"body":"zeta"}
+    ])
+}
+
+async fn jf_app() -> (Router, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), JF_SCHEMA_TOML).expect("app must build");
+    let (status, body) = post_docs(&app, &jf_corpus()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "indexing the jf343 corpus must succeed, got {body}"
+    );
+    (app, dir)
+}
+
+/// Percent-encodes every byte outside `A-Za-z0-9-_.~`, duplicated from
+/// `tests/json_facet.rs` for the same "no cross-binary sharing" reason —
+/// `json.facet`'s JSON value is not legal raw query-string text.
+fn jf_percent_encode(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() * 3);
+    for b in raw.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn jf_query(v: &Value) -> String {
+    format!(
+        "select?q=*:*&rows=0&facet=true&facet.field=hash&stats=true&stats.field=popularity&json.facet={}&wt=json",
+        jf_percent_encode(&v.to_string())
+    )
+}
+
+/// Top-level slot: `facets` sits after `facet_counts` and before `stats`
+/// (`jf343_with_classic_stats.json`). Exercises `facet=true` + `stats=true`
+/// + `json.facet` together, the same three-way coexistence
+/// `tests/json_facet.rs::coexists_with_classic_faceting_and_stats` checks by
+/// value — this test checks their *order* instead, which a parsed `Value`
+/// comparison cannot see (module docs above).
+#[tokio::test]
+async fn json_facet_top_level_slot_matches_solr() {
+    let (app, _dir) = jf_app().await;
+    let v = json!({"maxPopularity": "max(popularity)"});
+    let (status, text) = get_text(&app, CORE, &jf_query(&v)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "facet + stats + json.facet must be a 200: {text}"
+    );
+    assert_keys_match_fixture(&text, "jf343_with_classic_stats", "", false);
+}
+
+/// `facets`' own sub-object order: `count` first (the implicit scalar every
+/// `json.facet` response carries), then each requested key in request order.
+#[tokio::test]
+async fn json_facet_count_leads_facets_object() {
+    let (app, _dir) = jf_app().await;
+    let v = json!({"maxPopularity": "max(popularity)"});
+    let (status, text) = get_text(&app, CORE, &jf_query(&v)).await;
+    assert_eq!(status, StatusCode::OK, "json.facet must be a 200: {text}");
+    assert_keys_match_fixture(&text, "jf343_with_classic_stats", "facets", false);
+}
+
+/// The full 4-level nested shape's sub-object order: inside a terms bucket,
+/// `val, count` lead and an inline sub-facet trails as a further sibling key
+/// (`jf343_deep_max.json`) — not `val` alone, and not the sub-facet split out
+/// into some other top-level container.
+#[tokio::test]
+async fn json_facet_deep_bucket_sub_object_order_matches_solr() {
+    let (app, _dir) = jf_app().await;
+    let v = json!({
+        "maxPopularity": "max(popularity)",
+        "siteHashes": {
+            "limit": -1, "field": "hash", "type": "terms",
+            "facet": {
+                "indexes": {
+                    "limit": -1, "field": "index_id", "type": "terms",
+                    "facet": {
+                        "dataSources": {
+                            "limit": -1, "field": "ss_search_api_datasource", "type": "terms",
+                            "facet": {"maxPopularityPerDataSource": "max(popularity)"}
+                        }
+                    }
+                }
+            }
+        }
+    });
+    let (status, text) = get_text(
+        &app,
+        CORE,
+        &format!(
+            "select?q=*:*&rows=0&json.facet={}&wt=json",
+            jf_percent_encode(&v.to_string())
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "4-level json.facet must be a 200: {text}"
+    );
+    assert_keys_match_fixture(&text, "jf343_deep_max", "facets", false);
+    assert_keys_match_fixture(&text, "jf343_deep_max", "facets.siteHashes", false);
+    assert_keys_match_fixture(
+        &text,
+        "jf343_deep_max",
+        "facets.siteHashes.buckets[0]",
+        false,
+    );
+    assert_keys_match_fixture(
+        &text,
+        "jf343_deep_max",
+        "facets.siteHashes.buckets[0].indexes.buckets[0].dataSources.buckets[0]",
+        false,
+    );
+    assert_same_key_order(&text, "jf343_deep_max");
+}

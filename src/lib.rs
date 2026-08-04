@@ -38,6 +38,8 @@ mod grouping;
 /// `facet.heatmap` over `location`/`location_rpt` fields (#334).
 mod heatmap;
 mod highlight;
+/// `json.facet` — the JSON Facet API (#343).
+mod json_facet;
 mod local_params;
 mod params;
 mod query;
@@ -238,6 +240,10 @@ const SELECT_PARAMS: &[&str] = &[
     "facet.heatmap.distErr",
     "facet.heatmap.format",
     "json.nl",
+    // The JSON Facet API (issue #343, finding 175): one param whose value is a
+    // whole JSON object. `facet=true` is *not* sent alongside it, so it has to
+    // work standalone.
+    "json.facet",
     "stats",
     "stats.field",
     // `function=max(_version_)` is a real Solr stats-component form (the
@@ -3599,6 +3605,27 @@ async fn select(
         select_warnings.extend(facet_warnings.iter().cloned());
     }
 
+    // `json.facet` (issue #343): self-gating on the param's presence — there is
+    // no `json.facet=true` switch, and `facet=true` is not sent alongside it, so
+    // it neither reads nor is read by `facet_requested`. It shares `base`, so
+    // its implicit `count` and every bucket count track `q` and `fq`.
+    //
+    // The error split is `facet_counts`' exactly: a `json.facet` *parse*
+    // failure is detectable before the base query runs, so Solr's own fixtures
+    // for it (`jf343_err_bad_json.json`, `jf343_err_bad_type.json`) carry no
+    // `response` block, while a field-resolution failure
+    // (`jf343_err_unknown_field.json`) does — `json_facet::json_facets` marks
+    // the former with the same `facet::PreQueryFacetError`.
+    let json_facet_result = json_facet::json_facets(&state.index, &params, &base).map_err(|e| {
+        let err =
+            WfError::bad_request("wayfinder::JsonFacetError", e.to_string()).with_params(&params);
+        if e.downcast_ref::<facet::PreQueryFacetError>().is_some() {
+            err
+        } else {
+            attach_response(err)
+        }
+    })?;
+
     // `stats=true` gates the whole `stats` block the same way `facet=true`
     // gates `facet_counts` — `stats.field` alone does not turn it on (mirrors
     // `facet.field`'s own convention, and matches `stats_key_absent_without_stats_true`).
@@ -3699,6 +3726,13 @@ async fn select(
 
     if let Some((facet_counts, _)) = facet_result {
         body["facet_counts"] = facet_counts;
+    }
+    // `facets` sits between `facet_counts` and `stats`
+    // (`jf343_with_classic_stats.json`'s top-level order), and `serde_json`'s
+    // `preserve_order` makes this insertion order the wire order — so the slot
+    // is these three lines' position, nothing else (issue #343).
+    if let Some(facets) = json_facet_result {
+        body["facets"] = facets;
     }
     if let Some(stats) = stats_result {
         body["stats"] = stats;

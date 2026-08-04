@@ -77,6 +77,19 @@ impl fmt::Display for PreQueryFacetError {
 
 impl std::error::Error for PreQueryFacetError {}
 
+impl PreQueryFacetError {
+    /// Marks `e` as detected before the base query ran, so `select` answers
+    /// with the error-only envelope. Used by `crate::json_facet`, whose
+    /// `json.facet` parse failures have the same envelope split (issue #343,
+    /// `jf343_err_bad_json.json` carries no `response` block while
+    /// `jf343_err_unknown_field.json` does) — the wrapper's field stays
+    /// private to this module, so the constructor lives here rather than
+    /// re-implementing the marker type next door.
+    pub fn wrap(e: anyhow::Error) -> anyhow::Error {
+        anyhow::Error::new(PreQueryFacetError(e))
+    }
+}
+
 /// Solr's `facet.limit` default.
 const DEFAULT_FACET_LIMIT: i64 = 100;
 
@@ -1370,7 +1383,16 @@ fn render_buckets(buckets: &[(Option<String>, u64)], nl: JsonNl) -> Value {
 /// handle via `WayfinderSchema::field`, which a dynamic-only match has none of
 /// (only the catch-all container does) — so it keeps the pre-#66 static-only
 /// check rather than resolving through here into a field with no handle.
-fn check_facetable(schema: &WayfinderSchema, field_name: &str, allow_dynamic: bool) -> Result<()> {
+///
+/// `crate::json_facet` shares this check for its own `type: terms` facets
+/// (issue #343): finding 178's `json.facet` divergence and finding 105's
+/// classic-facet one are the same refusal for the same reason, down to the
+/// wording `tests/json_facet.rs` asserts, so they share one copy of it.
+pub(crate) fn check_facetable(
+    schema: &WayfinderSchema,
+    field_name: &str,
+    allow_dynamic: bool,
+) -> Result<()> {
     let fast = if allow_dynamic {
         schema.resolved_fast(field_name)
     } else {

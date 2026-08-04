@@ -3988,6 +3988,38 @@ impl CoreIndex {
         };
         Ok((**stats).clone())
     }
+
+    /// Runs an arbitrary — possibly nested — aggregation request against
+    /// `query` and hands the raw results back. `json.facet` (issue #343) needs
+    /// this because its whole shape is caller-defined: a tree of terms
+    /// aggregations with `max()` metrics hanging off arbitrary levels, where a
+    /// child aggregation's domain must be its parent bucket's documents.
+    /// `term_facet`/`field_stats` above each build one fixed aggregation, so
+    /// neither can express it.
+    ///
+    /// `terms_agg_count` is how many terms aggregations the tree contains; it
+    /// scales the per-request bucket budget exactly as the fused `/select`
+    /// pass does (see [`fused_bucket_limit`]). Tantivy's ceiling is
+    /// per-request, not per-aggregation, so a tree of `n` terms levels needs
+    /// `n` fields' worth of headroom.
+    ///
+    /// ponytail: nested buckets multiply rather than add, so a deep facet over
+    /// several high-cardinality columns can still trip Tantivy's limit and come
+    /// back as a 400. The captured client's topology is three levels over
+    /// site/index/datasource columns, all low-cardinality.
+    pub(crate) fn run_aggregations(
+        &self,
+        aggs: Aggregations,
+        query: &dyn Query,
+        terms_agg_count: usize,
+    ) -> Result<AggregationResults> {
+        let limits = AggregationLimitsGuard::new(None, Some(fused_bucket_limit(terms_agg_count)));
+        let collector = AggregationCollector::from_aggs(
+            aggs,
+            AggContextParams::new(limits, self.index.tokenizers().clone()),
+        );
+        Ok(self.reader.searcher().search(query, &collector)?)
+    }
 }
 
 /// Composes `query` with every `filter_queries` entry as a scoreless
