@@ -181,7 +181,7 @@ async fn unknown_core_is_404_with_a_json_error_envelope() {
     let (app, _dir) = indexed_app().await;
     let req = Request::builder()
         .method("GET")
-        .uri("/solr/nosuchcore/select?q=*:*&wt=json")
+        .uri("/wayfinder/nosuchcore/select?q=*:*&wt=json")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.expect("transport-level ok");

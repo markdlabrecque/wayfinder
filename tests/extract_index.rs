@@ -1,4 +1,4 @@
-//! `/solr/{core}/update/extract` Solr-Cell indexing path (issue #259).
+//! `/wayfinder/{core}/update/extract` Solr-Cell indexing path (issue #259).
 //!
 //! The companion to `extract_route.rs`: where that file covers #258's
 //! `extractOnly=true` extraction response, this one covers #259's

@@ -710,7 +710,7 @@ fn unsupported_field_type_errors_naming_the_field() {
 /// entries sharing a `name` silently make the second one dead code. That is a
 /// config error worth failing on: the schema author who wrote the second
 /// block clearly intended it to take effect. This is the root cause behind
-/// `GET /solr/{core}/schema/fieldtypes` emitting a duplicated name twice in
+/// `GET /wayfinder/{core}/schema/fieldtypes` emitting a duplicated name twice in
 /// its `fieldTypes` array (issue #156, round 2).
 #[test]
 fn duplicate_field_type_names_are_rejected_at_load_time() {
@@ -889,7 +889,7 @@ tokenizer = "simple"
 /// The `text_en` reservation was a one-name special case; every other built-in
 /// `resolve_type` accepts is shadowable in exactly the same way and must be
 /// reserved in exactly the same way. Driving this off `builtin_type_names()`
-/// keeps the guard and `GET /solr/{core}/schema/fieldtypes` from drifting
+/// keeps the guard and `GET /wayfinder/{core}/schema/fieldtypes` from drifting
 /// apart when a stemmer language is added -- that list's *contents* are pinned
 /// independently against a real Solr trace in `tests/schema_fieldtypes.rs`,
 /// so this test only has to assert the reservation covers all of it, and

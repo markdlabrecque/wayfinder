@@ -11,7 +11,7 @@
 //! `responseHeader` key at all (confirmed by inspection of the 20 traces
 //! that send it: `00002`-`00019`, `00021`, `00022`).
 //!
-//! `GET /solr/{core}/terms` (issue #155) already implements this correctly
+//! `GET /wayfinder/{core}/terms` (issue #155) already implements this correctly
 //! (`src/lib.rs::terms`, guarded by `tests/terms.rs`'s
 //! `terms_omit_header_true_suppresses_response_header` and friends) — not
 //! duplicated here.
@@ -116,7 +116,7 @@ async fn indexed_app_with_config(config: Option<&str>) -> (Router, TempDir) {
 
     let req = Request::builder()
         .method("POST")
-        .uri(format!("/solr/{CORE}/update?commit=true"))
+        .uri(format!("/wayfinder/{CORE}/update?commit=true"))
         .header("content-type", "application/json")
         .body(Body::from(corpus().to_string()))
         .unwrap();
@@ -283,7 +283,7 @@ async fn update_response_header_present_when_omit_header_false() {
     let req = Request::builder()
         .method("POST")
         .uri(format!(
-            "/solr/{CORE}/update?commit=true&omitHeader=false&wt=json"
+            "/wayfinder/{CORE}/update?commit=true&omitHeader=false&wt=json"
         ))
         .header("content-type", "application/json")
         .body(Body::from("[]"))
@@ -306,7 +306,7 @@ async fn update_response_header_present_when_omit_header_absent() {
     let (app, _dir) = indexed_app().await;
     let req = Request::builder()
         .method("POST")
-        .uri(format!("/solr/{CORE}/update?commit=true"))
+        .uri(format!("/wayfinder/{CORE}/update?commit=true"))
         .header("content-type", "application/json")
         .body(Body::from("[]"))
         .unwrap();
@@ -334,7 +334,7 @@ async fn update_omit_header_true_suppresses_response_header_entirely() {
     let req = Request::builder()
         .method("POST")
         .uri(format!(
-            "/solr/{CORE}/update?commit=true&omitHeader=true&wt=json"
+            "/wayfinder/{CORE}/update?commit=true&omitHeader=true&wt=json"
         ))
         .header("content-type", "application/json")
         .body(Body::from("[]"))
@@ -363,7 +363,7 @@ async fn update_omit_header_is_a_registered_param_under_strict_params() {
     let req = Request::builder()
         .method("POST")
         .uri(format!(
-            "/solr/{CORE}/update?commit=true&omitHeader=false&wt=json"
+            "/wayfinder/{CORE}/update?commit=true&omitHeader=false&wt=json"
         ))
         .header("content-type", "application/json")
         .body(Body::from("[]"))
@@ -417,7 +417,7 @@ async fn admin_luke_strict_unknown_omit_header_error_retains_header() {
 async fn admin_luke_unknown_core_omit_header_error_retains_header() {
     let (app, _dir) = indexed_app().await;
     let req = Request::builder()
-        .uri("/solr/nosuch/admin/luke?omitHeader=true&wt=json")
+        .uri("/wayfinder/nosuch/admin/luke?omitHeader=true&wt=json")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.expect("must not fail");
@@ -520,7 +520,7 @@ async fn update_error_omit_header_true_suppresses_header_and_retains_error() {
     let (app, _dir) = indexed_app().await;
     let req = Request::builder()
         .method("POST")
-        .uri(format!("/solr/{CORE}/update?omitHeader=true&wt=json"))
+        .uri(format!("/wayfinder/{CORE}/update?omitHeader=true&wt=json"))
         .header("content-type", "application/json")
         .body(Body::from("{not json"))
         .unwrap();
@@ -547,12 +547,12 @@ async fn invalid_omit_header_is_inert_before_select_and_update_validation() {
     let (app, _dir) = indexed_app().await;
 
     let select = Request::builder()
-        .uri("/solr/nosuch/select?q=*:*&omitHeader=1&wt=json")
+        .uri("/wayfinder/nosuch/select?q=*:*&omitHeader=1&wt=json")
         .body(Body::empty())
         .unwrap();
     let update = Request::builder()
         .method("POST")
-        .uri("/solr/nosuch/update?omitHeader=1&wt=json")
+        .uri("/wayfinder/nosuch/update?omitHeader=1&wt=json")
         .header("content-type", "application/json")
         .body(Body::from("[]"))
         .unwrap();
@@ -579,7 +579,7 @@ async fn select_invalid_omit_header_values_return_headerless_json_400() {
     for value in ["1", "t"] {
         let req = Request::builder()
             .uri(format!(
-                "/solr/{CORE}/select?q=*:*&omitHeader={value}&wt=json"
+                "/wayfinder/{CORE}/select?q=*:*&omitHeader={value}&wt=json"
             ))
             .body(Body::empty())
             .unwrap();

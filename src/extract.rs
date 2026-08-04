@@ -3033,7 +3033,7 @@ impl ExtractedDocument {
     /// `body`/`links`, so emitting them changes nothing observable. Trigger:
     /// a captured index whose `fmap.<tika-meta-key>` lands a value in a real
     /// schema field.
-    pub fn solr_cell_source_fields(&self) -> Vec<(String, Vec<String>)> {
+    pub fn extract_source_fields(&self) -> Vec<(String, Vec<String>)> {
         let mut fields: Vec<(String, Vec<String>)> = Vec::new();
         fields.push(("content".to_string(), vec![self.body_text.clone()]));
         if let Some(title) = self.title.clone() {

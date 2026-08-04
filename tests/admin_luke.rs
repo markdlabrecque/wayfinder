@@ -1,4 +1,4 @@
-//! `GET /solr/{core}/admin/luke` — issue #157, reversing the #57 descope for
+//! `GET /wayfinder/{core}/admin/luke` — issue #157, reversing the #57 descope for
 //! this endpoint.
 //!
 //! Ground truth for the envelope shape: `solr-ref/search-api/trace/00024.json`
@@ -389,7 +389,7 @@ async fn luke_strict_params_rejects_an_unknown_param() {
 /// Mutation guard for the `check_core` call in the handler, added by the
 /// implementor (the spec named this guard explicitly: sibling #156 shipped
 /// without it and the reviewer caught it). Without `check_core`,
-/// `GET /solr/nosuchcore/admin/luke` would report the real core's doc count
+/// `GET /wayfinder/nosuchcore/admin/luke` would report the real core's doc count
 /// under any core name at all. Verified by deletion: removing the
 /// `check_core` line makes this test fail with 200, and nothing else in the
 /// suite notices.
@@ -431,7 +431,7 @@ async fn luke_unknown_core_is_a_json_404() {
     );
 }
 
-/// Routing assertion: `GET /solr/{core}/admin/luke` is reachable under the
+/// Routing assertion: `GET /wayfinder/{core}/admin/luke` is reachable under the
 /// core path at all. Deliberately weaker than the tests above — it asserts
 /// only "not 404", so it stays true regardless of what the handler answers,
 /// and it fails loudly if the route is ever dropped from `search_api_routes!`
@@ -446,6 +446,6 @@ async fn luke_route_exists_under_the_core_path() {
     assert_ne!(
         status,
         StatusCode::NOT_FOUND,
-        "GET /solr/{{core}}/admin/luke must be routed, got: {body}"
+        "GET /wayfinder/{{core}}/admin/luke must be routed, got: {body}"
     );
 }

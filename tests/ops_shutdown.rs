@@ -103,7 +103,7 @@ stored = true
         loop {
             if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
                 let _ = stream.write_all(
-                    b"GET /solr/shutdown/admin/ping?wt=json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    b"GET /wayfinder/shutdown/admin/ping?wt=json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
                 );
                 let mut response = String::new();
                 if stream.read_to_string(&mut response).is_ok()
@@ -145,7 +145,7 @@ stored = true
         let (status, response) = http_request(
             addr,
             "POST",
-            "/solr/shutdown/update?commitWithin=60000&wt=json&ignored_by_wayfinder=yes",
+            "/wayfinder/shutdown/update?commitWithin=60000&wt=json&ignored_by_wayfinder=yes",
             document,
         );
         assert_eq!(
@@ -174,7 +174,7 @@ stored = true
         for evidence in [
             "wayfinder listening",
             "method=POST",
-            "uri=/solr/shutdown/update?commitWithin=60000&wt=json&ignored_by_wayfinder=yes",
+            "uri=/wayfinder/shutdown/update?commitWithin=60000&wt=json&ignored_by_wayfinder=yes",
             "status=200",
             "ignoring unknown request parameter",
             "parameter=ignored_by_wayfinder",
@@ -193,7 +193,7 @@ stored = true
         let (status, response) = http_request(
             restarted_addr,
             "GET",
-            "/solr/shutdown/select?q=id:shutdown-doc&fl=id&wt=json",
+            "/wayfinder/shutdown/select?q=id:shutdown-doc&fl=id&wt=json",
             "",
         );
         assert_eq!(

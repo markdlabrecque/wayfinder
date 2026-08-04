@@ -1,5 +1,5 @@
 //! Solr TermsComponent (issue #155, PRD's contract-endpoint backlog):
-//! `GET /solr/{core}/terms` — enumerates the analyzed inverted-index term
+//! `GET /wayfinder/{core}/terms` — enumerates the analyzed inverted-index term
 //! dictionary of a field with per-term document frequency.
 //!
 //! ## Ground truth
@@ -741,7 +741,7 @@ fn dynamic_trace_corpus() -> Value {
 /// The defect: `terms.fl=tm_X3b_en_title` names nothing in `[[fields]]`, only
 /// a `[[dynamic_fields]]` pattern -- exactly `presets/search-api.toml`'s own
 /// `tm_X3b_en_*` rule, and exactly the request the bug report reproduced
-/// 400ing (`GET /solr/search_api_capture/terms?terms=true&terms.fl=tm_X3b_en_title`)
+/// 400ing (`GET /wayfinder/search_api_capture/terms?terms=true&terms.fl=tm_X3b_en_title`)
 /// even though `select?q=tm_X3b_en_title:lazy` on the same app resolves the
 /// same name via `CoreIndex::field_target` and returns real hits. `/terms`
 /// must resolve it the same way, not just statically-declared names.

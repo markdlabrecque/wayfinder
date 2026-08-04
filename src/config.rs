@@ -196,7 +196,7 @@ pub struct Commit {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Admin {
-    /// The `lucene.solr-spec-version` value reported by `/admin/info/system`
+    /// The `lucene.wayfinder-spec-version` value reported by `/admin/info/system`
     /// and `<core>/admin/system` (issue #59). `search_api_solr`'s
     /// `SolrConnector::getSolrVersion()` (finding 78) reads this field alone
     /// to detect the Solr version, then regex-captures the leading
@@ -212,7 +212,12 @@ pub struct Admin {
     /// `schema.xml` already targets — see issue #59's spec for the full
     /// reasoning). This value is intentionally unclamped: an operator who
     /// overrides it is trusted to know the compatibility risk.
-    pub reported_solr_version: String,
+    ///
+    /// The TOML key was originally `reported_solr_version`; that name is kept
+    /// as a serde alias so existing `wayfinder.toml` files (a `deny_unknown_fields`
+    /// contract with operators) keep loading unchanged.
+    #[serde(alias = "reported_solr_version")]
+    pub reported_server_version: String,
 }
 
 /// `/update/extract` resource limits (issue #258). Every knob here overrides
@@ -287,7 +292,7 @@ impl Extraction {
 impl Default for Admin {
     fn default() -> Self {
         Admin {
-            reported_solr_version: "9.0.0".to_string(),
+            reported_server_version: "9.0.0".to_string(),
         }
     }
 }

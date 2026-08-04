@@ -43,7 +43,10 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
  * The version string's location in the admin/system response
  * (lucene.solr-spec-version = "9.10.1") is ground truth from
  * solr-ref/responses/admin_system.json -- read the fixture, per the plan
- * doc's "Premises to verify before implementing" item (c).
+ * doc's "Premises to verify before implementing" item (c). Wayfinder itself
+ * now emits the renamed sibling key lucene.wayfinder-spec-version (#325), so
+ * the fixture-derived mock bodies below patch that one key name before use;
+ * the fixture is left untouched as ground truth for real Solr's shape.
  *
  * @coversDefaultClass \Drupal\search_api_wayfinder\Plugin\search_api\backend\WayfinderBackend
  * @group search_api_wayfinder
@@ -452,7 +455,7 @@ class WayfinderBackendTest extends TestCase {
       'scheme' => 'http',
       'host' => 'localhost',
       'port' => 8983,
-      'path' => '/solr',
+      'path' => '/wayfinder',
       'core' => 'mycore',
       'timeout' => 5,
       'commitWithin' => 1000,
@@ -467,7 +470,7 @@ class WayfinderBackendTest extends TestCase {
    * @covers ::viewSettings
    */
   public function testViewSettingsIncludesVersionStringFromAdminSystem(): void {
-    $body = (string) file_get_contents(__DIR__ . '/../../../../../solr-ref/responses/admin_system.json');
+    $body = $this->wayfinderAdminSystemBody();
     $backend = $this->createBackend(new Response(200, [], $body));
 
     $settings = $backend->viewSettings();
@@ -480,32 +483,49 @@ class WayfinderBackendTest extends TestCase {
     $this->assertCount(
       1,
       $versionRows,
-      'viewSettings() should include exactly one "Wayfinder version" row, sourced from admin/system (solr-ref/responses/admin_system.json: lucene.solr-spec-version).'
+      'viewSettings() should include exactly one "Wayfinder version" row, sourced from admin/system (solr-ref/responses/admin_system.json: lucene.wayfinder-spec-version).'
     );
     // Exact match, not a substring check: the fixture's sibling
-    // lucene.solr-impl-version is "9.10.1 c135e6335c... - gerlowskija - ..."
+    // lucene.wayfinder-impl-version is "9.10.1 c135e6335c... - gerlowskija - ..."
     // and so *contains* "9.10.1" too. A real Wayfinder server emits
-    // solr-impl-version as "{version} wayfinder" (src/lib.rs), so a substring
+    // wayfinder-impl-version as "{version} wayfinder" (src/lib.rs), so a substring
     // assertion would pass while the admin panel rendered "9.0.0 wayfinder".
     $this->assertSame(
       '9.10.1',
       $versionRows[0]['info'],
-      'The version row must carry lucene.solr-spec-version verbatim, not lucene.solr-impl-version.'
+      'The version row must carry lucene.wayfinder-spec-version verbatim, not lucene.wayfinder-impl-version.'
     );
+  }
+
+  /**
+   * Loads solr-ref/responses/admin_system.json (real captured Solr, left
+   * untouched as ground truth for shape) and patches only the two sibling
+   * keys Wayfinder itself renamed (#325): lucene.solr-spec-version and
+   * lucene.solr-impl-version become lucene.wayfinder-spec-version and
+   * lucene.wayfinder-impl-version. This reproduces what a real (renamed)
+   * Wayfinder server now emits without touching the captured fixture.
+   */
+  private function wayfinderAdminSystemBody(): string {
+    $raw = (string) file_get_contents(__DIR__ . '/../../../../../solr-ref/responses/admin_system.json');
+    $decoded = json_decode($raw, TRUE);
+    $decoded['lucene']['wayfinder-spec-version'] = $decoded['lucene']['solr-spec-version'];
+    $decoded['lucene']['wayfinder-impl-version'] = $decoded['lucene']['solr-impl-version'];
+    unset($decoded['lucene']['solr-spec-version'], $decoded['lucene']['solr-impl-version']);
+    return (string) json_encode($decoded);
   }
 
   /**
    * @covers ::viewSettings
    */
   public function testViewSettingsStillIncludesServerUrl(): void {
-    $body = (string) file_get_contents(__DIR__ . '/../../../../../solr-ref/responses/admin_system.json');
+    $body = $this->wayfinderAdminSystemBody();
     $backend = $this->createBackend(new Response(200, [], $body), ['core' => 'mycore']);
 
     $settings = $backend->viewSettings();
 
     $urlRows = array_filter(
       $settings,
-      fn (array $row) => str_contains((string) $row['info'], 'http://localhost:8983/solr/mycore')
+      fn (array $row) => str_contains((string) $row['info'], 'http://localhost:8983/wayfinder/mycore')
     );
 
     $this->assertNotEmpty($urlRows, 'viewSettings() should still include the server core URL alongside the version handshake.');
@@ -531,7 +551,7 @@ class WayfinderBackendTest extends TestCase {
 
     $urlRows = array_filter(
       $settings,
-      fn (array $row) => str_contains((string) $row['info'], 'http://localhost:8983/solr/mycore')
+      fn (array $row) => str_contains((string) $row['info'], 'http://localhost:8983/wayfinder/mycore')
     );
     $this->assertNotEmpty($urlRows, 'A failed admin/system handshake must still leave the server URL row in place.');
 
@@ -606,14 +626,14 @@ class WayfinderBackendTest extends TestCase {
       'transport failure' => [
         new ConnectException(
           'Connection refused',
-          new Request('GET', 'http://localhost:8983/solr/mycore/admin/system')
+          new Request('GET', 'http://localhost:8983/wayfinder/mycore/admin/system')
         ),
       ],
     ];
   }
 
   /**
-   * A 200 response that does not carry lucene.solr-spec-version appends no
+   * A 200 response that does not carry lucene.wayfinder-spec-version appends no
    * version row, rather than an empty or "null"-rendering one.
    *
    * @dataProvider adminSystemWithoutVersionProvider
@@ -632,7 +652,7 @@ class WayfinderBackendTest extends TestCase {
 
     $urlRows = array_filter(
       $settings,
-      fn (array $row) => str_contains((string) $row['info'], 'http://localhost:8983/solr/mycore')
+      fn (array $row) => str_contains((string) $row['info'], 'http://localhost:8983/wayfinder/mycore')
     );
     $this->assertNotEmpty($urlRows, 'The server URL row must survive a version-less admin/system response.');
   }
@@ -643,9 +663,9 @@ class WayfinderBackendTest extends TestCase {
   public static function adminSystemWithoutVersionProvider(): array {
     return [
       'no lucene block' => ['{"responseHeader":{"status":0}}'],
-      'lucene block without solr-spec-version' => ['{"lucene":{"lucene-spec-version":"9.12.3"}}'],
-      'empty version string' => ['{"lucene":{"solr-spec-version":""}}'],
-      'non-string version' => ['{"lucene":{"solr-spec-version":{"nested":"object"}}}'],
+      'lucene block without wayfinder-spec-version' => ['{"lucene":{"lucene-spec-version":"9.12.3"}}'],
+      'empty version string' => ['{"lucene":{"wayfinder-spec-version":""}}'],
+      'non-string version' => ['{"lucene":{"wayfinder-spec-version":{"nested":"object"}}}'],
       'empty body' => [''],
     ];
   }

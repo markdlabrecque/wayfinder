@@ -1,4 +1,4 @@
-//! `GET /solr/{core}/schema/fieldtypes` (issue #156, resolving #142 as In).
+//! `GET /wayfinder/{core}/schema/fieldtypes` (issue #156, resolving #142 as In).
 //!
 //! Ground truth for the response shape is `solr-ref/search-api/trace/00020.json`
 //! (a real `solr:9` `GET /solr/{core}/schema/fieldtypes?wt=json&json.nl=flat`):
@@ -73,23 +73,23 @@ const UNSUPPORTED_LANGUAGE_NAMES: &[&str] = &["text_ja", "text_zh", "text_ko"];
 /// client would read and it must be Solr's.
 const EXPECTED_CLASSES: &[(&str, &str)] = &[
     // trace: `string`
-    ("string", "solr.StrField"),
+    ("string", "wayfinder.StrField"),
     // Wayfinder alias for `string`, so the same class the trace pins for it.
-    ("keyword", "solr.StrField"),
+    ("keyword", "wayfinder.StrField"),
     // trace: `pint`
-    ("int", "solr.IntPointField"),
+    ("int", "wayfinder.IntPointField"),
     // trace: `plong`
-    ("long", "solr.LongPointField"),
+    ("long", "wayfinder.LongPointField"),
     // trace: `pfloat`
-    ("float", "solr.FloatPointField"),
+    ("float", "wayfinder.FloatPointField"),
     // trace: `pdouble`
-    ("double", "solr.DoublePointField"),
+    ("double", "wayfinder.DoublePointField"),
     // trace: `pdate`
-    ("date", "solr.DatePointField"),
+    ("date", "wayfinder.DatePointField"),
     // trace: `text_en`
-    ("text_en", "solr.TextField"),
+    ("text_en", "wayfinder.TextField"),
     // trace: every `text_*` entry (`text_und`, `text_ws`, ...) is a TextField.
-    ("text_general", "solr.TextField"),
+    ("text_general", "wayfinder.TextField"),
 ];
 
 /// The keys `field_type_entry` must put on every entry beyond `name`/`class`.
@@ -188,7 +188,7 @@ async fn schema_fieldtypes_every_entry_has_name_and_class() {
     }
 }
 
-/// `is_string()` on `class` is not enough: `int -> solr.StrField`, or a
+/// `is_string()` on `class` is not enough: `int -> wayfinder.StrField`, or a
 /// fabricated `wayfinder.Foo`, would pass it. This pins the mapping to the
 /// classes `solr-ref/search-api/trace/00020.json` actually shows (see
 /// `EXPECTED_CLASSES`), which is the compatibility contract's rule that
@@ -215,7 +215,7 @@ async fn schema_fieldtypes_class_matches_the_trace_for_each_builtin() {
     }
 
     // Every stemmed language preset is analyzed text, which the trace shows as
-    // `solr.TextField` for all of its own `text_*` entries.
+    // `wayfinder.TextField` for all of its own `text_*` entries.
     for code in NON_ENGLISH_LANGUAGE_CODES {
         let name = format!("text_{code}");
         let entry = entries
@@ -224,9 +224,9 @@ async fn schema_fieldtypes_class_matches_the_trace_for_each_builtin() {
             .unwrap_or_else(|| panic!("fieldTypes must include `{name}`, got: {body}"));
         assert_eq!(
             entry["class"].as_str(),
-            Some("solr.TextField"),
+            Some("wayfinder.TextField"),
             "`{name}` is analyzed text, which the trace reports as \
-             solr.TextField, got: {entry}"
+             wayfinder.TextField, got: {entry}"
         );
     }
 }
@@ -484,7 +484,7 @@ kind = "lowercase"
     // name alone, and `..._every_entry_has_name_and_class` only checks
     // `class.is_string()`. Every custom chain resolves to `ResolvedType::Text`
     // (`schema::resolve_type` returns that for any matching `[[field_types]]`
-    // entry), so `solr.TextField` is the class a client must read.
+    // entry), so `wayfinder.TextField` is the class a client must read.
     let custom = body["fieldTypes"]
         .as_array()
         .expect("fieldTypes must be a JSON array")
@@ -493,7 +493,7 @@ kind = "lowercase"
         .unwrap_or_else(|| panic!("the custom chain must be reported, got: {body}"));
     assert_eq!(
         custom["class"].as_str(),
-        Some("solr.TextField"),
+        Some("wayfinder.TextField"),
         "a custom [[field_types]] chain is analyzed text, so it must report Solr's TextField \
          class, got: {custom}"
     );
@@ -503,7 +503,7 @@ kind = "lowercase"
 
 /// Same endpoint-agnostic JSON-404 divergence every other route carries
 /// (finding 49, `tests/update_pipeline.rs`'s `unknown_core_*` block): without
-/// this, `GET /solr/nosuchcore/schema/fieldtypes` would serve the real core's
+/// this, `GET /wayfinder/nosuchcore/schema/fieldtypes` would serve the real core's
 /// field types under any core name at all.
 #[tokio::test]
 async fn schema_fieldtypes_unknown_core_is_a_json_404() {

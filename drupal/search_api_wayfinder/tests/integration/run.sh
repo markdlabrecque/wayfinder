@@ -63,7 +63,7 @@ docker compose up -d --build wayfinder
 echo -n "waiting for wayfinder ping"
 wayfinder_ready=0
 for _ in $(seq 60); do
-  if curl -sf "http://localhost:18990/solr/content/admin/ping?wt=json" >/dev/null 2>&1; then
+  if curl -sf "http://localhost:18990/wayfinder/content/admin/ping?wt=json" >/dev/null 2>&1; then
     echo " ok"; wayfinder_ready=1; break
   fi
   echo -n "."; sleep 1
@@ -143,12 +143,12 @@ docker exec wf80-drupal bash -lc "
 # async *scheduled* hard commit, not immediate -- so the just-indexed fields
 # are not yet visible to /select without this. Force a synchronous commit
 # straight to the wayfinder container so the round trip isn't racing it.
-curl -sf --user operator:secret "http://localhost:18990/solr/content/update?commit=true" -H 'Content-Type: application/json' -d '{}' >/dev/null
+curl -sf --user operator:secret "http://localhost:18990/wayfinder/content/update?commit=true" -H 'Content-Type: application/json' -d '{}' >/dev/null
 
 # Assert documents actually landed before handing off to run_queries.php,
 # so the "indexing succeeded" claim above is backed by real evidence, not
 # just this comment.
-num_found="$(curl -sf --user operator:secret --get "http://localhost:18990/solr/content/select" \
+num_found="$(curl -sf --user operator:secret --get "http://localhost:18990/wayfinder/content/select" \
   --data-urlencode 'q=*:*' \
   --data-urlencode 'fq=index_id:"wf80_index"' \
   --data-urlencode 'rows=0' \

@@ -114,17 +114,17 @@ fn update9_corpus() -> Value {
     ])
 }
 
-/// `POST /solr/update9/<query>` with `body` as the request body.
+/// `POST /wayfinder/update9/<query>` with `body` as the request body.
 async fn post9(app: &Router, query: &str, body: &str) -> (StatusCode, Value) {
     request_full(app, "POST", &format!("update9/{query}"), Some(body)).await
 }
 
-/// `GET /solr/update9/<query>`.
+/// `GET /wayfinder/update9/<query>`.
 async fn get9(app: &Router, query: &str) -> (StatusCode, Value) {
     request_full(app, "GET", &format!("update9/{query}"), None).await
 }
 
-/// Arbitrary method against `/solr/update9/<query>`.
+/// Arbitrary method against `/wayfinder/update9/<query>`.
 async fn method9(
     app: &Router,
     method: &str,
@@ -161,7 +161,7 @@ fn build_update9_app_with_config(dir: &Path, config_toml: &str) -> anyhow::Resul
     wayfinder::app_with_config(&schema_path, &data_dir, &config_path)
 }
 
-/// Polls `GET /solr/update9/<select_query>` every ~50ms until
+/// Polls `GET /wayfinder/update9/<select_query>` every ~50ms until
 /// `response.numFound` is nonzero or `timeout` elapses, then returns the last
 /// result either way. Never a bare sleep-then-assert (task spec).
 async fn poll_until_visible(

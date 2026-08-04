@@ -511,12 +511,12 @@ impl ProbeApp {
     }
 
     async fn request(&self, method: Method, path: &str, body: Option<&str>) -> (StatusCode, Value) {
-        let uri = if path.starts_with("/solr/") {
+        let uri = if path.starts_with("/wayfinder/") {
             path.to_string()
         } else if path.starts_with("content/") {
-            format!("/solr/{path}")
+            format!("/wayfinder/{path}")
         } else {
-            format!("/solr/content/{path}")
+            format!("/wayfinder/content/{path}")
         };
         let mut request = Request::builder().method(method).uri(uri);
         if body.is_some() {
@@ -722,7 +722,7 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
                 )
                 .await;
             let mlt = probe.ok("mlt?q=id:doc1&mlt.fl=body&json.nl=flat").await;
-            let admin_info = probe.ok("/solr/admin/info/system?json.nl=flat").await;
+            let admin_info = probe.ok("/wayfinder/admin/info/system?json.nl=flat").await;
             let core_admin = probe.ok("content/admin/system?json.nl=flat").await;
             update && select && mlt && admin_info && core_admin
         }
@@ -731,17 +731,17 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
         // The mbeans leg keeps fidelity to the trace that motivates the
         // contract entry (`solr-ref/search-api/trace/00025.json`, which sends
         // `json.nl=map&json.nl=flat` in that order), but it cannot evidence
-        // *which* value wins: `admin_mbeans` renders `solr-mbeans` as an
+        // *which* value wins: `admin_mbeans` renders `wayfinder-mbeans` as an
         // object unconditionally and has no `flat` named-list variant to
         // differ from, so it reads the same whether Wayfinder honours
         // first-value-wins, ignores `json.nl`, or mishandles the repetition.
         // What it does buy is that the item can no longer read as covered
         // purely because a route exists (which is how it flipped when #158
-        // landed `GET /solr/{core}/admin/mbeans`). It stays
+        // landed `GET /wayfinder/{core}/admin/mbeans`). It stays
         // captured-equivalent rather than byte-identical by omitting
         // `stats=true`, which only controls a `stats` sub-object nested
-        // *inside* `solr-mbeans`, not its presence or shape -- the sibling
-        // `admin.mbeans.solr-mbeans` probe omits it for the same reason.
+        // *inside* `wayfinder-mbeans`, not its presence or shape -- the sibling
+        // `admin.mbeans.wayfinder-mbeans` probe omits it for the same reason.
         //
         // The `/select` facet leg is what discriminates.
         // `JsonNl::from_params` (`src/facet.rs`) reads `json.nl` and
@@ -776,7 +776,7 @@ async fn semantic_covered(probe: &ProbeApp, id: &str) -> bool {
             let mbeans = probe
                 .response("content/admin/mbeans?json.nl=map&json.nl=flat")
                 .await
-                .is_some_and(|body| body.get("solr-mbeans").is_some_and(Value::is_object));
+                .is_some_and(|body| body.get("wayfinder-mbeans").is_some_and(Value::is_object));
             let facet = probe
                 .response("select?q=*:*&facet=true&facet.field=category&json.nl=map&json.nl=flat")
                 .await
@@ -1390,10 +1390,10 @@ async fn response_field_covered(probe: &ProbeApp, id: &str) -> bool {
                 response.get("numFound").is_some_and(Value::is_u64)
                     && response.get("docs").is_some_and(Value::is_array)
             }),
-        "admin.info-system.lucene.solr-spec-version" => probe
-            .response("/solr/admin/info/system")
+        "admin.info-system.lucene.wayfinder-spec-version" => probe
+            .response("/wayfinder/admin/info/system")
             .await
-            .and_then(|body| body.pointer("/lucene/solr-spec-version").cloned())
+            .and_then(|body| body.pointer("/lucene/wayfinder-spec-version").cloned())
             .is_some_and(|version| {
                 version
                     .as_str()
@@ -1431,10 +1431,10 @@ async fn response_field_covered(probe: &ProbeApp, id: &str) -> bool {
             .await
             .and_then(|body| body.pointer("/index/numDocs").cloned())
             .is_some_and(|value| value.is_u64()),
-        "admin.mbeans.solr-mbeans" => probe
+        "admin.mbeans.wayfinder-mbeans" => probe
             .response("content/admin/mbeans")
             .await
-            .and_then(|body| body.get("solr-mbeans").cloned())
+            .and_then(|body| body.get("wayfinder-mbeans").cloned())
             .is_some_and(|value| value.is_object()),
         // A client reads term/frequency pairs out of `terms.<field>`, so the
         // probe has to ask for a real field -- `terms=true` with no `terms.fl`
@@ -1599,10 +1599,10 @@ mod tests {
 
     fn hollow_probe() -> ProbeApp {
         let app = Router::new()
-            .route("/solr/content/admin/luke", get(hollow_index_container))
-            .route("/solr/content/terms", get(hollow_terms_container))
+            .route("/wayfinder/content/admin/luke", get(hollow_index_container))
+            .route("/wayfinder/content/terms", get(hollow_terms_container))
             .route(
-                "/solr/content/schema/fieldtypes",
+                "/wayfinder/content/schema/fieldtypes",
                 get(hollow_fieldtypes_container),
             );
         ProbeApp {
@@ -1630,10 +1630,13 @@ mod tests {
 
     fn wrong_type_probe() -> ProbeApp {
         let app = Router::new()
-            .route("/solr/content/admin/luke", get(wrong_type_index_num_docs))
-            .route("/solr/content/terms", get(wrong_type_term_counts))
             .route(
-                "/solr/content/schema/fieldtypes",
+                "/wayfinder/content/admin/luke",
+                get(wrong_type_index_num_docs),
+            )
+            .route("/wayfinder/content/terms", get(wrong_type_term_counts))
+            .route(
+                "/wayfinder/content/schema/fieldtypes",
                 get(wrong_type_fieldtype_name),
             );
         ProbeApp {
@@ -1643,7 +1646,10 @@ mod tests {
     }
 
     fn hollow_terms_with_empty_field_probe() -> ProbeApp {
-        let app = Router::new().route("/solr/content/terms", get(hollow_terms_field_with_no_terms));
+        let app = Router::new().route(
+            "/wayfinder/content/terms",
+            get(hollow_terms_field_with_no_terms),
+        );
         ProbeApp {
             app,
             _workspace: ProbeWorkspace::new(),
@@ -1730,37 +1736,37 @@ mod tests {
     // Historical issue #167 context: this probe once asserted only HTTP 200
     // on `content/admin/mbeans?json.nl=flat&json.nl=map`. It therefore flipped
     // to covered as a side effect of #158 routing
-    // `GET /solr/{core}/admin/mbeans`, with nothing verifying `solr-mbeans`
+    // `GET /wayfinder/{core}/admin/mbeans`, with nothing verifying `wayfinder-mbeans`
     // was present or object-shaped as trace `00025.json` requires.
     // Same class of bug as #162 (an existence/200 check standing in for a
     // shape check), same stub-router fix pattern: the real handler cannot be
-    // coaxed into emitting a non-object `solr-mbeans` (`admin_mbeans` in
+    // coaxed into emitting a non-object `wayfinder-mbeans` (`admin_mbeans` in
     // `src/lib.rs` builds it unconditionally, regardless of `json.nl` or
     // `stats`), so this drives the real (private) `semantic_covered`
     // function against a throwaway stub router serving the wrong shape at
     // the same path `content/admin/mbeans` resolves to
-    // (`/solr/content/admin/mbeans`).
+    // (`/wayfinder/content/admin/mbeans`).
     //
     // The probe now also has a `/select` facet leg, which is the half that
     // actually discriminates first-value-wins. Its failing shapes are
-    // stubbed the same way, at `/solr/content/select`: the real app cannot
+    // stubbed the same way, at `/wayfinder/content/select`: the real app cannot
     // serve them without `json.nl` handling itself regressing, which is what
     // `repeated_map_and_flat_stays_covered_against_the_real_seeded_app`
     // (`tests/search_api_coverage.rs`) guards instead.
-    async fn mbeans_response_missing_solr_mbeans() -> axum::Json<Value> {
+    async fn mbeans_response_missing_wayfinder_mbeans() -> axum::Json<Value> {
         axum::Json(serde_json::json!({"responseHeader": {"status": 0, "QTime": 0}}))
     }
 
-    async fn mbeans_response_solr_mbeans_array() -> axum::Json<Value> {
-        axum::Json(serde_json::json!({"solr-mbeans": []}))
+    async fn mbeans_response_wayfinder_mbeans_array() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"wayfinder-mbeans": []}))
     }
 
-    async fn mbeans_response_solr_mbeans_null() -> axum::Json<Value> {
-        axum::Json(serde_json::json!({"solr-mbeans": null}))
+    async fn mbeans_response_wayfinder_mbeans_null() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"wayfinder-mbeans": null}))
     }
 
-    async fn mbeans_response_solr_mbeans_object() -> axum::Json<Value> {
-        axum::Json(serde_json::json!({"solr-mbeans": {"CORE": {}, "UPDATE": {}}}))
+    async fn mbeans_response_wayfinder_mbeans_object() -> axum::Json<Value> {
+        axum::Json(serde_json::json!({"wayfinder-mbeans": {"CORE": {}, "UPDATE": {}}}))
     }
 
     // The probe is a conjunction of an mbeans leg and a `/select` facet leg,
@@ -1789,8 +1795,8 @@ mod tests {
         select: axum::routing::MethodRouter,
     ) -> ProbeApp {
         let app = Router::new()
-            .route("/solr/content/admin/mbeans", mbeans)
-            .route("/solr/content/select", select);
+            .route("/wayfinder/content/admin/mbeans", mbeans)
+            .route("/wayfinder/content/select", select);
         ProbeApp {
             app,
             _workspace: ProbeWorkspace::new(),
@@ -1799,74 +1805,74 @@ mod tests {
 
     fn mbeans_missing_probe() -> ProbeApp {
         repeated_json_nl_probe(
-            get(mbeans_response_missing_solr_mbeans),
+            get(mbeans_response_missing_wayfinder_mbeans),
             get(select_facet_category_object),
         )
     }
 
     fn mbeans_array_probe() -> ProbeApp {
         repeated_json_nl_probe(
-            get(mbeans_response_solr_mbeans_array),
+            get(mbeans_response_wayfinder_mbeans_array),
             get(select_facet_category_object),
         )
     }
 
     fn mbeans_null_probe() -> ProbeApp {
         repeated_json_nl_probe(
-            get(mbeans_response_solr_mbeans_null),
+            get(mbeans_response_wayfinder_mbeans_null),
             get(select_facet_category_object),
         )
     }
 
     fn mbeans_object_probe() -> ProbeApp {
         repeated_json_nl_probe(
-            get(mbeans_response_solr_mbeans_object),
+            get(mbeans_response_wayfinder_mbeans_object),
             get(select_facet_category_object),
         )
     }
 
     fn facet_flat_array_probe() -> ProbeApp {
         repeated_json_nl_probe(
-            get(mbeans_response_solr_mbeans_object),
+            get(mbeans_response_wayfinder_mbeans_object),
             get(select_facet_category_flat_array),
         )
     }
 
     fn facet_missing_probe() -> ProbeApp {
         repeated_json_nl_probe(
-            get(mbeans_response_solr_mbeans_object),
+            get(mbeans_response_wayfinder_mbeans_object),
             get(select_facet_category_missing),
         )
     }
 
     #[tokio::test]
-    async fn repeated_map_and_flat_probe_rejects_a_response_missing_solr_mbeans() {
+    async fn repeated_map_and_flat_probe_rejects_a_response_missing_wayfinder_mbeans() {
         let probe = mbeans_missing_probe();
         assert!(
             !semantic_covered(&probe, "request.json-nl.repeated-map-and-flat").await,
-            "request.json-nl.repeated-map-and-flat must require `solr-mbeans` to \
+            "request.json-nl.repeated-map-and-flat must require `wayfinder-mbeans` to \
              be present in the response, not merely that the request 200s -- a \
-             200 with no `solr-mbeans` key at all must not count as covered"
+             200 with no `wayfinder-mbeans` key at all must not count as covered"
         );
     }
 
     #[tokio::test]
-    async fn repeated_map_and_flat_probe_rejects_a_non_object_solr_mbeans_array() {
+    async fn repeated_map_and_flat_probe_rejects_a_non_object_wayfinder_mbeans_array() {
         let probe = mbeans_array_probe();
         assert!(
             !semantic_covered(&probe, "request.json-nl.repeated-map-and-flat").await,
-            "request.json-nl.repeated-map-and-flat must require `solr-mbeans` to \
+            "request.json-nl.repeated-map-and-flat must require `wayfinder-mbeans` to \
              be a JSON object -- the shape the trace settled on -- not merely \
              present; a JSON array must not count as covered"
         );
     }
 
     #[tokio::test]
-    async fn repeated_map_and_flat_probe_rejects_a_null_solr_mbeans() {
+    async fn repeated_map_and_flat_probe_rejects_a_null_wayfinder_mbeans() {
         let probe = mbeans_null_probe();
         assert!(
             !semantic_covered(&probe, "request.json-nl.repeated-map-and-flat").await,
-            "request.json-nl.repeated-map-and-flat must require `solr-mbeans` to \
+            "request.json-nl.repeated-map-and-flat must require `wayfinder-mbeans` to \
              be a JSON object, not merely present -- JSON null must not count as \
              covered"
         );
@@ -1900,12 +1906,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_map_and_flat_probe_accepts_an_object_solr_mbeans_and_object_facet() {
+    async fn repeated_map_and_flat_probe_accepts_an_object_wayfinder_mbeans_and_object_facet() {
         let probe = mbeans_object_probe();
         assert!(
             semantic_covered(&probe, "request.json-nl.repeated-map-and-flat").await,
             "request.json-nl.repeated-map-and-flat must still count a 200 \
-             response whose `solr-mbeans` is a genuine JSON object, alongside \
+             response whose `wayfinder-mbeans` is a genuine JSON object, alongside \
              an object-shaped `category` facet, as covered -- the tightened \
              check must not reject the shapes it is supposed to require"
         );
@@ -1922,7 +1928,7 @@ mod tests {
     // The real app cannot serve that shape at this path once the feature is
     // in, so, following the #162/#167 stubs above, this drives the real
     // (private) `semantic_covered` against a throwaway router serving
-    // `/solr/content/select` directly. Both the rejecting and the accepting
+    // `/wayfinder/content/select` directly. Both the rejecting and the accepting
     // case are pinned: without the accepting one a path or pointer typo would
     // make the rejection pass vacuously.
     //
@@ -1995,7 +2001,7 @@ mod tests {
 
     fn select_only_probe(select: axum::routing::MethodRouter) -> ProbeApp {
         ProbeApp {
-            app: Router::new().route("/solr/content/select", select),
+            app: Router::new().route("/wayfinder/content/select", select),
             _workspace: ProbeWorkspace::new(),
         }
     }
@@ -2255,7 +2261,7 @@ mod tests {
 
     fn mlt_only_probe(mlt: axum::routing::MethodRouter) -> ProbeApp {
         ProbeApp {
-            app: Router::new().route("/solr/content/mlt", mlt),
+            app: Router::new().route("/wayfinder/content/mlt", mlt),
             _workspace: ProbeWorkspace::new(),
         }
     }

@@ -33,7 +33,7 @@ class WayfinderClientTest extends TestCase {
     $mock = new MockHandler($responses);
     $handlerStack = HandlerStack::create($mock);
     $httpClient = new Client(['handler' => $handlerStack]);
-    return new WayfinderClient($httpClient, 'http://localhost:8983/solr/mycore', NULL, $username, $password);
+    return new WayfinderClient($httpClient, 'http://localhost:8983/wayfinder/mycore', NULL, $username, $password);
   }
 
   /**
@@ -50,8 +50,8 @@ class WayfinderClientTest extends TestCase {
     $httpClient = new Client(['handler' => $handlerStack]);
 
     return $username === NULL && $password === NULL
-      ? new WayfinderClient($httpClient, 'http://localhost:8983/solr/mycore')
-      : new WayfinderClient($httpClient, 'http://localhost:8983/solr/mycore', NULL, $username ?? '', $password ?? '');
+      ? new WayfinderClient($httpClient, 'http://localhost:8983/wayfinder/mycore')
+      : new WayfinderClient($httpClient, 'http://localhost:8983/wayfinder/mycore', NULL, $username ?? '', $password ?? '');
   }
 
   /**
@@ -198,12 +198,12 @@ class WayfinderClientTest extends TestCase {
     $mock = new MockHandler([
       new \GuzzleHttp\Exception\ConnectException(
         'Connection refused',
-        new \GuzzleHttp\Psr7\Request('GET', 'http://localhost:8983/solr/mycore/admin/ping')
+        new \GuzzleHttp\Psr7\Request('GET', 'http://localhost:8983/wayfinder/mycore/admin/ping')
       ),
     ]);
     $handlerStack = HandlerStack::create($mock);
     $httpClient = new Client(['handler' => $handlerStack]);
-    $client = new WayfinderClient($httpClient, 'http://localhost:8983/solr/mycore');
+    $client = new WayfinderClient($httpClient, 'http://localhost:8983/wayfinder/mycore');
 
     $this->assertFalse($client->ping());
   }
@@ -215,12 +215,12 @@ class WayfinderClientTest extends TestCase {
     $mock = new MockHandler([
       new \GuzzleHttp\Exception\ConnectException(
         'Connection refused',
-        new \GuzzleHttp\Psr7\Request('GET', 'http://localhost:8983/solr/mycore/select')
+        new \GuzzleHttp\Psr7\Request('GET', 'http://localhost:8983/wayfinder/mycore/select')
       ),
     ]);
     $handlerStack = HandlerStack::create($mock);
     $httpClient = new Client(['handler' => $handlerStack]);
-    $client = new WayfinderClient($httpClient, 'http://localhost:8983/solr/mycore');
+    $client = new WayfinderClient($httpClient, 'http://localhost:8983/wayfinder/mycore');
 
     $this->expectException(SearchApiException::class);
     $client->select(['q' => '*:*']);
@@ -233,12 +233,12 @@ class WayfinderClientTest extends TestCase {
     $mock = new MockHandler([
       new \GuzzleHttp\Exception\ConnectException(
         'Connection refused',
-        new \GuzzleHttp\Psr7\Request('POST', 'http://localhost:8983/solr/mycore/update')
+        new \GuzzleHttp\Psr7\Request('POST', 'http://localhost:8983/wayfinder/mycore/update')
       ),
     ]);
     $handlerStack = HandlerStack::create($mock);
     $httpClient = new Client(['handler' => $handlerStack]);
-    $client = new WayfinderClient($httpClient, 'http://localhost:8983/solr/mycore');
+    $client = new WayfinderClient($httpClient, 'http://localhost:8983/wayfinder/mycore');
 
     $this->expectException(SearchApiException::class);
     $client->update(['add' => ['doc' => ['id' => 'x']]]);
@@ -252,7 +252,7 @@ class WayfinderClientTest extends TestCase {
     $mock = new MockHandler([new Response(200, [], '{"response":{"numFound":0,"docs":[]}}')]);
     $handlerStack = HandlerStack::create($mock);
     $handlerStack->push(\GuzzleHttp\Middleware::history($history));
-    $client = new WayfinderClient(new Client(['handler' => $handlerStack]), 'http://localhost:8983/solr/mycore');
+    $client = new WayfinderClient(new Client(['handler' => $handlerStack]), 'http://localhost:8983/wayfinder/mycore');
 
     $client->select(['q' => '*:*', 'fq' => ['index_id:"my_index"', 'ss_status:"published"']]);
 
@@ -270,7 +270,7 @@ class WayfinderClientTest extends TestCase {
     $handlerStack = HandlerStack::create($mock);
     $handlerStack->push(\GuzzleHttp\Middleware::history($history));
     $httpClient = new Client(['handler' => $handlerStack]);
-    $client = new WayfinderClient($httpClient, 'http://localhost:8983/solr/mycore');
+    $client = new WayfinderClient($httpClient, 'http://localhost:8983/wayfinder/mycore');
 
     $client->update(['add' => ['doc' => ['id' => 'x']]], ['commitWithin' => 1000]);
 
@@ -321,11 +321,11 @@ class WayfinderClientTest extends TestCase {
     $mock = new MockHandler([new Response(200, [], '{"match":{"numFound":0,"docs":[]},"response":{"numFound":0,"docs":[]}}')]);
     $handlerStack = HandlerStack::create($mock);
     $handlerStack->push(\GuzzleHttp\Middleware::history($history));
-    $client = new WayfinderClient(new Client(['handler' => $handlerStack]), 'http://localhost:8983/solr/mycore');
+    $client = new WayfinderClient(new Client(['handler' => $handlerStack]), 'http://localhost:8983/wayfinder/mycore');
 
     $client->mlt(['q' => 'id:"mlt1"', 'mlt.fl' => 'body']);
 
-    $this->assertSame('/solr/mycore/mlt', $history[0]['request']->getUri()->getPath());
+    $this->assertSame('/wayfinder/mycore/mlt', $history[0]['request']->getUri()->getPath());
   }
 
   /**
@@ -366,14 +366,14 @@ class WayfinderClientTest extends TestCase {
     $mock = new MockHandler([new Response(200, [], '{"responseHeader":{"status":0},"file":"x"}')]);
     $handlerStack = HandlerStack::create($mock);
     $handlerStack->push(\GuzzleHttp\Middleware::history($history));
-    $client = new WayfinderClient(new Client(['handler' => $handlerStack]), 'http://localhost:8983/solr/mycore');
+    $client = new WayfinderClient(new Client(['handler' => $handlerStack]), 'http://localhost:8983/wayfinder/mycore');
 
     $filepath = __DIR__ . '/../../../../../solr-ref/extract-inputs/sample.txt';
     $client->extract($filepath);
 
     $request = $history[0]['request'];
     $this->assertSame('POST', $request->getMethod());
-    $this->assertSame('/solr/mycore/update/extract', $request->getUri()->getPath());
+    $this->assertSame('/wayfinder/mycore/update/extract', $request->getUri()->getPath());
     $this->assertSame('extractOnly=true&extractFormat=text&resource.name=sample.txt&wt=json', $request->getUri()->getQuery());
 
     // multipart/form-data with a generated boundary -- assert the prefix, not
@@ -408,12 +408,12 @@ class WayfinderClientTest extends TestCase {
     $mock = new MockHandler([
       new \GuzzleHttp\Exception\ConnectException(
         'Connection refused',
-        new \GuzzleHttp\Psr7\Request('POST', 'http://localhost:8983/solr/mycore/update/extract')
+        new \GuzzleHttp\Psr7\Request('POST', 'http://localhost:8983/wayfinder/mycore/update/extract')
       ),
     ]);
     $handlerStack = HandlerStack::create($mock);
     $httpClient = new Client(['handler' => $handlerStack]);
-    $client = new WayfinderClient($httpClient, 'http://localhost:8983/solr/mycore');
+    $client = new WayfinderClient($httpClient, 'http://localhost:8983/wayfinder/mycore');
 
     $this->expectException(SearchApiException::class);
     $client->extract(__DIR__ . '/../../../../../solr-ref/extract-inputs/sample.txt');

@@ -1,4 +1,4 @@
-//! `/solr/{core}/update/extract` extractOnly route tests (issue #258).
+//! `/wayfinder/{core}/update/extract` extractOnly route tests (issue #258).
 //!
 //! Every test in this file talks to the real HTTP route via
 //! `common::request_multipart`/`common::request_multipart_raw`/
@@ -486,7 +486,7 @@ async fn plain_update_route_still_works_after_extract_route_exists() {
     let (app, _dir) = default_app().await;
     let req = Request::builder()
         .method("POST")
-        .uri(format!("/solr/{CORE}/update?commit=true"))
+        .uri(format!("/wayfinder/{CORE}/update?commit=true"))
         .header("content-type", "application/json")
         .body(Body::from(
             json!([{"id": "doc-1", "body": "hello", "category": ["a"]}]).to_string(),
@@ -500,7 +500,7 @@ async fn plain_update_route_still_works_after_extract_route_exists() {
     assert_eq!(
         resp.status(),
         StatusCode::OK,
-        "POST /solr/{{core}}/update must still succeed regardless of the sibling /update/extract route"
+        "POST /wayfinder/{{core}}/update must still succeed regardless of the sibling /update/extract route"
     );
 }
 

@@ -1,5 +1,5 @@
 //! `defType=edismax` (issue #7, PRD §5 v1 exception) — `q`/`qf`/`pf`/`mm`/
-//! `tie`/`boost`/`bq` over `GET /solr/<core>/select`.
+//! `tie`/`boost`/`bq` over `GET /wayfinder/<core>/select`.
 //!
 //! Every expected value here comes from a committed fixture in
 //! `solr-ref/responses/edismax_*.json`, captured against a dedicated 10-doc
@@ -174,7 +174,7 @@ async fn edismax_route_returns_200() {
     assert_eq!(
         status,
         StatusCode::OK,
-        "GET /solr/<core>/select?defType=edismax must be 200, got {body}"
+        "GET /wayfinder/<core>/select?defType=edismax must be 200, got {body}"
     );
 }
 

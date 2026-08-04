@@ -420,7 +420,8 @@ async fn keyorder_app() -> (Router, TempDir) {
 // Unlike `facets`/`keyorder`, this schema names its core `sortdebt` (not
 // `content`) to match the manifest-errors row's own request path verbatim —
 // `tests/sort.rs`'s own comment explains why: the captured fixtures and the
-// task spec want a schema literally named `sortdebt` at `/solr/sortdebt/...`.
+// task spec want a schema literally named `sortdebt` at `/wayfinder/sortdebt/...`
+// (issue #325: the server route prefix is now `/wayfinder/`, not `/solr/`).
 // So `sortdebt/...` rows are NOT rewritten in `app_and_request_url` below,
 // unlike `facets/...`/`keyorder/...`.
 
@@ -497,7 +498,7 @@ fn sortdebt_doc(id: &str) -> Value {
     }
 }
 
-/// `POST /solr/sortdebt/update?commit=true` — cannot be `common::post_docs`,
+/// `POST /wayfinder/sortdebt/update?commit=true` — cannot be `common::post_docs`,
 /// which is hardcoded to `common::CORE` (`"content"`). Mirrors
 /// `tests/sort.rs::sortdebt_post_docs`.
 async fn sortdebt_post_docs(app: &Router, docs: &Value) -> (StatusCode, Value) {
@@ -827,7 +828,7 @@ fn update9_corpus() -> Value {
     ])
 }
 
-/// `POST /solr/update9/update?commit=true` — cannot be `common::post_docs`,
+/// `POST /wayfinder/update9/update?commit=true` — cannot be `common::post_docs`,
 /// which is hardcoded to `common::CORE`.
 async fn update9_post_docs(app: &Router, docs: &Value) -> (StatusCode, Value) {
     common::request_full(
@@ -905,7 +906,7 @@ fn stats_corpus() -> Value {
     ])
 }
 
-/// `POST /solr/stats/update?commit=true` — cannot be `common::post_docs`,
+/// `POST /wayfinder/stats/update?commit=true` — cannot be `common::post_docs`,
 /// which is hardcoded to `common::CORE`.
 async fn stats_post_docs(app: &Router, docs: &Value) -> (StatusCode, Value) {
     common::request_full(
@@ -988,7 +989,7 @@ fn grouping_corpus() -> Value {
     ])
 }
 
-/// `POST /solr/grouping/update?commit=true` — cannot be `common::post_docs`,
+/// `POST /wayfinder/grouping/update?commit=true` — cannot be `common::post_docs`,
 /// which is hardcoded to `common::CORE` ("content").
 async fn grouping_post_docs(app: &Router, docs: &Value) -> (StatusCode, Value) {
     common::request_full(
@@ -1258,24 +1259,32 @@ fn ranked_score_value_ratified_reason(name: &str) -> Option<&'static str> {
 /// `stats_multi_fields`, `stats_zero`, and `stats_zero_fq` all now match the
 /// captured fixtures for real and their entries are removed rather than left
 /// here — this list is empty until the next unbuilt-feature entry needs it.
-/// Issue #59 (`/admin/info/system` version handshake): the reported
-/// `lucene.solr-spec-version` is deliberately configured (default `9.0.0`,
-/// PRD open question 2) rather than mirroring the captured Solr's own
-/// `9.10.1`, and the rest of the envelope (`jvm`/`system` stats — uptime,
-/// memory, load, hostnames, command-line args) is inherently unreproducible
-/// host-specific volatility, same category as `ping`'s `rid` problem below.
-/// Both are permanent, not a to-do: there is no real Wayfinder host JVM/OS to
-/// introspect meaningfully, and the version is a config choice, not a bug.
+/// Issue #59 (`/admin/info/system` version handshake): the reported version
+/// (issue #325 renamed the key from `lucene.solr-spec-version` to
+/// `lucene.wayfinder-spec-version`) is deliberately configured (default
+/// `9.0.0`, PRD open question 2) rather than mirroring the captured Solr's
+/// own `9.10.1`, and the rest of the envelope (`jvm`/`system` stats —
+/// uptime, memory, load, hostnames, command-line args) is inherently
+/// unreproducible host-specific volatility, same category as `ping`'s `rid`
+/// problem below. Both are permanent, not a to-do: there is no real
+/// Wayfinder host JVM/OS to introspect meaningfully, and the version is a
+/// config choice, not a bug.
 const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[
     (
         "admin_info_system",
-        "issue #59: `responseHeader`, `mode`, `solr_home`, `core_root`, and the top-level key set \
-         are compared exactly and do match. The suppressed diffs are: `lucene.solr-spec-version` \
-         (a deliberate config-driven choice, default 9.0.0 per PRD open question 2, not a mirror of \
-         the captured Solr's 9.10.1) and `lucene.solr-impl-version`/`lucene-impl-version` (build \
-         hash + date, unreproducible); `jvm.*` (memory/uptime/vendor/processors, real host JVM \
-         stats Wayfinder has no equivalent of); and `system.*` (host CPU/memory/load stats) — same \
-         permanent category as `ping`'s `rid` in EXPECTED_DIVERGENCES below",
+        "issue #59: `responseHeader`, `mode`, and the top-level key set are compared exactly and \
+         do match. The suppressed diffs are: `solr_home`/`core_root` (issue #325: Wayfinder now \
+         emits the key `wayfinder_home` in place of `solr_home`, and both `wayfinder_home` and \
+         `core_root` carry the value `/var/wayfinder/data`, replacing the literal \"solr\" token \
+         and path the fixture's captured Solr still reports); `lucene.solr-spec-version` (issue \
+         #325 renamed the key Wayfinder emits to \
+         `wayfinder-spec-version`, on top of the pre-existing deliberate config-driven version \
+         value, default 9.0.0 per PRD open question 2, not a mirror of the captured Solr's 9.10.1) \
+         and `lucene.solr-impl-version`/`lucene-impl-version` (same #325 key rename to \
+         `wayfinder-impl-version`, plus build hash + date, unreproducible); `jvm.*` \
+         (memory/uptime/vendor/processors, real host JVM stats Wayfinder has no equivalent of); \
+         and `system.*` (host CPU/memory/load stats) — same permanent category as `ping`'s `rid` \
+         in EXPECTED_DIVERGENCES below",
     ),
     (
         "stats_version_max",
@@ -1901,16 +1910,22 @@ const EXPECTED_DIVERGENCES: &[(&str, &str)] = &[
     ),
     (
         "admin_system",
-        "issue #59: `responseHeader`, `mode`, the top-level key set, and `core.schema` \
-         (finding 78's version-detection field, `\"drupal-4.4.0-solr-9.x-0\"`) are compared \
-         exactly and do match. The suppressed diffs are: `lucene.solr-spec-version` (a \
-         deliberate config-driven choice, default 9.0.0 per PRD open question 2, not a mirror \
-         of the captured Solr's 9.10.1) and `lucene.solr-impl-version`/`lucene-impl-version` \
-         (build hash + date, unreproducible); `jvm.*` (memory/uptime/vendor/processors, real \
-         host JVM stats Wayfinder has no equivalent of); `system.*` (host CPU/memory/load \
-         stats); and `core.host`/`core.now`/`core.start`/`core.directory.*` (hostname, \
-         timestamps, real filesystem paths on the capture host) — same permanent category as \
-         `admin_info_system` in EXPECTED_DIVERGENCES_MANIFEST_ERRORS above and `ping`'s `rid`",
+        "issue #59: `responseHeader`, `mode`, and the top-level key set are compared exactly \
+         and do match. The suppressed diffs are: `core.schema` (finding 78's version-detection \
+         field — issue #325 renamed Wayfinder's reported value to \
+         `\"drupal-4.4.0-wayfinder-9.x-0\"`, replacing the literal \"solr\" token; the fixture's \
+         captured Solr value `\"drupal-4.4.0-solr-9.x-0\"` never changes, so this key now \
+         diverges where it previously matched exactly); `lucene.solr-spec-version` (issue #325 \
+         renamed the key Wayfinder emits to `wayfinder-spec-version`, on top of the \
+         pre-existing deliberate config-driven version value, default 9.0.0 per PRD open \
+         question 2, not a mirror of the captured Solr's 9.10.1) and \
+         `lucene.solr-impl-version`/`lucene-impl-version` (same #325 key rename to \
+         `wayfinder-impl-version`, plus build hash + date, unreproducible); `jvm.*` \
+         (memory/uptime/vendor/processors, real host JVM stats Wayfinder has no equivalent of); \
+         `system.*` (host CPU/memory/load stats); and `core.host`/`core.now`/`core.start`/ \
+         `core.directory.*` (hostname, timestamps, real filesystem paths on the capture host) \
+         — same permanent category as `admin_info_system` in EXPECTED_DIVERGENCES_MANIFEST_ERRORS \
+         above and `ping`'s `rid`",
     ),
 ];
 
@@ -3140,7 +3155,8 @@ fn normalize_extract_office_touches_nothing_when_already_normal() {
 }
 
 /// The hermetic runner: every `manifest-multipart.tsv` row, POSTed through
-/// the real `/solr/{core}/update/extract` route (issue #258) against an
+/// the real `/wayfinder/{core}/update/extract` route (issue #258, renamed by
+/// issue #325) against an
 /// in-process Wayfinder, diffed against its committed fixture.
 ///
 /// Expected to fail today for a structural reason, not a normalisation

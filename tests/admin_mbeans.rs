@@ -1,4 +1,4 @@
-//! `GET /solr/{core}/admin/mbeans?stats=true` (issue #158), reversing the
+//! `GET /wayfinder/{core}/admin/mbeans?stats=true` (issue #158), reversing the
 //! #57 descope for this endpoint.
 //!
 //! Ground truth is `solr-ref/search-api/trace/00025.json` (issue #55): 48 KB
@@ -7,7 +7,7 @@
 //! getStatsSummary()` (coverage/search_api_solr_4.4.0_source/src/
 //! SolrConnector/SolrConnectorPluginBase.php, ~L775-820) reads exactly six
 //! leaves off it, on the Solr >= 7.0 branch (the branch that applies here,
-//! since `config.admin.reported_solr_version` defaults to "9.0.0"):
+//! since `config.admin.reported_server_version` defaults to "9.0.0"):
 //!
 //!   - `solr-mbeans.UPDATE.updateHandler.stats["UPDATE.updateHandler.docsPending"]`
 //!   - `...["UPDATE.updateHandler.softAutoCommitMaxTime"]`
@@ -180,12 +180,12 @@ const SOFT_AUTOCOMMIT_ON: &str = "[commit]\nautocommit_max_time = 5000\n";
 /// `SolrConnectorPluginBase::getStatsSummary()`'s Solr >= 7.0 branch.
 fn assert_six_leaves_present(body: &Value) {
     for pointer in [
-        "/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.docsPending",
-        "/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.softAutoCommitMaxTime",
-        "/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesById",
-        "/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesByQuery",
-        "/solr-mbeans/CORE/core/stats/CORE.coreName",
-        "/solr-mbeans/CORE/core/stats/INDEX.size",
+        "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.docsPending",
+        "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.softAutoCommitMaxTime",
+        "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesById",
+        "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesByQuery",
+        "/wayfinder-mbeans/CORE/core/stats/CORE.coreName",
+        "/wayfinder-mbeans/CORE/core/stats/INDEX.size",
     ] {
         assert!(
             body.pointer(pointer).is_some(),
@@ -231,17 +231,18 @@ async fn mbeans_leaves_do_not_resolve_at_plausible_but_wrong_paths() {
     assert_six_leaves_present(&body);
 
     assert!(
-        body.pointer("/solr-mbeans/UPDATE/updateHandler/softAutoCommitMaxTime")
+        body.pointer("/wayfinder-mbeans/UPDATE/updateHandler/softAutoCommitMaxTime")
             .is_none(),
         "the leaf must live under the `stats` object, not directly on `updateHandler`, got: {body}"
     );
     assert!(
-        body.pointer("/solr-mbeans/CORE/core/stats/coreName")
+        body.pointer("/wayfinder-mbeans/CORE/core/stats/coreName")
             .is_none(),
         "the key must be the full `CORE.coreName` string, not bare `coreName`, got: {body}"
     );
     assert!(
-        body.pointer("/solr-mbeans/CORE/core/stats/size").is_none(),
+        body.pointer("/wayfinder-mbeans/CORE/core/stats/size")
+            .is_none(),
         "the key must be the full `INDEX.size` string, not bare `size`, got: {body}"
     );
 }
@@ -257,16 +258,16 @@ async fn mbeans_without_stats_param_is_bean_list_only() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
 
     assert!(
-        body.pointer("/solr-mbeans/UPDATE").is_some(),
+        body.pointer("/wayfinder-mbeans/UPDATE").is_some(),
         "the bean list itself must still be present without stats=true, got: {body}"
     );
     assert!(
-        body.pointer("/solr-mbeans/UPDATE/updateHandler/stats")
+        body.pointer("/wayfinder-mbeans/UPDATE/updateHandler/stats")
             .is_none(),
         "without stats=true, no `stats` sub-object may appear, got: {body}"
     );
     assert!(
-        body.pointer("/solr-mbeans/CORE/core/stats").is_none(),
+        body.pointer("/wayfinder-mbeans/CORE/core/stats").is_none(),
         "without stats=true, no `stats` sub-object may appear on CORE either, got: {body}"
     );
 }
@@ -279,7 +280,7 @@ async fn mbeans_stats_false_is_also_bean_list_only() {
     let (status, body) = get_m(&app, core, "admin/mbeans?stats=false&wt=json&json.nl=map").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert!(
-        body.pointer("/solr-mbeans/UPDATE/updateHandler/stats")
+        body.pointer("/wayfinder-mbeans/UPDATE/updateHandler/stats")
             .is_none(),
         "stats=false must not include stats blocks, got: {body}"
     );
@@ -292,7 +293,7 @@ async fn mbeans_stats_false_is_also_bean_list_only() {
 /// conflicting values -- and pins the two things the real response settled:
 /// `stats` was honoured despite its value being
 /// `"true?omitHeader=false"`, and the FIRST `json.nl` (`map`) won, not the
-/// second (`flat`): `solr-mbeans` must be a JSON object, not the alternating
+/// second (`flat`): `wayfinder-mbeans` must be a JSON object, not the alternating
 /// array `json.nl=flat` would produce.
 #[tokio::test]
 async fn mbeans_malformed_captured_request_honours_stats_and_first_json_nl() {
@@ -308,13 +309,15 @@ async fn mbeans_malformed_captured_request_honours_stats_and_first_json_nl() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
 
     assert!(
-        body.get("solr-mbeans").is_some_and(|v| v.is_object()),
-        "`solr-mbeans` must be a JSON object -- the FIRST `json.nl` (map) must win over the \
+        body.get("wayfinder-mbeans").is_some_and(|v| v.is_object()),
+        "`wayfinder-mbeans` must be a JSON object -- the FIRST `json.nl` (map) must win over the \
          second (flat), matching the captured response's shape, got: {body}"
     );
     assert!(
-        body.pointer("/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.docsPending")
-            .is_some(),
+        body.pointer(
+            "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.docsPending"
+        )
+        .is_some(),
         "stats must be honoured even though its raw value is `true?omitHeader=false`, matching \
          the captured trace (UPDATE.updateHandler.stats is present with real values there), \
          got: {body}"
@@ -347,7 +350,9 @@ async fn mbeans_docs_pending_reflects_real_uncommitted_docs_then_zero_after_comm
     let (status, body) = get_m(&app, core, "admin/mbeans?stats=true&wt=json").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(
-        body.pointer("/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.docsPending"),
+        body.pointer(
+            "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.docsPending"
+        ),
         Some(&json!(4)),
         "docsPending must equal the real count of uncommitted docs, got: {body}"
     );
@@ -358,7 +363,9 @@ async fn mbeans_docs_pending_reflects_real_uncommitted_docs_then_zero_after_comm
     let (status, body) = get_m(&app, core, "admin/mbeans?stats=true&wt=json").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(
-        body.pointer("/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.docsPending"),
+        body.pointer(
+            "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.docsPending"
+        ),
         Some(&json!(0)),
         "docsPending must drop to 0 once every pending doc has been committed, got: {body}"
     );
@@ -390,12 +397,16 @@ async fn mbeans_deletes_by_id_and_deletes_by_query_increment_independently() {
     let (status, body) = get_m(&app, core, "admin/mbeans?stats=true&wt=json").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        body.pointer("/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesById"),
+        body.pointer(
+            "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesById"
+        ),
         Some(&json!(0)),
         "deletesById must start at 0, got: {body}"
     );
     assert_eq!(
-        body.pointer("/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesByQuery"),
+        body.pointer(
+            "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesByQuery"
+        ),
         Some(&json!(0)),
         "deletesByQuery must start at 0, got: {body}"
     );
@@ -406,12 +417,16 @@ async fn mbeans_deletes_by_id_and_deletes_by_query_increment_independently() {
     let (status, body) = get_m(&app, core, "admin/mbeans?stats=true&wt=json").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        body.pointer("/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesById"),
+        body.pointer(
+            "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesById"
+        ),
         Some(&json!(1)),
         "deletesById must be 1 after deleting a single id, got: {body}"
     );
     assert_eq!(
-        body.pointer("/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesByQuery"),
+        body.pointer(
+            "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesByQuery"
+        ),
         Some(&json!(0)),
         "deletesByQuery must be untouched by a delete-by-id call, got: {body}"
     );
@@ -430,12 +445,16 @@ async fn mbeans_deletes_by_id_and_deletes_by_query_increment_independently() {
     let (status, body) = get_m(&app, core, "admin/mbeans?stats=true&wt=json").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        body.pointer("/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesById"),
+        body.pointer(
+            "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesById"
+        ),
         Some(&json!(3)),
         "deletesById must accumulate per id deleted (1 + 2 = 3), got: {body}"
     );
     assert_eq!(
-        body.pointer("/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesByQuery"),
+        body.pointer(
+            "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesByQuery"
+        ),
         Some(&json!(0)),
         "deletesByQuery must still be untouched, got: {body}"
     );
@@ -452,12 +471,16 @@ async fn mbeans_deletes_by_id_and_deletes_by_query_increment_independently() {
     let (status, body) = get_m(&app, core, "admin/mbeans?stats=true&wt=json").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        body.pointer("/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesByQuery"),
+        body.pointer(
+            "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesByQuery"
+        ),
         Some(&json!(1)),
         "deletesByQuery must be 1 after a single delete-by-query call, got: {body}"
     );
     assert_eq!(
-        body.pointer("/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesById"),
+        body.pointer(
+            "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesById"
+        ),
         Some(&json!(3)),
         "deletesById must remain 3, independent of the delete-by-query call, got: {body}"
     );
@@ -506,7 +529,9 @@ async fn mbeans_deletes_by_query_does_not_count_a_query_that_failed_to_parse() {
     let (status, body) = get_m(&app, core, "admin/mbeans?stats=true&wt=json").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(
-        body.pointer("/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesByQuery"),
+        body.pointer(
+            "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.deletesByQuery"
+        ),
         Some(&json!(0)),
         "a query that failed to parse never became a delete, so deletesByQuery must still be 0, \
          got: {body}"
@@ -552,18 +577,18 @@ async fn mbeans_core_name_is_the_real_configured_core_name_not_hardcoded() {
     assert_eq!(status, StatusCode::OK, "body: {body_b}");
 
     assert_eq!(
-        body_a.pointer("/solr-mbeans/CORE/core/stats/CORE.coreName"),
+        body_a.pointer("/wayfinder-mbeans/CORE/core/stats/CORE.coreName"),
         Some(&json!(core_a)),
         "CORE.coreName must be this process's real (non-default) core name, got: {body_a}"
     );
     assert_eq!(
-        body_b.pointer("/solr-mbeans/CORE/core/stats/CORE.coreName"),
+        body_b.pointer("/wayfinder-mbeans/CORE/core/stats/CORE.coreName"),
         Some(&json!(core_b)),
         "CORE.coreName must be this process's real (non-default) core name, got: {body_b}"
     );
     assert_ne!(
-        body_a.pointer("/solr-mbeans/CORE/core/stats/CORE.coreName"),
-        body_b.pointer("/solr-mbeans/CORE/core/stats/CORE.coreName"),
+        body_a.pointer("/wayfinder-mbeans/CORE/core/stats/CORE.coreName"),
+        body_b.pointer("/wayfinder-mbeans/CORE/core/stats/CORE.coreName"),
         "two differently-named cores must report differently -- a hardcoded value would make \
          these equal"
     );
@@ -606,11 +631,11 @@ async fn mbeans_index_size_tracks_real_on_disk_size_growth() {
     assert_eq!(status, StatusCode::OK, "body: {body_large}");
 
     let size_small = body_small
-        .pointer("/solr-mbeans/CORE/core/stats/INDEX.size")
+        .pointer("/wayfinder-mbeans/CORE/core/stats/INDEX.size")
         .and_then(Value::as_str)
         .expect("INDEX.size must be a string");
     let size_large = body_large
-        .pointer("/solr-mbeans/CORE/core/stats/INDEX.size")
+        .pointer("/wayfinder-mbeans/CORE/core/stats/INDEX.size")
         .and_then(Value::as_str)
         .expect("INDEX.size must be a string");
 
@@ -671,7 +696,7 @@ async fn mbeans_index_size_string_matches_human_size_of_index_size_in_bytes() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
 
     let size_in_bytes = body
-        .pointer("/solr-mbeans/CORE/core/stats/INDEX.sizeInBytes")
+        .pointer("/wayfinder-mbeans/CORE/core/stats/INDEX.sizeInBytes")
         .and_then(Value::as_u64)
         .expect("INDEX.sizeInBytes must be a present u64");
     // Below 1024 bytes `human_size` takes its `unit == 0` branch and the
@@ -684,7 +709,7 @@ async fn mbeans_index_size_string_matches_human_size_of_index_size_in_bytes() {
         "seeded index must exceed 1 KB for the precision branch to be compared, got {size_in_bytes}"
     );
     let size_str = body
-        .pointer("/solr-mbeans/CORE/core/stats/INDEX.size")
+        .pointer("/wayfinder-mbeans/CORE/core/stats/INDEX.size")
         .and_then(Value::as_str)
         .expect("INDEX.size must be a present string");
 
@@ -715,7 +740,7 @@ async fn mbeans_soft_auto_commit_max_time_reflects_configured_autocommit_max_tim
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(
         body.pointer(
-            "/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.softAutoCommitMaxTime"
+            "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.softAutoCommitMaxTime"
         ),
         Some(&json!(format!("{configured_ms}ms"))),
         "softAutoCommitMaxTime must reflect config.commit.autocommit_max_time as Solr's own \
@@ -733,7 +758,7 @@ async fn mbeans_soft_auto_commit_max_time_is_absent_when_unset() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert!(
         body.pointer(
-            "/solr-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.softAutoCommitMaxTime"
+            "/wayfinder-mbeans/UPDATE/updateHandler/stats/UPDATE.updateHandler.softAutoCommitMaxTime"
         )
         .is_none(),
         "the key must be ABSENT when autocommit_max_time is unset -- Solr omits it entirely \
@@ -749,7 +774,7 @@ async fn mbeans_soft_auto_commit_max_time_is_absent_when_unset() {
 /// mirroring `tests/admin_luke.rs::luke_unknown_core_is_a_json_404`. Sibling
 /// #156 shipped without this guard and the reviewer caught it; here, deleting
 /// the `check_core` line leaves the whole rest of the suite green while
-/// `GET /solr/nosuchcore/admin/mbeans` happily reports the real core's stats
+/// `GET /wayfinder/nosuchcore/admin/mbeans` happily reports the real core's stats
 /// (and its `CORE.coreName`) under any core name at all. Verified by
 /// deletion: without `check_core` this test fails with 200.
 #[tokio::test]
@@ -786,7 +811,7 @@ async fn mbeans_unknown_core_is_a_json_404() {
         "error.msg must name the unknown core, got: {body}"
     );
     assert!(
-        body.get("solr-mbeans").is_none(),
+        body.get("wayfinder-mbeans").is_none(),
         "an unknown core must not leak the real core's mbeans stats, got: {body}"
     );
 }

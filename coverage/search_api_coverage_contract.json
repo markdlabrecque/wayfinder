@@ -4,169 +4,169 @@
       "file": "00001.json",
       "seq": 1,
       "method": "POST",
-      "endpoint": "/solr/{core}/update"
+      "endpoint": "/wayfinder/{core}/update"
     },
     {
       "file": "00002.json",
       "seq": 2,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00003.json",
       "seq": 3,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00004.json",
       "seq": 4,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00005.json",
       "seq": 5,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00006.json",
       "seq": 6,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00007.json",
       "seq": 7,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00008.json",
       "seq": 8,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00009.json",
       "seq": 9,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00010.json",
       "seq": 10,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00011.json",
       "seq": 11,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00012.json",
       "seq": 12,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00013.json",
       "seq": 13,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00014.json",
       "seq": 14,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00015.json",
       "seq": 15,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00016.json",
       "seq": 16,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00017.json",
       "seq": 17,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00018.json",
       "seq": 18,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00019.json",
       "seq": 19,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00020.json",
       "seq": 20,
       "method": "GET",
-      "endpoint": "/solr/{core}/schema/fieldtypes"
+      "endpoint": "/wayfinder/{core}/schema/fieldtypes"
     },
     {
       "file": "00021.json",
       "seq": 21,
       "method": "GET",
-      "endpoint": "/solr/{core}/select"
+      "endpoint": "/wayfinder/{core}/select"
     },
     {
       "file": "00022.json",
       "seq": 22,
       "method": "GET",
-      "endpoint": "/solr/{core}/mlt"
+      "endpoint": "/wayfinder/{core}/mlt"
     },
     {
       "file": "00023.json",
       "seq": 23,
       "method": "GET",
-      "endpoint": "/solr/admin/info/system"
+      "endpoint": "/wayfinder/admin/info/system"
     },
     {
       "file": "00024.json",
       "seq": 24,
       "method": "GET",
-      "endpoint": "/solr/{core}/admin/luke"
+      "endpoint": "/wayfinder/{core}/admin/luke"
     },
     {
       "file": "00025.json",
       "seq": 25,
       "method": "GET",
-      "endpoint": "/solr/{core}/admin/mbeans"
+      "endpoint": "/wayfinder/{core}/admin/mbeans"
     },
     {
       "file": "00026.json",
       "seq": 26,
       "method": "GET",
-      "endpoint": "/solr/{core}/admin/system"
+      "endpoint": "/wayfinder/{core}/admin/system"
     },
     {
       "file": "00027.json",
       "seq": 27,
       "method": "GET",
-      "endpoint": "/solr/{core}/admin/system"
+      "endpoint": "/wayfinder/{core}/admin/system"
     },
     {
       "file": "00028.json",
       "seq": 28,
       "method": "GET",
-      "endpoint": "/solr/{core}/terms"
+      "endpoint": "/wayfinder/{core}/terms"
     }
   ],
   "captured_parameters": [
@@ -1119,13 +1119,13 @@
   ],
   "endpoints": [
     {
-      "id": "POST /solr/{core}/update",
+      "id": "POST /wayfinder/{core}/update",
       "trace": [
         "00001.json"
       ]
     },
     {
-      "id": "GET /solr/{core}/select",
+      "id": "GET /wayfinder/{core}/select",
       "trace": [
         "00002.json",
         "00003.json",
@@ -1149,44 +1149,44 @@
       ]
     },
     {
-      "id": "GET /solr/{core}/schema/fieldtypes",
+      "id": "GET /wayfinder/{core}/schema/fieldtypes",
       "trace": [
         "00020.json"
       ]
     },
     {
-      "id": "GET /solr/{core}/mlt",
+      "id": "GET /wayfinder/{core}/mlt",
       "trace": [
         "00022.json"
       ]
     },
     {
-      "id": "GET /solr/admin/info/system",
+      "id": "GET /wayfinder/admin/info/system",
       "trace": [
         "00023.json"
       ]
     },
     {
-      "id": "GET /solr/{core}/admin/luke",
+      "id": "GET /wayfinder/{core}/admin/luke",
       "trace": [
         "00024.json"
       ]
     },
     {
-      "id": "GET /solr/{core}/admin/mbeans",
+      "id": "GET /wayfinder/{core}/admin/mbeans",
       "trace": [
         "00025.json"
       ]
     },
     {
-      "id": "GET /solr/{core}/admin/system",
+      "id": "GET /wayfinder/{core}/admin/system",
       "trace": [
         "00026.json",
         "00027.json"
       ]
     },
     {
-      "id": "GET /solr/{core}/terms",
+      "id": "GET /wayfinder/{core}/terms",
       "trace": [
         "00028.json"
       ]
@@ -4140,7 +4140,7 @@
       }
     },
     {
-      "id": "admin.info-system.lucene.solr-spec-version",
+      "id": "admin.info-system.lucene.wayfinder-spec-version",
       "trace": [
         "00023.json"
       ],
@@ -4184,7 +4184,7 @@
       }
     },
     {
-      "id": "admin.mbeans.solr-mbeans",
+      "id": "admin.mbeans.wayfinder-mbeans",
       "trace": [
         "00025.json"
       ],

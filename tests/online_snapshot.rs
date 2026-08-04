@@ -121,7 +121,7 @@ stored = true
         loop {
             if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
                 let _ = stream.write_all(
-                    b"GET /solr/online-snapshot/admin/ping?wt=json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    b"GET /wayfinder/online-snapshot/admin/ping?wt=json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
                 );
                 let mut response = String::new();
                 if stream.read_to_string(&mut response).is_ok()
@@ -154,7 +154,7 @@ stored = true
         let (status, response) = http_request(
             live_addr,
             "POST",
-            "/solr/online-snapshot/update?commit=true&wt=json",
+            "/wayfinder/online-snapshot/update?commit=true&wt=json",
             r#"[{"id":"snapshot-doc","body":"committed while online"}]"#,
         );
         assert_eq!(status, 200, "committed update must succeed: {response}");
@@ -178,7 +178,7 @@ stored = true
         let (status, response) = http_request(
             live_addr,
             "GET",
-            "/solr/online-snapshot/select?q=id:snapshot-doc&fl=id&wt=json",
+            "/wayfinder/online-snapshot/select?q=id:snapshot-doc&fl=id&wt=json",
             "",
         );
         assert_eq!(status, 200, "live server must remain queryable: {response}");
@@ -189,7 +189,7 @@ stored = true
         let (status, response) = http_request(
             snapshot_addr,
             "GET",
-            "/solr/online-snapshot/select?q=id:snapshot-doc&fl=id&wt=json",
+            "/wayfinder/online-snapshot/select?q=id:snapshot-doc&fl=id&wt=json",
             "",
         );
         assert_eq!(
@@ -245,7 +245,7 @@ stored = true
         let (status, response) = http_request(
             live_addr,
             "POST",
-            "/solr/online-snapshot/update?commit=true&wt=json",
+            "/wayfinder/online-snapshot/update?commit=true&wt=json",
             r#"[{"id":"seed","body":"seed generation"}]"#,
         );
         assert_eq!(status, 200, "seed commit must succeed: {response}");
@@ -267,7 +267,7 @@ stored = true
                 let (status, response) = http_request(
                     live_addr,
                     "POST",
-                    "/solr/online-snapshot/update?commit=true&wt=json",
+                    "/wayfinder/online-snapshot/update?commit=true&wt=json",
                     &request,
                 );
                 assert_eq!(status, 200, "batch {batch} commit must succeed: {response}");
@@ -359,7 +359,7 @@ stored = true
         let (status, response) = http_request(
             live_addr,
             "GET",
-            "/solr/online-snapshot/admin/ping?wt=json",
+            "/wayfinder/online-snapshot/admin/ping?wt=json",
             "",
         );
         assert_eq!(status, 200, "live server must remain available: {response}");

@@ -2,7 +2,7 @@
 //! UI").
 //!
 //! Scope: a new page (or status element) showing this process's ping/health
-//! status, reusing the existing `/solr/{core}/admin/ping` handler/logic
+//! status, reusing the existing `/wayfinder/{core}/admin/ping` handler/logic
 //! directly rather than a second health-check code path — the same "call the
 //! real handler, don't reimplement it" pattern issue #127's query tester
 //! established for `/select` (`query_ui` in `src/lib.rs` calls `select()`
@@ -47,7 +47,7 @@
 //! suite does not invent one; instead the reuse guarantee is tested the same
 //! way #127's query tester is (`ping_page_reflects_the_real_admin_ping_status_value`
 //! below): the UI page's rendered status must equal the value the real
-//! `/solr/{core}/admin/ping` endpoint actually returns for the same request,
+//! `/wayfinder/{core}/admin/ping` endpoint actually returns for the same request,
 //! not an independently hardcoded string. If a future change makes `ping()`'s
 //! status conditional, that test starts actually distinguishing reuse from a
 //! hardcoded-healthy UI; today it mainly guards against silently drifting
@@ -148,7 +148,7 @@ async fn ping_page_shows_ok_for_an_empty_core_too() {
 }
 
 /// The reuse guard named in the module doc: the UI page's rendered status
-/// must equal what the real `/solr/{core}/admin/ping` endpoint actually
+/// must equal what the real `/wayfinder/{core}/admin/ping` endpoint actually
 /// returns for this process, fetched independently via `common::get` (the
 /// same wire path a real Solr client would hit) — not a value the UI
 /// handler invents or hardcodes on its own.

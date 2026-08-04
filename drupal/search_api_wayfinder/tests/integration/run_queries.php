@@ -32,7 +32,7 @@ $exit_code = 0;
 // authenticated Search API round trip below.
 $unauthenticated = new \Drupal\search_api_wayfinder\WayfinderClient(
   \Drupal::service('http_client'),
-  'http://wayfinder:8983/solr/content',
+  'http://wayfinder:8983/wayfinder/content',
 );
 if (!$unauthenticated->ping()) {
   echo "AUTH: FAIL - unauthenticated client could not ping the public endpoint\n";

@@ -1,4 +1,4 @@
-//! MoreLikeThis (`/mlt`, issue #6, PRD §5) — `GET /solr/<core>/mlt`.
+//! MoreLikeThis (`/mlt`, issue #6, PRD §5) — `GET /wayfinder/<core>/mlt`.
 //!
 //! Every fixture-backed expected value here comes from the dedicated 20-doc
 //! corpus in `solr-ref/capture.sh`'s MLT block. The original fixtures used
@@ -295,7 +295,7 @@ async fn mlt_route_exists_and_returns_200_for_a_known_doc() {
     assert_eq!(
         status,
         StatusCode::OK,
-        "GET /solr/<core>/mlt for a known source doc must be 200 (no route registered yet is \
+        "GET /wayfinder/<core>/mlt for a known source doc must be 200 (no route registered yet is \
          the expected red state)"
     );
 }
