@@ -1,0 +1,225 @@
+//! Phase 4 synonym administration contract (issue #389).
+//!
+//! Product decisions encoded here: each core owns a query-side-only synonym
+//! table; `GET`/`POST /ui/synonyms` is the operator surface (not `/select`);
+//! and a successful edit is persisted in the core data directory without a
+//! restart or reindex.
+//!
+//! Minimal form/file contract chosen for this phase:
+//! - the POST body is `application/x-www-form-urlencoded` with one `groups`
+//!   field containing newline-separated, comma-separated groups;
+//! - every member is one non-whitespace token; groups are normalized to
+//!   lowercase and expand symmetrically;
+//! - the durable file is `data/synonyms.txt`, UTF-8, one normalized group per
+//!   line (`drupal,durpal\n`).
+//!
+//! These choices intentionally leave multi-token mappings and directional
+//! mappings for a later phase.
+
+mod common;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use common::{app_with_schema, get, post_docs};
+use http_body_util::BodyExt;
+use serde_json::{Value, json};
+use tempfile::TempDir;
+use tower::ServiceExt;
+
+const SYNONYMS_ROUTE: &str = "/ui/synonyms";
+const SYNONYM_FILE: &str = "data/synonyms.txt";
+const SYNONYM_SCHEMA: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+"#;
+
+async fn post_synonym_form(
+    app: &axum::Router,
+    form: &str,
+) -> (StatusCode, axum::http::HeaderMap, String) {
+    let request = Request::builder()
+        .method("POST")
+        .uri(SYNONYMS_ROUTE)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(form.to_owned()))
+        .expect("build synonym form request");
+    let response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("synonym form request must not fail at transport level");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("synonym form response must be readable")
+        .to_bytes();
+    (
+        status,
+        headers,
+        String::from_utf8(bytes.to_vec()).expect("synonym form response must be UTF-8"),
+    )
+}
+
+async fn synonym_app() -> (axum::Router, TempDir) {
+    let dir = TempDir::new().expect("create temp dir");
+    let app = app_with_schema(dir.path(), SYNONYM_SCHEMA).expect("synonym schema must load");
+    let (status, body) = post_docs(&app, &json!([{"id": "cms", "body": "Drupal"}])).await;
+    assert_eq!(status, StatusCode::OK, "index synonym corpus: {body}");
+    (app, dir)
+}
+
+fn num_found(body: &Value) -> u64 {
+    body.pointer("/response/numFound")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("response.numFound must be numeric: {body}"))
+}
+
+async fn assert_query_count(app: &axum::Router, q: &str, expected: u64) {
+    let (status, body) = get(app, &format!("select?q={q}&rows=0")).await;
+    assert_eq!(status, StatusCode::OK, "/select?q={q}: {body}");
+    assert_eq!(num_found(&body), expected, "/select?q={q}: {body}");
+}
+
+fn assert_save_succeeded(status: StatusCode, body: &str) {
+    assert!(
+        status == StatusCode::OK || status == StatusCode::SEE_OTHER,
+        "valid synonym save must return 200 or redirect after saving; status={status}, body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn synonym_page_has_client_filter_and_editable_group_rows() {
+    let (app, _dir) = synonym_app().await;
+    let (status, _headers, body) = post_synonym_form(&app, "groups=Drupal%2CDurpal").await;
+    assert_save_succeeded(status, &body);
+
+    let (status, headers, body) = common::get_text(&app, SYNONYMS_ROUTE).await;
+    assert_eq!(status, StatusCode::OK, "GET {SYNONYMS_ROUTE}: {body}");
+    assert!(
+        headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("text/html")),
+        "synonym admin page must be HTML: {headers:?}"
+    );
+
+    // The filter is explicitly client-side: a search control, the group list
+    // it filters, and script wiring are all required. Server query parameters
+    // alone would not satisfy this operator UX.
+    assert!(
+        body.contains("id=\"synonym-filter\""),
+        "missing filter: {body}"
+    );
+    assert!(
+        body.contains("id=\"synonym-groups\""),
+        "missing group list: {body}"
+    );
+    assert!(
+        body.contains("<script"),
+        "filter must have client-side wiring: {body}"
+    );
+
+    // A persisted group must render as an editable row, with explicit add,
+    // edit, and delete affordances rather than an opaque configuration blob.
+    assert!(
+        body.contains("value=\"drupal,durpal\""),
+        "missing group row: {body}"
+    );
+    for action in ["add", "edit", "delete"] {
+        assert!(
+            body.contains(&format!("data-action=\"{action}\"")),
+            "synonym page must expose a `{action}` control: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn saved_synonyms_expand_immediately_on_queries_but_never_enter_index_terms() {
+    let (app, dir) = synonym_app().await;
+    let (status, _headers, body) = post_synonym_form(&app, "groups=Drupal%2CDurpal").await;
+    assert_save_succeeded(status, &body);
+
+    // Case-insensitive, symmetric expand-style lookup must take effect in the
+    // running core immediately; no index write/reopen is permitted for it.
+    assert_query_count(&app, "durpal", 1).await;
+    assert_query_count(&app, "DRUPAL", 1).await;
+
+    // Query-side-only is the reason synonym edits do not require reindexing:
+    // the synonym spelling must not be materialized into the term dictionary.
+    let (status, terms) = get(&app, "terms?terms=true&terms.fl=body&terms.limit=100").await;
+    assert_eq!(status, StatusCode::OK, "/terms must succeed: {terms}");
+    let listed: Vec<&str> = terms["terms"]["body"]
+        .as_array()
+        .unwrap_or_else(|| panic!("terms.body must be a flat term array: {terms}"))
+        .iter()
+        .step_by(2)
+        .map(|value| value.as_str().expect("term must be a string"))
+        .collect();
+    assert!(
+        listed.contains(&"drupal"),
+        "indexed source term missing: {terms}"
+    );
+    assert!(
+        !listed.contains(&"durpal"),
+        "query-only synonym must not be written to index terms: {terms}"
+    );
+
+    assert_eq!(
+        std::fs::read(dir.path().join(SYNONYM_FILE)).expect("saved synonym file"),
+        b"drupal,durpal\n",
+        "the durable table format is normalized one comma-group per line"
+    );
+}
+
+#[tokio::test]
+async fn synonym_table_survives_reopen_and_is_loaded_before_the_first_query() {
+    let (app, dir) = synonym_app().await;
+    let (status, _headers, body) = post_synonym_form(&app, "groups=Drupal%2CDurpal").await;
+    assert_save_succeeded(status, &body);
+    drop(app);
+
+    let reopened = app_with_schema(dir.path(), SYNONYM_SCHEMA).expect("reopen core");
+    assert_query_count(&reopened, "durpal", 1).await;
+}
+
+#[tokio::test]
+async fn invalid_group_rejects_without_replacing_live_or_durable_synonyms() {
+    let (app, dir) = synonym_app().await;
+    let (status, _headers, body) = post_synonym_form(&app, "groups=Drupal%2CDurpal").await;
+    assert_save_succeeded(status, &body);
+    let path = dir.path().join(SYNONYM_FILE);
+    let before = std::fs::read(&path).expect("baseline synonym file");
+
+    // Multi-token phrases are deliberately outside this phase's safe form
+    // contract. A rejected write must leave both the currently hot table and
+    // the complete on-disk file untouched (the observable atomicity contract).
+    let (status, _headers, body) = post_synonym_form(&app, "groups=new+york%2Cnyc").await;
+    assert!(
+        status.is_client_error(),
+        "invalid synonym group must fail with a 4xx response; status={status}, body: {body}"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("synonym file after rejected save"),
+        before,
+        "a rejected edit must not partially replace the durable table"
+    );
+    assert_query_count(&app, "durpal", 1).await;
+    assert_query_count(&app, "nyc", 0).await;
+}
