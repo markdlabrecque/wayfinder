@@ -1,3 +1,5 @@
+> **Historical implementation record.** This completed spec does not define current requirements or future work.
+
 # #354 — three non-cloud endpoints from `search_api_solr_admin`
 
 Branch: `354-admin-endpoints`. **Group C, lands last** — it owns the coverage

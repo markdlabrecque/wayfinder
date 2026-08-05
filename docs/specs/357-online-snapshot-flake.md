@@ -1,3 +1,5 @@
+> **Historical implementation record.** This completed spec does not define current requirements or future work.
+
 # #357 — `online_snapshot` flakes under parallel test load
 
 Branch: `357-online-snapshot-flake`. **Lands on `main` immediately after

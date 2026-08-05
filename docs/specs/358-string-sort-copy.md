@@ -1,3 +1,5 @@
+> **Historical implementation record.** This completed spec does not define current requirements or future work.
+
 # #358 — string fields get no language-specific `sort_*` copy
 
 Branch: `358-string-sort-copy`. Group A — safe to run alongside 359–362.

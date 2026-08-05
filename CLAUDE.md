@@ -28,8 +28,8 @@ non-trivial work; it is the source of scope decisions.
    Self-approval is not required — merge your own PR as soon as checks pass.
 6. **Rebase onto `main` before merging** when other branches have landed in the meantime, and
    re-run the gates locally afterwards. Concurrent branches here routinely conflict in
-   `src/lib.rs`, `tests/common/mod.rs`, and `solr-ref/capture.sh`; a green branch plus a green
-   `main` does not imply a green merge.
+   `src/lib.rs` and `tests/common/mod.rs`; a green branch plus a green `main` does not imply a
+   green merge.
 7. **Link the report, don't retype it.** Substantive work leaves a report in
    `docs/reports/YYYY-MM-DD-<slug>.md`; the PR body summarises and points at it.
 
@@ -44,8 +44,6 @@ wants some of these, so assign ownership per branch before starting:
 | `src/lib.rs` | almost every issue | routing, handler bodies, `SELECT_PARAMS`/`UPDATE_PARAMS` |
 | `src/core_index.rs` | search/index features | the index-creation call is a repeat conflict site |
 | `tests/common/mod.rs` | every test suite | shared helpers; the `dead_code` allow lives here as an inner attribute — do not add a second one on `mod common;` |
-| `solr-ref/capture.sh` | anything capturing fixtures | append blocks at the end only |
-| `solr-ref/manifest.tsv` | anything capturing fixtures | core-relative GETs only, see below |
 | `docs/solr-ref-findings.md` | anything learning a Solr fact | append a numbered finding |
 
 Sequencing that has already proven necessary: error-envelope work lands before features that
@@ -53,46 +51,23 @@ produce errors, and schema-layer work lands before features that need new field 
 
 ## Compatibility contract
 
-- **Fixtures in `solr-ref/responses/` are immutable factual evidence.** Expected values in tests
-  come from them, never from what the implementation happens to produce. Fixture existence is
-  **not automatic product scope**: scope comes from the PRD and the issue/PR's client evidence,
-  product merit, and cost.
-- For a request/response path Wayfinder supports and a real client exercises, match Solr exactly
-  unless a deliberate departure is ratified in PRD §2. A captured but unexercised path is optional;
-  its mismatch is not automatically a bug or an implementation obligation. Do not widen a
-  normaliser or relax an assertion to hide an unintended supported-path difference — fix it or
-  escalate it with the diff.
-- **A scoped supported path needing fixtures needs new ones**: extend `solr-ref/capture.sh` (real
-  `solr:9` in Docker), commit the fixtures and manifest, derive the tests from them. **Append your
-  block at the end of `capture.sh`** so concurrent branches merge mechanically.
-- **Never re-capture existing fixtures as a side effect.** Re-running `capture.sh` rewrites all
-  of them, and `QTime`/`_version_`/`rid` churn dirties every branch's diff. If you must re-run
-  it, restore the fixtures afterwards — but note `git checkout -- solr-ref/` restores **tracked**
-  files only. Fixtures your branch captured but has not yet committed are untracked, and a
-  checkout silently leaves them as the freshly-churned versions. Commit new fixtures first, or
-  back up `solr-ref/responses/` and `manifest.tsv` outside the repo before re-running and restore
-  from that.
-- **`solr-ref/manifest.tsv` holds core-relative GETs only** — the differential harness GETs
-  every row in it verbatim. Anything else (other core, POST body, non-GET method) belongs in
-  `manifest-errors.tsv`.
-- **Wire format only.** Match Solr's param names, semantics, and JSON envelope. Never Solr's
-  config format.
-- `docs/solr-ref-findings.md` records **factual evidence** from Solr and clients; it is not a
-  divergence-policy ledger. Record a deliberate departure on any supported path in PRD §2's
-  ratified-divergence list with fixture or client evidence, a reason, and the
-  issue/report. Record unsupported or out-of-scope behaviour in PRD §5 and its issue/report,
-  never in the ratified-divergence list.
-- While #392 remains pending, the differential harness (`cargo test --test differential`) is
-  regression evidence and inventory evidence, not scope authority. `EXPECTED_DIVERGENCES` in
-  `tests/differential.rs` remains mechanically self-expiring when a listed entry starts matching,
-  but does not create a product commitment; delete its entry when the scoped feature lands.
+- Wayfinder retains its Solr-compatible wire because that is how it was built and how existing
+  clients reach it; Solr parity is not an ongoing goal.
+- **Fixtures in `solr-ref/responses/` are the frozen regression baseline.** Expected values come
+  from fixtures, never from implementation output. They remain factual evidence for the shipped
+  wire and do not create product scope.
+- No new Solr-parity work or captures are planned. Do not alter the frozen fixtures to make an
+  implementation pass; preserve fixture-derived assertions for the behaviours they record.
+- **Wire format only.** The current wire uses Solr parameter names, semantics, and JSON envelopes,
+  never Solr configuration files.
+- `docs/solr-ref-findings.md` records factual Solr and client evidence. Existing deliberate
+  differences are described in PRD §2; unsupported boundaries are stated in PRD §5.
 - Implementing a new request param? Add it to `SELECT_PARAMS`/`UPDATE_PARAMS` in `src/lib.rs`,
   or `strict_params = true` will 400 a param Wayfinder actually supports.
 
 ## Testing
 
-- `cargo test` must be green, and stay hermetic: no network, no Docker. Live-Solr work is gated
-  behind an env var (`WAYFINDER_DIFF_SOLR=1`).
+- `cargo test` must be green and stay hermetic: no network, no Docker.
 - `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` must both be clean. That
   clippy invocation is CI's exact command.
 - Tests come before implementation, and are confirmed red for the right reason first.

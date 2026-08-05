@@ -1,15 +1,16 @@
 # Solr reference capture — findings
 
-Source: `solr:9` (`_default` configset), core `content`, 5 docs.
-Regenerate with `solr-ref/capture.sh` (gitignored). Fixtures in `solr-ref/responses/`, index in `solr-ref/manifest.tsv`.
+Source: historical `solr:9` observations. `solr-ref/responses/` is the frozen regression baseline
+for the current wire.
 
 ## Evidence boundary
 
-This document records factual Solr capture and client-source evidence. Fixtures provide expected
-values but do not automatically create product scope. A deliberate departure on any supported
-path belongs in PRD §2 with fixture or client evidence, a reason, and its
-issue/report. Unsupported or out-of-scope behaviour belongs in PRD §5 and its issue/report.
-Captured but unexercised behaviour is evidence, not an implementation obligation.
+This document preserves numbered factual evidence from historical Solr observations and client
+source. Numbered findings retain their original wording as dated records; instructions or scope
+language inside them is historical, not current policy or planned work. Fixtures provide expected
+values for existing assertions and do not create product scope. Wayfinder's current supported
+behavior and deliberate differences are described in PRD §2; permanent unsupported boundaries
+are in PRD §5.
 
 Schema: `id` (string, uniqueKey), `body` (text_en, stored), `category` (string, stored,
 docValues, multiValued). `doc5` has no `category` — that is what makes `facet.missing`
@@ -17,13 +18,13 @@ observable.
 
 ## Numbering
 
-A finding is numbered once and never renumbered; a new one takes the next free number rather
-than reusing a vacated one. Citations across `src/`, `tests/`, `docs/` and
-`solr-ref/capture.sh` point at these numbers, and `tests/finding_citations.rs` fails on a
-citation that resolves to nothing and on a number defined twice.
+A finding is numbered once and never renumbered; a new finding used the next free number rather
+than reusing a vacated one. Citations across `src/`, `tests/`, and `docs/` point at these numbers,
+and `tests/documentation_contract.rs` protects the complete heading-number set.
 
-32, 33, 43, 44, 45, 85 and 86 were vacated by renumbers and never reused; a citation of one
-of them dangles and the guard catches it.
+Numbering gaps are intentional. Numbers 32, 33, 43, 44, 45, 85, 86, and 104 were vacated by
+earlier renumbering and remain unused; #392 removed only unnumbered planning and comparison-runner
+sections, so the numbered factual findings remain intact.
 
 ## Envelope facts the tracer bullet must reproduce
 
@@ -71,19 +72,6 @@ of them dangles and the guard catches it.
 **Open question 3 (reject vs ignore unknown params) has direct Solr evidence:** Solr ignores
 unknown parameters. Client evidence and the PRD determine whether a Wayfinder path supports them;
 this finding does not make that scope decision.
-
-## Not yet captured
-
-Stats, MLT, edismax, `/update` responses, `commitWithin`/`softCommit` behaviour.
-Range facets were captured by issue #3 (findings 105-107) — what is still missing there is
-`facet.range.other` / `.include` / `.hardend`, month/year date-math gaps, `facet.prefix`,
-`facet.method`, `facet.pivot`, interval and heatmap faceting, `f.<field>.facet.*` per-field
-overrides, and `json.nl=map` combined with `facet.missing` (a `null` key in an object).
-
-Add to `capture.sh` when those features come into scope — the script is meant to grow with the
-feature set.
-
----
 
 ## Findings from the issue #11 error-shape capture
 
@@ -180,141 +168,6 @@ those numbers ambiguous. These three are issue #3's, renumbered to 105-107; issu
       `gap`/`start`/`end` untouched.
     - **Empty interior buckets are emitted, at 0**: the date capture has
       `"2020-01-01T00:00:00Z",0` and `"2020-01-04T00:00:00Z",0` between populated buckets.
-
-    Only day-granularity date gaps are in scope: `+1MONTH`/`+1YEAR` need a calendar-aware
-    DateMathParser (month lengths vary), so Wayfinder refuses them by name rather than silently
-    rounding. Follow-up.
-
-## Differential harness (issue #1)
-
-`tests/differential.rs` + `tests/common/diff.rs` run the query set in `solr-ref/manifest.tsv`
-against Wayfinder and diff the response against a known-good side, per the normaliser rules
-above (PRD §8). Two modes, one differ:
-
-- **Hermetic (default):** `cargo test --test differential`. Every manifest entry runs against
-  an in-process Wayfinder and is diffed against the committed fixture in
-  `solr-ref/responses/<name>.json`. No network, no Docker — this is the command CI runs.
-- **Live:** `WAYFINDER_DIFF_SOLR=1 cargo test --test differential`. Same query set, same differ,
-  but the expected side comes from a live Solr over HTTP (`WAYFINDER_DIFF_SOLR_URL`, default
-  `http://localhost:8983/solr/content`). Run `solr-ref/capture.sh` first — it leaves the
-  container up with the schema and corpus already loaded; this test does not orchestrate
-  Docker itself. **This mode never queries Wayfinder** — it re-fetches from Solr itself and
-  diffs that against the committed fixture, i.e. a fixture-staleness check against the live
-  container, not a Wayfinder compatibility check (that is the hermetic mode's job). This matters
-  for the self-expiring list below: a divergence that only exists because Wayfinder lacks a
-  feature trivially "matches" in live mode on every run, since real Solr is internally
-  consistent with its own past capture — so those entries' self-expiry is decided by the
-  hermetic run only, and live mode just logs them. (`fl=score`, issue #34, used to be this
-  list's example of that; it no longer is, since it landed as a ratified permanent divergence —
-  PRD ratified-divergence 4 — rather than an unbuilt-feature one. See finding 31.)
-
-### `manifest-errors.tsv` wiring (issue #31)
-
-`manifest-errors.tsv` (added by issue #11 for the non-core-relative-GET error fixtures — other
-cores, POST/PUT/DELETE, request bodies) is now run by the same two-mode harness, in
-`tests/differential.rs::manifest_errors_every_row_runs_against_the_matching_hermetic_app` /
-`live_solr_matches_committed_manifest_errors`. `tests/common/diff.rs::load_manifest_errors`
-parses its 6-column format (`name, status, method, url-after-/solr/, body, [base-url]`);
-`common::request_full`/`request` (moved from `tests/error_shapes.rs`, issue #31 item 3) issue the
-requests so POST/PUT/DELETE and bodies work. Per-row app selection is by the URL's leading core
-segment (`content/...`, `facets/...`, `keyorder/...`), rewritten to `content` before the request
-is issued, since every Wayfinder test app names its core `content` (`KEYORDER_SCHEMA_TOML`'s
-comment documents the same rewrite for `tests/json_key_order.rs`'s own copy of that core). A
-segment naming neither — `nosuchcore/...`, `schemaless_probe/...` — is issued unrewritten against
-the default content app, since that mismatch (a core Wayfinder genuinely does not have) is exactly
-the shape of the `ACCEPTED_DIVERGENCES` rows below.
-
-### `ACCEPTED_DIVERGENCES` vs `EXPECTED_DIVERGENCES`
-
-Two distinct lists, both self-documenting, printed during their runs, never silent:
-
-- **`ACCEPTED_DIVERGENCES`** (`tests/differential.rs`, manifest-errors runner only) — *ratified,
-  permanent* divergences from captured Solr behaviour, each citing the PRD §2 entry that ratifies
-  it and the finding that supplies evidence: `err_missing_core` (finding 15, HTML vs JSON 404 body — checked as a raw-text
-  non-JSON assertion, since `common::fixture` would panic parsing it), `update_unknown_field_schemaless`
-  (PRD ratified-divergence 3, no schemaless mode), and the two supported unfacetable-field rows
-  (finding 105, `facet_non_docvalues_text`, `facet_stored_only_field`). The unsupported
-  `facet_non_docvalues_text_enum` row is expected-difference inventory instead. Accepted entries
-  never expire — there is nothing to build, the PRD says this is Wayfinder's intended shape — so they
-  are checked by a narrower, row-specific assertion instead of the generic differ, and are not
-  expected to ever leave the list.
-- **`EXPECTED_DIVERGENCES`** (`manifest.tsv` loop) / **`EXPECTED_DIVERGENCES_MANIFEST_ERRORS`**
-  (`manifest-errors.tsv` loop) — a mechanically self-expiring regression/inventory
-  classification, not product scope, an implementation queue, or ratification. Every entry's
-  diff is still computed; the moment it comes back empty the suite goes red, naming the entry to
-  delete. Creating or retaining an entry does not authorize work; a separate PRD and issue/PR
-  scope decision is required. See "Expected-
-  divergence list" below for the `manifest.tsv` history; `EXPECTED_DIVERGENCES_MANIFEST_ERRORS`
-  is now **empty** — issue #35 closed the gap it tracked (`facet_unknown_field` and four more
-  rows surfaced by issue #33: Wayfinder's facet-field/facet-query errors omitted the `response`
-  block Solr's fixture carries alongside `error`). The fix builds `response` before
-  `facet::facet_counts` runs and attaches it to a `facet.query`/`facet.field` error, while a
-  `facet.range` error — detected before the base query ever runs — is marked with
-  `facet::PreQueryFacetError` so it is deliberately excluded and still renders with no
-  `response` key, matching `facet_err_range_single.json` and friends (see finding 50).
-
-### Running the live error mode
-
-`WAYFINDER_DIFF_SOLR=1 cargo test --test differential` runs `live_solr_matches_committed_manifest_errors`
-alongside the others. Each row uses its own effective base URL (column 6 of `manifest-errors.tsv`,
-defaulting to the canonical `http://localhost:8983/solr`) and its own method/body via
-`common::diff::fetch_live_full`/`fetch_live_status` (the latter is a status-only fetch, used for
-`ACCEPTED_DIVERGENCES` rows, since `err_missing_core`'s HTML body would fail `fetch_live_full`'s
-JSON parse). A row whose base URL fails a quick reachability probe
-(`common::diff::live_reachable`) is a printed, named skip — the per-issue containers on
-8984/8985/8986 are not guaranteed to be up — except the canonical 8983 base, which must always
-answer. Running this mode **writes** to the reference container: `update_unknown_field_schemaless`
-re-POSTs `probe_unknown_field` with `commit=true` against the canonical 8983 container, exactly
-as `manifest-errors.tsv`'s own row does — idempotent in practice (same doc `id`, so a re-POST
-just re-indexes it), but not a read-only probe.
-
-### Adding a query
-
-The query set is `solr-ref/manifest.tsv`, generated by `solr-ref/capture.sh` — it is the single
-source of truth. To add a query: add a `cap` line to `capture.sh`, re-run it (needs Docker), and
-commit both the new fixture under `solr-ref/responses/` and the updated `manifest.tsv`. Do not
-hand-edit the manifest or fixtures.
-
-### Expected-divergence list
-
-`tests/differential.rs::EXPECTED_DIVERGENCES` inventories manifest entries with a *known,
-currently real* Wayfinder-vs-Solr difference — currently just `ping` (reason below). The list
-neither creates product scope nor commits Wayfinder to implementation; only a separate PRD and
-issue/PR decision can do that. `sort` *ordering* (issue #2) and the seven faceting entries this list
-used to carry (`facet.mincount`/`limit`/`missing`/`query`, `json.nl=map`, term-dictionary
-enumeration for the zero/all-filtered facets) were deleted when issues #2/#3 landed and they
-stopped diverging — the mechanism working exactly as designed. `select_term_scored`/
-`select_quick_scored` (issue #31/#34) were here too, for the same reason (no `fl=score`
-support); issue #34 landed `fl=score`, and their remaining divergence (BM25 score magnitude)
-turned out to be a permanent scoring-formula difference rather than an unbuilt feature, so they
-moved to `RANKED_SCORE_VALUE_RATIFIED` (PRD ratified-divergence 4, finding 31) instead of being
-deleted outright. Each entry carries a reason identifying why the harness classifies it; that
-reason is not an owning implementation issue.
-
-Note what does **not** belong here: an *accepted, permanent* divergence (finding 15's unknown
-core, finding 105's unfacetable-field 400). Those get their fixtures in `manifest-errors.tsv`, a
-numbered factual finding, and PRD §2 ratification; an expected-difference entry is mechanically
-self-expiring and cannot represent a permanent policy decision.
-
-This list is inventory, not a permanent skip or implementation queue. The whole-query-set test
-still runs every entry and computes its real diff; it just does not count a listed entry's diff as
-a failure. If an entry starts matching, the test fails and requests deletion of the stale
-classification. That mechanical cleanup says nothing about whether a nonmatching behavior should
-ever be implemented.
-
-`ping` is in this list too, not given a normaliser carve-out: its fixture's
-`responseHeader.params` includes Solr ping-handler internals such as a per-run `rid` counter
-that no implementation can reproduce byte-for-byte (the same reason `tracer_bullet.rs::ping_reports_ok`
-only asserts ping's essential shape rather than diffing the full envelope). Normalising `rid`
-away generically would risk quietly swallowing a real `params` diff on every other manifest
-entry, so it is handled as a named, reasoned exclusion instead.
-
-When scoped work happens to make an entry match, remove the corresponding entry from
-`EXPECTED_DIVERGENCES` in `tests/differential.rs`. If you forget, the test fails with a message
-telling you exactly which stale classification to remove; the entry itself never scopes that
-work.
-
----
 
 ## Findings from the issue #2 `sort` capture
 

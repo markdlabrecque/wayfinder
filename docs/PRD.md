@@ -14,12 +14,8 @@ production: 1–2 GB of resident memory before the first document is indexed, GC
 10–30 second cold start, a separate deployment lifecycle, and an XML config set that has to
 be regenerated and re-uploaded whenever the index definition changes.
 
-For the overwhelming majority of these deployments — tens of thousands to low millions of
-documents, single node, one or two indexes — that is a large operational tax for a small
-search problem.
-
-**Wayfinder** is a single static Rust binary that speaks Solr's HTTP API, backed by Tantivy
-for indexing and retrieval, configured by a TOML file.
+**Wayfinder** is a single static Rust binary backed by Tantivy, configured by TOML, with one
+schema file and one data directory.
 
 ### Primary goals
 
@@ -30,364 +26,119 @@ for indexing and retrieval, configured by a TOML file.
 ### Secondary goals
 
 3. Memory footprint an order of magnitude below Solr for the same corpus.
-4. Wire-compatible enough that existing Solr clients work against it unmodified.
+4. A stable wire for existing clients.
 
-### Eventual target: Drupal Search API
+### Existing-client wire
 
-The motivating consumer is Drupal's Search API via `search_api_solr`, and the *integration*
-is deliberately sequenced after v1 (§5). Building the engine against Solr's own documented
-behaviour first keeps the design honest and avoids contorting the core around one client's
-quirks.
-
-The module's request set, however, is more than one client's quirks: it is the best available
-evidence of which Solr features real applications depend on, so capturing it is phase v1.5 and
-feeds the roadmap rather than only the test suite. §2 explains how the two contracts relate.
+Wayfinder retains its Solr-compatible wire because that is how Wayfinder was built and how
+existing clients reach it. The wire is not an ongoing parity goal. It supplies the current
+request parameter names and JSON envelope without adopting Solr's configuration format or
+becoming a general Solr replacement.
 
 ### Non-goals
 
 - SolrCloud, ZooKeeper, distributed/sharded search.
 - Data Import Handler, Streaming Expressions, SQL interface.
 - XML anything — not `schema.xml`, not `solrconfig.xml`, not `wt=xml`. See §3.
+- OCR. Image-only documents may validly yield no text.
 
-Document extraction was originally part of the second bullet as “Tika/`/extract`.” Issue #171
-revisited that decision because the vendored `search_api_solr` client has a concrete
-`extractContentFromFile()` path to `/update/extract`, even though the captured site did not have
-an attachments integration configured to exercise it. The revised boundary admits extraction to
-the roadmap **only as an in-process Rust feature with no JVM, Tika server, sidecar, or separately
-operated service**. Well-maintained Rust parsing crates are ordinary implementation dependencies,
-not third-party runtime services; hand-writing PDF and Office parsers is not a goal. OCR remains
-out of scope: image-only documents may validly yield no text.
+Document extraction is an in-process Rust capability; it never requires a JVM, Tika server,
+sidecar, or separately operated service. Well-maintained Rust parsing crates are ordinary
+implementation dependencies, not third-party runtime services.
 
 ---
 
 ## 2. Compatibility contract
 
-Wayfinder is compatible with Solr's **wire format** — request parameter names and response
-JSON envelope — and deliberately *not* with its configuration format.
+Wayfinder's current supported behavior uses Solr's **wire format** — request parameter names
+and response JSON envelopes — and deliberately not its configuration format. The retained wire
+is an existing-client entry point, not an ongoing parity program.
 
-That split is the central design decision. The configuration format is what *operators* deal
-with, it is the single worst part of running Solr, and matching it would import the project's
-largest source of complexity for no gain.
-
-### The goal is coverage, not identity
-
-Wire compatibility is **an adoption mechanism, not the product**. The target is to serve the
-great majority of what real Solr deployments actually do — call it 75-80% of use cases — so
-that an existing user switches without touching their client. It is not to reproduce Solr's
-response bytes for their own sake.
-
-The distinction matters because two different things get called "Solr compatibility":
-
-- **Solr as a design teacher.** Twenty-one years of accumulated judgment about what a search
-  backend needs: the field-type and analyzer model, what faceting has to return, `mm`'s
-  conditional grammar, commit-visibility semantics, missing-values-last on sort. This is the
-  valuable inheritance, it is why the engine is built against Solr's documented behaviour
-  first, and Wayfinder keeps it regardless of what happens to the wire.
-- **Solr as a wire protocol.** Param names and envelope shape. Much less of this is wisdom
-  than it appears — `facet_fields` as a flat alternating name/count array is a 2006 decision
-  nobody could undo, not an insight. Reproducing it buys client compatibility and nothing else.
-
-Fixtures and captures are immutable factual evidence: they supply expected test values and are
-never derived from Wayfinder. They do **not** automatically define product scope. Scope decisions
-belong in this PRD and in the issue/PR, based on client evidence, product merit, and cost.
-
-Consequences, and they are the point of this section:
-
-1. **Fidelity is weighted by what clients exercise.** A request/response path Wayfinder supports
-   and a real client exercises is held exactly. A captured path no client reaches is optional: a
-   mismatch there is not automatically a bug or an implementation obligation. The differential
-   harness (§8) is evidence about regressions and inventory — not a claim of byte-identity across
-   Solr's whole surface or scope authority.
-2. **Divergence on the merits is policy, not apology.** A deliberate departure on a supported
-   path is recorded in the ratified list below with fixture or client evidence, its reason, and
-   its issue/report. Unsupported or out-of-scope behaviour is identified as such, not presented
-   as a supported-path divergence. That list is a design record, not a confession.
-3. **Coverage has to be measurable or it will drift.** "75-80%" is not an assertion, it is a
-   number to compute; the instrument is in §5's Phases notes.
-
-An unintended difference from fixture evidence is a bug when it is on the scoped,
-supported client-exercised contract. Divergence is a decision someone makes and writes down,
-never something a normaliser absorbs.
+The fixtures in `solr-ref/responses/` are the frozen regression baseline. Expected values come
+from fixtures, never implementation output. They record factual historical Solr and client
+behavior; fixture existence does not itself broaden Wayfinder's supported surface.
 
 ### What must match exactly
 
-For the request and response paths real clients exercise:
+For current request and response paths, the shipped wire retains these shapes:
 
 - **Response envelope.** `responseHeader{status, QTime, params}`,
   `response{numFound, start, numFoundExact, docs}`, `facet_counts{facet_queries,
-  facet_fields, facet_ranges}`, `highlighting{}`, `stats{}`. Including the awkward parts —
-  `facet_fields` as a flat alternating name/count array, `json.nl` handling, the shape of an
-  empty result and an empty facet.
+  facet_fields, facet_ranges}`, `highlighting{}`, and `stats{}`. This includes flat alternating
+  `facet_fields`, `json.nl` handling, and the shapes of empty results and facets.
 - **Error shape.** `{"responseHeader": {...}, "error": {"msg": ..., "code": ...}}` with the
-  HTTP status Solr would return.
-- **Parameter names and semantics**, per §4.
+  returned HTTP status.
+- **Parameters.** The current supported parameter names and semantics in §5.
 
 ### Verified envelope facts
 
-Captured from a real `solr:9` against the tracer-bullet schema (`solr-ref/capture.sh`,
-gitignored — regenerate rather than trust this list if it ages):
-
-1. `facet_fields` defaults to a **flat alternating array** — `["animals",2,"classic",2]` —
-   and switches to an object under `json.nl=map`. Both shapes in scope.
-2. `facet.missing=true` appends a literal `null` key to that array: `[...,"misc",1,null,1]`.
-   The array is heterogeneous; model it as untyped JSON values.
-3. `facet_counts` always carries all five sub-objects — `facet_queries`, `facet_fields`,
-   `facet_ranges`, `facet_intervals`, `facet_heatmaps` — empty when unused. But the whole
-   `facet_counts` key is **absent** when `facet` was not requested.
-4. `numFoundExact` is present in Solr 9. Always `true` for Wayfinder (exact `Count`
-   collector), but the key must exist.
-5. `params` echoes raw request values as **strings**, even numerics (`"rows":"0"`), in
-   non-request order. The differential normaliser must be order-insensitive here.
-6. An unknown field in `fl` is **silently dropped** — no error.
-7. Unknown request parameters are **silently ignored**, `status: 0`. See open question 3.
-8. With no `fl`, docs include internal fields (`_version_`, `_root_`). Wayfinder needs its
-   own explicit default-`fl` decision.
-9. Errors: HTTP status matches `error.code`, `responseHeader.status` mirrors it, and
-   `error.metadata` is *also* a flat alternating array. `error.msg` is free text — compare
-   code and status, not the message.
-10. Sorting on a non-`docValues` field is a hard 400, not a silent fallback. Same constraint
-    as Wayfinder's `fast = true` requirement.
-11. `responseHeader.warnings` (a JSON array of strings) appears when Solr raises the effective
-    `facet.mincount` from 0 to 1 for a `facet.field` on a Points-based (numeric/date) column —
-    `"Raising facet.mincount from 0 to 1, because field <name> is Points-based."`
-    (`facet_field_numeric_all.json`). Absent from every other fixture, including `facet.range`
-    on the same fields and `facet.field` on a string column; Wayfinder emits the same key,
-    verbatim wording, under the same gate, and leads `responseHeader` with it (`warnings, status,
-    QTime, params`), matching the fixture's key order. Not a divergence — see findings 27-30.
+1. `facet_fields` defaults to a **flat alternating array** and switches to an object under
+   `json.nl=map`.
+2. `facet.missing=true` appends a literal `null` key to that array.
+3. `facet_counts` carries `facet_queries`, `facet_fields`, `facet_ranges`, `facet_intervals`, and
+   `facet_heatmaps` when faceting is requested, and is absent otherwise.
+4. `numFoundExact` is present. Wayfinder always returns `true` because its `Count` collector is
+   exact.
+5. Parameter echoes retain raw string values, including numerics; their object key order is not
+   semantically meaningful.
+6. An unknown `fl` field is silently omitted from a document, and unknown request parameters are
+   ignored unless `strict_params` is enabled.
+7. With no `fl`, Solr fixtures include `_version_` and `_root_`; Wayfinder's documented response
+   behavior is described with the relevant feature.
+8. Error HTTP status, `error.code`, and `responseHeader.status` agree. `error.metadata` is a flat
+   alternating array; message text is not treated as a general equality contract.
+9. Sorting a non-`docValues` field is a hard 400. Wayfinder's equivalent requirement is
+   `fast = true`.
+10. A numeric or date `facet.field` can raise `facet.mincount` to 1 and report the warning in
+    `responseHeader.warnings`.
 
 ### What deliberately differs
 
-- Configuration is TOML (§3), not `schema.xml` / `solrconfig.xml`.
-- `wt=json` only. No XML, no javabin, no `wt=phps`.
-- No core admin API in v1; cores are directories.
+- Configuration is TOML (§3), not `schema.xml` or `solrconfig.xml`.
+- `wt=json` is the only response writer; XML, javabin, and `wt=phps` are unsupported.
+- Wayfinder serves one configured core per process rather than Solr's core-admin model.
 
 #### Ratified divergences from captured Solr behaviour
 
-These are knowing mismatches on supported paths, whether client-exercised or not. Each records
-fixture or client evidence, the reason chosen, and its issue or report; an unsupported or out-of-scope path belongs
-in §5 instead. Nothing may be added here without those records. Number 6 moved to §5 when issue
-#399 distinguished unsupported parser types from supported-path divergences; later numbers stay
-stable for existing citations.
+This is the descriptive record of current supported behavior that intentionally differs from
+historical Solr fixture evidence. The numbering is stable for existing citations.
 
-1. **An unknown core returns a JSON error envelope, not Solr's 404 HTML page.**
-   `err_missing_core.json` shows real Solr answering with its "Searching for Solr? You must type
-   the correct path." easter egg. Wayfinder matches the 404 status and returns its normal JSON
-   error. Clients parse JSON; none depends on that HTML, and serving it would mean carrying a
-   second response format solely to reproduce a joke. (findings 15, issue #11)
+1. **Unknown core errors are JSON, not Solr's HTML 404 page.** Wayfinder preserves the 404 status
+   and returns its normal JSON error envelope.
 
-2. **A facet on an existing but unfacetable field is a 400, where Solr returns 200 with empty
-   counts.** `facet_non_docvalues_text.json` and `facet_stored_only_field.json` show Solr
-   answering `status: 0` with `"<field>":[]` for a non-docValues field and for a stored-only
-   field — no warning anywhere in the response. That is the one captured behaviour this project
-   rejects on the merits: the client cannot distinguish "this field has no values" from "you asked
-   for something impossible", which is exactly the silent-empty-counts failure the tracer-bullet
-   review flagged. Tantivy cannot aggregate a non-`fast` column at all, so the honest answer is a
-   hard 400 in the Solr error envelope, worded to mirror the `sort` equivalent in finding 11.
-   (issue #3's finding 105, narrowed by issue #26)
+2. **Faceting an existing but unfacetable field is a 400.** Solr's historical fixtures return 200
+   with an empty count list; Wayfinder rejects a request it cannot aggregate rather than making an
+   impossible field indistinguishable from an empty one.
 
-   **Scope note, and a caution about how this list gets built.** As first ratified this divergence
-   also covered a facet on a field that *does not exist*, on the strength of a fixture showing
-   Solr returning 200 with an empty array. That fixture was captured against a container whose
-   schema `capture.sh`'s own schemaless probe had polluted, so the "unknown" field existed. On a
-   clean container Solr 400s, exactly as Wayfinder does, so unknown facet fields were never a
-   divergence. A ratified divergence is only as good as the cleanliness of the fixture behind it —
-   which is why every entry here must name its fixture, and why `capture.sh` must leave the
-   reference core able to reproduce its own captures.
+3. **Unknown document fields are rejected.** Solr's `_default` configuration can add such fields
+   schemalessly; Wayfinder uses a fixed schema. `[[dynamic_fields]]` is the supported way to
+   admit matching fields.
 
-3. **An unknown field in an incoming document is rejected, where Solr's `_default` configset
-   auto-adds it.** That configset is *schemaless* (`update.autoCreateFields` defaults to true), so
-   Solr silently adds the field as `text_general` and returns 200
-   (`update_unknown_field_schemaless.json`). Wayfinder matches non-schemaless Solr instead
-   (`update_unknown_field_strict.json`, 400), because auto-adding is runtime schema mutation,
-   which §3 rules out and Tantivy cannot do in place regardless. `[[dynamic_fields]]` is the
-   supported way to accept fields not named individually. (issue #10)
+4. **`fl=score` preserves score keys and ranking order, not Solr's BM25 float magnitude.** Tantivy
+   and Lucene use different scoring internals; `score` and `response.maxScore` retain their
+   current wire positions and types.
 
-4. **`fl=score`'s BM25 float magnitude does not match Solr's; doc ranking order and the wire
-   shape do.** `select_term_scored.json` and `select_quick_scored.json` show Tantivy's BM25
-   score for a doc diverging from Solr's captured BM25 score by a non-constant ~1.9x-2.3x
-   ratio (e.g. `select_term_scored`'s `doc2`: Tantivy ~0.875 vs. Solr's captured 0.457;
-   `select_quick_scored`'s `doc3`: Tantivy ~0.940 vs. Solr's captured 0.413) — the ratio moving
-   per-doc rules out a missing constant factor and points at an internal scoring-formula
-   difference (idf / norm-encoding) between Tantivy's and Solr/Lucene's BM25Similarity, not a
-   wiring bug. Doc *ranking order* already matches Solr exactly for both fixtures. Per
-   `CLAUDE.md`'s compatibility contract ("Wire format only... Never Solr's config format"),
-   Wayfinder's compatibility obligation is to Solr's wire semantics, not to reproducing another
-   engine's internal ranking math bit-for-bit, so `fl=score`'s obligation is: the `score` key is
-   present/positioned/typed correctly and `response.maxScore` is present/typed correctly (both
-   gated on `fl` requesting `score`), and ranking order matches — not that the float values
-   themselves match. (issue #34)
+5. **System-admin responses report Wayfinder values.** Configured version values and Wayfinder
+   placeholders replace Solr's JVM, host, timestamp, path, and build-specific data; the reported
+   schema string keeps the `search_api_solr`-consumed segments while naming Wayfinder.
 
-5. **`/admin/info/system` and `/admin/system` report a configured version, not the
-   captured Solr's own `9.10.1`, serve static `jvm`/`system` placeholders instead of host
-   introspection, and name their version, home, and schema values after Wayfinder rather than
-   Solr.** `admin_info_system.json` and `admin_system.json` are verbatim copies of the
-   captured envelopes; the differences, all permanent and all suppressed via the
-   `admin_system`/`admin_info_system` entries in `tests/differential.rs`, are:
+7. **Colliding `facet.field` response labels are a hard 400.**
+   `facet_collision_field_flat.json` and `facet_collision_field_map.json` show Solr emitting
+   duplicate JSON object members for the same response label; Wayfinder rejects that ambiguous
+   response shape. Repeated identical `facet.query` values still coalesce.
 
-   - `lucene.solr-spec-version`/`-impl-version`. The *value* is a config choice, default
-     `"9.0.0"` (resolves open question 2 above); the *key* was renamed to
-     `wayfinder-spec-version`/`wayfinder-impl-version` by issue #325, which removed the literal
-     `solr` token from Wayfinder's own response keys. Solr's *impl* version additionally
-     carries a build hash and date that are unreproducible; Wayfinder emits a plain
-     `"<version> wayfinder"`.
-   - `jvm.*`/`system.*` — real host JVM/OS stats with no Wayfinder equivalent to introspect.
-   - `core.host`/`core.now`/`core.start`/`core.directory.*` on `/admin/system` — hostname,
-     timestamps, and real filesystem paths on the capture host.
-   - `solr_home`/`core_root` on `/admin/info/system`. Issue #325 renamed the emitted key to
-     `wayfinder_home`, so the top-level key set of that response deliberately no longer matches
-     the fixture's, and both `wayfinder_home` and `core_root` carry `/var/wayfinder/data` where
-     the captured Solr reports its own `solr`-rooted path.
-   - `core.schema` on `/admin/system`. This one **was** compared exactly against
-     `"drupal-4.4.0-solr-9.x-0"` and now is not: issue #325 renamed Wayfinder's reported value
-     to `"drupal-4.4.0-wayfinder-9.x-0"`. The parse is preserved deliberately, and the rename is
-     safe for exactly that reason: `search_api_solr`'s `SolrConnectorPluginBase.php`
-     `explode('-', $schema)`s that value and reads `$parts[1]` (`getSchemaVersion`, the module
-     version `4.4.0`), `$parts[3]` (`getSchemaTargetedSolrBranch`, `9.x`), and `$parts[4]`
-     (`isJumpStartConfigSet`, `0`) — it never reads `$parts[2]`, which is the only segment this
-     rename touches (finding 78). The hyphen arity and every consumed segment are unchanged; a
-     client that pins the whole literal string instead of parsing it owns that risk.
+8. **Invalid `omitHeader` values receive Wayfinder's JSON 400 rather than Jetty HTML.** Valid
+   `omitHeader=true`/`yes`/`on` suppresses the header on success and error responses.
 
-   (issue #59; issue #325)
+9. **Authentication failures are JSON.** Wayfinder returns its JSON `WfError` envelope and
+   `WWW-Authenticate: Basic realm="wayfinder"` rather than Solr's Jetty HTML and `solr` realm.
 
-7. **Colliding `facet.field` response labels are a hard 400, where Solr returns 200 with duplicate
-   JSON object members.** `facet_collision_field_flat.json` and
-   `facet_collision_field_map.json` show `{!key=x}category` plus `{!key=x}id` producing two literal
-   `"x"` members in request order; `json.nl=map` changes only each member's bucket shape. That
-   response cannot be represented by a normal JSON object model, and common parsers silently keep
-   only one member — recreating the data loss this edge case is meant to prevent. Wayfinder
-   therefore rejects the ambiguous request in its normal 400 error envelope rather than emitting
-   duplicate keys or silently choosing a facet. This is deliberately narrow: the companion
-   `facet_collision_query_flat.json` and `facet_collision_query_map.json` fixtures show Solr itself
-   coalescing duplicate identical `facet.query` values, which Wayfinder matches. (issue #149;
-   finding 102)
+10. **`/update/extract` uses Wayfinder extraction rather than Tika.** It omits Tika's
+    `X-Parsed-By` classes and fabricated link `shape="rect"`, indexes Wayfinder-extracted content,
+    and returns 200-empty for a malformed content stream that Tika rejects.
 
-8. **An invalid `omitHeader` value returns Wayfinder's JSON error envelope, where Solr returns
-   Jetty HTML.** `omit_header_invalid_one.html` shows `omitHeader=1&wt=json` failing before Solr's
-   JSON response writer runs, with HTTP 400 and `invalid boolean value: 1` embedded in an HTML
-   page. Wayfinder matches the 400 and rejects the same vocabulary, but keeps the response in its
-   normal headerless JSON error shape. This is the same client-facing choice as divergence 1:
-   clients parse JSON, Wayfinder supports only `wt=json`, and reproducing a servlet container's
-   fallback HTML would add a second error format solely for parser failures. Valid
-   `omitHeader=true`/`yes`/`on` still suppresses `responseHeader` on success and error envelopes,
-   matching `omit_header_error_true.json`, `omit_header_error_yes.json`, and
-   `omit_header_update_error_true.json`. (issue #179; finding 112)
-
-9. **An authentication failure returns Wayfinder's JSON `WfError` envelope, where Solr's auth
-   filter returned Jetty HTML, and challenges with `realm="wayfinder"` where Solr sends
-   `realm="solr"`.** The issue #229 BasicAuthPlugin capture (finding 118) shows
-   unauthenticated and wrong-credential `/solr/admin/info/system` requests returning 401 Jetty
-   HTML, while a correct credential returns 200; both 401s carry `WWW-Authenticate: Basic
-   realm="solr"`. Wayfinder matches the 401 status and the `WWW-Authenticate: Basic` challenge
-   shape, but issue #325 changed the realm token to `wayfinder`, and Wayfinder returns its normal
-   JSON error envelope rather than the HTML. The envelope half is the same client-facing choice
-   as divergences 1 and 8: Wayfinder's response surface is JSON-only and its clients parse JSON,
-   so reproducing a servlet-container fallback would add a second error format solely for
-   authentication failures. The realm half is safe because the realm string is a display label —
-   RFC 7617 clients key credentials on it but no `search_api_solr` code path compares it — so a
-   client re-prompts once at most. (issue #229; issue #325; finding 118)
-
-10. **`/update/extract` omits `X-Parsed-By`, omits Tika's injected `shape="rect"`,
-    indexes Wayfinder's own extraction (not Tika's) on the Solr-Cell path, and extracts a
-    malformed-content-stream PDF to empty (200) where Tika throws (500).** Several separate
-    divergences on the one endpoint, from the issue #258, #259, and #294 captures (findings
-    120-123):
-
-    - **`X-Parsed-By` is absent** from both `file_metadata` and the XHTML `<head>`. Its captured
-      values are Java class names —
-      `org.apache.tika.parser.DefaultParser`, `...csv.TextAndCSVParser`, `...html.HtmlParser` —
-      naming the Tika classes that did the work. Wayfinder has no Tika and no honest equivalent;
-      emitting a Java class name it never ran would be a lie a client could reasonably act on
-      (Tika's own tooling keys parser-specific behaviour off it). Emitting Wayfinder-specific
-      values instead would be a *different* divergence with no fixture behind it, and would still
-      break any client matching on the captured strings.
-    - **`shape="rect"` is not injected** onto `<a>` elements. `extract_html_only_xml.json` shows
-      Tika adding it to a link whose source (`solr-ref/extract-inputs/sample.html`) has no such
-      attribute. It is an artefact of Tika's HTML parser, not content, and reproducing it would
-      mean fabricating markup that was never in the document.
-    - **The Solr-Cell indexing path (#259) indexes Wayfinder's own extraction, not Tika's.**
-      `extractOnly=true` is no longer required (this retires #258's former "extractOnly required"
-      divergence): with it absent or false, `literal.*`/`fmap.*`/`uprefix`/`lowernames`/
-      `captureAttr` are applied to the extraction and the result is indexed through the same
-      commit path `/update` uses, answering the bare `responseHeader` (`extract_html_index.json`).
-      The indexed document's `body` is Wayfinder's `body_text` (its HTML text form), not Tika's
-      content-field serialization (which keeps the title plus a structure-dependent whitespace
-      layout Wayfinder does not replicate); and its `links` carry the real `<a>` attribute values
-      only — no fabricated `shape="rect"` (the bullet above). The follow-up select
-      (`extract_html_select.json`) therefore differs in `body` and `links`, asserted in
-      `tests/extract_index.rs` (which also proves the fixture still genuinely differs, so the
-      divergence cannot silently start matching). This is Solr-compatibility completeness for
-      non-Drupal clients — issue #259's own survey found no Drupal/Search-API consumer for
-      server-side indexing, so the divergence has no client behind it.
-    - **PDF body whitespace differs from Tika/PDFBox (normalized away).**
-      `pdf-extract`'s coordinate-based text device and Tika/PDFBox emit the same words in the
-      same order but different whitespace — single vs double newline between columns, none vs
-      `\n\n\n\n` between pages. The #261 GO report ratified this as "match (whitespace divergence
-      only) ... a normalisation detail for the renderer, not an extraction defect", so the
-      differential harness compares the PDF `extractFormat=text` body by its non-whitespace token
-      sequence (`normalize_extract`'s PDF branch), applied symmetrically so it cannot hide a
-      real content difference. The six success-path PDF corpus rows are listed in
-      `ACCEPTED_DIVERGENCES_MULTIPART`. (issue #294; report `2026-08-03-pdf-extraction-corpus.md`)
-    - **A malformed-content-stream PDF extracts to empty (200), where Tika throws (500).**
-      `extract_pdf_malformed_objects.json` is Tika/PDFBox throwing `DataFormatException` on a
-      broken Flate stream; `pdf-extract` swallows an unfilterable stream as "no text" rather
-      than erroring (#261 Q1 divergence #1) and cannot distinguish that from a legitimately
-      empty image-only PDF, so Wayfinder emits the same 200-empty shape for both. This is a
-      *status* divergence, recorded in `DIVERGENT_STATUS_MULTIPART`. The **former** corrupt-PDF
-      415 divergence — `broken.pdf` (`extract_corrupt_pdf.json`) — is **retired by #294**: the
-      PDF extractor now reaches a parse failure inside `lopdf` (the `%PDF-` header has no xref)
-      and answers 500, matching the capture, so that entry is deleted rather than re-justified —
-      exactly as this bullet predicted. (issue #294)
-
-    The first two, plus the PDF body-whitespace divergence, are normalised away in the
-    differential harness by `normalize_extract`, with each affected row listed in
-    `ACCEPTED_DIVERGENCES_MULTIPART` in `tests/differential.rs`; that runner asserts the raw
-    envelopes really do still differ before normalisation, so the normaliser cannot quietly start
-    hiding something else. The malformed-content-stream PDF row is a *status* divergence, which no
-    normaliser may hide: it is listed row-by-row in `DIVERGENT_STATUS_MULTIPART`, which pins the
-    exact status Wayfinder must return and fails if the capture ever starts agreeing. The #259
-    indexing-path `body`/`links` divergence is a *value* divergence on a two-step index→select flow
-    the single-request manifest runner cannot express, so it lives in `tests/extract_index.rs`
-    rather than `ACCEPTED_DIVERGENCES_MULTIPART`.
-    (issues #258, #259, and #294; findings 120-123)
-
-11. **`{!payload_score}` over a field that carries no term payloads is a 400, where Solr dies on
-    an uncaught `NullPointerException` (500).** `pls_err_nonpayload.json` is
-    `{!payload_score f=body v="dog" func=max}` against a plain `text` field: Solr's
-    `PayloadScoreQParserPlugin` builds the span query, hands it to `PayloadScoreQuery`, and the
-    request fails with a 500 carrying a `trace` and no `msg` at all — a crash, not a diagnosis.
-    Wayfinder validates the field's payload capability after Solr's own checks (`f` present, `f`
-    defined, `v` analyzes to a term, `func` known, each of which keeps its captured message) and
-    answers 400 naming the field. Reproducing an upstream crash is not a goal, and a 500 with no
-    `msg` is unactionable for the client; a 400 is the same category the project already chose in
-    divergence 2 for "you asked for something impossible". Recorded in `ACCEPTED_DIVERGENCES`
-    with a check arm that asserts the fixture is still the 500/NPE shape and that Wayfinder still
-    answers 400, so the entry cannot rot into an excuse. (finding 170; issue #340)
-
-Note that divergence 3 is a difference from the *configset* the reference fixtures were captured
-against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, 4, 7, 8,
-10, and 11 are differences from Solr proper. Divergence 5 is a deliberate config choice plus
-inherent host non-reproducibility, not a Solr-behaviour disagreement. Divergence 9 is a
-difference from Solr's auth-filter/container error body, while retaining its 401 and Basic
-challenge realm.
-
-### How this is verified
-
-The differential harness compares a corpus and query set against captured Solr responses. It is
-regression and inventory evidence only: client evidence and the scope decisions in this PRD decide
-which differences must be fixed. On those scoped paths, fail on any unintended difference outside
-a normaliser for legitimately variable fields (`QTime`, timestamps, float tolerance on scores).
-Details in §8.
-
-### The Search API contract, next
-
-`search_api_solr` generates a Solr config set and issues a bounded set of requests. Capture
-both — the generated `schema.xml` and an HTTP trace of a real site against a real Solr — and
-freeze them as fixtures. That is a discovered contract rather than a guessed one, and it serves
-twice over: as the v2 conformance suite, and as the coverage denominator this section's target
-is measured against. It is phase v1.5 (§5) for that reason — the scope it defines is needed
-before the work it scopes.
-
-Importantly, that capture is expected to require **no XML parsing in Wayfinder** (§3).
+11. **`{!payload_score}` on a field without payloads is a 400.** Solr's historical response is an
+    uncaught 500; Wayfinder returns a diagnosable validation error.
 
 ---
 
@@ -476,9 +227,8 @@ manager, referenced by name from the field. The preset *is* the registration.
 
 ### Why no `schema.xml`, even for Search API
 
-An earlier draft proposed an `import-solr-config` converter for the Search API phase (v2, §5).
-On inspection it is
-not needed, and shipping it would be building for a problem we do not have.
+An earlier draft proposed an `import-solr-config` converter for Search API use. On inspection it
+is not needed, and shipping it would be building for a problem we do not have.
 
 `search_api_solr` does not declare a field per Drupal field. It encodes type and cardinality
 into the field name — `ss_`, `sm_`, `tm_`, `its_`, `ds_`, `bs_`, and so on — and relies on
@@ -490,9 +240,8 @@ repo, and reused by every Drupal site.
 Same for the language-specific text types the module generates — a fixed set per language,
 shipped as analyzer presets.
 
-v2 therefore ships a `search-api.toml` preset, not a converter. Revisit only if a real
-config set turns out to contain genuinely per-site content the preset cannot express; the
-fallback then is a converter, still a setup-time tool and never a runtime XML parser.
+Wayfinder ships a `search-api.toml` preset rather than a converter. It remains a
+setup-time TOML description, never a runtime XML parser.
 
 ### Server config
 
@@ -546,661 +295,104 @@ the library, not a compromise.
 
 ## 5. Feature scope
 
-Scoping rule for v1: **ship what Tantivy supports natively; roadmap the rest.** One
-deliberate exception, called out below.
+This section records the current product surface. The Solr-compatible wire is retained for
+existing clients, not expanded as an ongoing parity goal.
 
-Scoping rule from v2 onward: **ship what `search_api_solr` demonstrably uses; everything else
-Solr 9.x offers is unscheduled, on the Solr 9.x parity roadmap below.** The evidence base is
-the v1.5 capture (`coverage/search_api_coverage_contract.json`) plus the vendored module source
-(`coverage/search_api_solr_4.4.0_source`) for features the capture site did not have configured
-(autocomplete, spatial, grouping). This generalises calls the PRD had been making one at a time —
-the edismax six-param descope (issue #136), the `terms`/`admin/luke`/`admin/mbeans` descope
-(issue #57), the `_version_` narrowing — into the default rule, so each future descope no longer
-needs its own argument from first principles, only its evidence.
+### Current search and indexing capabilities
 
-### v1 — native Tantivy capability
-
-| Feature | Tantivy primitive |
+| Feature | Current implementation |
 |---|---|
-| Schema, field types, analyzer chains, multi-valued fields | `Schema`, `TextAnalyzer`, tokenizer/filter stack |
-| BM25 relevance | native, default scorer |
-| `q` — boolean / term / phrase / prefix / range / fuzzy / regex | `QueryParser`, `BooleanQuery`, `PhraseQuery`, `RangeQuery`, `FuzzyTermQuery`, `RegexQuery` |
-| `fq` filter queries (repeatable) | `BooleanQuery` with a non-scoring `Occur::Must` clause |
-| `fl`, `start`, `rows` | stored-field retrieval, `TopDocs::with_limit(..).and_offset(..)` |
-| `sort` | custom collector over fast-field column readers (field must be `fast`) — **not** `TopDocs::order_by_fast_field`, see below |
-| `numFound` | `Count` collector |
-| **Faceting** — `facet.field`, `facet.query`, `facet.range` + `.start`/`.end`/`.gap`, `facet.limit`, `facet.mincount`, `facet.sort`, `facet.missing` | aggregation API: `terms`, `range`, `histogram`, `date_histogram` |
-| **Stats** — `stats`, `stats.field` | metric aggregations: `min`/`max`/`sum`/`avg`/`count`/`stats`/`extended_stats`/`percentiles`/`cardinality` |
-| **Highlighting** — `hl`, `hl.fl`, `hl.snippets`, `hl.fragsize`, `hl.simple.pre`/`post` | `SnippetGenerator` |
-| **MoreLikeThis** — `/mlt` | `MoreLikeThisQuery` + builder (min/max doc freq, min term freq, max query terms, word length, stop words, boost) |
-| Field and document boosts | `BoostQuery` |
-| `/update` — add, delete-by-id, delete-by-query, `commit`, `commitWithin`, `softCommit`, `overwrite` | `IndexWriter` |
-| `/admin/ping` | trivial |
-| Commit / merge behaviour | `IndexWriter::commit`, `IndexReader` reload policy, merge policy |
+| Schema, field types, analyzer chains, multi-valued fields | Tantivy `Schema`, `TextAnalyzer`, tokenizer/filter stack |
+| BM25 relevance | Tantivy's native default scorer |
+| `q` | Boolean, term, phrase, prefix, range, fuzzy, and regex queries |
+| `fq` | Repeatable non-scoring Boolean `Must` clauses |
+| `fl`, `start`, `rows` | Stored-field retrieval and `TopDocs` pagination |
+| `sort` | Custom fast-field collector, including multi-clause sorting |
+| Result counts | Exact Tantivy `Count` collection |
+| Classic facets | `facet.field`, `facet.query`, `facet.range`, limit, mincount, sort, and missing buckets |
+| JSON facets | Terms facets, nesting, and `max()` aggregations over supported fields |
+| Stats | Metric aggregations for supported stat fields |
+| Highlighting | `hl`, `hl.fl`, snippets, fragment size, and simple tags |
+| MoreLikeThis | `/mlt` with its supported term and scoring parameters |
+| Updates | Add, delete-by-id, delete-by-query, commit, `commitWithin`, `softCommit`, and `overwrite` |
+| Search helpers | `/terms`, spellcheck, `/suggest`, `/admin/ping`, and the read-only `/ui` core view |
+| Extraction | Multipart `/update/extract` for the shipped extraction formats and envelopes |
+| Spatial and grouping | Shipped point, heatmap, date-range, grouping, and function-query capabilities |
 
-Tantivy's aggregation API is Elasticsearch-shaped, which is a good sign for this project: the
-bucket/metric model is a superset of what Solr's facet component needs, so the work is
-parameter translation rather than building an aggregation engine.
+`sort` uses Wayfinder's own collector over per-segment fast-field column readers. A field must
+be `fast`; multi-valued selectors and missing-value behavior are handled by that collector rather
+than `TopDocs::order_by_fast_field`.
 
-**Unsupported classic-facet methods.** Wayfinder supports its fast-field aggregation path, not
-Solr's alternative `facet.method` implementations. In particular, `facet.method=enum` is out of
-scope: captured Solr can enumerate a non-docValues field's term dictionary, while Wayfinder
-returns 400 for that request. The fixture remains inventory evidence, not a PRD §2-ratified
-supported-path divergence or an implementation commitment. (finding 106; issues #3, #399)
-
-**Correction from issue #2 (`sort`).** This table originally paired `sort` with
-`TopDocs::order_by_fast_field`. That primitive cannot implement the feature: it orders by exactly
-one fast field, so it cannot express multi-clause sort, cannot mix `score` into a clause list, and
-gives no control over where missing values land. `sort` is implemented instead as ordering inside
-Wayfinder's own collector (`src/collector.rs`), with per-segment fast-field column readers, the
-Lucene min/max selector for multi-valued fields, and missing values last in both directions. The
-`fast = true` requirement is unchanged — that part was right.
+**Classic-facet boundary.** `facet.method=enum` is permanently unsupported. Wayfinder exposes its
+fast-field aggregation path and returns 400 rather than attempting Solr's term-dictionary method.
 
 ### v1 exception — edismax
 
-Not a Tantivy feature, but *composition* of Tantivy primitives rather than missing capability:
-`qf` is a set of per-field `BoostQuery` clauses, `pf` a phrase clause over the same fields,
-`tie` dis-max tie-breaking across the per-field scorers, `boost` a multiplicative wrapper around
-the composed query, and `bf` an additive one — both via the function-query evaluator (`src/function_query.rs`, issue #289).
+Wayfinder supports `defType`, `q`, `qf`, `pf`, `mm`, `tie`, `bq`, quoted phrases, `+`/`-`, and
+`boost`/`bf` over constants, numeric field references, `sum`, `product`, `max`, `min`, and
+`recip`. `boost` multiplies the composed score per document and **`bf` is supported** as an
+additive function-query boost. `{!func}`, `{!boost b=...}`, and `{!payload_score}` use the
+shipped evaluator and payload field type.
 
-- **In:** `defType`, `q`, `qf`, `pf`, `mm`, `tie`, `bq`, quoted phrases, `+`/`-`, and `boost`/`bf`
-  over the arithmetic function-query subset (issue #289): constants, numeric field references,
-  and `sum`/`product`/`max`/`min`/`recip`, reached through `bf` (additive), `boost`
-  (multiplicative, constant or function form), and the `{!func}`/`{!boost b=...}` query parsers.
-- **Out:** `pf2`/`pf3`, `ps`, `stopwords`, `lowercaseOperators`. The date/ordinal functions
-  `ms`/`rord` (off the corrected client path — finding 129) are a follow-up to the arithmetic
-  evaluator, not a v1 exclusion: they extend `src/function_query.rs` rather than re-scoping it
-  (findings 75, 83, 129). The `{!payload_score}` query parser
-  (`Utility::flattenKeysToPayloadScore`, over the payload-bearing `boost_term_payload` field
-  type) **landed the same way** (issue #340): a `boost_term_payload` field type whose indexing
-  side strips the `|<float>` suffix and whose fast column keeps the token verbatim, plus a
-  `PayloadScoreQuery` in `src/function_query.rs` that replaces the child term query's score with
-  the `min`/`max`/`average`/`sum` of the matched term's payloads. Still out within it:
-  `includeSpanScore=true` (Lucene's span-plus-payload blend) and a multi-term `v` (Solr's ordered
-  `SpanNearQuery`), both named descopes with self-expiring entries in
-  `EXPECTED_DIVERGENCES_MANIFEST_ERRORS` (findings 165, 171).
+`pf2`, `pf3`, `ps`, `stopwords`, and `lowercaseOperators` are permanently unsupported edismax
+parameters. The analyzer `stopwords` filter is separate and remains supported where configured.
+Within `{!payload_score}`, `includeSpanScore=true` and multi-term `v` values are unsupported;
+the shipped evaluator supports a single payload-bearing term with `includeSpanScore=false`.
 
-**Unsupported local-params parser types (issue #137).** A local-params block in `q` naming any
-query parser other than `edismax`, `func`, or `boost` is unsupported and gets a `SyntaxError` 400
-in the Solr error envelope, although real Solr parses registered types such as `{!lucene}quick`
-and `{!term f=id}doc1`. The committed client evidence sends only `{!edismax qf='...'}` in `q`
-and `{!key=...}` in `facet.field`, so fixture existence creates no scope for the other parser
-types. This is **not a regression**: before issue #137, Tantivy's query
-grammar already rejected the raw `{!` string; that issue changed the error message, not the
-status. `{!func}` and `{!boost}` became supported through the real evaluator in issue #289. This
-unsupported boundary and its evidence belong in §5 and the issue/report, not §2's ratified
-divergence list. (findings 90-92)
+A local-params block in `q` names only the supported `edismax`, `func`, and `boost` parsers;
+other parser types receive a `SyntaxError` 400, although Solr parses registered types such as
+`{!lucene}quick`. This is **not a regression**: before issue #137, Tantivy's grammar already
+rejected the raw `{!` string; #137 changed the error message. `{!func}` and `{!boost}` landed
+through the real evaluator in #289.
 
-**`boost` and `bf` apply function queries (issue #289).** Real Solr's `boost` is a
-*function-query* parameter (finding 83), not a plain float — a constant like `boost=2.5` is just
-its simplest function. Wayfinder's `function_query` evaluator applies both: `boost` multiplies
-the composed score per document, `bf` adds to it, and `{!func}`/`{!boost b=...}` on `q` route
-through the same evaluator. The earlier constant-only accept-and-warn treatment (#232) is
-gone — those params now affect ranking.
+**Issue #137 Shape B.** `search_api_solr` sends
+`q=({!edismax qf='...'}+"quick" +"rocket")`; its captured handler defaults are
+`defType=lucene` and `df=id`. The outer lucene parser binds only the next run after the local
+params block, so traces 00004 and 00008 return `numFound: 0` although the document has both
+terms. Findings 90, 91, and 92 record the fixture and client evidence.
 
-**The Out items are ratified by the v1.5 capture, not merely undemanded (issue #136).** Across
-the 28 committed Drupal traces in `solr-ref/search-api/trace/`, client usage of `bf`, `pf2`,
-`pf3`, `ps`, `stopwords` and `lowercaseOperators` is **zero** — the module's whole edismax
-surface is `{!edismax qf='...'}` inside `q`, and it emits none of `mm`, `tie`, `pf`, `bq`, or
-`boost` either, all of which v1 already implements. (The edismax *param* `stopwords` is what is
-descoped; the analyzer *filter* of the same name is implemented and appears in captured schema
-responses.) None of the six appears in the `captured_parameters` denominator in
-`coverage/search_api_coverage_contract.json`, so building any of them moves the coverage
-fraction by zero. Per the capture's role as a scoping input that decides what to build (see "Why
-the capture moved to its own phase" below), zero usage plus zero coverage movement is a positive
-reason to keep them out. `tests/edismax_descope_guard.rs` is the expiring guard: it fails the day
-a new trace or a regenerated coverage contract mentions any of the six, which is the signal to
-revisit this descope (issue #136) rather than silently keep it.
+This is deliberate **fidelity** for a current supported path: the high-recall interpretation is
+a **divergence** from the shipped behavior. Issue #137's “so keyword search works” title is
+wrong-premised; the Shape-B request does not make keyword search work, it preserves the observed
+low-recall result.
 
-**The client's own `{!edismax}`-inside-`q` shape is reproduced bug-compatibly, low recall included
-(issue #137).** `search_api_solr` does not send `defType=edismax`; it sends the whole query as
-`q=({!edismax qf='...'}+"quick" +"rocket")`. The captured `/select` handler defaults
-(`solr-ref/search-api/configset/solrconfig_extra.xml`) are `defType=lucene`, `df=id`, so the
-**outer** parser is lucene and `{!edismax ...}` is an *inline nested query*, not a position-0
-local-params block that would re-select the parser for the whole `q`. Solr binds only the **next
-whitespace-delimited run** of characters after `}` to the nested parser — also terminated by a `)`
-that closes a paren opened *before* the run, which matters because every captured `q` wraps the
-whole query in `(...)` (finding 91) — and the remainder is parsed by the outer lucene parser
-against `df=id` and matches nothing. Wayfinder reproduces that binding rule **including its
-low-recall outcome**: traces 00004/00008 (`+"quick" +"fox"`) return `numFound: 0` even though the
-document `entity:node/1` contains both terms, because `+"fox"` never reaches edismax. Findings 90,
-91 and 92 and the per-trace `numFound` table in finding 90 carry the evidence; all seven captured
-Shape-B traces fit this model and only this model.
+### Permanent unsupported boundaries
 
-That is **deliberate fidelity for a supported client-exercised Shape-B path, not a rule that every
-captured local-params shape creates scope.** The "obviously more useful" high-recall reading — hand
-the whole remainder to edismax — would be a supported-path **divergence**, so it could ship only
-after PRD §2 ratification with fixture or client evidence, a reason, and an issue/report. Issue
-#137's own title ("so keyword search works") is wrong-premised on this point and is recorded as
-such: keyword search does not start working for a Shape-B client, it starts failing the way real
-Solr fails, and the fix belongs upstream in `search_api_solr`. The two `numFound == 0` assertions in
-`tests/local_params.rs` are the guard against a later well-meaning rewrite to high recall.
+`q.op` and `qt` are permanently unsupported. Wayfinder serves its own configured core and select
+handler; it does not accept the foreign-core `solr_document` datasource path that emits them.
 
-`mm` is the hardest single piece — the grammar accepts absolute counts, percentages, and
-conditional lists (`2<-1 5<80%`). Implement it fully; it is a small self-contained parser.
+`search_api_solr_admin` is permanently unsupported. Its core reload, field-analysis, and
+configset-file routes are unreachable through a Wayfinder backend and have no Wayfinder route.
 
-### Phases
+The open-ended `solr_text_custom` and `solr_text_custom:<code>` analyzer families are permanently
+unsupported. Wayfinder supports its fixed Search API field-type presets rather than importing
+site-defined Solr analyzer chains.
 
-| Phase | Contents |
-|---|---|
-| **POC** | The tracer bullet, §6 |
-| **v1** | The table above + edismax + the differential harness |
-| **v1.5 — the capture** | The `search_api_solr` contract capture (§2), pulled ahead of the rest of v2: generated config set + HTTP trace of a real Drupal site, frozen as fixtures, plus the coverage denominator computed from them |
-| **v2 — Search API** | `search_api_wayfinder` connector module (issue #57, done), `search-api.toml` preset (done), `/admin/system` version handshake (done). `/admin/luke`, `/terms`, `/admin/mbeans` were descoped here and are now back in scope under v2.75 — see below. |
-| **v2.5 — Admin web UI** | A read-only operator dashboard, server-rendered by the same binary. Tracer bullet (core view, issue #94) done. See below. |
-| **v2.75 — the contract's remaining endpoints** | The four endpoints in the coverage denominator that Wayfinder does not yet serve: `/terms` (#155), `/schema/fieldtypes` (#156), `/admin/luke` (#157), `/admin/mbeans` (#158). Completing them closes the endpoints bucket. See below. |
-| **Document extraction — staged** | First the client-evidenced `extractOnly=true` path for plain text and HTML, behind request/concurrency/output limits; then DOCX/PPTX and spreadsheet/ODF/RTF families; PDF only after a separate parser-quality and cancellation decision. See below. |
-| **v3** | Result caches + autowarm; spellcheck is delivered end to end — the server accepts `spellcheck`, `spellcheck.q`, `spellcheck.dictionary`, and `spellcheck.collate` (#222) and generates real suggestions and collations (#228, commit `d97b442`), and the Drupal connector sends the request and parses the response (#342); the separate `suggest` path is now served too (#352) — `suggest.buildAll` is accepted and inert, since Tantivy's term dictionary is already the live dictionary (`terms` moved earlier to v2.75). Also grouping (`group=true` — see note below on why "collapse" left this line) and `_version_` (issue TBD — scope narrowed, see below). |
-| **v4** | ~~Function queries (`bf`, `{!func}`)~~ **arithmetic function queries landed (#289), `{!payload_score}` landed (#340)** — date/ordinal `ms`/`rord` remain — spatial (`{!geofilt}`, `bbox`, `{!frange}geodist()`, heatmap facets), snapshot-based read replicas |
-| **Solr 9.x parity** | Solr features with zero client evidence, deliberately unscheduled — the table below. |
-| **Deep roadmap** | Distributed / sharded search, SolrCloud. The majority of Solr's complexity and directly opposed to the operational-simplicity goal. |
+Atomic updates and optimistic concurrency are permanently unsupported. `/update` accepts whole
+documents, not field modifiers such as `set` or `inc`, `versions=true`, or stale-write conflict
+handling.
 
-**Why the capture moved to its own phase.** `search_api_solr` is not merely the motivating
-client — it is a fifteen-year empirical answer to *which subset of Solr real applications use*,
-validated across tens of thousands of sites. Under §2's coverage framing that makes the capture
-a **scoping input, not just a conformance suite**: it decides what to build, not only what to
-test. Two things follow. First, it has to land before the endpoints it would justify, so v2's
-endpoint list is deliberately conditional — building `/terms` or `/admin/mbeans` because Solr
-has them is the old framing. Second, it informs work already in flight: the module leans on
-edismax, so the trace bears on issue #7's `qf`/`pf`/`mm` handling.
+SolrCloud, ZooKeeper, distributed or sharded search, streaming expressions, the SQL interface,
+and XML/javabin response writers remain unsupported non-goals.
 
-Capture against **stock upstream `search_api_solr`, unmodified** — the connector module is the
-extension point and must not be in the loop while ground truth is being established.
+### Current `_version_`, administration, and extraction behavior
 
-**v2's conditional endpoint clause, resolved by descoping rather than by building.** The capture
-(finding 76, `docs/solr-ref-findings.md`) confirmed the module does call `<core>/admin/luke`
-and `<core>/admin/mbeans` — so the trace answered the "whichever" question above for those two.
-(The `terms` half of finding 76 was a source-only inference and was wrong about the path —
-corrected by finding 192 / issue #351: stock autocomplete rides the `/autocomplete` handler's
-terms *component*, and `getTermsQuery()` has zero callers, so `/terms` is **not** evidenced by
-stock `search_api_solr` — it is reached only by our `search_api_wayfinder` connector module.)
-But issue #57's own
-scoping doc (`docs/plans/57-search-api-wayfinder-backend.md`) narrowed v2 further than the trace alone
-would: the connector module implements only what the Wayfinder *server* already exposes, and the
-server has no `terms`/`admin/luke`/`admin/mbeans` endpoints. Building the client side of three
-endpoints the server can't answer would be exactly the "stub methods for later" the plan doc rules
-out, so all three are out of scope for #57, not merely deferred silently. `terms` backs the module's
-autocomplete/suggester path (`search_api_autocomplete`, not installed in the capture); `admin/luke`
-and `admin/mbeans` back Search API's own schema-browsing/server-stats admin screens — none of the
-three sit on the query or index path v1-v2 already cover. Revisit if a later phase adds server-side
-support for any of them; until then this is a recorded, deliberate gap, not an open PRD commitment.
+`_version_` is an internal `i64` fast field populated from a per-core counter. It is not declared
+in `schema.toml` and is omitted from ordinary response documents. It remains available to the
+shipped stats and JSON-facet behavior where those routes support it.
 
-**v2.75: that revisit condition has fired, and the gap is now being closed.** The descope above
-was conditional on the server not exposing these endpoints, which is a circular reason once the
-question becomes whether the server should. Four endpoints in the coverage denominator remain
-unserved — `terms` (#155), `schema/fieldtypes` (#156), `admin/luke` (#157), `admin/mbeans` (#158)
-— and all four are now in scope. This does not reopen the general rule: they are in because the
-capture shows the module calling them, which is exactly §5's client-evidence test, and the rest
-of Solr's admin and schema surface stays on the parity roadmap.
+The read-only `/ui` page reports the configured core's live document count and on-disk size. It
+runs in the same binary and reads the same in-process index and schema state as the wire routes.
 
-`schema/fieldtypes` is the one whose absence does active harm rather than leaving a screen blank.
-The module's `getSchemaLanguageStatistics()` catches the 404 per language and degrades to
-"unsupported", so a working Wayfinder currently reports every language as unsupported on Drupal's
-server-status screen.
-
-**Deliberate divergence: three of the four answer with an honest subset.** Solr's `admin/luke`
-(7.5 KB), `admin/mbeans` (48 KB) and `schema/fieldtypes` (24 KB) responses are mostly Lucene and
-JVM identity — analyzer chain classes, per-field index flag strings like `ITS-----OF-----`,
-directory implementation names, heap accounting, per-handler timers. Wayfinder has no such
-internals, and the client reads a handful of leaves from each: one field from `luke`
-(`index.numDocs`), six from `mbeans`, and field-type *names* only from `fieldtypes`. Wayfinder
-therefore serves real values where a real consumer exists and static plausible placeholders
-elsewhere, following the precedent `/admin/info/system` already set, and omits the Lucene-internal
-keys rather than fabricating them. This is a recorded divergence from captured Solr behaviour, not
-a bug: none of the three carries a `solr-ref/manifest.tsv` row, because a differential-harness row
-could only ever be a permanent `EXPECTED_DIVERGENCES` entry. `terms` is the exception in *shape* — it is real
-index data Wayfinder genuinely has, so when it is exercised it is expected to match, and a manifest
-row for it is a legitimate follow-up once a capture against the differential core exists. Note
-though that, per finding 192 / issue #351, no *stock* client requests `/terms`: it is the
-connector module's reimplementation of the Terms autocomplete plugin that reaches it. The
-autocomplete plan is recorded with #351: our-module reading, extended to all three plugins
-(Terms→`/terms` done; Spellcheck→`/select`, no server work; Suggester→`/suggest`, blocked on a
-real `suggest.q` read path).
-
-Two further `admin/mbeans` specifics, recorded here rather than left to code comments (issue
-#158). First, `UPDATE.updateHandler.softAutoCommitMaxTime` is a key the client *does* read, and
-Wayfinder matches Solr's wire form exactly: the string `"<N>ms"` built from the configured
-millisecond value, and no key at all when soft autocommit is unset. Both halves come from the
-capture and the consumer, not from convenience. `solr-ref/search-api/trace/00025.json` renders it
-as the string `"5000ms"` (with `autoCommitMaxTime` alongside it as `"15000ms"`), so a bare integer
-would be a divergence; and the `-1` an earlier draft of this paragraph promised for the unset case
-is the *Drupal module's own* default for a missing key, never a value Solr puts on the wire — the
-`isset($update_handler_stats['UPDATE.updateHandler.softAutoCommitMaxTime'])` guard around
-`$max_time = -1` in `coverage/search_api_solr_4.4.0_source/src/SolrConnector/SolrConnectorPluginBase.php:781-798`
-only fires because Solr omits the key entirely when soft autocommit is off, which is what Wayfinder
-does too. Second, this handler treats `stats` as truthy on a
-`true` *prefix* rather than the usual exact `== "true"`: the captured request
-(`solr-ref/search-api/trace/00025.json`) sends `stats=true?omitHeader=false`, because the module
-concatenates a handler string that already carries a query onto Solarium's params, and the
-captured response shows Solr honoured it. Exact equality would answer the real client with an
-empty status report.
-
-The honesty constraint cuts both ways. `schema/fieldtypes` must list exactly the languages
-Wayfinder really stems, which is the 18 in `schema.rs`'s `LANGUAGES` table (English plus 17
-non-English `text_<code>` presets) -- not the 16 an earlier draft of this section and issue #156
-both claimed; `LANGUAGES` also carries `ta` and `tr`, and `resolve_type` accepts them, so the
-handler reports 18 and the tests assert 18. The count matters because the module turns a name in
-that list into a green "supported" row. Padding it would convert today's misreport-downward into a
-misreport-upward, which is worse: nobody investigates green; under-reporting `ta`/`tr` would hide
-two languages Wayfinder genuinely supports. The endpoint's recorded divergences are therefore an
-omission *and* an addition: it omits the Lucene analyzer chains
-(`indexAnalyzer`/`queryAnalyzer`/`analyzer`), which Wayfinder cannot describe truthfully, and it
-adds `indexed`/`stored`/`multiValued`/`docValues` to every entry where Solr emits them sparsely,
-because those four are Wayfinder's real uniform type-level defaults and no client reads them.
-
-`admin/luke` (#157) lands under the same rule. Its `index{}` block reports real values for the
-five figures that describe the core's contents -- `numDocs`, `maxDoc`, `deletedDocs`,
-`hasDeletions`, `segmentCount`, all read per request off the same searcher `/select` answers
-from -- and static placeholders for the Lucene-identity keys (`version`, `current`, `directory`, `segmentsFile`,
-`segmentsFileSizeInBytes`, `userData`); `indexHeapUsageBytes` and `lastModified` are omitted, as
-real Solr omits them in the captured trace. Its recorded divergences in `fields{}` are again an
-omission and an addition: it omits the per-field `schema`/`index` flag strings (Lucene `FieldInfo`
-bits), `docs`, `topTerms` and `histogram`, and adds `indexed`/`stored`/`multiValued`/`docValues`/
-`required` booleans, which carry the same information the flag string encodes but as real values
-from the live `[[fields]]` schema rather than a fabricated bitmask. Dynamic-field *instances* do
-not appear in `fields{}`: Wayfinder stores every dynamic value in the shared `_dynamic` container,
-so there is no per-instance field in the index to enumerate.
-
-**The coverage instrument.** The capture yields the denominator: the set of params, endpoints,
-and response fields `search_api_solr` 4.4.0 can emit across its configured features. Coverage is
-the fraction of those fixture-derived contract items that pass their item-specific runtime probe.
-The resulting report defines the project's wire-coverage claim: every request shape the captured
-client sends is accepted with the expected parameter handling and client-consumed response
-envelope, including required JSON key order. The fraction itself is a score over the item-specific
-probes; the differential and feature-specific suites (§8) provide separate fixture-derived
-semantic assertions and explicit key-order cases. It is not a claim of byte-for-byte parity for
-every trace. A reproducible claim is what keeps "75-80%" from becoming a slogan.
-
-The resulting **75/75 is a wire-contract claim, not a feature-completeness claim**. It does not
-mean that every Solr component behind those requests is implemented. Spellcheck used to be the
-concrete example — #222 accepted the four captured parameters and returned the captured empty
-`suggestions`/`collations` envelope — but it no longer is: #228 (`d97b442`) generates real
-suggestions and collations, and #342 wires the Drupal connector to both halves. The distinction
-itself still stands; it just has no current instance.
-`mlt.maxntp` was the other case that exposed this distinction during #189, but it is not a current
-gap: Wayfinder now implements and probes the token cap rather than counting accepted-but-ignored
-syntax as coverage.
-
-Notes on deferred items:
-
-- **Caches** — Tantivy has none. Measure before building; Tantivy may be fast enough that a
-  filter cache is unnecessary. If v1 latency lands materially worse than Solr, that is the
-  signal to build it.
-- **Spellcheck / suggester** — no longer deferred. The captured `spellcheck`, `spellcheck.q`,
-  repeated `spellcheck.dictionary`, and `spellcheck.collate` request plus its empty response
-  envelope landed as the tracer slice (#222); real suggestions and collations landed on top of it
-  in #228 (`d97b442`), built over the term dictionary with Tantivy's FST/fuzzy support; and #342
-  made the Drupal connector emit the request params and parse the response into
-  `search_api_spellcheck` extra data, alongside the language-aware field naming
-  (`spellcheck_<lang>`) the component's sink field needs. The separate `suggest`
-  path is now served (#352): `search_api_solr`'s cron fires
-  `GET /<core>/suggest?suggest.buildAll=true` via `fireAndForget` on every cron
-  run, and Wayfinder accepts it and returns Solr's `command:"buildAll"`
-  envelope inertly — Tantivy's term dictionary is already an FST, so there is
-  no separate dictionary to build, and the connector module's live suggestion
-  read path is `/terms` over `twm_suggest` with `terms.prefix` (findings
-  141/142/154-156), not `/suggest`. (Caveat added by #351 / finding 192: the
-  earlier wording "`/autocomplete` -> `/terms`" described the connector
-  module's reimplementation of the Terms plugin as a direct `/terms` GET, not a
-  stock-client path — stock `search_api_solr` hits `/autocomplete` directly and
-  never requests `/terms`; `/terms` and `/suggest` are reached only by our
-  module. Extending autocomplete to the Suggester and Spellcheck plugins is
-  recorded with #351 — Spellcheck rides `/select` today, Suggester is blocked
-  on a real `suggest.q` read path.) There is no ratified divergence here:
-  the build envelope matches Solr byte-for-byte. (The #352 spec's premise that
-  the divergence to ratify was "Solr returns empty until built, Wayfinder reads
-  live" did not hold: Solr's `AnalyzingInfixLookupFactory` returns a 500
-  "suggester was not built" on a pre-build query, not empty, and Wayfinder does
-  not serve `suggest.q` via `/suggest` at all.)
-- **Atomic updates + `_version_`** — narrowed by evidence to just `_version_`; see the "v3 —
-  `_version_`" subsection below.
-- **Grouping** — no native equivalent; needs a custom collector. This line originally said
-  "grouping/collapse", but the module's `collapse`-named identifiers (`setGrouping()`'s
-  `$collapse_field` loop) drive Solr *grouping* (`group=true&group.field=…`), not the
-  Collapse/Expand component (`fq={!collapse}` + `expand=true`), which the client never sends —
-  Collapse/Expand moved to the Solr 9.x parity table below.
-
-### Document extraction — accepted direction, staged delivery
-
-The evidence is source-level rather than trace-level. The vendored
-`SearchApiSolrBackend::extractContentFromFile()` constructs a Solarium Extract query, sets
-`extractOnly=true`, chooses XML or text extraction, uploads the file, and reads the extracted
-content. None of the 28 captured Search API requests calls `/update/extract`, because the capture
-site did not configure an attachments integration. This is still a real client emission path,
-but it weights the initial wire scope toward `extractOnly` rather than Solr Cell's much broader
-server-side indexing surface.
-
-The retained tracer bullet is therefore a multipart `POST /wayfinder/{core}/update/extract` for plain
-text and HTML, returning the captured `extractOnly=true` envelope. A following slice may apply
-`literal.<field>` and `fmap.<from>` and feed the existing update pipeline; those params are not
-required by the evidenced client path. The proposed format order is:
-
-1. Plain text and HTML, including charset decoding and a budgeted incremental HTML token sink
-   rather than an unbounded DOM.
-2. DOCX and PPTX through bounded ZIP + streaming XML; XLSX and ODS through a spreadsheet reader;
-   then ODT/ODP and RTF.
-3. PDF in its own issue. PDF text fidelity (font encodings, CMaps, ligatures, layout) and opaque
-   parser CPU behaviour make it qualitatively riskier than zipped XML. Image-only PDF OCR is out.
-
-Resource limits are an architecture prerequisite, not a post-launch hardening task. At minimum:
-request bytes, concurrent extraction count, extracted-character count, archive entry count,
-per-entry and cumulative uncompressed bytes, and compression ratio. Extraction must run off the
-async request executor. An HTTP timeout around a blocking in-process parser is not cancellation —
-the work continues after the response — so formats whose parser cannot enforce a cooperative
-budget, especially PDF, do not ship until that limitation is explicitly resolved. Metadata starts
-narrowly with stable keys needed by the envelope (`resourceName`, detected content type, and the
-format's title/author when reliable); unknown metadata is dropped unless a later indexing slice
-maps it through `fmap`/`uprefix`.
-
-Issue #171's dependency survey recommends maintained, permissively licensed Rust crates rather
-than hand-written format implementations: `chardetng` + `encoding_rs`, `html5ever`, `zip` +
-`quick-xml`, `calamine`, and `rtf-parser`; `pdf-extract`/`lopdf` remain candidates for the separate
-PDF issue. Exact versions, licenses, evidence, captures, and rejected alternatives are recorded in
-`docs/reports/2026-08-01-text-extraction-exploration.md`.
-
-### `solr_document` datasource — out of Wayfinder's world (`q.op`, `qt`)
-
-A distinct descope category from the parity roadmap below: `q.op` and `qt` ARE
-emitted by `search_api_solr` 4.4.0, but only on a datasource path Wayfinder
-deliberately does not serve. `SearchApiSolrBackend.php:1808-1830` branches the
-query builder on `Utility::hasIndexJustSolrDocumentDatasource($index)`: a normal
-Drupal-owned datasource gets the index/site filter, and only the `else` — the
-index is *just* the `solr_document` datasource, which indexes/searches documents
-in a **foreign Solr core that Drupal does not own** — emits
-`addParam('qt', $config['request_handler'])` (line 1814) and
-`addParam('q.op', 'OR')` unless already set (line 1828), the latter with the
-comment that the query builder assumes OR "but a foreign schema could have a
-non-default config for q.op".
-
-That datasource is out of Wayfinder's world. A Wayfinder core is Drupal-owned by
-construction — #301 settled **one core per site** as the supported topology
-(PR #323; the server serves a single core per process, open question 1) — so the
-`solr_document` / `SolrMultisiteDocument` datasources that target a foreign core
-have no Wayfinder to point at, and the two params only that path emits never
-reach a request Wayfinder serves. They therefore stay absent from
-`SELECT_PARAMS` and 400 under `strict_params = true` (asserted by
-`tests/q_op_qt_descope_guard.rs`), rather than being admitted inertly. Admitting
-them would be the wrong half-measure either way: `qt` is meaningless for a server
-with one select handler, and `q.op` is not inert — it carries real OR/AND
-default-operator semantics — so admitting it without implementing the operator
-would be a silently wrong answer, and there is no served client to implement it
-for. The descope is recorded here rather than left implicit so the parity
-picture is in one place (finding 190).
-
-Two facts keep this narrow, both pinned by the guard. The module's only other
-`q.op` occurrence (`SearchApiSolrBackend.php:2085-2093`) is dead code — a
-`/* We keep this as an example. */` block inside `applySearchWorkarounds()`,
-never executed — not a second live path. And the Solr 3.6 legacy connector
-(`modules/search_api_solr_legacy/.../Solr36Connector.php:76-77`) also adds
-`q.op`, but that connector is out of scope for a Solr 9.x backend. The guard
-fails the day either param stops being confined to the `solr_document` branch in
-the 4.4.0 source, or a captured trace sends it — at which point the descope must
-be revisited (issue #356), not silently kept.
-
-### `search_api_solr_admin` — a Solr connector module, unreachable against Wayfinder
-
-A second out-of-Wayfinder's-world descope, found by the 2026-08-04 full-source sweep of
-`search_api_solr` 4.4.0's `modules/search_api_solr_admin/` (issue #354). The module ships three
-endpoints that all live on the standard (non-cloud) connector, so the SolrCloud non-goal does
-not by itself exclude them — but a stronger exclusion does: **`search_api_solr_admin` cannot
-see a Wayfinder server at all.** Every route and every command path in the module hard-gates on
-`$backend instanceof SolrBackendInterface`, and `WayfinderBackend`
-(`drupal/search_api_wayfinder/.../WayfinderBackend.php`) is a separate Search API backend
-(`extends BackendPluginBase implements PluginFormInterface`), not a `search_api_solr` connector
-— deliberately, because Wayfinder is not Solr, so modelling it as a `SolrConnectorInterface`
-(cores, configsets, Solarium query objects) would be a category error. The gate appears in all
-three access-check classes, the field-analysis route's `LocalActionAccessCheck`, the Drush
-commands, and the hooks; and the command path is the strongest statement of intent:
-`Utility::getSolrConnector($server)` (`src/Utility/Utility.php:1265-1272`) — which the reload
-Drush command and every command-helper entry point call — is declared `: SolrConnectorInterface`
-and throws `SearchApiSolrException('Server %s is not a Solr server')` when the backend is not a
-`SolrBackendInterface`, before it can reach any connector method (finding 194).
-
-So against a Wayfinder server the reload-core and field-analysis **forms** 403 at Drupal's own
-route access check, the reload **Drush command** throws "Server is not a Solr server" from
-`Utility::getSolrConnector`, and no HTTP request for any of the three endpoints is ever emitted.
-The capture could not see these not merely because that one site happened not to use the module,
-but because the module has no path to a non-Solr backend. This is a strictly stronger exclusion
-than "zero client evidence in the trace," and it means **none of the three moves the coverage
-denominator**: they are in none of the 28 traces and in none of the contract's 9 endpoints / 75
-items, and the decision not to build them moves the coverage fraction by zero — 75/75 is
-unchanged (#225). A self-expiring guard, `tests/search_api_solr_admin_descope_guard.rs`, fails
-the day the `instanceof SolrBackendInterface` gate leaves the source, the day `WayfinderBackend`
-starts implementing `SolrBackendInterface`, or the day a trace carries one of the three — i.e.
-the day the unreachability premise stops holding. When it goes red, the fix is **not** to weaken
-it; it is to revisit this decision (#354) with the new evidence.
-
-The three, individually:
-
-- **Core reload** — `GET /solr/admin/cores?action=RELOAD&core=<core>` (server-level, note the
-  path shape). `StandardSolrConnector::reloadCore()` builds a CoreAdmin `createReload()`. Wayfinder
-  has no reload concept to answer it with regardless of reachability: config is TOML loaded once at
-  process start (§3/§6), the schema is fixed at index creation and refused on incompatible change
-  (open question 4), and one process serves one core (open question 1) — there is no configset to
-  re-read and no atomic searcher swap to perform. A 200-no-op would be the "silently wrong answer"
-  the project rejects (it would tell an operator their config change applied when it did not), so
-  the endpoint stays unrouted rather than faking success.
-- **Field analysis** — `GET /<core>/analysis/field`. `getAnalysisQueryField()` → Solarium
-  `createAnalysisField()`, setting `analysis.fieldtype` and `analysis.fieldvalue`; an interactive
-  AJAX form showing the analyzer chain's token output. This is the one with real independent value
-  — Wayfinder has a genuine analyzer chain (`schema.rs::tokenize`) and v2.5's admin UI (§5) has no
-  "what did the analyzer do to my text?" answer. But as a `search_api_solr_admin` parity endpoint
-  it is unreachable (the `instanceof` gate), and building a Solr-wire-shaped
-  `/wayfinder/{core}/analysis/field` that no stock client can ask would violate §5's "ship what
-  clients demonstrably use." Analyzer introspection is therefore recorded as a **v2.5
-  Wayfinder-own candidate** — a `/ui` or Wayfinder-native surface with its own scope and shape
-  (not necessarily Solr's per-component class-name breakdown, which names Java classes Wayfinder
-  has no equivalent of) — not a parity endpoint built under #354. It is listed as an out-of-scope
-  item in the v2.5 section below so the candidacy is visible rather than implicit.
-- **Configset file read** — `GET /<core>/admin/file?file=<name>`. `getFile()` serves raw configset
-  files (`schema.xml`, `solrconfig.xml`, …). Wayfinder has no configset (§3), so there is nothing
-  honest to return; the four `getFile()` callers (`Utility::getServerFiles`, `SolrConfigForm`,
-  `SolrConfigSetController`'s config-zip download, and `search_api_solr.install`'s requirements
-  check) all read configset XML that does not exist in a Wayfinder core, and all sit behind the
-  same `SolrBackendInterface` gate regardless.
-
-`uploadConfigset()` is Cloud-only (`StandardSolrCloudConnector.php:253-263`) and stays out under
-the SolrCloud non-goal, as issue #354 already noted.
-
-### Solr 9.x parity roadmap — zero client evidence, deliberately unscheduled
-
-The remainder of Solr 9.x's feature surface, checked against the same evidence base as the
-descopes above: zero hits in the coverage contract's parameter denominator, and zero emission
-sites in the module source — both the vendored 4.4.0 core (`coverage/search_api_solr_4.4.0_source`)
-and upstream's submodules (autocomplete, admin, devel), swept for each row below. None of these
-has a phase. The only reason any of them would ever be built is **Solr 9.x wire parity as a goal
-in itself** — which §2 explicitly says it is not ("an adoption mechanism, not the product") — or
-a new client whose capture shows real usage, the same bar every descope above already carries.
-
-| Solr 9.x feature | Note |
-|---|---|
-| JSON Request API | Requests arrive as query params; no captured request uses a JSON request body. Distinct from the JSON *Facet* API below, which is a single param and has shipped. |
-| ~~JSON Facet API~~ — **shipped, #343** | Not unscheduled any more. Solarium's JSON Facet API (`createJsonFacetAggregation`, e.g. `max(_version_)`) appears only on admin diagnostics screens (finding 132), never on a search path — client evidence, just non-search evidence. The evidenced surface landed in #343: `json.facet` with `type: terms` (`field`, `limit`, `mincount`, `sort`), arbitrary `facet`-key nesting, and `max()` aggregations, to the 4-level topology `doGetMaxDocumentVersions()` sends. Everything unevidenced (`type: query`/`range`, other aggregation functions, `domain`/`offset`/`numBuckets`/…) returns 400 rather than being silently ignored — findings 175-178. |
-| `facet.pivot`, `facet.interval` | Only field, query, and heatmap faceting is emitted. `facet.range` is equally unemitted, but v1 already shipped it — kept as surplus, not unshipped. |
-| Collapse & Expand (`fq={!collapse}`, `expand=true`) | The module's "collapse" identifiers drive Solr grouping (`group=true`), which stays in v3. |
-| Query Elevation (`/elevate`) | Relevance tweaks travel as `bq`/`boost` function queries; no elevation params. |
-| Block join / nested documents (`{!parent}`, `{!child}`) | The module indexes flat documents; even date ranges are a custom field type, not child docs. `_root_` remains envelope-shape only (§2 fact 8). |
-| Realtime Get (`/get`) | |
-| TermVector component (`/tvrh`) | |
-| `cursorMark` deep paging | Pagination is plain `start`/`rows`. |
-| Learning to Rank (`{!ltr}`) | |
-| Result clustering (Carrot2) | |
-| Tagger handler (`/tag`) | |
-| Atomic updates & optimistic concurrency (`set`/`inc`/…, `versions=true`, 409-on-stale) | Already descoped with evidence in the v3 `_version_` subsection; listed here so the parity picture is complete in one place. |
-
-Features that are *also* client-unused but already ruled out as §1 non-goals — SolrCloud,
-streaming expressions, the SQL interface, and XML/javabin response writers — stay non-goals rather
-than moving here: a non-goal is a stronger statement than unscheduled. `/update/extract` is no
-longer in that list: issue #171 found a direct emission path in the vendored client source and the
-staged in-process boundary is recorded above.
-
-This table is scoped to features a single-node Solr 9.x serves on the wire. It does not
-enumerate operational subsystems with no Wayfinder analogue (replication handler, CDCR, metrics
-API, security plugins) — those fall under §1 non-goals or §5's deep roadmap wholesale.
-
-### v2.5 — Admin web UI
-
-Solr operators get `/solr/#/`, an AngularJS console bundled with the JVM process, for free. Wayfinder
-has no equivalent today — the only way to see what a running instance is doing is `curl`. This phase
-closes that gap, scoped deliberately small: **a read-only dashboard, nothing more,** landed after v2
-because by then there are real cores (Search API sites) worth looking at, though nothing here
-functionally depends on v2 or blocks on it.
-
-**In scope (v1 of this phase):**
-
-- **Core view** — name, doc count, on-disk size, field count for the one core this process
-  serves (§10 open question 1, resolved: single-core-per-process — `app()` takes exactly one
-  schema/data-dir). One page, the landing view. A multi-core *list* would need a core registry
-  that does not exist; out of scope here, revisit only if open question 1 reopens toward
-  multi-core.
-- **Schema view** — the core's persisted TOML schema rendered read-only: fields, types, `stored`/
-  `fast`/`multi_valued` flags, dynamic-field patterns, copy-fields. Sourced from the same on-disk
-  schema §3 already persists and diffs against at startup — no new storage.
-- **Index stats** — doc count, segment count, on-disk size, uptime. "Resident memory" is reported as
-  best-effort OS-level info, with the same honesty §6 already applies to the absent heap knob: Wayfinder
-  is mmap-based, so there is no JVM-heap-shaped number to show, and the page says so rather than
-  faking one.
-- **Query tester** — a form for `q`/`fq`/`fl`/`rows`/`start`/`facet.field`, submitted to the core's own
-  `/select`, rendering the JSON response. This is a thin UI wrapper over the existing endpoint — no new
-  query logic, no second code path to keep in sync with the real one.
-- **Ping/health** — this process's core status, reusing `/admin/ping`.
-
-**Out of scope, explicitly, for this phase** (each is a bigger surface than a dashboard and needs its
-own scoping pass if ever pursued):
-
-- Core create/delete, schema editing, or any config mutation from the browser. §3 already refuses to
-  start on an incompatible schema change; a UI that could trigger one is a different, much larger
-  feature.
-- Document edit/delete from the UI (the update pipeline stays API-only).
-- Fine-grained authorization and user/role administration remain out of scope for the dashboard.
-  The phase originally left all authentication to deployment infrastructure, but issue #229 later
-  added optional server-wide HTTP Basic authentication. When configured, it protects the admin UI
-  alongside the Solr routes; only the two explicit health paths remain public.
-- Multi-instance/cluster views. Out of scope for the same reason SolrCloud is (§1 non-goals) — one
-  process, one core.
-- **Analyzer introspection** (the "what did the analyzer do to my text?" tool, Solr's
-  `<core>/analysis/field`). Listed here as a **candidate**, not a commitment: Wayfinder has a
-  genuine analyzer chain (`schema.rs::tokenize`) and this dashboard has no answer for that
-  question today, so the operator value is real. It is out of the *v2.5 in-scope* list above
-  (core view, schema view, index stats, query tester, ping) because it is a new interactive
-  surface rather than a read of state the dashboard already shows, and because the honest
-  Wayfinder shape — over Wayfinder's own tokenizer/filter names — is not Solr's per-component
-  Java-class-name breakdown. It is explicitly **not** a `search_api_solr_admin` parity endpoint:
-  that module's field-analysis form is unreachable against a Wayfinder server (§5's
-  `search_api_solr_admin` descope, finding 194), so this candidacy is a Wayfinder-own feature,
-  not a wire-parity answer.
-
-**Architecture.** New routes under `/ui` (resolved by issue #94; `/admin` was the other
-candidate), served by the same axum app, alongside the existing `/wayfinder/*` API routes (issue
-#325 renamed them from `/solr/*`) — not a
-second process, not a second deployment artifact. Server-rendered HTML, compiled in via `askama`
-(compile-time-checked templates, no runtime template parsing, no JS build step) rather than a
-client-side framework — this keeps the "single static binary" goal intact the same way
-TOML-not-XML config does. Data comes from the same
-in-process index/schema state the query pipeline already reads (no core registry exists — `app()`
-serves exactly one core, per open question 1); no new stats-collection subsystem, only what's
-already tracked or trivially derivable (e.g. index directory size via `std::fs`).
-
-**Tracer bullet for this phase — done (issue #94).** One page: the core view, reading real doc
-count and on-disk size from the one running core, at `GET /ui`. Schema view, stats, and the query
-tester are the "flesh it out" that follows, each its own follow-up issue, not part of the slice.
-
-**Testing.** Hermetic unit/integration tests against a real in-process core (no browser automation
-required at this scope — assert on rendered HTML/text content and HTTP status, the same style as the
-existing route tests). A browser-driven check is a fair addition later if the UI grows enough
-interactivity to need one; a static dashboard doesn't.
-
-### v3 — `_version_`, narrowed from "atomic updates + optimistic concurrency"
-
-The Phases table originally listed this item as full atomic updates (`{"set"/"inc"/"add-distinct":
-...}` field modifiers) plus write-time optimistic concurrency (`versions=true`, a client-supplied
-`_version_` on update, HTTP 409 on a stale write) — Solr's whole story around `_version_`. Checked
-against the real client the same way v2's `terms`/`admin/luke`/`admin/mbeans` clause was: **the
-evidence does not support building most of that.**
-
-`search_api_solr` 4.4.0 (`SearchApiSolrBackend.php`) writes exclusively through Solarium's
-`addDocument(s)` — always whole documents, never Solr's atomic-update JSON. It never supplies a
-`_version_` on write and never sends `versions=true`; the coverage contract
-(`coverage/search_api_coverage_contract.json`) confirms zero hits for
-`set`/`inc`/`add-distinct`/`versions`, and none of the 28 captured search traces carries `_version_`
-on the request side. This is a real feature described in the Phases table only because it's a Solr
-concept, the same premise gap the capture is supposed to close (§5's "coverage instrument" note).
-
-**What the client actually does with `_version_` (finding 132, shape corrected by finding 191,
-#307/#293).** The client reads `_version_` only through JSON facets — but the **primary** shape is
-nested `terms` facets, not an aggregation. (The stats component is nonetheless a capability of
-the field; see the next paragraph — it is just not a path any captured request takes.)
-`doDocumentCounts()` (PHP `:4895`) sends top-level `siteHashes` (`hash`) carrying a nested
-`numDocsPerIndex` (`index_id`) and uses **no `_version_`**; `max(_version_)` is only its `catch`
-fallback (PHP `:4934-4940`), a deliberately minimal facet over the one always-present field
-(comment at `:4934`: "the only field we can be 99% sure exists in any index" — a cheap
-always-present probe for a facet, not a version). The other caller, `doGetMaxDocumentVersions()`
-(`:5033`), sends a top-level `max(_version_)` plus a four-level nested topology (`hash` →
-`index_id` → `ss_search_api_datasource` → per-datasource `max(_version_)`). Both are server-status
-admin diagnostics screens. Finding 190 has the full shape, the `local_key` response-keying, and
-the `omitHeader=false` / SOLR-13509 detail (and corrects the issue's `:5079-5085` mis-cite: that
-range is the `addFacet` nesting, not an `omitHeader` guard — the guard is `:4943-4949` in
-`doDocumentCounts()`).
-
-An earlier draft of this section wrongly described `_version_` as read through `stats.field`;
-finding 132 corrected that (never `stats.field`), and finding 191 in turn corrects finding 132's
-*shape* (nested terms primary, `max()` the fallback). `stats.field` remains a valid capability of
-the delivered field (see below), not a path any captured request takes.
-
-**Delivered in v1 (#99/#102), and kept as-is.** A real `_version_` field: `i64`, `fast` (docValues),
-auto-populated per document from a per-core `AtomicI64` seeded at process start (so a restart begins
-later than pre-restart writes without persisting write-side version semantics), not user-schema-
-defined, not user-visible in `schema.toml`, and stripped from `/response/docs` exactly as `_root_`
-is (§2 envelope fact 8). The field is also statable — `stats.field=_version_` (and the
-`function=max(_version_)` phrasing) works through the existing stats component (`src/stats.rs`,
-#5) via `check_statable`'s deliberate `_version_` exception. That is a correct general capability
-of the field; it is not what the diagnostics screens use (they use the JSON facet above), and both
-stay — the two render differently on the wire (the stats component emits a float, a JSON facet
-aggregation a raw integer, finding 177), so they are separate paths, not one behind the other. The
-execution record lives in `tests/version_field.rs` and `docs/reports/` (see #293's and #343's
-reports).
-
-**The real dependency, since landed (#343).** The only path that touches `_version_` is **JSON
-faceting with aggregation functions and nesting** (`json.facet`, `type: terms` nesting, `max()`).
-It was rescoped out of #293 as its own item because it is a considerably larger and differently
-shaped feature than a version counter, and because its only client is an admin diagnostics screen —
-nothing a site *searches* depends on `_version_`. It shipped in **#343**: `json.facet` as a
-standalone param (no `facet=true`), `type: terms` over fast fields with `field`/`limit`/`mincount`/
-`sort`, arbitrary nesting via the `facet` key, `max()` aggregations including `max(_version_)`, and
-the implicit `count` — the full 4-level topology `doGetMaxDocumentVersions()` sends. The delivered
-field turned out to be exactly the right shape to aggregate over, as this section predicted: #343
-needed no change to `_version_` itself. Ground truth is the 20 `jf343_*` fixtures; findings 175-178
-record the envelope, and 168 records the two Solr behaviours Wayfinder deliberately 400s on instead
-(terms on a non-docValues field, `max()` over a text field). `_version_` remains non-facetable and
-non-sortable — `tests/version_field.rs` still asserts both are 400.
-
-**Out of scope, explicitly** (each needs its own evidence before it's worth building):
-
-- Atomic update field modifiers (`set`/`inc`/`add`/`add-distinct`/`remove`/`remove-regex`). No
-  client evidence of use; would need Tantivy read-modify-write under the hood regardless (segments
-  are immutable — Tantivy's `IndexWriter` has no partial-field mutation primitive, so this is never
-  "atomic" at the storage layer, only at the request-response boundary), a materially bigger and
-  riskier feature than a version counter.
-- `versions=true` on `/update` and 409-on-stale-write optimistic concurrency. No client sends a
-  `_version_` on write or checks for a conflict response. Revisit only if a client that does
-  surfaces.
-- Any ordering/semantic guarantee on `_version_` values beyond monotonic increase (Solr's own is an
-  opaque `long` tied to its update log; a `max(_version_)` watermark only needs "bigger means
-  newer," which the per-core counter already gives).
-
-**Guard.** `tests/version_write_descope_guard.rs` guards what is *still* descoped after #343 — the
-**write side** only. Over both evidence channels (the 28 traces and the frozen 4.4.0 source) it
-fails the day a captured request sends `_version_` or `versions=true`, or the source stops writing
-whole documents through `addDocument(s)`. It was narrowed from the wider `version_descope_guard.rs`
-when #343 landed: the read-path needles and framing came out, while the write-side descopes above
-and the finding-132 PRD tripwires stayed, because #343 touched neither. When it goes red, revisit
-this decision (#293) with the new evidence — do not weaken the guard.
+`/update/extract` is an in-process multipart endpoint. It retains the documented extract-only and
+indexing response shapes, applies the configured resource limits, and uses Wayfinder's own
+extraction rather than Tika. OCR and external extraction services are unsupported.
 
 ---
 
 ## 6. Tuning knobs
 
-Scoped to v1 features. Server TOML plus per-request params where Solr has them.
+Current server TOML and per-request parameters where Solr has them.
 
 **Relevance (per-request):** `qf`, `pf`, `mm`, `tie`, `boost`, `bq`, `sort`.
 
@@ -1263,8 +455,8 @@ iterated on, not a spike. No Drupal in it.
    `numFound`, correct Solr JSON envelope.
 4. `GET /wayfinder/<core>/admin/ping`.
 
-**Done when:** `curl` a document in, `curl` a query out, and the response matches Solr's for
-the same corpus and query, modulo `QTime`.
+**Done when:** `curl` a document in and `curl` a query out through the shipped wire,
+with the response shape asserted by the frozen regression fixtures.
 
 The one non-obvious inclusion is the single `facet.field`. Faceting goes through a completely
 different Tantivy path — the aggregation API over fast fields — and whether a field is `FAST`
@@ -1272,67 +464,15 @@ is a *schema* decision. Leave faceting out and the slice can produce a schema la
 way to express it, which is exactly the layer a tracer bullet exists to prove. One facet field
 forces that decision on day one for very little code.
 
-Deliberately out: highlighting, edismax, stats, MLT, sort. All are post-processing or query
-composition on a pipeline the slice already proves.
+The initial slice excluded highlighting, edismax, stats, MLT, and sort. Their current shipped
+behavior is recorded in §5.
 
 ---
 
-## 8. Conformance & benchmarking
+## 8. Benchmarking
 
-**Differential harness.** Same corpus, same query set, real Solr vs Wayfinder, diff the JSON.
-Normalise `QTime`, timestamps, and float tolerance on scores — and log every field the
-normaliser touched, because an over-eager normaliser turns a green suite into a lie. While #392
-remains pending, this is regression and inventory evidence, not scope authority or a product
-commitment: a fixture or `EXPECTED_DIVERGENCES` entry cannot itself require implementation.
-`EXPECTED_DIVERGENCES` remains mechanically self-expiring when behaviour starts matching, but
-that mechanism does not decide which paths Wayfinder supports.
-
-**Known limit, learned the hard way (issues #2, #11).** The harness proves *envelope*
-equivalence, not *semantic* equivalence. `error.msg` is deliberately normalised away — it is free
-text and outside the compatibility contract (findings 10) — so two genuinely different errors that
-share an HTTP status and `error.code` diff to **zero**. Issue #2 shipped a wrong error
-classification twice under a fully green harness for exactly this reason: reverting a real bug in
-sort-clause validation produced no diffs at all. A green run is therefore necessary but not
-sufficient for anything error-shaped, and every issue that produces errors (#4–#9) inherits this.
-The mitigation is per-feature: reduce a message to its *class* and compare that class against the
-fixture, so the fixture decides which error is correct without freezing either side's wording —
-see `sort_error_class()` in `tests/sort.rs`.
-
-**The matching trap in the other direction, now closed (issue #25).** Comparing parsed `Value`s
-cannot detect key-order divergence: parsing discards object order, and `serde_json` was originally
-built *without* `preserve_order`, so every object Wayfinder emitted was alphabetised. Solr's order
-is meaningful throughout — it serialises `SimpleOrderedMap`/`NamedList`, giving
-`responseHeader, response, facet_counts` at the top, `status, QTime, params` in the header,
-`numFound, start, numFoundExact, docs` in the response, `metadata, msg, code` in an error,
-`counts, gap, start, end` in a range facet, and under `json.nl=map` the facet order itself as the
-object's key order. `serde_json` is now built with `preserve_order`, every construction site already
-lists its keys in Solr's order, and the emitted order reproduces Solr's (findings 21–25).
-Enabling the feature does not weaken any existing assertion: `IndexMap`'s `PartialEq` compares as a
-map, so `Value == Value` — and therefore `assert_matches_fixture` and `tests/common/diff.rs` —
-stays order-*insensitive* and keeps exactly its previous meaning. The guard is consequently a
-separate, order-*sensitive* suite, `tests/json_key_order.rs`, which reads key order out of the
-document bytes via a hand-written `Deserialize` over `MapAccess` (`tests/common/key_order.rs`) so
-it cannot be neutered by a feature-flag change; it carries self-tests pinning that property and a
-tripwire test that names `preserve_order` if someone drops it. One path is permanently exempt:
-`responseHeader.params`, whose order in Solr is Java `HashMap` iteration order — neither request
-order nor alphabetical, and not reproducible by any implementation (findings 6, 26). The
-differential normaliser is order-insensitive there for the same reason.
-
-Without a captured client trace, the query set is written deliberately rather than observed,
-so weight it toward the edges: zero results, empty facets, pagination past the end,
-multi-valued facets, facet with `mincount` filtering everything out, sort on each field type,
-missing field in `fl`, malformed params. Those are where a hand-rolled response envelope
-diverges from Solr's, and where a strict client throws a fatal error instead of showing an
-empty result set.
-
-Build this early. It is not in the tracer bullet, but it is the thing that tells you the
-envelope is right, and retrofitting it is more expensive than starting with it.
-
-**Relevance check.** Both engines use BM25, so ranking should be close; drift comes from
-analyzer-chain differences. Compare ranked ID lists, not just result sets.
-
-**Benchmark.** Two corpus sizes: 50 k documents and 2 M. Targets, to be revised once real
-numbers land:
+Benchmark current Wayfinder behavior against the operational goals rather than treating Solr
+parity as a product target. Two corpus sizes are useful: 50 k documents and 2 M documents.
 
 | Metric | Solr baseline | Wayfinder target |
 |---|---|---|
@@ -1343,8 +483,8 @@ numbers land:
 | Container image size | ~500 MB | < 30 MB |
 | Index size on disk | baseline | ≤ 1.2× baseline |
 
-Latency parity is the honest v1 target. Solr is mature and fast; memory, startup, and
-operational simplicity are where this project wins, and those are the primary goals.
+The frozen fixture baseline supplies regression assertions for the current wire. Performance work
+measures Wayfinder's own latency, memory, startup, and operational simplicity.
 
 ---
 
@@ -1352,11 +492,11 @@ operational simplicity are where this project wins, and those are the primary go
 
 | Risk | Mitigation |
 |---|---|
-| Response-envelope fidelity is harder than it looks — Solr has accreted odd shapes (`facet_fields` alternating arrays, `json.nl`, inconsistent empty-value handling) | The differential harness, built early, with edge-weighted queries |
+| Response-envelope fidelity is harder than it looks — Solr has accreted odd shapes (`facet_fields` alternating arrays, `json.nl`, inconsistent empty-value handling) | Frozen fixture-derived regression assertions for the current wire |
 | Relevance drifts visibly from Solr on migrated corpora | Both are BM25; drift comes from analyzer chains. Test ranked ID lists explicitly, not just membership. |
 | `softCommit` semantics differ enough to surprise clients that expect NRT | Document plainly; test the reindex/update flows a real client performs |
-| v2 finds Search API needs something structurally absent (a component, a response field with no Tantivy-side source) | The v1.5 capture exists to surface this *before* v2 builds against it. The v1 engine is useful regardless. |
-| Scope creep toward being a general Solr replacement | The non-goals in §1 and the phase table in §5. Every request gets asked: does the target use case need this? |
+| A client needs something structurally absent (a component or response field with no Tantivy-side source) | Scope any Wayfinder-specific design on its own merits; the retained wire creates no parity commitment. |
+| Scope creep toward being a general Solr replacement | The non-goals in §1 and the current boundaries in §5. |
 | One `IndexWriter` per core becomes an indexing bottleneck | It is a Tantivy constraint, not a choice. Measure at 2 M docs; if it binds, the answer is batching, not architecture. |
 
 ---
@@ -1368,21 +508,19 @@ operational simplicity are where this project wins, and those are the primary go
    goal, and it is what the codebase already does — `src/lib.rs`'s module doc states it as the
    current architecture, and `app()` takes exactly one schema/data-dir pair with no `CoreRegistry`
    anywhere. Issue #94 confirmed this the hard way: a ticket drafted against a "list all cores"
-   premise had to be corrected once the code was read, because there is no registry to list. v2.5's
-   admin UI (§5) is scoped around this — one core view, not a core list — and stays that way unless
-   a future need forces multi-core, at which point this line reopens rather than silently drifting.
+   premise had to be corrected once the code was read, because there is no registry to list. The
+   admin UI (§5) is one core view, not a core list.
 2. ~~**Which Solr version to report** from `/admin/system`.~~ **Resolved by issue #59:**
    `[admin] reported_server_version` (issue #325's rename of `reported_solr_version`, still
    accepted as an alias) defaults to `"9.0.0"` — the lowest version in the 9.x branch
    the Search API capture's generated `schema.xml` already targets (finding 78), and every
-   `search_api_solr` `version_compare()` gate that unlocks a feature Wayfinder does not implement
-   sits at or below Solr 8.x, so no 9.x value invites an unsupported feature. See ratified
-   divergence 5 below.
+   `search_api_solr` `version_compare()` condition sits at or below Solr 8.x, so the reported
+   value does not imply an unsupported feature. See ratified divergence 5 below.
 3. ~~**Unknown parameters: reject or ignore?**~~ **Resolved by the reference capture:** Solr
    returns `status: 0` and ignores them. Rejecting would 400 on requests real Solr serves,
    which breaks the compatibility claim — and Solr clients do routinely send extra params.
-   **Ignore by default, log at debug, offer `strict_params = true`** for development, so gaps
-   are still discoverable during the Search API phase.
+   **Ignore by default, log at debug, offer `strict_params = true`** for deployments that want
+   unknown request parameters rejected.
 4. ~~**Schema evolution.**~~ **Resolved as written, and implemented in issue #10:** refuse to
    start and require a reindex. Worth recording *why* there was never a softer option — Tantivy
    fixes a schema at index creation and `IndexBuilder::open_or_create` does a strict equality
@@ -1397,8 +535,8 @@ operational simplicity are where this project wins, and those are the primary go
    in `tantivy::tokenizer::Language` ships, 18 in total, as `text_<code>` presets alongside
    `string`/`keyword`/`text_general`/`text_en`. Built-in `text_en` removes English stopwords
    before stemming and applies Solr's captured Porter terminal-`y` rule (`day` → `dai`, while
-   `sky` remains `sky`) on static fields. That semantic change is analyzer contract v2: indexes
-   built under v1 with static `text_en` terms refuse startup and require a reindex. The shared
+   `sky` remains `sky`) on static fields. Indexes built before that static-`text_en` analyzer
+   change refuse startup and require a reindex. The shared
    `_dynamic_text` catch-all intentionally retains v1 Snowball behavior because the captured
    Drupal Search API configset preserves singular `day`; normal v1 dynamic indexes remain
    compatible, while pre-v1/legacy-dynamic `en_stem` indexes still fail closed before an analyzed

@@ -1,3 +1,5 @@
+> **Historical implementation record.** This completed spec does not define current requirements or future work.
+
 # PREP-1 (#368) — Vendor the full `search_api_solr` 4.4.0 source
 
 Issue: **#368**. Branch: `368-vendor-source`. Claim the issue before starting

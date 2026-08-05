@@ -1,3 +1,5 @@
+> **Historical implementation record.** This completed spec does not define current requirements or future work.
+
 # #361 — `QueryBuilder` sends no `fl`, so sink fields come back inside docs
 
 Branch: `361-querybuilder-fl`. Group A.
