@@ -1,9 +1,8 @@
 # Wayfinder
 
-A Solr-wire-compatible search backend in Rust, built on Tantivy: one static
-binary, one schema file, one data directory. No JVM, no ZooKeeper, no config-set
-upload. See `docs/PRD.md` for scope and phases, and [`docs/deployment.md`](docs/deployment.md)
-for the supported TLS deployment model.
+A Solr-similar search backend in Rust, built on Tantivy: one static
+binary, one schema file, one data directory. See `docs/PRD.md` for scope and phases, 
+and [`docs/deployment.md`](docs/deployment.md) for the supported TLS deployment model.
 
 ## Running
 
