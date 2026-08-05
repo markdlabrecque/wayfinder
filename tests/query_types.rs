@@ -24,9 +24,13 @@
 //!   fact. The expected token shapes it relies on (that `SimpleTokenizer` +
 //!   `LowerCaser` + English stopword removal + English `Stemmer` — built-in
 //!   `text_en`'s versioned analyzer — split
-//!   `count_i` into `["count", "i"]` and `_dynamic.count_i` into
-//!   `["dynam", "count", "i"]`) were verified against Wayfinder's own
-//!   tokenizer pipeline before writing the test, not assumed.
+//!   `count_num` into `["count", "num"]` and `_dynamic.count_num` into
+//!   `["dynam", "count", "num"]`) were verified against Wayfinder's own
+//!   tokenizer pipeline before writing the test, not assumed. (Issue #388:
+//!   originally `count_i`/`["count", "i"]` — renamed so the lone one-character
+//!   `i` token, dropped once the global text_en chain gains a length-2 lower
+//!   bound, cannot entangle this Wayfinder-only regression with that
+//!   unrelated fix.)
 
 // The `dead_code` allow for partially-used shared helpers is an inner attribute
 // inside `tests/common/mod.rs`; repeating it here is a clippy error under
@@ -704,11 +708,26 @@ async fn quoted_phrase_containing_colon_is_a_phrase_not_a_field_query() {
 // follow-up 5's open question.
 // =============================================================================
 
-/// A schema with a `*_i` dynamic int rule, default field `body`. One doc
-/// whose `body` contains the literal token sequence `count i seven` (which is
-/// exactly what the phrase `"count_i: seven"` tokenizes to on built-in
-/// `text_en`'s versioned analyzer — `SimpleTokenizer` splits on the non-alphanumeric `_`
-/// and `:`), plus a `count_i` value the unquoted control query exercises.
+/// A schema with two dynamic int rules, default field `body`: `*_i` (kept for
+/// the wildcard/fuzzy/exists tests below, which only exercise field-name
+/// rewriting and never look at `body`'s tokens) and `*_num` (used by the two
+/// tests immediately below, which DO depend on `body`'s exact token
+/// sequence). One doc whose `body` contains the literal token sequence
+/// `count num seven` (which is exactly what the phrase `"count_num: seven"`
+/// tokenizes to on built-in `text_en`'s versioned analyzer —
+/// `SimpleTokenizer` splits on the non-alphanumeric `_` and `:`), plus
+/// `count_i`/`count_num` values the unquoted control queries exercise.
+///
+/// Issue #388: the token-sequence-dependent tests used to share the single
+/// dynamic field `count_i` (pattern `*_i`), whose phrase split into
+/// `["count", "i", "seven"]`. Once the global text_en chain gains a
+/// `LengthFilterFactory min="2"` bound, that lone `i` token is dropped from
+/// BOTH the query and the indexed body, entangling those tests with the
+/// length-bound fix rather than isolating the dynamic-field-rewrite bug they
+/// exist to catch. `count_num`/`*_num` keeps every split token at 2+
+/// characters, so those tests' pass/fail is driven only by
+/// `rewrite_dynamic_fields`, unaffected by #388; `count_i`/`*_i` stays for the
+/// field-name-only tests below, which #388 does not touch.
 const DYNAMIC_QUOTE_SCHEMA_TOML: &str = r#"
 [core]
 name = "content"
@@ -731,6 +750,12 @@ pattern = "*_i"
 type = "int"
 stored = true
 fast = true
+
+[[dynamic_fields]]
+pattern = "*_num"
+type = "int"
+stored = true
+fast = true
 "#;
 
 async fn dynamic_quote_app() -> (Router, TempDir) {
@@ -739,7 +764,12 @@ async fn dynamic_quote_app() -> (Router, TempDir) {
         common::app_with_schema(dir.path(), DYNAMIC_QUOTE_SCHEMA_TOML).expect("app must build");
     let (status, body) = post_docs(
         &app,
-        &json!([{"id": "d1", "body": "the count i seven report", "count_i": 7}]),
+        &json!([{
+            "id": "d1",
+            "body": "the count num seven report",
+            "count_i": 7,
+            "count_num": 7
+        }]),
     )
     .await;
     assert_eq!(
@@ -750,52 +780,52 @@ async fn dynamic_quote_app() -> (Router, TempDir) {
     (app, dir)
 }
 
-/// Control: an UNQUOTED `count_i:7` must still be rewritten to the dynamic
+/// Control: an UNQUOTED `count_num:7` must still be rewritten to the dynamic
 /// container and match — this is the existing, already-working behaviour
 /// (mirrors `tests/schema_layer.rs::doc_field_matching_a_dynamic_pattern_is_indexed_and_returned`)
 /// that the fix below must not break.
 #[tokio::test]
 async fn dynamic_field_rewrite_still_applies_unquoted() {
     let (app, _dir) = dynamic_quote_app().await;
-    let (status, body) = get(&app, "select?q=count_i:7&wt=json").await;
+    let (status, body) = get(&app, "select?q=count_num:7&wt=json").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body["response"]["numFound"],
         json!(1),
-        "an unquoted count_i:7 must still be rewritten to the dynamic container and match: \
+        "an unquoted count_num:7 must still be rewritten to the dynamic container and match: \
          {body}"
     );
 }
 
-/// The regression: a QUOTED phrase containing `count_i:` must NOT be rewritten
-/// to a `_dynamic.count_i` field query — it is a literal phrase on `df`
-/// (`body`), and `body`'s doc contains exactly that token sequence
-/// (`count i seven`), so the correct answer is `numFound: 1`.
+/// The regression: a QUOTED phrase containing `count_num:` must NOT be
+/// rewritten to a `_dynamic.count_num` field query — it is a literal phrase
+/// on `df` (`body`), and `body`'s doc contains exactly that token sequence
+/// (`count num seven`), so the correct answer is `numFound: 1`.
 ///
 /// Today `rewrite_dynamic_fields`'s `<ident>:` scan has no notion of being
 /// inside a quoted string (its own `ponytail:` comment says so explicitly),
-/// so it rewrites `count_i:` to `_dynamic.count_i:` even here, changing the
-/// phrase's token sequence from `["count", "i", "seven"]` to
-/// `["dynam", "count", "i", "seven"]` (verified against Wayfinder's actual
+/// so it rewrites `count_num:` to `_dynamic.count_num:` even here, changing
+/// the phrase's token sequence from `["count", "num", "seven"]` to
+/// `["dynam", "count", "num", "seven"]` (verified against Wayfinder's actual
 /// `text_en` tokenizer pipeline, not assumed) — which does not occur in the
 /// doc's body, so today this answers `numFound: 0`, the wrong-for-the-right-
 /// reason failure this test exists to catch.
 #[tokio::test]
 async fn dynamic_field_rewrite_must_not_apply_inside_a_quoted_phrase() {
     let (app, _dir) = dynamic_quote_app().await;
-    let (status, body) = get(&app, "select?q=%22count_i:+seven%22&df=body&wt=json").await;
+    let (status, body) = get(&app, "select?q=%22count_num:+seven%22&df=body&wt=json").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body["response"]["numFound"],
         json!(1),
-        "a quoted phrase containing `count_i:` must be searched as a literal phrase on `df`, \
-         not rewritten to a `_dynamic.count_i` field query: {body}"
+        "a quoted phrase containing `count_num:` must be searched as a literal phrase on `df`, \
+         not rewritten to a `_dynamic.count_num` field query: {body}"
     );
     let returned_ids = ids(&body);
     assert_eq!(
         returned_ids,
         vec!["d1".to_string()],
-        "the phrase must match doc d1's body (`count i seven`), not be silently swallowed by \
+        "the phrase must match doc d1's body (`count num seven`), not be silently swallowed by \
          an incorrect rewrite: {body}"
     );
 }

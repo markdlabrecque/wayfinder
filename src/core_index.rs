@@ -230,6 +230,34 @@ fn dir_size_bytes(dir: &Path) -> u64 {
     total
 }
 
+/// Whether a legacy index's shared analyzed-dynamic catch-all has any
+/// persisted inverted-index terms. Schema snapshots describe only the latest
+/// configuration, so an earlier, historically allowed analyzed rule can have
+/// populated this field before a later raw-only snapshot replaced it.
+///
+/// This deliberately inspects raw term dictionaries rather than searching live
+/// documents: a deleted posting remains an on-disk old-analyzer term until a
+/// merge, and treating it as harmless would certify a v3 marker without proof
+/// that the persisted catch-all is empty.
+fn legacy_dynamic_text_has_indexed_terms(data_dir: &Path) -> Result<bool> {
+    let index = Index::open_in_dir(data_dir).with_context(|| {
+        format!(
+            "opening legacy index in {} to verify its _dynamic_text postings",
+            data_dir.display()
+        )
+    })?;
+    let Ok(field) = index.schema().get_field(schema::DYNAMIC_TEXT_FIELD) else {
+        return Ok(false);
+    };
+    let reader = index.reader().context("opening legacy index reader")?;
+    for segment in reader.searcher().segment_readers() {
+        if segment.inverted_index(field)?.terms().num_terms() != 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Renders one stored Tantivy value as the JSON Solr would return for it.
 fn render_value<'a>(v: impl tantivy::schema::Value<'a>) -> Value {
     if let Some(s) = v.as_str() {
@@ -781,7 +809,7 @@ impl CoreIndex {
         // empty data directory, so directory existence alone must never turn
         // a fresh index into a legacy one.
         let has_snapshot = snapshot.exists();
-        let (previous_static_text_en, previous_analyzed_dynamic, previous_has_dynamic_fields) =
+        let (previous_changed_static_text, previous_analyzed_dynamic, previous_has_dynamic_fields) =
             if has_snapshot {
                 let previous = std::fs::read_to_string(&snapshot)
                     .with_context(|| format!("reading stored schema {}", snapshot.display()))?;
@@ -794,7 +822,7 @@ impl CoreIndex {
                 let previous_schema = schema::parse(&previous)
                     .context("parsing the index's stored schema for its analyzer contract")?;
                 (
-                    previous_schema.uses_static_text_en(),
+                    previous_schema.uses_changed_static_text(),
                     previous_schema.uses_analyzed_dynamic_path(),
                     previous_schema.has_dynamic_fields(),
                 )
@@ -808,11 +836,23 @@ impl CoreIndex {
         // semantics for Search API, so a normal v1 marker makes that path safe.
         // Pre-v1/legacy-dynamic markers still require reindexing before an
         // analyzed dynamic rule can use their older `en_stem` catch-all.
+        //
+        // Contract v3 (#388) changes all three analyzed-text chains at once --
+        // static `text_en`, static `text_general`, and `_dynamic_text` -- by
+        // adding the configset's character-counted length bound and Lucene's
+        // simple case folding. The incoming and latest-snapshot predicates
+        // reject any configured affected path, but a snapshot can no longer
+        // describe an analyzed rule that historically wrote terms before a
+        // later raw-only edit. A legacy marker may therefore become current
+        // only after the persisted `_dynamic_text` term dictionaries prove
+        // empty. The configured-path predicate still serves the v1 and v2
+        // checks that fail before that physical proof is needed.
         let analyzer_contract = schema::analyzer_contract_path(data_dir);
-        let uses_static_text_en = wf_schema.uses_static_text_en() || previous_static_text_en;
+        let uses_changed_static_text =
+            wf_schema.uses_changed_static_text() || previous_changed_static_text;
         let uses_analyzed_dynamic =
             wf_schema.uses_analyzed_dynamic_path() || previous_analyzed_dynamic;
-        let uses_pre_v1_changed_path = uses_static_text_en || uses_analyzed_dynamic;
+        let uses_changed_analyzed_path = uses_changed_static_text || uses_analyzed_dynamic;
         let marker_to_write = if analyzer_contract.exists() {
             let persisted = std::fs::read_to_string(&analyzer_contract).with_context(|| {
                 format!(
@@ -822,23 +862,53 @@ impl CoreIndex {
             })?;
             match persisted.trim() {
                 schema::ANALYZER_CONTRACT => None,
-                schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT if uses_pre_v1_changed_path => {
+                schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT if uses_changed_analyzed_path => {
                     bail!(
                         "the index in {} predates the current text_en/_dynamic_text analyzer contract; reindex into a fresh data directory",
                         data_dir.display()
                     );
                 }
                 schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT => None,
-                // A normal v1 marker certifies the dynamic catch-all's still-
-                // current Snowball pipeline. Only static text_en changed in v2.
-                schema::ANALYZER_CONTRACT_V1 if uses_static_text_en => {
+                // A v2 marker certifies the Porter-compatible text_en chain but
+                // predates v3's length bound and simple case folding, which
+                // changed every analyzed-text chain (#388).
+                schema::ANALYZER_CONTRACT_V2 if uses_changed_analyzed_path => {
                     bail!(
-                        "the index in {} uses the v1 text_en analyzer contract; reindex into a fresh data directory for the Porter-compatible text_en analyzer",
+                        "the index in {} uses the v2 text_en analyzer contract; reindex into a fresh data directory for the length-bounded, simple-case-folded text_en/text_general/_dynamic_text analyzers",
                         data_dir.display()
                     );
                 }
-                schema::ANALYZER_CONTRACT_V1 => Some(schema::ANALYZER_CONTRACT),
-                schema::ANALYZER_CONTRACT_V1_LEGACY_DYNAMIC_TEXT if uses_pre_v1_changed_path => {
+                schema::ANALYZER_CONTRACT_V2 => {
+                    if has_snapshot && legacy_dynamic_text_has_indexed_terms(data_dir)? {
+                        bail!(
+                            "the index in {} has legacy _dynamic_text postings; reindex into a fresh data directory for the current analyzer contract",
+                            data_dir.display()
+                        );
+                    }
+                    Some(schema::ANALYZER_CONTRACT)
+                }
+                // A v1 marker certified the dynamic catch-all's Snowball
+                // pipeline, which v2 left alone -- but v3 re-cases and
+                // length-bounds it too, so an index with an analyzed dynamic
+                // rule is no longer adoptable either: its terms are stale on
+                // both counts. This branch spans two contract steps, so the
+                // message names both reasons.
+                schema::ANALYZER_CONTRACT_V1 if uses_changed_analyzed_path => {
+                    bail!(
+                        "the index in {} uses the v1 text_en analyzer contract; reindex into a fresh data directory for the Porter-compatible text_en analyzer and the length-bounded, simple-case-folded text_en/text_general/_dynamic_text analyzers",
+                        data_dir.display()
+                    );
+                }
+                schema::ANALYZER_CONTRACT_V1 => {
+                    if has_snapshot && legacy_dynamic_text_has_indexed_terms(data_dir)? {
+                        bail!(
+                            "the index in {} has legacy _dynamic_text postings; reindex into a fresh data directory for the current analyzer contract",
+                            data_dir.display()
+                        );
+                    }
+                    Some(schema::ANALYZER_CONTRACT)
+                }
+                schema::ANALYZER_CONTRACT_V1_LEGACY_DYNAMIC_TEXT if uses_changed_analyzed_path => {
                     bail!(
                         "the index in {} predates the current text_en/_dynamic_text analyzer contract; reindex into a fresh data directory",
                         data_dir.display()
@@ -854,7 +924,7 @@ impl CoreIndex {
                     );
                 }
             }
-        } else if has_snapshot && uses_pre_v1_changed_path {
+        } else if has_snapshot && uses_changed_analyzed_path {
             bail!(
                 "the index in {} predates the current text_en/_dynamic_text analyzer contract; reindex into a fresh data directory",
                 data_dir.display()
@@ -869,9 +939,11 @@ impl CoreIndex {
         // marker-write failure now leaves no newly-created versioned index
         // behind, so a retry cannot mistake it for a pre-contract index. A
         // real legacy index has a snapshot and was rejected above before any
-        // marker write; an unaffected legacy index is safe to adopt. A legacy
-        // dynamic schema retains a distinct state because its unused
-        // `_dynamic_text` catch-all still carries an older identity.
+        // marker write; a legacy marker is rewritten only after its configured
+        // paths and (where applicable) persisted `_dynamic_text` terms prove
+        // safe to adopt. A legacy dynamic schema retains a distinct state
+        // because its unused `_dynamic_text` catch-all still carries an older
+        // identity.
         if let Some(marker) = marker_to_write {
             std::fs::write(&analyzer_contract, marker).with_context(|| {
                 format!(

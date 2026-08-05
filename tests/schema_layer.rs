@@ -14,7 +14,14 @@ mod common;
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
-use tantivy::Index;
+use tantivy::tokenizer::TokenStream;
+use tantivy::{
+    Index, Term,
+    collector::Count,
+    query::TermQuery,
+    schema::IndexRecordOption,
+    tokenizer::{Language, LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer},
+};
 use tempfile::TempDir;
 use wayfinder::schema;
 
@@ -89,11 +96,27 @@ fn create_older_analyzer_index(dir: &std::path::Path, toml: &str, tokenizer: &st
     let schema_path = dir.join("schema.toml");
     std::fs::write(&schema_path, toml).expect("write legacy schema");
     let wf_schema = schema::load(&schema_path).expect("legacy schema loads");
+    // Targets the CURRENT static-text_en identity (`wayfinder_text_en_v3` as
+    // of issue #388, previously `_v2`), so a caller-given older identity
+    // (`wayfinder_text_en_v1`, bare `en_stem`, ...) actually lands in the
+    // serialized schema in its place.
     let schema_json = serde_json::to_string(&wf_schema.tantivy_schema)
         .expect("serialize current Tantivy schema")
-        .replace("wayfinder_text_en_v2", tokenizer);
-    let schema_json = if tokenizer == "en_stem" {
-        schema_json.replace("wayfinder_text_en_v1", tokenizer)
+        .replace("wayfinder_text_en_v3", tokenizer);
+    // As above, but for `_dynamic_text`'s CURRENT identity
+    // (`wayfinder_dynamic_text_v3` as of #388; it no longer coincides with
+    // static `text_en`'s v1 identity the way it did pre-#388). Swapped
+    // whenever the caller wants a truly historical shared identity on both
+    // paths at once: the fully pre-#51 bare `en_stem` state, or the v1/v2-era
+    // state in which `_dynamic_text` had not yet diverged from static
+    // `text_en`'s v1 identity (`wayfinder_text_en_v1` was the catch-all's
+    // identity through the v2 contract bump too -- only static `text_en`
+    // moved to `_v2`; see the `DYNAMIC_TEXT_TOKENIZER` doc comment in
+    // `src/schema.rs`). A caller building an all-raw-dynamic-rule schema (no
+    // static analyzed field at all, so the first replace above is a no-op)
+    // relies on this branch to land the retired identity on `_dynamic_text`.
+    let schema_json = if tokenizer == "en_stem" || tokenizer == "wayfinder_text_en_v1" {
+        schema_json.replace("wayfinder_dynamic_text_v3", tokenizer)
     } else {
         schema_json
     };
@@ -214,6 +237,461 @@ fn text_presets_tokenize_as_expected() {
     );
 }
 
+// --- issue #388: text_en / text_general / _dynamic_text length bounds and
+// simple case folding --------------------------------------------------------
+//
+// Wayfinder's global analyzed text chains diverge from the shipped
+// `search_api_solr` configset in three ways (see
+// `tests/select_analyzer_bounds.rs`'s module doc for the full writeup):
+// no `LengthFilterFactory min="2" max="100"` lower/upper bound, and Rust's
+// full-Unicode `LowerCaser` instead of Lucene's simple (1:1) folding on
+// U+0130. All three of Wayfinder's chains carry the bug: static `text_en`,
+// static `text_general` (`text_general` is not currently a Wayfinder-owned
+// chain at all -- it resolves to Tantivy's own `default` tokenizer), and the
+// shared `_dynamic_text` catch-all every analyzed dynamic rule flows through
+// regardless of its declared type.
+
+/// A schema with an analyzed dynamic rule, so `_dynamic_text`'s tokenizer
+/// is actually registered in the returned schema's `TokenizerManager`.
+/// `WayfinderSchema::tokenize` only resolves preset *type names*
+/// (`text_en`/`text_general`), not internal tokenizer identities, so the
+/// dynamic catch-all's chain has to be read directly off `wf.tokenizers`
+/// (see `tokenize_identity` below) rather than through `tokenize()`.
+const DYNAMIC_ANALYZED_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "id"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+
+[[dynamic_fields]]
+pattern = "*_txt"
+type = "text_general"
+stored = true
+"#;
+
+/// Runs `text` through the tokenizer registered under `tokenizer_name` in
+/// `wf`'s `TokenizerManager` and returns the resulting terms. Panics if the
+/// identity is not registered at all, which is the expected failure mode for
+/// the not-yet-implemented v3 identities this file asserts against.
+fn tokenize_identity(
+    wf: &schema::WayfinderSchema,
+    tokenizer_name: &str,
+    text: &str,
+) -> Vec<String> {
+    let mut analyzer = wf
+        .tokenizers
+        .get(tokenizer_name)
+        .unwrap_or_else(|| panic!("tokenizer `{tokenizer_name}` must be registered"));
+    let mut stream = analyzer.token_stream(text);
+    let mut out = Vec::new();
+    while stream.advance() {
+        out.push(stream.token().text.clone());
+    }
+    out
+}
+
+#[test]
+fn text_en_preset_enforces_the_configsets_length_bounds_and_simple_case_folding() {
+    let (_dir, path) = write_schema(FULL_SCHEMA_TOML);
+    let wf = schema::load(&path).expect("schema loads");
+
+    // AMENDMENT 1 (issue #388): static text_en/text_general stand in for
+    // Solr's `_default` configset (capture.sh:1686 boots the edismax
+    // reference core with `solr-precreate content`, no configset argument),
+    // whose text_en has NO LengthFilterFactory at all. Five edismax fixtures
+    // pin this: the one-character `b`/`c`/`d` tokens in the pA/pB/mmA-mmD
+    // docs move BM25's average field length and flip a 1% score gap, so a
+    // one-character token surviving here is ground truth, not an unfixed bug.
+    // The min=2 lower bound belongs to the dynamic-catch-all test only
+    // (`_dynamic_text` stands in for the search_api_solr configset instead).
+    assert_eq!(
+        wf.tokenize("text_en", "i").expect("text_en preset"),
+        vec!["i"],
+        "issue #388 AMENDMENT 1: static text_en stands in for Solr's `_default` configset, \
+         which has no LengthFilterFactory at all -- a one-character token must survive, \
+         pinned by the edismax fixtures' BM25 average-field-length behaviour"
+    );
+    assert_eq!(
+        wf.tokenize("text_en", "hi").expect("text_en preset"),
+        vec!["hi"],
+        "a two-character token must survive -- unaffected either way"
+    );
+
+    // ponytail: RemoveLongFilter::limit(40) counting bytes (not
+    // LengthFilterFactory's characters, which `_default` doesn't have at
+    // all) is a pre-existing divergence from `_default`, which drops
+    // nothing at any length. Unpinned by any fixture; out of scope for
+    // #388 (AMENDMENT 1 corrected the spec to leave this filter alone) and
+    // filed as a follow-up.
+    let a45 = "a".repeat(45);
+    assert_eq!(
+        wf.tokenize("text_en", &a45).expect("text_en preset"),
+        Vec::<String>::new(),
+        "issue #388 AMENDMENT 1: static text_en keeps RemoveLongFilter::limit(40) (bytes) \
+         unchanged -- a 45-character/45-byte token must still be dropped"
+    );
+    let b100 = "b".repeat(100);
+    assert_eq!(
+        wf.tokenize("text_en", &b100).expect("text_en preset"),
+        Vec::<String>::new(),
+        "issue #388 AMENDMENT 1: 100 bytes is still well over RemoveLongFilter::limit(40) -- \
+         must be dropped, same as before this issue"
+    );
+    let c101 = "c".repeat(101);
+    assert_eq!(
+        wf.tokenize("text_en", &c101).expect("text_en preset"),
+        Vec::<String>::new(),
+        "issue #388 AMENDMENT 1: 101 bytes is still well over RemoveLongFilter::limit(40) -- \
+         must be dropped, same as before this issue"
+    );
+
+    assert_eq!(
+        wf.tokenize("text_en", "İstanbul").expect("text_en preset"),
+        vec!["istanbul"],
+        "issue #388: Lucene's LowerCaseFilterFactory is Character.toLowerCase, Unicode's \
+         SIMPLE (1:1) mapping -- U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE must fold to a \
+         bare `i`. Tantivy's LowerCaser is Rust's full-Unicode str::to_lowercase, which \
+         appends a trailing U+0307 COMBINING DOT ABOVE; assert the exact token, not `contains`"
+    );
+
+    // The existing expectations text_presets_tokenize_as_expected pins
+    // (stemming, stopwords) must still hold -- none of its tokens are
+    // shorter than 2 characters or contain U+0130, so the length/case fix
+    // must not move them.
+    assert_eq!(
+        wf.tokenize("text_en", "The Quick Runners")
+            .expect("text_en preset"),
+        vec!["quick", "runner"],
+        "text_en must still drop English stopwords before stemming remaining tokens"
+    );
+}
+
+#[test]
+fn text_general_preset_enforces_the_configsets_length_bounds_and_simple_case_folding() {
+    let (_dir, path) = write_schema(FULL_SCHEMA_TOML);
+    let wf = schema::load(&path).expect("schema loads");
+
+    // AMENDMENT 1 (issue #388): static text_general stands in for Solr's
+    // `_default` configset the same way text_en does (see the comment on
+    // that test above) -- ground truth is the edismax/select/terms fixtures,
+    // not the search_api_solr configset's `text_und`. A one-character token
+    // must survive; the min=2 lower bound belongs to the dynamic-catch-all
+    // test only.
+    assert_eq!(
+        wf.tokenize("text_general", "i")
+            .expect("text_general preset"),
+        vec!["i"],
+        "issue #388 AMENDMENT 1: static text_general stands in for Solr's `_default` \
+         configset, which has no LengthFilterFactory at all -- a one-character token must \
+         survive"
+    );
+    assert_eq!(
+        wf.tokenize("text_general", "hi")
+            .expect("text_general preset"),
+        vec!["hi"],
+        "a two-character token must survive -- unaffected either way"
+    );
+
+    // ponytail: text_general currently resolves to Tantivy's own built-in
+    // `default` tokenizer (SimpleTokenizer -> RemoveLongFilter::limit(40) ->
+    // LowerCaser), so it already carries this same byte-based 40-byte cut
+    // `_default` (no length filter at all) does not have. Pre-existing,
+    // unpinned by any fixture, and out of scope for #388 (AMENDMENT 1
+    // corrected the spec to leave this filter alone on both static
+    // presets) -- filed as a follow-up.
+    let a45 = "a".repeat(45);
+    assert_eq!(
+        wf.tokenize("text_general", &a45)
+            .expect("text_general preset"),
+        Vec::<String>::new(),
+        "issue #388 AMENDMENT 1: static text_general keeps RemoveLongFilter::limit(40) \
+         (bytes) unchanged -- a 45-character/45-byte token must still be dropped"
+    );
+    let b100 = "b".repeat(100);
+    assert_eq!(
+        wf.tokenize("text_general", &b100)
+            .expect("text_general preset"),
+        Vec::<String>::new(),
+        "issue #388 AMENDMENT 1: 100 bytes is still well over RemoveLongFilter::limit(40) \
+         -- must be dropped, same as before this issue"
+    );
+    let c101 = "c".repeat(101);
+    assert_eq!(
+        wf.tokenize("text_general", &c101)
+            .expect("text_general preset"),
+        Vec::<String>::new(),
+        "issue #388 AMENDMENT 1: 101 bytes is still well over RemoveLongFilter::limit(40) \
+         -- must be dropped, same as before this issue"
+    );
+
+    assert_eq!(
+        wf.tokenize("text_general", "İstanbul")
+            .expect("text_general preset"),
+        vec!["istanbul"],
+        "issue #388: text_general must fold U+0130 the same simple (1:1) way text_en does -- \
+         a bare `i`, not Rust's full mapping with a trailing U+0307 COMBINING DOT ABOVE"
+    );
+}
+
+#[test]
+fn dynamic_text_catch_all_enforces_the_configsets_length_bounds_and_simple_case_folding() {
+    let (_dir, path) = write_schema(DYNAMIC_ANALYZED_SCHEMA_TOML);
+    let wf = schema::load(&path).expect("schema loads");
+    let tokenizer = "wayfinder_dynamic_text_v3";
+
+    assert_eq!(
+        tokenize_identity(&wf, tokenizer, "i"),
+        Vec::<String>::new(),
+        "issue #388: `_dynamic_text` -- the shared catch-all every analyzed dynamic rule flows \
+         through regardless of its declared type -- must drop a one-character token just like \
+         the static presets"
+    );
+    assert_eq!(
+        tokenize_identity(&wf, tokenizer, "hi"),
+        vec!["hi"],
+        "a two-character token must survive -- the lower bound is inclusive"
+    );
+
+    let a45 = "a".repeat(45);
+    assert_eq!(
+        tokenize_identity(&wf, tokenizer, &a45),
+        vec![a45.clone()],
+        "issue #388: a 45-character token is inside max=\"100\" and must survive. Regression \
+         guard against RemoveLongFilter::limit(40) (bytes) being re-added instead of \
+         LengthFilter (characters)"
+    );
+    let b100 = "b".repeat(100);
+    assert_eq!(
+        tokenize_identity(&wf, tokenizer, &b100),
+        vec![b100.clone()],
+        "issue #388: the upper bound is inclusive -- exactly 100 characters must survive"
+    );
+    let c101 = "c".repeat(101);
+    assert_eq!(
+        tokenize_identity(&wf, tokenizer, &c101),
+        Vec::<String>::new(),
+        "101 characters must be dropped -- one over the inclusive max=\"100\" bound"
+    );
+
+    assert_eq!(
+        tokenize_identity(&wf, tokenizer, "İstanbul"),
+        vec!["istanbul"],
+        "issue #388: `_dynamic_text` must fold U+0130 the same simple way the static presets \
+         do -- a bare `i`, not Rust's full mapping with a trailing U+0307 COMBINING DOT ABOVE"
+    );
+
+    // `_dynamic_text` deliberately keeps its v1 Snowball semantics (stopwords
+    // + Stemmer, no PorterTerminalYFilter) -- only the length bound and case
+    // folding change. `day` staying `day` (not `dai`, as text_en's Porter
+    // terminal-y rule would produce) is the discriminator.
+    assert_eq!(
+        tokenize_identity(&wf, tokenizer, "day"),
+        vec!["day"],
+        "_dynamic_text must keep Snowball English stemming (day stays day), unlike text_en's \
+         Porter terminal-y variant"
+    );
+}
+
+// --- issue #388: analyzer contract v3 (text_en/text_general length+case
+// bounds and simple case folding, and _dynamic_text's length+case fix) ------
+//
+// Changing the three chains above changes the terms already written to disk,
+// so `src/core_index.rs`'s existing startup machinery (the same machinery
+// that gated v1 -> v2 above) must refuse an incompatible existing index
+// rather than silently return wrong results. `ANALYZER_CONTRACT` becomes the
+// v3 marker; the v2 value moves to a new `ANALYZER_CONTRACT_V2` const (not
+// referenced by name here -- these tests write its literal value directly, so
+// they fail on an observed VALUE today rather than a missing symbol).
+
+/// A marker already at the CURRENT contract must open normally and stay
+/// untouched. Read through the live `schema::ANALYZER_CONTRACT` symbol
+/// (never a literal) so this test tracks whatever the current contract value
+/// is, both before and after #388 lands -- it is an invariant of every
+/// contract version, not a value newly introduced by this issue.
+#[test]
+fn current_analyzer_contract_marker_opens_normally() {
+    let dir = TempDir::new().expect("temp dir");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    let marker = data_dir.join("wayfinder-analyzer-contract");
+    std::fs::write(&marker, schema::ANALYZER_CONTRACT)
+        .expect("write current analyzer contract marker");
+
+    let _app = common::app_with_schema(dir.path(), FULL_SCHEMA_TOML).expect(
+        "an index already certified under the current analyzer contract must open normally",
+    );
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("read analyzer contract marker"),
+        schema::ANALYZER_CONTRACT,
+        "a marker already at the current contract must be left untouched"
+    );
+}
+
+/// A v2 marker (today's `ANALYZER_CONTRACT` value, to become
+/// `ANALYZER_CONTRACT_V2`) on a schema with a static `text_en` field -- which
+/// v3 changes -- must require reindexing. Predicted RED: today's code treats
+/// this literal as the CURRENT contract (nothing has bumped to v3 yet), so it
+/// opens fine and `.expect_err` panics.
+#[test]
+fn v2_marker_on_static_text_en_field_refuses_startup_requiring_reindex() {
+    let dir = TempDir::new().expect("temp dir");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    std::fs::write(
+        data_dir.join("wayfinder-analyzer-contract"),
+        "text_en_porter_compatible_v2",
+    )
+    .expect("write v2 analyzer contract marker");
+
+    let err = common::app_with_schema(dir.path(), FULL_SCHEMA_TOML).expect_err(
+        "a v2 marker with a static text_en field must require reindexing for the v3 \
+         length+case fix (issue #388)",
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.to_lowercase().contains("reindex"),
+        "v2-with-affected-data refusal must require reindexing, got: {msg}"
+    );
+}
+
+/// As above, but the affected field is static `text_general` -- new ground
+/// for #388, since `text_general` did not change between v1 and v2 at all.
+/// Predicted RED for the same reason as the text_en case.
+#[test]
+fn v2_marker_on_static_text_general_field_refuses_startup_requiring_reindex() {
+    let text_general_only = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+
+[[fields]]
+name = "body"
+type = "text_general"
+stored = true
+"#;
+    let dir = TempDir::new().expect("temp dir");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    std::fs::write(
+        data_dir.join("wayfinder-analyzer-contract"),
+        "text_en_porter_compatible_v2",
+    )
+    .expect("write v2 analyzer contract marker");
+
+    let err = common::app_with_schema(dir.path(), text_general_only).expect_err(
+        "a v2 marker with a static text_general field must require reindexing for the v3 \
+         length+case fix (issue #388) -- text_general did not change v1 -> v2 at all, so this \
+         is new ground",
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.to_lowercase().contains("reindex"),
+        "v2-with-affected-data refusal must require reindexing, got: {msg}"
+    );
+}
+
+/// As above, but the affected path is an analyzed `[[dynamic_fields]]` rule
+/// (which flows through `_dynamic_text`) rather than a static field.
+/// Predicted RED for the same reason.
+#[test]
+fn v2_marker_on_analyzed_dynamic_rule_refuses_startup_requiring_reindex() {
+    let dir = TempDir::new().expect("temp dir");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    std::fs::write(
+        data_dir.join("wayfinder-analyzer-contract"),
+        "text_en_porter_compatible_v2",
+    )
+    .expect("write v2 analyzer contract marker");
+
+    let err = common::app_with_schema(dir.path(), DYNAMIC_ANALYZED_SCHEMA_TOML).expect_err(
+        "a v2 marker with an analyzed dynamic rule must require reindexing for the v3 \
+         _dynamic_text length+case fix (issue #388)",
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.to_lowercase().contains("reindex"),
+        "v2-with-affected-data refusal must require reindexing, got: {msg}"
+    );
+}
+
+/// A v2 marker on a schema that can hold NO affected data (raw/string fields
+/// only, no analyzed dynamic rule) must be silently upgraded to the current
+/// (v3) contract rather than bailing -- mirroring `v1_raw_only_analyzer_
+/// contract_is_upgraded_without_reindex` above, one version later. This is an
+/// invariant that already holds today (a marker equal to the live
+/// `ANALYZER_CONTRACT` symbol always opens fine, regardless of schema
+/// content), so it is not expected to be red on its own -- it guards against
+/// the v2-affected-data tests above being satisfied by a change that makes
+/// EVERY v2 marker bail unconditionally, which would break raw-only adoption.
+#[tokio::test]
+async fn v2_marker_on_raw_only_schema_is_upgraded_without_reindex() {
+    let raw_only = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+
+[[fields]]
+name = "body"
+type = "string"
+stored = true
+
+[[dynamic_fields]]
+pattern = "*_s"
+type = "string"
+stored = true
+"#;
+    let dir = TempDir::new().expect("temp dir");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    let marker = data_dir.join("wayfinder-analyzer-contract");
+    std::fs::write(&marker, "text_en_porter_compatible_v2")
+        .expect("write v2 analyzer contract marker");
+
+    let app = common::app_with_schema(dir.path(), raw_only)
+        .expect("a v2 index with no changed analyzer path must remain adoptable");
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("read upgraded analyzer contract"),
+        schema::ANALYZER_CONTRACT,
+        "safe v2 adoption must persist the current (v3) analyzer contract"
+    );
+
+    // A raw-only schema still has `[[dynamic_fields]]`, so `catch_all_fields`
+    // (`src/schema.rs`) gives it a `_dynamic_text` catch-all regardless of the
+    // rule's own (non-analyzed) type -- opening the index is not enough to
+    // prove that catch-all's tokenizer identity actually resolves; only a
+    // write through it does (`tests/schema_layer.rs` module background,
+    // issue #388 follow-up: `open().is_ok()` alone stayed green through a
+    // real `Error getting tokenizer for field: _dynamic_text` regression).
+    let (status, body) = common::post_docs(&app, &json!([{"id": "d1", "extra_s": "hello"}])).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a doc through the raw-only `_dynamic_text` catch-all must write after safe v2 \
+         adoption, got: {body:?}"
+    );
+}
+
 #[test]
 fn pre_analyzer_contract_text_en_index_refuses_startup_requiring_reindex() {
     let dir = TempDir::new().expect("temp dir");
@@ -250,7 +728,95 @@ fn v1_text_en_analyzer_contract_refuses_startup_requiring_reindex() {
 }
 
 #[test]
-fn v1_raw_only_analyzer_contract_is_upgraded_without_reindex() {
+fn v1_marker_with_old_dynamic_postings_hidden_by_raw_snapshot_refuses_reindex() {
+    let old_dynamic = DYNAMIC_ANALYZED_SCHEMA_TOML;
+    let raw_dynamic = old_dynamic.replace("type = \"text_general\"", "type = \"string\"");
+    assert_ne!(
+        old_dynamic, raw_dynamic,
+        "test setup: evolution must remove the analyzed rule"
+    );
+
+    let dir = TempDir::new().expect("temp dir");
+    let schema_path = dir.path().join("schema.toml");
+    std::fs::write(&schema_path, old_dynamic).expect("write old analyzed schema");
+    let old = schema::load(&schema_path).expect("old analyzed schema loads");
+    let legacy_schema_json = serde_json::to_string(&old.tantivy_schema)
+        .expect("serialize old Tantivy schema")
+        .replace("wayfinder_dynamic_text_v3", "wayfinder_text_en_v1");
+    assert!(
+        legacy_schema_json.contains("wayfinder_text_en_v1"),
+        "test setup: old catch-all must persist its v1 tokenizer identity"
+    );
+
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    let legacy_tokenizers = old.tokenizers.clone();
+    legacy_tokenizers.register(
+        "wayfinder_text_en_v1",
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(LowerCaser)
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    {
+        let legacy_index = Index::builder()
+            .schema(serde_json::from_str(&legacy_schema_json).expect("legacy schema parses"))
+            .tokenizers(legacy_tokenizers.clone())
+            .fast_field_tokenizers(legacy_tokenizers)
+            .create_in_dir(&data_dir)
+            .expect("create old index");
+        let dynamic_text = legacy_index
+            .schema()
+            .get_field("_dynamic_text")
+            .expect("old schema has the dynamic catch-all");
+        let mut writer = legacy_index.writer(15_000_000).expect("open old writer");
+        writer
+            .add_document(tantivy::doc!(dynamic_text => json!({"legacy_txt": "X"})))
+            .expect("write through old analyzed catch-all");
+        writer.commit().expect("commit old analyzed posting");
+
+        // v1 indexed a one-character token; v3's catch-all drops it at the
+        // new min=2 bound. A direct term query proves an actual old analyzed
+        // posting exists, rather than merely an analyzed rule in a snapshot.
+        let mut old_posting = Term::from_field_json_path(dynamic_text, "legacy_txt", false);
+        old_posting.append_type_and_str("x");
+        assert_eq!(
+            legacy_index
+                .reader()
+                .expect("open old reader")
+                .searcher()
+                .search(
+                    &TermQuery::new(old_posting, IndexRecordOption::Basic),
+                    &Count,
+                )
+                .expect("search old posting"),
+            1,
+            "test setup: `_dynamic_text` must hold an actual old-chain analyzed posting"
+        );
+    }
+
+    // This evolution was historically allowed: its latest persisted snapshot
+    // says every dynamic rule is raw, even though the physical index above
+    // already contains an old analyzed `_dynamic_text` posting.
+    std::fs::write(schema::snapshot_path(&data_dir), &raw_dynamic)
+        .expect("overwrite snapshot with evolved raw schema");
+    std::fs::write(
+        data_dir.join("wayfinder-analyzer-contract"),
+        "text_en_stopwords_v1",
+    )
+    .expect("write v1 analyzer contract marker");
+
+    let err = common::app_with_schema(dir.path(), &raw_dynamic).expect_err(
+        "a raw latest snapshot cannot prove the old catch-all was unused; startup must require reindexing",
+    );
+    assert!(
+        format!("{err:#}").to_lowercase().contains("reindex"),
+        "unsafe legacy adoption must require reindexing, got: {err:#}"
+    );
+}
+
+#[tokio::test]
+async fn v1_raw_only_analyzer_contract_is_upgraded_without_reindex() {
     let raw_only = r#"
 [core]
 name = "raw-v1"
@@ -267,23 +833,59 @@ required = true
 name = "body"
 type = "string"
 stored = true
+
+[[dynamic_fields]]
+pattern = "*_s"
+type = "string"
+stored = true
 "#;
     let dir = TempDir::new().expect("temp dir");
     create_older_analyzer_index(dir.path(), raw_only, "wayfinder_text_en_v1");
     let marker = dir.path().join("data/wayfinder-analyzer-contract");
     std::fs::write(&marker, "text_en_stopwords_v1").expect("write v1 analyzer contract");
 
-    let _app = common::app_with_schema(dir.path(), raw_only)
+    let app = common::app_with_schema(dir.path(), raw_only)
         .expect("a v1 index with no changed analyzer path must remain adoptable");
     assert_eq!(
         std::fs::read_to_string(marker).expect("read upgraded analyzer contract"),
         schema::ANALYZER_CONTRACT,
         "safe v1 adoption must persist the current analyzer contract"
     );
+
+    // Issue #388 follow-up: this schema's raw (`string`) `[[dynamic_fields]]`
+    // rule still gets a `_dynamic_text` catch-all (`catch_all_fields` does not
+    // look at the rule's own type), and `create_older_analyzer_index` with
+    // `wayfinder_text_en_v1` puts that CURRENTLY-retired identity on the
+    // persisted `_dynamic_text` field -- the exact shape a real pre-#388
+    // all-raw-dynamic index has. Opening successfully does not prove the
+    // identity actually resolves; only a write through it does.
+    let (status, body) = common::request_full(
+        &app,
+        "POST",
+        "raw-v1/update?commit=true",
+        Some(&json!([{"id": "d1", "extra_s": "hello"}]).to_string()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a doc through the raw-only `_dynamic_text` catch-all must write after safe v1 \
+         adoption, got: {body:?}"
+    );
 }
 
+// AMENDMENT 1 (issue #388): this test used to be
+// `v1_analyzed_dynamic_contract_is_safely_upgraded` and asserted a silent
+// upgrade, because pre-#388 the dynamic catch-all's analyzer hadn't changed
+// since v1. v3 changes `_dynamic_text`'s chain (the length bound and simple
+// case folding), so a v1-marker index with an analyzed dynamic rule now
+// carries stale terms on disk *and* a persisted Tantivy schema naming the
+// retired `wayfinder_text_en_v1` identity nothing registers any more --
+// upgrading it silently would produce silently wrong results. This test
+// encodes an invariant the change deliberately invalidates, so it is amended
+// to expect the reindex bail instead of a safe upgrade.
 #[test]
-fn v1_analyzed_dynamic_contract_is_safely_upgraded() {
+fn v1_analyzed_dynamic_contract_now_requires_reindexing() {
     let dynamic_text = r#"
 [core]
 name = "dynamic-v1"
@@ -306,17 +908,26 @@ stored = true
     let marker = dir.path().join("data/wayfinder-analyzer-contract");
     std::fs::write(&marker, "text_en_stopwords_v1").expect("write v1 analyzer contract");
 
-    let _app = common::app_with_schema(dir.path(), dynamic_text)
-        .expect("v1 already uses the dynamic catch-all's still-current Snowball analyzer");
+    let err = common::app_with_schema(dir.path(), dynamic_text).expect_err(
+        "issue #388 AMENDMENT 1: a v1-marker index with an analyzed dynamic rule must now \
+         require reindexing -- v3 changes _dynamic_text's chain, so silently upgrading would \
+         leave stale terms on disk and a persisted schema naming the retired \
+         wayfinder_text_en_v1 identity",
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.to_lowercase().contains("reindex"),
+        "v1-analyzed-dynamic refusal must require reindexing, got: {msg}"
+    );
     assert_eq!(
-        std::fs::read_to_string(marker).expect("read upgraded analyzer contract"),
-        schema::ANALYZER_CONTRACT,
-        "normal v1 dynamic state must upgrade to the current contract"
+        std::fs::read_to_string(&marker).expect("read analyzer contract marker"),
+        "text_en_stopwords_v1",
+        "a refused startup must not touch the on-disk marker"
     );
 }
 
-#[test]
-fn v1_legacy_dynamic_contract_remains_fail_closed() {
+#[tokio::test]
+async fn v1_legacy_dynamic_contract_remains_fail_closed() {
     let raw_dynamic = r#"
 [core]
 name = "legacy-dynamic-v1"
@@ -340,13 +951,35 @@ stored = true
     std::fs::write(&marker, "text_en_stopwords_v1_legacy_dynamic_text")
         .expect("write v1 legacy-dynamic marker");
 
-    let _app = common::app_with_schema(dir.path(), raw_dynamic)
-        .expect("an unused legacy dynamic catch-all remains safe to open");
-    assert_eq!(
-        std::fs::read_to_string(&marker).expect("read upgraded legacy marker"),
-        schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT,
-        "v1 legacy-dynamic state must remain distinguished after upgrade"
-    );
+    {
+        let app = common::app_with_schema(dir.path(), raw_dynamic)
+            .expect("an unused legacy dynamic catch-all remains safe to open");
+        assert_eq!(
+            std::fs::read_to_string(&marker).expect("read upgraded legacy marker"),
+            schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT,
+            "v1 legacy-dynamic state must remain distinguished after upgrade"
+        );
+
+        // Issue #388 follow-up / item E: the legacy `en_stem` dynamic path
+        // (unlike `wayfinder_text_en_v1`/`_v2`, `en_stem` is Tantivy's own
+        // built-in tokenizer, always registered regardless of the #388
+        // retired-identity aliases) must still actually write through
+        // `_dynamic_text`, not merely open. Pins the "legacy-dynamic state is
+        // unaffected" finding so it is not re-litigated by a future change
+        // that only checks `.is_ok()`.
+        let (status, body) = common::request_full(
+            &app,
+            "POST",
+            "legacy-dynamic-v1/update?commit=true",
+            Some(&json!([{"id": "d1", "extra_value": "hello"}]).to_string()),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a doc through the legacy en_stem `_dynamic_text` catch-all must write, got: {body:?}"
+        );
+    }
 
     let now_analyzed = raw_dynamic.replace(
         "pattern = \"*_value\"\ntype = \"string\"",
@@ -358,6 +991,137 @@ stored = true
     assert!(
         msg.contains("text_en") && msg.to_lowercase().contains("reindex"),
         "legacy dynamic refusal must identify text_en and reindexing, got: {msg}"
+    );
+}
+
+// --- issue #388 follow-up: an all-raw-dynamic-rule schema's `_dynamic_text`
+// catch-all must actually resolve after adoption, not just open -----------
+//
+// `catch_all_fields` (`src/schema.rs`) gives `_dynamic_text` to any schema
+// with a `[[dynamic_fields]]` rule at all, regardless of the rule's own
+// declared type -- including a schema whose rules are ALL non-analyzed
+// (`string`/`int`). Such a schema's persisted Tantivy identity for
+// `_dynamic_text` is the pre-#388 shared identity `wayfinder_text_en_v1`
+// (see the `DYNAMIC_TEXT_TOKENIZER` doc comment in `src/schema.rs`: it
+// coincided with static `text_en`'s v1 identity through the v2 contract
+// bump), while `uses_changed_analyzed_path` is false for it -- so a v1 *or*
+// v2 marker is correctly adopted without a reindex and the marker rewritten
+// to v3. If the retired identity is not kept resolvable (aliased) as of the
+// rewrite, every subsequent write then fails with HTTP 500 `Error getting
+// tokenizer for field: _dynamic_text` -- a failure `open().is_ok()` alone
+// cannot see, since it only surfaces on the next write. v1 and v2 take
+// different arms in `src/core_index.rs`'s marker-upgrade match, so both are
+// covered separately.
+
+/// An all-raw dynamic-rule schema: every `[[dynamic_fields]]` rule is
+/// `string` or `int`, no analyzed field anywhere (static or dynamic).
+const ALL_RAW_DYNAMIC_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "id"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+
+[[dynamic_fields]]
+pattern = "*_s"
+type = "string"
+stored = true
+
+[[dynamic_fields]]
+pattern = "*_i"
+type = "int"
+stored = true
+"#;
+
+#[tokio::test]
+async fn v1_marker_on_all_raw_dynamic_schema_adopts_rewrites_and_writes() {
+    let dir = TempDir::new().expect("temp dir");
+    create_older_analyzer_index(
+        dir.path(),
+        ALL_RAW_DYNAMIC_SCHEMA_TOML,
+        "wayfinder_text_en_v1",
+    );
+    let marker = dir.path().join("data/wayfinder-analyzer-contract");
+    std::fs::write(&marker, "text_en_stopwords_v1").expect("write v1 analyzer contract");
+
+    // 1. the index adopts (open succeeds).
+    let app = common::app_with_schema(dir.path(), ALL_RAW_DYNAMIC_SCHEMA_TOML).expect(
+        "an all-raw-dynamic-rule index has no changed analyzer path and must remain adoptable \
+         under a v1 marker",
+    );
+
+    // 2. the marker is rewritten to the current (v3) contract.
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("read upgraded analyzer contract"),
+        schema::ANALYZER_CONTRACT,
+        "safe v1 adoption of an all-raw-dynamic-rule index must persist the current analyzer \
+         contract"
+    );
+
+    // 3. a subsequently POSTed and committed document returns 200 -- the
+    // load-bearing assertion. (1) and (2) alone pass even when the retired
+    // `wayfinder_text_en_v1` identity is not kept resolvable; only a write
+    // through `_dynamic_text` proves the tokenizer manager can still resolve
+    // it.
+    let (status, body) = common::post_docs(
+        &app,
+        &json!([{"id": "d1", "extra_s": "hello", "count_i": 3}]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a doc through the all-raw-dynamic `_dynamic_text` catch-all must write after safe v1 \
+         adoption, got: {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn v2_marker_on_all_raw_dynamic_schema_adopts_rewrites_and_writes() {
+    let dir = TempDir::new().expect("temp dir");
+    create_older_analyzer_index(
+        dir.path(),
+        ALL_RAW_DYNAMIC_SCHEMA_TOML,
+        "wayfinder_text_en_v1",
+    );
+    let marker = dir.path().join("data/wayfinder-analyzer-contract");
+    // `_dynamic_text` did not change between v1 and v2 (only static `text_en`
+    // moved), so a genuinely pre-#388 all-raw-dynamic index carries the same
+    // on-disk `wayfinder_text_en_v1` identity under either marker -- only the
+    // marker file's own contents differ, exercising the v2 arm in
+    // `src/core_index.rs` instead of the v1 one.
+    std::fs::write(&marker, "text_en_porter_compatible_v2").expect("write v2 analyzer contract");
+
+    // 1. the index adopts (open succeeds).
+    let app = common::app_with_schema(dir.path(), ALL_RAW_DYNAMIC_SCHEMA_TOML).expect(
+        "an all-raw-dynamic-rule index has no changed analyzer path and must remain adoptable \
+         under a v2 marker",
+    );
+
+    // 2. the marker is rewritten to the current (v3) contract.
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("read upgraded analyzer contract"),
+        schema::ANALYZER_CONTRACT,
+        "safe v2 adoption of an all-raw-dynamic-rule index must persist the current analyzer \
+         contract"
+    );
+
+    // 3. the load-bearing write assertion -- see the v1 sibling test above.
+    let (status, body) = common::post_docs(
+        &app,
+        &json!([{"id": "d1", "extra_s": "hello", "count_i": 3}]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a doc through the all-raw-dynamic `_dynamic_text` catch-all must write after safe v2 \
+         adoption, got: {body:?}"
     );
 }
 
@@ -462,13 +1226,19 @@ stored = true
     let schema_path = dir.path().join("schema.toml");
     std::fs::write(&schema_path, raw_only).expect("write legacy schema");
     let current = schema::load(&schema_path).expect("raw-only dynamic schema loads");
+    // Issue #388: `_dynamic_text`'s current identity moves to
+    // `wayfinder_dynamic_text_v3` (previously it coincided with static
+    // `text_en`'s v1 identity, `wayfinder_text_en_v1`). This test simulates a
+    // truly pre-#51 index, whose `_dynamic_text` catch-all used Tantivy's bare
+    // `en_stem` before either identity existed, so the replace target must
+    // track whatever the CURRENT identity is.
     let legacy_schema_json = serde_json::to_string(&current.tantivy_schema)
         .expect("serialize current Tantivy schema")
-        .replace("wayfinder_text_en_v1", "en_stem");
+        .replace("wayfinder_dynamic_text_v3", "en_stem");
     assert!(
         legacy_schema_json.contains("_dynamic_text")
             && legacy_schema_json.contains("en_stem")
-            && !legacy_schema_json.contains("wayfinder_text_en_v1"),
+            && !legacy_schema_json.contains("wayfinder_dynamic_text_v3"),
         "test setup: materialize the old `_dynamic_text` tokenizer identity"
     );
     let materialize_legacy = |root: &std::path::Path| {
@@ -652,7 +1422,22 @@ tokenizer = "simple"
 
 #[test]
 fn custom_field_type_cannot_use_an_internal_text_en_tokenizer_identity() {
-    for name in ["wayfinder_text_en_v1", "wayfinder_text_en_v2"] {
+    // Issue #388: static `text_en`/`text_general` and the `_dynamic_text`
+    // catch-all all move to new v3 tokenizer identities
+    // (`wayfinder_text_en_v3`, `wayfinder_text_general_v3`,
+    // `wayfinder_dynamic_text_v3`), because a tokenizer name is the on-disk
+    // analyzer identity. Old and new identities must ALL stay reserved so a
+    // custom `[[field_types]]` entry can never shadow one -- including
+    // `wayfinder_text_general_v3`, which is new territory: pre-#388,
+    // `text_general` resolved to Tantivy's own `default` tokenizer, not a
+    // Wayfinder-owned (and therefore reservable) identity at all.
+    for name in [
+        "wayfinder_text_en_v1",
+        "wayfinder_text_en_v2",
+        "wayfinder_text_en_v3",
+        "wayfinder_text_general_v3",
+        "wayfinder_dynamic_text_v3",
+    ] {
         let toml = format!(
             r#"{FULL_SCHEMA_TOML}
 [[field_types]]

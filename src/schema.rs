@@ -124,18 +124,53 @@ pub fn builtin_type_names() -> Vec<String> {
     names
 }
 
-/// Tantivy's own `default` analyzer: simple tokenizer, long tokens dropped,
-/// lowercased, no stemming. Solr calls this shape `text_general`.
-const TEXT_GENERAL_TOKENIZER: &str = "default";
+/// Wayfinder's versioned stemmer-free analyzer: simple tokenizer, the
+/// configset's character-counted length bound, then Lucene's simple (1:1) case
+/// folding. It stands in for the shipped configset's `text_und`, which has no
+/// stemmer and whose `stopwords_und.txt` is empty. Before #388 this was
+/// Tantivy's built-in `default` analyzer, which has neither bound nor simple
+/// folding; owning the identity is what lets the on-disk analyzer contract see
+/// the change.
+const TEXT_GENERAL_TOKENIZER: &str = "wayfinder_text_general_v3";
 /// Wayfinder's versioned Solr-compatible English analyzer: simple tokenizer,
-/// long-token removal, lowercase, English stopword removal, then stemming.
-/// It intentionally does not override Tantivy's `en_stem`, which remains
-/// available for custom analyzer chains and upstream defaults.
-const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v2";
+/// the configset's length bound, simple lowercase, English stopword removal,
+/// then Porter-compatible stemming. It intentionally does not override
+/// Tantivy's `en_stem`, which remains available for custom analyzer chains and
+/// upstream defaults.
+const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v3";
 /// The shared dynamic-text catch-all retains the pre-v2 Snowball analyzer.
 /// Drupal Search API's captured configset uses Snowball and preserves singular
 /// `day`; all analyzed dynamic rules share this one tokenizer in Tantivy.
-const DYNAMIC_TEXT_TOKENIZER: &str = "wayfinder_text_en_v1";
+/// #388 gave it its own name: it carried static `text_en`'s v1 identity while
+/// the two chains happened to coincide, and they no longer do.
+const DYNAMIC_TEXT_TOKENIZER: &str = "wayfinder_dynamic_text_v3";
+/// The pre-#388 `text_en` identities. Both are still *registered*, as aliases
+/// of the chain that replaced each (see `build_tokenizers`), because a
+/// tokenizer name lives in the persisted Tantivy schema: an index that predates
+/// #388 and is legitimately adopted without a reindex still names one of these
+/// on its `_dynamic_text` catch-all, and a name the manager cannot resolve
+/// turns every later write into `Error getting tokenizer for field:
+/// _dynamic_text`. They also stay in the reserved list below, so a custom
+/// `[[field_types]]` entry still cannot redefine one.
+///
+/// `wayfinder_text_en_v1` was *both* the v1 static `text_en` identity and the
+/// `_dynamic_text` catch-all identity through v2; `wayfinder_text_en_v2` was
+/// the v2 static `text_en` identity.
+const TEXT_EN_TOKENIZER_V1: &str = "wayfinder_text_en_v1";
+const TEXT_EN_TOKENIZER_V2: &str = "wayfinder_text_en_v2";
+/// Built from the two consts above so the reservation list cannot drift from
+/// the set that is actually registered.
+const RETIRED_TEXT_TOKENIZERS: [&str; 2] = [TEXT_EN_TOKENIZER_V1, TEXT_EN_TOKENIZER_V2];
+
+/// `LengthFilterFactory min/max` on every text field type in the shipped
+/// `search_api_solr` configset (`schema_extra_types.xml`), applied on both the
+/// index and query analyzers. Both bounds are in *characters*, as Lucene's
+/// `LengthFilter` measures them, and both are inclusive (#388). They bound the
+/// `_dynamic_text` catch-all only -- the static presets follow Solr's `_default`
+/// configset, which has no `LengthFilterFactory` at all (see
+/// `build_tokenizers`).
+const TEXT_MIN_TOKEN_LEN: usize = 2;
+const TEXT_MAX_TOKEN_LEN: usize = 100;
 
 /// `boost_term_payload`'s **indexing** analyzer: the module's front half
 /// (whitespace, length min=2/max=100, lowercase, remove-duplicates) followed by
@@ -178,14 +213,24 @@ const SUGGEST_MAX_TOKEN_LEN: usize = 100;
 /// no stemmer for.
 const SUGGEST_UNDEFINED_DICTIONARY: &str = "und";
 
-/// The on-disk analyzer contract for indexes built with Wayfinder's
-/// Porter-compatible English preset. This is separate from Tantivy's schema:
-/// it lets startup identify pre-contract indexes before their old tokenizer
-/// identity can be adopted.
-pub const ANALYZER_CONTRACT: &str = "text_en_porter_compatible_v2";
-/// A safely adopted pre-v2 index whose unused `_dynamic_text` catch-all still
-/// has an older tokenizer identity. It is not full v2 certification: a later
-/// rule that starts writing analyzed dynamic values must reindex.
+/// The on-disk analyzer contract for indexes built with Wayfinder's current
+/// analyzed-text chains: the Porter-compatible English preset plus #388's
+/// configset length bound and simple case folding on all three of `text_en`,
+/// `text_general`, and the `_dynamic_text` catch-all. This is separate from
+/// Tantivy's schema: it lets startup identify pre-contract indexes before their
+/// old tokenizer identity can be adopted.
+pub const ANALYZER_CONTRACT: &str = "text_en_solr_length_case_v3";
+/// The v2 marker: Porter-compatible `text_en`, but no length bound anywhere and
+/// Rust's full-Unicode lowercasing. Recognized explicitly during upgrade, so an
+/// index that cannot hold affected data is adopted while one that can fails
+/// closed.
+pub const ANALYZER_CONTRACT_V2: &str = "text_en_porter_compatible_v2";
+/// A safely adopted older index whose unused `_dynamic_text` catch-all still
+/// has an older tokenizer identity. It is not full certification at the current
+/// contract: a later rule that starts writing analyzed dynamic values must
+/// reindex. The value was minted at v2 and deliberately kept across v3 -- it
+/// means "safe legacy-dynamic adoption", not "certified at v2", and an index
+/// carrying it holds no analyzed data to be invalidated by a chain change.
 pub const ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT: &str =
     "text_en_porter_compatible_v2_legacy_dynamic_text";
 /// The v1 marker is recognized explicitly during upgrade, rather than treated
@@ -438,10 +483,16 @@ impl WayfinderSchema {
         })
     }
 
-    /// Whether this schema can contain static data whose analyzer changed from
-    /// v1 Snowball stemming to v2's Porter-compatible terminal-`y` behavior.
-    pub fn uses_static_text_en(&self) -> bool {
-        self.fields.iter().any(|field| field.type_ == "text_en")
+    /// Whether this schema can contain static data written by one of the
+    /// built-in analyzed-text presets whose chain has changed: `text_en`
+    /// (v1 Snowball stemming -> v2's Porter-compatible terminal-`y` behavior,
+    /// then v3's length bound and simple case folding) and `text_general`
+    /// (unchanged until v3, which gave it both of those and its own tokenizer
+    /// identity -- issue #388).
+    pub fn uses_changed_static_text(&self) -> bool {
+        self.fields
+            .iter()
+            .any(|field| matches!(field.type_.as_str(), "text_en" | "text_general"))
     }
 
     /// Whether any configured dynamic rule can write analyzed text through
@@ -1186,23 +1237,96 @@ fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager>
     let manager = TokenizerManager::default();
     let english_stopwords =
         || StopWordFilter::new(Language::English).expect("Tantivy ships an English stopword list");
+    // The three global analyzed-text chains (#388). All three fold case with
+    // `SimpleLowerCaseFilter`, because Lucene's `LowerCaseFilterFactory` is
+    // Unicode's simple (1:1) mapping in *both* reference configsets, and Rust's
+    // `LowerCaser` is the full mapping (they disagree on U+0130). That is what
+    // changes their on-disk terms, and why all three take new v3 identities.
+    //
+    // The *length* bound is not shared, because the three chains stand in for
+    // field types from two different configsets (#388 AMENDMENT 1):
+    //
+    //   - `_dynamic_text` is the Search API catch-all every analyzed dynamic
+    //     rule flows through, and the shipped `search_api_solr` configset gives
+    //     every one of its text types `LengthFilterFactory min="2" max="100"`,
+    //     counted in characters. The captured `select_analyzer_*` fixtures pin
+    //     both ends: `tm_title:i` returns zero, and a 45-character token is
+    //     found (`select_analyzer_long45_und`).
+    //   - static `text_en` / `text_general` stand in for Solr's *`_default`*
+    //     configset instead -- that is what pins `text_en`'s `day` -> `dai`
+    //     Porter terminal-y rule (PRD open question 5), which the Search API
+    //     configset's Snowball chain contradicts, and `capture.sh:1686` boots
+    //     the edismax reference core with no configset argument at all.
+    //     `_default`'s `text_en` has no `LengthFilterFactory`, and five edismax
+    //     fixtures pin that: `edismax_basic`, `edismax_score_baseline`,
+    //     `edismax_boost_multiplicative`, `edismax_term_boost` and
+    //     `edismax_operators_required` rank `eD` above `eB` only while the
+    //     one-character tokens in the unrelated `pA`/`pB`/`mmA`-`mmD` docs stay
+    //     in the index, keeping Solr's BM25 average field length. So these two
+    //     chains keep the length filter they already had, untouched.
+    //
+    // ponytail: the length filter they already had is `RemoveLongFilter`, whose
+    // 40-byte cut is a divergence from `_default` (which drops nothing at any
+    // length) in its own right. Pre-existing, unpinned by any fixture, and
+    // deliberately out of #388's scope -- filed as #393.
+    //
+    // `_dynamic_text`, by contrast, drops `RemoveLongFilter` entirely: that
+    // filter is byte-based (`token.text.len() < limit`) while
+    // `LengthFilterFactory` is character-based, so keeping both would reinstate
+    // the divergence at 40 bytes and make `TEXT_MAX_TOKEN_LEN` unreachable. The
+    // same reasoning is written out for the suggest chain below.
+    //
+    // Solr orders the chain `Stop -> WDGF -> Length -> LowerCase -> Snowball`;
+    // running `Length` before the stopword filter cannot change the surviving
+    // set, because both filters only ever remove tokens.
+    let dynamic_text = TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter_dynamic(LengthFilter {
+            min: TEXT_MIN_TOKEN_LEN,
+            max: TEXT_MAX_TOKEN_LEN,
+        })
+        .filter_dynamic(SimpleLowerCaseFilter)
+        .filter_dynamic(english_stopwords())
+        .filter_dynamic(Stemmer::new(Language::English))
+        .build();
+    let text_en = TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter_dynamic(RemoveLongFilter::limit(40))
+        .filter_dynamic(SimpleLowerCaseFilter)
+        .filter_dynamic(english_stopwords())
+        .filter_dynamic(PorterTerminalYFilter)
+        .filter_dynamic(Stemmer::new(Language::English))
+        .build();
+    manager.register(DYNAMIC_TEXT_TOKENIZER, dynamic_text.clone());
+    manager.register(TEXT_EN_TOKENIZER, text_en.clone());
+    // The pre-#388 identities stay resolvable, aliased to the chain that
+    // replaced each. A tokenizer name is part of the *persisted Tantivy
+    // schema*, and `catch_all_fields` gives `_dynamic_text` to any schema with
+    // a dynamic rule at all -- including the all-raw (`string`/`int`) schemas
+    // the v1/v2 contract branches legitimately adopt without a reindex. Such an
+    // index still names `wayfinder_text_en_v1` on that field, and leaving the
+    // name unregistered does not fail the open: it fails every subsequent
+    // write, with `Error getting tokenizer for field: _dynamic_text`, on an
+    // index the marker now claims is at the current contract.
+    //
+    // The aliases are not a second semantics: legacy adoption reaches them
+    // only after `CoreIndex::open` rejects configured affected paths and,
+    // before writing a current marker, verifies the persisted `_dynamic_text`
+    // term dictionaries are empty. A latest schema snapshot alone cannot prove
+    // that: an earlier analyzed rule may have been replaced by a raw rule.
+    // Pointing the aliases at the *current* chains rather than reconstructing
+    // the old ones is deliberate -- if such a field ever did receive a value,
+    // it would be analyzed the way the v3 marker on disk says it is.
+    manager.register(TEXT_EN_TOKENIZER_V1, dynamic_text);
+    manager.register(TEXT_EN_TOKENIZER_V2, text_en);
+    // `text_general` is `_default`'s stemmer-free analyzed text type, so it gets
+    // no stopword or stemmer filter. Pre-#388 it was Tantivy's own `default`
+    // tokenizer, whose chain is exactly this one with `LowerCaser` in place of
+    // `SimpleLowerCaseFilter`; owning the identity is what lets the analyzer
+    // contract see the folding change.
     manager.register(
-        DYNAMIC_TEXT_TOKENIZER,
+        TEXT_GENERAL_TOKENIZER,
         TextAnalyzer::builder(SimpleTokenizer::default())
-            .filter(RemoveLongFilter::limit(40))
-            .filter(LowerCaser)
-            .filter(english_stopwords())
-            .filter(Stemmer::new(Language::English))
-            .build(),
-    );
-    manager.register(
-        TEXT_EN_TOKENIZER,
-        TextAnalyzer::builder(SimpleTokenizer::default())
-            .filter(RemoveLongFilter::limit(40))
-            .filter(LowerCaser)
-            .filter(english_stopwords())
-            .filter(PorterTerminalYFilter)
-            .filter(Stemmer::new(Language::English))
+            .filter_dynamic(RemoveLongFilter::limit(40))
+            .filter_dynamic(SimpleLowerCaseFilter)
             .build(),
     );
     for (code, lang) in LANGUAGES {
@@ -1301,11 +1425,6 @@ fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager>
     // `catenateWords` are `1` on the index side and `0` on the query side
     // (`:51` vs `:62`, `:172` vs `:183`). Unpinned by any fixture.
     //
-    // ponytail: this fixes the SUGGEST path only. Wayfinder's global `text_en` /
-    // `text_general` presets still have no `LengthFilter` and still use Rust's
-    // full-Unicode `LowerCaser`, so `/select` over a `text_en` field keeps
-    // diverging from Solr on both counts. That is a real, separate bug, filed as
-    // #388 -- not closed by this change.
     let suggest_front = || {
         TextAnalyzer::builder(SimpleTokenizer::default())
             .filter_dynamic(LengthFilter {
@@ -1424,13 +1543,18 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     // `TEXT_EN_TOKENIZER` is not a schema type name but is
     // reserved alongside them: it is the tokenizer identity `text_en` registers
     // under, and a chain registering over it would redefine the built-in preset.
+    // The same holds for `TEXT_GENERAL_TOKENIZER` and `DYNAMIC_TEXT_TOKENIZER`
+    // (#388) and for the retired identities in `RETIRED_TEXT_TOKENIZERS`, which
+    // an older on-disk index still names.
     // The `wayfinder_suggest_*` identities (#384) are reserved for the same
     // reason -- a custom chain under one of those names would redefine the
     // analyzer the `/suggest` read path resolves through `dictionary_tokenizer`.
     let reserved_type_names: Vec<String> = builtin_type_names()
         .into_iter()
+        .chain(RETIRED_TEXT_TOKENIZERS.iter().map(|name| name.to_string()))
         .chain([
             TEXT_EN_TOKENIZER.to_string(),
+            TEXT_GENERAL_TOKENIZER.to_string(),
             DYNAMIC_TEXT_TOKENIZER.to_string(),
             BOOST_TERM_PAYLOAD_TOKENIZER.to_string(),
             BOOST_TERM_PAYLOAD_VERBATIM_TOKENIZER.to_string(),
