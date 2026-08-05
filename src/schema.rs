@@ -255,6 +255,16 @@ pub struct FieldTypeConfig {
     pub tokenizer: String,
     #[serde(default)]
     pub filters: Vec<FilterConfig>,
+    /// Issue #389 Phase 1 seam: a distinct query-time tokenizer, registered
+    /// alongside `tokenizer`'s index-time analyzer. `None` means this field
+    /// type has no separate query analyzer, so the query path must fall back
+    /// to the index one.
+    #[serde(default)]
+    pub query_tokenizer: Option<String>,
+    /// The filter chain for `query_tokenizer`. Only consulted when
+    /// `query_tokenizer` is `Some`.
+    #[serde(default)]
+    pub query_filters: Vec<FilterConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -521,6 +531,40 @@ impl WayfinderSchema {
             // reachable here -- it is storage, not the query-time analysis
             // chain (#340).
             ResolvedType::BoostTermPayload => BOOST_TERM_PAYLOAD_TOKENIZER.to_string(),
+            _ => return None,
+        };
+        let mut analyzer = self.tokenizers.get(&tokenizer_name)?;
+        let mut stream = analyzer.token_stream(text);
+        let mut out = Vec::new();
+        while stream.advance() {
+            out.push(stream.token().text.clone());
+        }
+        Some(out)
+    }
+
+    /// Issue #389 Phase 1 stub: the index/query analyzer split is not
+    /// implemented yet, so this resolves the *index*-side tokenizer name
+    /// unconditionally -- exactly the identity lookup query paths use today
+    /// (`core_index.rs:2516`, `:3811`, `:4148`). Written only so Phase 1's
+    /// red tests compile against the shape the implementor is expected to
+    /// build; a real implementation consults a per-schema index-name ->
+    /// query-name map populated from `FieldTypeConfig::query_tokenizer` in
+    /// `build_tokenizers`.
+    pub fn query_tokenizer_name(&self, index_tokenizer_name: &str) -> String {
+        index_tokenizer_name.to_string()
+    }
+
+    /// Issue #389 Phase 1 stub: query-time counterpart to
+    /// [`Self::tokenize`]. Currently just delegates to the index-side
+    /// analyzer via [`Self::query_tokenizer_name`]'s identity fallback --
+    /// the real split is unimplemented.
+    pub fn tokenize_query(&self, type_name: &str, text: &str) -> Option<Vec<String>> {
+        let tokenizer_name = match resolve_type(type_name, &self.field_types).ok()? {
+            ResolvedType::Str => "raw".to_string(),
+            ResolvedType::Text { tokenizer } => self.query_tokenizer_name(&tokenizer),
+            ResolvedType::BoostTermPayload => {
+                self.query_tokenizer_name(BOOST_TERM_PAYLOAD_TOKENIZER)
+            }
             _ => return None,
         };
         let mut analyzer = self.tokenizers.get(&tokenizer_name)?;

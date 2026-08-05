@@ -632,6 +632,167 @@ language = "english"
     );
 }
 
+// --- index/query analyzer split (issue #389 Phase 1) ------------------------
+//
+// Today `WayfinderSchema` (and every query-path caller in `core_index.rs`)
+// resolves exactly one analyzer per field type, used for both indexing and
+// query-time analysis. Solr's `text_en`/`text_und` genuinely differ between
+// the two (accent folding shared, but synonyms/WDGF catenation are query- or
+// index-only) -- see `an389_select_cat_joined_en` (2 docs) vs
+// `an389_select_cat_delim_en` (1 doc), findings 195-204. Phase 1 is the
+// structural prerequisite only: it introduces a second, query-side analyzer
+// identity per field type and a fallback when none is registered. It makes
+// **no** observable behaviour change to any existing chain.
+
+/// The core new capability: a `[[field_types]]` entry that registers a
+/// distinct query-side chain (`query_tokenizer` + `query_filters`) must
+/// resolve a genuinely different analyzer on `tokenize_query` than on
+/// `tokenize`. The index chain here has no stopword filter; the query chain
+/// does, so the difference is directly observable rather than incidental.
+#[test]
+fn field_type_query_analyzer_differs_from_index_analyzer() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "an389_split"
+tokenizer = "simple"
+query_tokenizer = "simple"
+[[field_types.filters]]
+kind = "lowercase"
+[[field_types.query_filters]]
+kind = "lowercase"
+[[field_types.query_filters]]
+kind = "stopwords"
+language = "english"
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let wf = schema::load(&path).expect("schema loads");
+
+    let index_tokens = wf
+        .tokenize("an389_split", "The Cat Sat")
+        .expect("index analyzer must be registered");
+    let query_tokens = wf
+        .tokenize_query("an389_split", "The Cat Sat")
+        .expect("query analyzer must be registered");
+
+    assert_eq!(
+        index_tokens,
+        vec!["the", "cat", "sat"],
+        "the index chain carries no stopword filter and must keep every token, got {index_tokens:?}"
+    );
+    assert_eq!(
+        query_tokens,
+        vec!["cat", "sat"],
+        "the query chain carries an English stopword filter and must drop \
+         `the`; Phase 1 must resolve a distinct query analyzer instead of \
+         reusing the index one (issue #389), got {query_tokens:?}"
+    );
+    assert_ne!(
+        index_tokens, query_tokens,
+        "a field type with a deliberately different query chain must analyze \
+         differently on the two paths"
+    );
+}
+
+/// Fallback rule: when a `[[field_types]]` entry registers no
+/// `query_tokenizer` at all, the query path must resolve exactly the index
+/// analyzer -- not merely an analyzer that happens to produce the same
+/// tokens for one sample input, but the *same registered chain*, checked
+/// here across several inputs including ones a stopword/stemmer difference
+/// would expose.
+#[test]
+fn field_type_with_no_query_tokenizer_falls_back_to_index_analyzer() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "an389_no_query_chain"
+tokenizer = "simple"
+[[field_types.filters]]
+kind = "lowercase"
+[[field_types.filters]]
+kind = "stopwords"
+language = "english"
+[[field_types.filters]]
+kind = "stemmer"
+language = "english"
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let wf = schema::load(&path).expect("schema loads");
+
+    for sample in ["The Quick Runners", "a b c", "Café", ""] {
+        assert_eq!(
+            wf.tokenize_query("an389_no_query_chain", sample),
+            wf.tokenize("an389_no_query_chain", sample),
+            "with no `query_tokenizer` configured, the query path must fall \
+             back to the index analyzer exactly, for input {sample:?}"
+        );
+    }
+}
+
+/// Every existing built-in chain must be unaffected: `text_en` and
+/// `text_general` register no query-side identity in Phase 1, so their query
+/// analyzer must resolve to the same tokens the index analyzer already
+/// produces (the real regression guard for both is
+/// `text_presets_tokenize_as_expected` above; this only pins that the new
+/// `tokenize_query` seam does not change their behaviour).
+#[test]
+fn builtin_text_presets_query_analyzer_is_unaffected() {
+    let (_dir, path) = write_schema(FULL_SCHEMA_TOML);
+    let wf = schema::load(&path).expect("schema loads");
+
+    for type_name in ["text_en", "text_general"] {
+        for sample in ["The Quick Runners", "Café Central", ""] {
+            assert_eq!(
+                wf.tokenize_query(type_name, sample),
+                wf.tokenize(type_name, sample),
+                "`{type_name}` registers no query analyzer in Phase 1, so \
+                 `tokenize_query` must equal `tokenize` for input {sample:?}"
+            );
+        }
+    }
+}
+
+/// The `wayfinder_suggest_*` chains (issue #384) are a second, non-field-type
+/// seam onto the same `TokenizerManager`: `dictionary_tokenizer` gives the
+/// raw tokenizer identity `suggest_lookup` resolves through directly, not a
+/// `[[field_types]]` name. Phase 1's lookup must leave that identity
+/// unchanged for every dictionary code, so the `/suggest` read path keeps
+/// resolving exactly the chain it does today.
+#[test]
+fn suggest_dictionary_tokenizer_query_lookup_is_unaffected() {
+    let (_dir, path) = write_schema(FULL_SCHEMA_TOML);
+    let wf = schema::load(&path).expect("schema loads");
+
+    for code in ["en", "und", "fr", "nosuchcode"] {
+        let name = schema::dictionary_tokenizer(code);
+        assert_eq!(
+            wf.query_tokenizer_name(&name),
+            name,
+            "dictionary `{code}` resolves tokenizer identity `{name}`; Phase 1 \
+             registers no query variant for it, so the lookup must return the \
+             same identity unchanged"
+        );
+    }
+}
+
+/// `ANALYZER_CONTRACT` guards on-disk term compatibility: Phase 1 changes no
+/// index-side term, so it must not bump the contract. A later phase (Phase 2,
+/// accent folding) is the one expected to move this to a `_v3` identity,
+/// following the `wayfinder_text_en_v2` precedent this file already pins
+/// elsewhere (see the `analyzer_contract_*` tests below).
+#[test]
+fn analyzer_contract_is_not_bumped_by_the_index_query_split() {
+    assert_eq!(
+        schema::ANALYZER_CONTRACT,
+        "text_en_porter_compatible_v2",
+        "Phase 1 (issue #389) introduces the index/query analyzer seam but no \
+         index-side term change; bumping ANALYZER_CONTRACT here would be \
+         premature -- that is Phase 2's job"
+    );
+}
+
 #[test]
 fn custom_field_type_cannot_shadow_the_builtin_text_en_preset() {
     let toml = format!(
