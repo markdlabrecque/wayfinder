@@ -4336,6 +4336,29 @@ async fn suggest(
     match params.get("suggest.q") {
         Some(q) => {
             let dictionary = params.get("suggest.dictionary").unwrap_or("und");
+            // Solr resolves `suggest.dictionary` against the suggesters the
+            // configset declares, and 400s an unknown name rather than falling
+            // back (`suggest_q_dict_unknown.json`, finding 195). The default
+            // above is `und`, which IS configured, so an ABSENT
+            // `suggest.dictionary` keeps being served -- only an explicit
+            // unknown name is rejected, and the configured set is per-language
+            // (`LANGUAGES` + `und`, one suggester per installed language field
+            // type) -- see `schema::is_configured_suggester` for the
+            // `text_fr_7_0_0.yml` evidence that `en`/`und` alone is a capture
+            // artifact, not the contract.
+            if !schema::is_configured_suggester(dictionary) {
+                return Err(WfError::bad_request(
+                    "wayfinder::SuggestError",
+                    format!("No suggester named {dictionary} was configured"),
+                )
+                // `/suggest` never echoes params, and unlike the
+                // `suggest.count<=0` 500 this fixture carries `metadata` and no
+                // `trace` -- the shape `WfError` renders by default -- and no
+                // `suggest` block: the component fails before emitting its
+                // container.
+                .envelope(Envelope::NoParams)
+                .with_params(&params));
+            }
             // Parsed SIGNED so a negative reaches the guard below rather than
             // failing the parse and silently becoming the default.
             //
@@ -4363,6 +4386,14 @@ async fn suggest(
                      if you just need the total hit count",
                 )
                 .envelope(Envelope::NoParams)
+                // ponytail: `with_params` here is ONLY for `omitHeader`: `Envelope::NoParams`
+                // never renders the echoed params, so this cannot add a `params`
+                // key. It makes the two `/suggest` error paths agree -- the
+                // unknown-dictionary 400 above does the same -- rather than
+                // having one honour `omitHeader` and one ignore it. No fixture
+                // pins `omitHeader` on either, and the captured requests send no
+                // `omitHeader`, so both fixtures are unaffected.
+                .with_params(&params)
                 .with_suggest(json!({}))
                 // The fixture's `trace` is Solr's Java stack. Wayfinder states
                 // the equivalent in its own terms rather than forging JVM
@@ -4380,7 +4411,14 @@ async fn suggest(
             // does not highlight. So `suggest_q_infix_en` carries
             // `<b>fox</b>` while `suggest_q_cfq_match` carries plain
             // `quick brown fox`.
-            let highlight = cfq.is_none();
+            //
+            // The condition is whether a context filter is actually ENGAGED, not
+            // whether the parameter was present: `suggest.cfq=` (empty) parses to
+            // no clauses, gates no document, and Solr highlights it exactly as it
+            // highlights no `cfq` at all (`suggest_q_cfq_empty.json`, finding
+            // 196). Routing both through the same predicate is what keeps the two
+            // responses identical instead of special-casing the empty string.
+            let highlight = !core_index::cfq_engages_filter(cfq);
             let hits = state
                 .index
                 // Guarded above: `count` is strictly positive here.

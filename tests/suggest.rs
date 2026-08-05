@@ -1143,3 +1143,51 @@ async fn suggest_q_no_dictionary_still_served_as_und() {
         "an absent suggest.dictionary must default to the und dictionary: {body}"
     );
 }
+
+/// The second guard against narrowing the dictionary check: a PER-LANGUAGE
+/// dictionary must be served, not 400'd.
+///
+/// `suggest_q_dict_unknown.json` pins only that `xx` is rejected. It does NOT
+/// pin that `en`/`und` are the only accepted names, and reading it that way
+/// would break real clients: `search_api_solr` generates one suggester per
+/// installed language field type, and each language's field-type config ships
+/// its own (`coverage/search_api_solr_4.4.0_source/config/optional/
+/// search_api_solr.solr_field_type.text_fr_7_0_0.yml:215-226` declares a
+/// suggester `name: fr`). The shipped `solrconfig_extra.xml` carrying only
+/// `en`/`und` is an artifact of the capture environment's installed field
+/// types. A French or German site sends its langcode as the dictionary
+/// (`Suggester.php:247` sets `$options['dictionary'] = $langcode`, passed
+/// through at `:280`) and its Solr answers 200.
+///
+/// This also covers the repeated-`suggest.dictionary` case the multilingual
+/// branch emits (`Suggester.php:253`): `Params::get` is first-wins, so a
+/// multilingual site whose first langcode is `de` lands exactly here.
+///
+/// Asserts the envelope and the dictionary key, not a suggestion count: the
+/// German suggest chain's stemming over an English corpus is not what is being
+/// pinned, admission is.
+#[tokio::test]
+async fn suggest_q_per_language_dictionary_is_served() {
+    let (app, _dir) = suggest_lookup_app().await;
+    for dictionary in ["fr", "de"] {
+        let (status, body) = get(
+            &app,
+            &format!("suggest?suggest.dictionary={dictionary}&suggest.q=qui&wt=json"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "suggest.dictionary={dictionary} is a configured per-language suggester and must be \
+             served, got {status}: {body}"
+        );
+        assert!(
+            body["suggest"].get(dictionary).is_some(),
+            "the response must be keyed by the requested dictionary `{dictionary}`: {body}"
+        );
+        assert!(
+            body["error"].is_null(),
+            "suggest.dictionary={dictionary} must not be an error: {body}"
+        );
+    }
+}

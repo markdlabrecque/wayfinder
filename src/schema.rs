@@ -1053,6 +1053,58 @@ pub fn dictionary_tokenizer(dictionary: &str) -> String {
     }
 }
 
+/// Is `dictionary` a *configured* suggester -- one Solr's `SuggestComponent`
+/// would resolve rather than reject? Solr matches `suggest.dictionary` against
+/// the declared `<lst name="suggester">` entries and answers
+/// `No suggester named <name> was configured` (400) for anything else, captured
+/// as `solr-ref/responses/suggest_q_dict_unknown.json` (finding 195).
+///
+/// **The set is per-language, not just `en`/`und`.** `search_api_solr` generates
+/// one suggester per INSTALLED language field type, and each language's field-type
+/// config ships its own: `coverage/search_api_solr_4.4.0_source/config/optional/
+/// search_api_solr.solr_field_type.text_fr_7_0_0.yml:215-226` declares
+/// `class: solr.SuggestComponent` with a suggester `name: fr`, `indexPath: ./fr`.
+/// So the shipped `solr-ref/search-api/configset/solrconfig_extra.xml:32-56`
+/// carrying only `en` and `und` is an artifact of which field types the capture
+/// environment had installed -- NOT the contract. A French site's Solr answers
+/// `suggest.dictionary=fr` with 200, and a French site does send it:
+/// `Suggester.php:247` sets `$options['dictionary'] = $langcode` and `:280` passes
+/// it straight to the suggest component.
+///
+/// Hence [`LANGUAGES`] plus [`SUGGEST_UNDEFINED_DICTIONARY`] (`und` is not in
+/// `LANGUAGES`), which is exactly the set of `wayfinder_suggest_*` chains
+/// `build_tokenizers` registers (`src/schema.rs:1296` for `und`, `:1312` per
+/// `LANGUAGES` entry) -- the same fan-out [`dictionary_tokenizer`] resolves
+/// through and the reservation list at `:1413` covers.
+/// Both halves come out of the same per-language YAML, so agreeing with the
+/// analyzer set is agreeing with Solr, not a coincidence. A name outside it
+/// (`xx`) is still the fixture's 400.
+///
+/// The widening also clears a second-order case that would otherwise have been a
+/// live bug: the multilingual branch sends a REPEATED `suggest.dictionary`
+/// (`Suggester.php:253`, `$options['dictionary'] = $langcodes`), and
+/// `Params::get` is first-wins (`src/params.rs:52`), so a multilingual site whose
+/// first langcode was neither `en` nor `und` -- `de`, say -- would have been 400'd
+/// by a two-name set. First-wins is itself the right reading of the repeat
+/// (finding 193 pinned it for `spellcheck.dictionary`); what was wrong was the
+/// narrow set, and `de` is now served.
+///
+/// [`dictionary_tokenizer`] keeps its own `und` fallback regardless: it is the
+/// analyzer resolver, and the index stays a trust boundary for a name that never
+/// passed through this gate (the build/command path does not).
+///
+/// ponytail: admission is Wayfinder's always-on 18-language fan-out, not a
+/// configset-derived set. A real site that installed only the `en` and `und`
+/// field types would 400 `fr` where Wayfinder answers 200 -- Wayfinder is
+/// permissive by exactly the amount its analyzer set is always-on. The ceiling
+/// is "no configset, so no per-deployment suggester list" (PRD: wire format
+/// only, never Solr's config format); the alternative -- inventing a config
+/// surface to narrow it -- would be worse than being permissive.
+pub fn is_configured_suggester(dictionary: &str) -> bool {
+    dictionary == SUGGEST_UNDEFINED_DICTIONARY
+        || LANGUAGES.iter().any(|(code, _)| *code == dictionary)
+}
+
 /// Builds the `TextAnalyzer` for a `[[field_types]]` chain.
 fn build_analyzer(ft: &FieldTypeConfig) -> Result<TextAnalyzer> {
     let mut builder = match ft.tokenizer.as_str() {

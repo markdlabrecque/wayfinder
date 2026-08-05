@@ -5050,6 +5050,37 @@ struct Cfq {
     min_should: usize,
 }
 
+impl Cfq {
+    /// Does this carry any clause at all -- i.e. is the context-filtered lookup
+    /// path actually engaged? A parse that yields no clauses gates nothing: every
+    /// document passes [`cfq_passes`], exactly as it does with no `suggest.cfq`.
+    ///
+    /// `+()` (an empty MUST group) IS engaged and matches nothing, which is why
+    /// this asks about clauses rather than about whether anything can match.
+    fn is_engaged(&self) -> bool {
+        !self.must.is_empty() || !self.should.is_empty() || !self.must_not.is_empty()
+    }
+}
+
+/// Does a raw `suggest.cfq` value engage Solr's context-filtered lookup path?
+///
+/// The handler needs this because the answer decides HIGHLIGHTING, not just the
+/// document set: `AnalyzingInfixSuggester` highlights unconditionally except on
+/// the context-filtered path. Asking the parser -- rather than asking whether the
+/// parameter string was present -- is what makes `suggest.cfq=` (empty) behave
+/// identically to no `suggest.cfq` at all, which is what real Solr does:
+/// `suggest_q_cfq_empty.json` is byte-identical to `suggest_q_prefix_en.json`
+/// modulo `QTime` (finding 196).
+///
+/// ponytail: the fixture pins the EMPTY string only. Whitespace-only
+/// (`suggest.cfq=%20`) comes out the same way here, but that is an INFERENCE from
+/// `parse_cfq` trimming its input, not a captured fact -- nothing pins it, and the
+/// ceiling is "follows by the same argument, deliberately not separately
+/// invented".
+pub fn cfq_engages_filter(cfq: Option<&str>) -> bool {
+    parse_cfq(cfq).is_engaged()
+}
+
 /// Parses `suggest.cfq` into [`Cfq`]: `+tag` (MUST), bare `tag` (SHOULD), `-tag`
 /// (MUST_NOT), and parenthesised groups of any of the three.
 ///

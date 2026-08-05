@@ -3644,3 +3644,116 @@ garden}; for the misspelling `qwick`, `en`'s nearest is `quick` (1 edit) and
       unscheduled"); these three are zero-*reachable*-client evidence, which
       is a strictly stronger exclusion, and the descope is recorded next to
       the `solr_document` one so the parity picture stays in one place.
+
+## Findings from the issue #390 unpinned-behaviour captures
+
+Issue #384 shipped the `/suggest?suggest.q=` read path and left two answers
+unconstrained by any fixture — places where Wayfinder's code and an equally
+plausible reading of Solr disagreed with nothing to arbitrate. Both were probed
+live against `solr:9` with the shipped Drupal configset (the `#390` block at the
+end of `solr-ref/capture.sh`: its own container `wayfinder-solr-390` on port
+9015, the #384 corpus verbatim, so these fixtures are directly comparable with
+the #384 ones). **Both came back as divergences, not confirmations** — the
+guessed behaviour was wrong in each case.
+
+195. **An unknown `suggest.dictionary` is a 400 `No suggester named <name> was
+      configured`, not a fallback to `und`.**
+      `suggest?suggest.dictionary=xx&suggest.q=qui&wt=json` →
+      `solr-ref/responses/suggest_q_dict_unknown.json`: status 400 in both the
+      HTTP status and `responseHeader.status`, `error.msg` `No suggester named xx
+      was configured`, `error.code` 400 — and, notably, **no `suggest` block at
+      all**, unlike the `suggest.count<=0` 500, which carries `suggest:{}`
+      because the component had already emitted its container by the time Lucene
+      rejected the count. The envelope has a `responseHeader` but no `params`
+      (`/suggest` never echoes params, so this is `Envelope::NoParams`), and the
+      error object is the `metadata`-carrying default shape with **no `trace`** —
+      the opposite of the `suggest.count<=0` error, whose shape is
+      `msg`/`trace`/`code` with no `metadata` (finding 59's split). What this
+      falsified: Wayfinder answered **200 with `und` results** for any
+      unrecognised name, because `schema::dictionary_tokenizer` falls back to
+      `SUGGEST_UNDEFINED_DICTIONARY` for anything outside `LANGUAGES`
+      (`src/schema.rs:1048`) and the handler never validated the name
+      (`src/lib.rs:4338`). `suggest_q_und.json` pinned `und` itself and
+      `suggest_q_cfq_unknown.json` pinned an unknown context *tag*; neither
+      settled an unknown *dictionary*, and the fallback reading turned out to be
+      the wrong one. **Fixed (#390)** by gating the `suggest.q` lookup path on
+      `schema::is_configured_suggester`.
+      **What the fixture pins, precisely: that `xx` is REJECTED — not that only
+      `en` and `und` are accepted.** That distinction matters, and getting it
+      wrong was caught in review of the first #390 implementation, which read the
+      shipped `solrconfig_extra.xml:32-56` (suggesters `en` and `und` only) as
+      the contract and so would have 400'd a dictionary real clients send.
+      `search_api_solr` generates **one suggester per installed language field
+      type**, and each language's field-type config ships its own:
+      `coverage/search_api_solr_4.4.0_source/config/optional/search_api_solr.
+      solr_field_type.text_fr_7_0_0.yml:215-226` declares `class:
+      solr.SuggestComponent` with a suggester `name: fr`, `indexPath: ./fr`. So
+      the capture environment's two-suggester configset is an artifact of which
+      field types were installed there, and a French site's Solr answers
+      `suggest.dictionary=fr` with 200. The client does send it:
+      `modules/search_api_solr_autocomplete/src/Plugin/
+      search_api_autocomplete/suggester/Suggester.php:247` sets
+      `$options['dictionary'] = $langcode`, passed through to the suggest
+      component at `:280`. The configured set is therefore `LANGUAGES` plus
+      `SUGGEST_UNDEFINED_DICTIONARY` (`und` is not in `LANGUAGES`) — which is
+      exactly the set of `wayfinder_suggest_*` chains `build_tokenizers`
+      registers (`src/schema.rs:1296` for `und`, `:1312` per `LANGUAGES` entry,
+      reserved at `:1413`) and `dictionary_tokenizer` resolves
+      through, so the per-language read path #384 built stays reachable and
+      `src/schema.rs:1040`'s promise of it stays true. Agreeing with the analyzer
+      set is not a coincidence here: both halves come out of the same
+      per-language YAML. `xx` is outside the set either way, so the fixture still
+      holds. **Second-order case the widening clears:** the multilingual branch
+      sends a REPEATED `suggest.dictionary` (`Suggester.php:253`,
+      `$options['dictionary'] = $langcodes`) and `Params::get` is first-wins
+      (`src/params.rs:52`), so a multilingual site whose first langcode was
+      neither `en` nor `und` — `de`, say — would have been 400'd by the narrow
+      set. First-wins is itself correct (finding 193 pinned exactly that for
+      `spellcheck.dictionary`); the narrow set was the bug, and `de` is now
+      served. Guarded by
+      `tests/suggest.rs::suggest_q_per_language_dictionary_is_served` (`fr` and
+      `de` → 200, keyed by the requested dictionary), which is what stops the
+      narrowing from coming back. The default is likewise untouched: `params.get(
+      "suggest.dictionary").unwrap_or("und")` means an ABSENT
+      `suggest.dictionary` is `und`, which IS configured, so only an explicitly
+      supplied *unconfigured* name is rejected —
+      `tests/suggest.rs::suggest_q_no_dictionary_still_served_as_und` is the
+      guard that keeps the new check from being widened into the default path.
+      `dictionary_tokenizer` keeps its `und` fallback: it is the analyzer
+      resolver, and the build/command path does not go through this gate.
+
+196. **`suggest.cfq=` (empty) is identical to no `suggest.cfq` at all —
+      highlighting INCLUDED.**
+      `suggest?suggest.dictionary=en&suggest.q=qui&suggest.cfq=&wt=json` →
+      `solr-ref/responses/suggest_q_cfq_empty.json`, which is **byte-identical
+      to `suggest_q_prefix_en.json`** (the same query with no `cfq`) modulo
+      `QTime`: `numFound` 3, and all three terms carry `<b>qui</b>`
+      highlighting. Three readings were live before the capture and it killed
+      two of them: (a) empty means "match nothing", because Solr builds the
+      context filter as a BooleanQuery and an empty BooleanQuery under a MUST
+      matches nothing — falsified, all three documents came back; (b) empty
+      means "no filter for document selection, but still the context-filtered
+      *lookup path*", hence no highlighting — falsified, the highlighting is
+      there; (c) empty is simply absent, which is what the fixture shows. What
+      this falsified in Wayfinder: the document set was already right
+      (`parse_cfq` yields no clauses, so `cfq_passes` admits everything), but
+      highlighting was **suppressed**, because `src/lib.rs:4383` read
+      `let highlight = cfq.is_none();` and an empty value is `Some("")`. So
+      Wayfinder returned the three suggestions unhighlighted where Solr
+      highlights them. **Fixed (#390)** at the root rather than by special-casing
+      the empty string: `highlight` is now derived from whether a context filter
+      is actually ENGAGED — `!core_index::cfq_engages_filter(cfq)`, which asks
+      the parser (`Cfq::is_engaged`, any MUST/SHOULD/MUST_NOT clause at all)
+      instead of asking whether the parameter string was present. That makes
+      whitespace-only `suggest.cfq` follow by the same argument (`parse_cfq`
+      already trims), and it keeps `+()` — an empty MUST group, which IS a
+      clause and matches nothing — on the context-filtered, unhighlighted path.
+      The pin is deliberately a comparison against the *sibling* response
+      (`tests/suggest.rs::suggest_q_cfq_empty_matches_no_cfq_body`), not only
+      against the fixture, so a future edit cannot reproduce the fixture by some
+      other means while re-introducing a `cfq`-shaped special case. The
+      underlying Solr behaviour is unchanged from #384's reading —
+      `AnalyzingInfixSuggester` highlights unconditionally EXCEPT on the
+      context-filtered lookup path (`suggest_q_infix_en` carries `<b>fox</b>`,
+      `suggest_q_cfq_match` carries plain `quick brown fox`) — the correction is
+      only about which inputs count as engaging that path.
