@@ -630,11 +630,17 @@ const TERMS_DEFAULT_LIMIT: usize = 10;
 /// same component accepts (captured: each echoes its own `command` field,
 /// inertly).
 ///
-/// ponytail: `suggest.q` (the lookup path) is deliberately NOT admitted --
-/// Wayfinder serves live token-prefix completion through `/autocomplete` ->
-/// `/terms` over `twm_suggest` with `terms.prefix` (findings 154-156), not
-/// through `/suggest`, so a `/suggest?suggest.q=` lookup is out of scope and
-/// 400s under `strict_params` rather than pretending to answer it.
+/// ponytail: `suggest.q` (the lookup path) is deliberately NOT admitted yet.
+/// The connector module (`search_api_wayfinder`) reaches live token-prefix
+/// completion through a direct `/terms?terms.prefix=` GET over `twm_suggest`
+/// (findings 141/142/154-156) -- that is its reimplementation of the Terms
+/// autocomplete plugin, not a stock-client path. Stock `search_api_solr`
+/// autocomplete hits the `/autocomplete` handler directly (finding 192, issue
+/// #351) and never requests `/terms` or `/suggest`; serving the Suggester
+/// plugin needs a real `suggest.q` read path (infix match + `suggest.cfq` over
+/// `sm_context_tags`), which is the recorded prerequisite, not yet built. Until
+/// it lands, a `/suggest?suggest.q=` lookup 400s under `strict_params` rather
+/// than pretending to answer it.
 const SUGGEST_PARAMS: &[&str] = &[
     "suggest",
     "suggest.buildAll",

@@ -699,8 +699,13 @@ Capture against **stock upstream `search_api_solr`, unmodified** — the connect
 extension point and must not be in the loop while ground truth is being established.
 
 **v2's conditional endpoint clause, resolved by descoping rather than by building.** The capture
-(finding 76, `docs/solr-ref-findings.md`) confirmed the module does call `terms`, `<core>/admin/luke`,
-and `<core>/admin/mbeans` — so the trace answered the "whichever" question above. But issue #57's own
+(finding 76, `docs/solr-ref-findings.md`) confirmed the module does call `<core>/admin/luke`
+and `<core>/admin/mbeans` — so the trace answered the "whichever" question above for those two.
+(The `terms` half of finding 76 was a source-only inference and was wrong about the path —
+corrected by finding 192 / issue #351: stock autocomplete rides the `/autocomplete` handler's
+terms *component*, and `getTermsQuery()` has zero callers, so `/terms` is **not** evidenced by
+stock `search_api_solr` — it is reached only by our `search_api_wayfinder` connector module.)
+But issue #57's own
 scoping doc (`docs/plans/57-search-api-wayfinder-backend.md`) narrowed v2 further than the trace alone
 would: the connector module implements only what the Wayfinder *server* already exposes, and the
 server has no `terms`/`admin/luke`/`admin/mbeans` endpoints. Building the client side of three
@@ -734,9 +739,14 @@ therefore serves real values where a real consumer exists and static plausible p
 elsewhere, following the precedent `/admin/info/system` already set, and omits the Lucene-internal
 keys rather than fabricating them. This is a recorded divergence from captured Solr behaviour, not
 a bug: none of the three carries a `solr-ref/manifest.tsv` row, because a differential-harness row
-could only ever be a permanent `EXPECTED_DIVERGENCES` entry. `terms` is the exception — it is real
-index data Wayfinder genuinely has, so it is expected to match, and a manifest row for it is a
-legitimate follow-up once a capture against the differential core exists.
+could only ever be a permanent `EXPECTED_DIVERGENCES` entry. `terms` is the exception in *shape* — it is real
+index data Wayfinder genuinely has, so when it is exercised it is expected to match, and a manifest
+row for it is a legitimate follow-up once a capture against the differential core exists. Note
+though that, per finding 192 / issue #351, no *stock* client requests `/terms`: it is the
+connector module's reimplementation of the Terms autocomplete plugin that reaches it. The
+autocomplete plan is recorded with #351: our-module reading, extended to all three plugins
+(Terms→`/terms` done; Spellcheck→`/select`, no server work; Suggester→`/suggest`, blocked on a
+real `suggest.q` read path).
 
 Two further `admin/mbeans` specifics, recorded here rather than left to code comments (issue
 #158). First, `UPDATE.updateHandler.softAutoCommitMaxTime` is a key the client *does* read, and
@@ -818,9 +828,16 @@ Notes on deferred items:
   `GET /<core>/suggest?suggest.buildAll=true` via `fireAndForget` on every cron
   run, and Wayfinder accepts it and returns Solr's `command:"buildAll"`
   envelope inertly — Tantivy's term dictionary is already an FST, so there is
-  no separate dictionary to build, and the live suggestion read path is
-  `/autocomplete` -> `/terms` over `twm_suggest` with `terms.prefix`
-  (findings 154-156), not `/suggest`. There is no ratified divergence here:
+  no separate dictionary to build, and the connector module's live suggestion
+  read path is `/terms` over `twm_suggest` with `terms.prefix` (findings
+  141/142/154-156), not `/suggest`. (Caveat added by #351 / finding 192: the
+  earlier wording "`/autocomplete` -> `/terms`" described the connector
+  module's reimplementation of the Terms plugin as a direct `/terms` GET, not a
+  stock-client path — stock `search_api_solr` hits `/autocomplete` directly and
+  never requests `/terms`; `/terms` and `/suggest` are reached only by our
+  module. Extending autocomplete to the Suggester and Spellcheck plugins is
+  recorded with #351 — Spellcheck rides `/select` today, Suggester is blocked
+  on a real `suggest.q` read path.) There is no ratified divergence here:
   the build envelope matches Solr byte-for-byte. (The #352 spec's premise that
   the divergence to ratify was "Solr returns empty until built, Wayfinder reads
   live" did not hold: Solr's `AnalyzingInfixLookupFactory` returns a 500
