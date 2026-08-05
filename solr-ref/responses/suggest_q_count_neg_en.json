@@ -1,7 +1,7 @@
 {
   "responseHeader":{
     "status":500,
-    "QTime":1},
+    "QTime":0},
   "suggest":{},
   "error":{
     "msg":"numHits must be > 0; please use TotalHitCountCollector if you just need the total hit count",

@@ -1,12 +1,12 @@
 {
   "responseHeader":{
     "status":0,
-    "QTime":4},
+    "QTime":1},
   "suggest":{
     "en":{
-      "fox":{
+      "studies show":{
         "numFound":1,
         "suggestions":[{
-            "term":"quick brown fox",
+            "term":"case <b>studies</b> <b>show</b> progress",
             "weight":0,
             "payload":""}]}}}}

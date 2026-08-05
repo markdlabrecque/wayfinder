@@ -1,12 +1,12 @@
 {
   "responseHeader":{
     "status":0,
-    "QTime":4},
+    "QTime":1},
   "suggest":{
     "en":{
-      "fox":{
+      "running rivers":{
         "numFound":1,
         "suggestions":[{
-            "term":"quick brown fox",
+            "term":"<b>running</b> <b>river</b>s carve valleys",
             "weight":0,
             "payload":""}]}}}}

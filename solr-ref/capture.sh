@@ -4982,11 +4982,24 @@ if want_any '^suggest_q_'; then
   # match is exact and analyzer-free; `site_alpha`/`site_beta` vary by doc so
   # `cfq` can include and exclude, `lang_en`/`lang_und` vary so a two-tag AND
   # is satisfiable for some docs and not others.
+  #
+  # su5 carries MULTI-BYTE phrases on purpose: U+212A KELVIN SIGN (3 bytes,
+  # lowercases to the 1-byte `k`) and U+0130 LATIN CAPITAL I WITH DOT ABOVE
+  # (2 bytes, lowercases to a 3-byte `i` + combining dot). Every other phrase in
+  # this corpus is pure ASCII, where an analyzed token's byte length equals its
+  # surface's -- which let a highlighter that adds the ANALYZED token's byte
+  # length to an offset into the ORIGINAL text look correct on all 25 fixtures
+  # while actually being able to slice mid-codepoint. su5 is the case that tells
+  # the two apart. Its tags are `site_gamma`/`lang_tr`, used by no `cfq` fixture,
+  # and none of its tokens is touched by any pre-su5 query, so adding it must
+  # leave the other 25 fixtures byte-identical outside `QTime` -- that
+  # invariance is itself the check that su5 is inert.
   curl -sf "$SUGGESTQ384_SOLR/$SUGGESTQ384_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
     {"id":"su1","twm_suggest":["quick brown fox","lazy dog"],"sm_context_tags":["site_alpha","lang_en"]},
     {"id":"su2","twm_suggest":["quietly quacking quail","brown bear"],"sm_context_tags":["site_alpha","lang_und"]},
     {"id":"su3","twm_suggest":["the quick fox jumps over the lazy dog","case studies show progress"],"sm_context_tags":["site_beta","lang_en"]},
-    {"id":"su4","twm_suggest":["running rivers carve valleys"],"sm_context_tags":["site_beta","lang_und"]}
+    {"id":"su4","twm_suggest":["running rivers carve valleys"],"sm_context_tags":["site_beta","lang_und"]},
+    {"id":"su5","twm_suggest":["\u212Aelvin degrees","\u0130stanbul airport"],"sm_context_tags":["site_gamma","lang_tr"]}
   ]' >/dev/null
   # Build both dictionaries (buildOn* are false). The response is the #352
   # build envelope; discarded -- only the build side effect is wanted here.
@@ -4994,10 +5007,24 @@ if want_any '^suggest_q_'; then
 fi
 
 # Fixture-only capture (no manifest row -- see the block comment above).
+#
+# Deliberately NOT `curl -sf` like the ping/update/build calls above: two of
+# these fixtures (`suggest_q_count_zero_en`, `suggest_q_count_neg_en`) ARE 500
+# responses, and their bodies are the ground truth for the error envelope, so
+# -f would throw away exactly what is wanted. The failure -f would have caught
+# -- a fixture silently written from a broken request -- is caught instead by
+# requiring a non-empty body that parses as JSON and carries a responseHeader.
+# A Solr error page or an empty body fails that and aborts the capture loudly
+# rather than committing a fitted fixture.
 capsuggestq() {  # capsuggestq <name> <url-after-/solr/>
   local name=$1 suffix=$2
   want "$name" || return 0
   curl -sg "$SUGGESTQ384_SOLR/$suffix" -o "$OUT/$name.json"
+  if ! python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if 'responseHeader' in d else 1)" \
+      "$OUT/$name.json" 2>/dev/null; then
+    echo "capsuggestq $name: response is not a Solr JSON envelope -- refusing to write a fitted fixture" >&2
+    return 1
+  fi
 }
 
 D384='suggest.dictionary'
@@ -5090,6 +5117,59 @@ capsuggestq suggest_q_cfq_should_two "$SUGGESTQ384_CORE/suggest?$D384=en&suggest
 # matching clause here, so the expected answer is empty rather than "everything
 # except su1". Pins which of the two readings the MUST_NOT branch must have.
 capsuggestq suggest_q_cfq_negative "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=fox&suggest.cfq=-site_alpha&wt=json"
+# --- round-3 review probes: four behaviours the first 25 fixtures leave open.
+#
+# 1. Highlight length for a NON-FINAL (exact) query token whose stem differs
+#    from its surface. Every non-final token in the fixtures above is
+#    stem-identical (quick/fox), so nothing distinguishes "bold the stem's
+#    length" from "bold the whole surface token". Lucene splits the two cases
+#    (`addWholeMatch` for a matched term, `addPrefixMatch` for the final prefix),
+#    which predicts `case <b>studies</b> <b>show</b> progress` -- whereas the
+#    stem-length reading predicts `case <b>studi</b>es <b>show</b> progress`.
+#    "studies" stems to "studi" under text_en and is non-final here; "show" is
+#    the final token and is stem-identical, so this isolates exactly one
+#    variable.
+capsuggestq suggest_q_hl_wholetoken_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=studies%20show&wt=json"
+# 2. Same question with the final token also stemmed, to pin the prefix branch's
+#    length independently: "running rivers" -> run/river vs running/rivers.
+capsuggestq suggest_q_hl_stemspan_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=running%20rivers&wt=json"
+# 3. TRAILING SEPARATOR. Lucene makes the last token a PrefixQuery only when the
+#    analyzed stream ends exactly at the input's end; a trailing space means the
+#    last token is complete, so it becomes a TermQuery instead. If that holds,
+#    "qui " returns 0 where "qui" returns 3 -- and a user typing a space into an
+#    autocomplete box is entirely ordinary, so this is a live path, not a corner.
+capsuggestq suggest_q_trailing_space_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=qui%20&wt=json"
+# 4. MULTI-BYTE highlight spans (su5). The panic/garble case: the surface token
+#    "Kelvin" is 8 bytes and analyzes to the 6-byte "kelvin", so any
+#    arithmetic that adds an analyzed length to an original offset lands
+#    mid-codepoint. Two queries, one per direction of the length change:
+#    "k" prefixes a token whose analyzed form is SHORTER than its surface, ...
+capsuggestq suggest_q_multibyte_prefix_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=k&wt=json"
+#    ... and "istanbul" one whose analyzed form is LONGER (U+0130 lowercases to
+#    "i" + a combining dot). Whatever Solr returns here is the contract for the
+#    span arithmetic; nothing above pins it.
+capsuggestq suggest_q_multibyte_grow_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=istanbul&wt=json"
+#    `suggest.q=k` came back EMPTY, which is not what folding U+212A to "k"
+#    predicts, so these two disambiguate WHY: if "kelvin" also misses, the
+#    KELVIN SIGN is not being folded to "k" at all (so the token is not
+#    "kelvin") -- if "kelvin" hits and "k" misses, the miss is about the query,
+#    not the folding. Either way the answer decides whether Wayfinder's
+#    tokenizer (Rust `to_lowercase`, which DOES fold U+212A) diverges here.
+capsuggestq suggest_q_multibyte_full_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=kelvin&wt=json"
+capsuggestq suggest_q_multibyte_short_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=ke&wt=json"
+#    ... and the same single-char probe on the GROW side, where "istanbul"
+#    already hits: does a 1-char "i" prefix match "İstanbul"?
+capsuggestq suggest_q_multibyte_onechar_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=i&wt=json"
+# 5. cfq PAREN GROUP. `parse_cfq`'s docstring claimed the plugin can emit a
+#    multilingual `(<t> <t>)` group; the vendored 4.4.0 source refutes that --
+#    `Utility::buildSuggesterContextFilterQuery` (Utility.php:476-487) builds
+#    `'+' . $tag` per tag and space-joins them, and its only caller
+#    (search_api_solr_autocomplete Suggester.php:282) passes the result straight
+#    through. So a group is unreachable from the real client. Captured anyway
+#    because the code has a branch for it, and an unreachable branch that returns
+#    the WRONG answer is worse than no branch: this fixture is what decides
+#    whether to implement it or delete it.
+capsuggestq suggest_q_cfq_group "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=fox&suggest.cfq=%2B%28site_alpha%20site_beta%29&wt=json"
 
 if want_any '^suggest_q_'; then
   release "$SUGGESTQ384_CONTAINER" "suggest #384 core '$SUGGESTQ384_CORE'"
