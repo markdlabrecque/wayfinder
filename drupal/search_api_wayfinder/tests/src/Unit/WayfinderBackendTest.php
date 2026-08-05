@@ -1136,4 +1136,45 @@ class WayfinderBackendTest extends TestCase {
     $this->assertSame('quick fox', $suggestions[0]->getSuggestedKeys());
   }
 
+  /**
+   * Review-flagged defect (issue #385, not in the spec's own required cases):
+   * `getSuggesterAutocompleteSuggestions()`'s response walk is
+   * `foreach ($response['suggest'] ?? [] as $dictionary => $queries)`
+   * (WayfinderBackend.php:592) -- unlike every INNER level of the same walk
+   * (`:593`'s `is_array($queries)` guard, `:597`'s `is_array($phrases)`
+   * ternary, `:598`'s `is_array($phrase)` check) and unlike the sibling
+   * Terms walk (`:465-466`'s `is_array($list)` guard before iterating), there
+   * is no outer `is_array()` guard on `$response['suggest']` itself.
+   *
+   * `??` only substitutes when the key is missing or NULL -- a malformed or
+   * unexpected transport response whose `suggest` key is present but a
+   * scalar (e.g. a string) reaches `foreach` unguarded. PHP 8's `foreach`
+   * over a non-iterable raises "Warning: foreach() argument must be of type
+   * array|object, string given", which this suite's `failOnWarning="true"`
+   * (phpunit.xml.dist) promotes to a test failure -- so this must fail on the
+   * warning, not merely produce a wrong (but silent) result.
+   *
+   * The transport layer (`WayfinderClient::suggest()`) always JSON-decodes a
+   * real HTTP body, so a top-level `suggest` scalar cannot come from a
+   * well-formed Solr/Wayfinder response; the point of this guard, matching
+   * the Terms path and every inner level of this same method, is defence
+   * against exactly this kind of not-quite-the-expected-shape response
+   * degrading gracefully to no suggestions instead of a warning reaching the
+   * widget.
+   *
+   * @covers ::getSuggesterAutocompleteSuggestions
+   */
+  public function testGetSuggesterAutocompleteSuggestionsReturnsEmptyArrayWhenSuggestKeyIsNotAnArray(): void {
+    $index = $this->mockIndex();
+    $query = $this->mockQuery($index);
+
+    $client = $this->createMock(WayfinderClient::class);
+    // A malformed response: 'suggest' present but not an array/object, unlike
+    // every real Solr/Wayfinder envelope this client ever decodes.
+    $client->method('suggest')->willReturn(['suggest' => 'not-an-array']);
+
+    $backend = $this->backendWithClient($client);
+    $this->assertSame([], $backend->getSuggesterAutocompleteSuggestions($query, 'fox', []));
+  }
+
 }
