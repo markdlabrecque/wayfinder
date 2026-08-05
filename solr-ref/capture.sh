@@ -5175,3 +5175,79 @@ if want_any '^suggest_q_'; then
   release "$SUGGESTQ384_CONTAINER" "suggest #384 core '$SUGGESTQ384_CORE'"
 fi
 
+
+# --- issue #390: two behaviours #384 left unpinned ---------------------------
+#
+# Both are places where Wayfinder currently picks an answer that no fixture
+# constrains, so its code and an equally plausible reading of Solr disagree with
+# nothing to arbitrate:
+#
+# 1. UNKNOWN suggest.dictionary. `dictionary_tokenizer` (src/schema.rs) falls
+#    back to SUGGEST_UNDEFINED_DICTIONARY for any name it does not recognise, so
+#    Wayfinder answers an unknown dictionary under the `und` chain -- 200, with
+#    results. The shipped solrconfig_extra.xml defines only `en` and `und`, so
+#    SuggestComponent may instead reject the name outright (plausibly a 400
+#    `No suggester named xx was configured`). `suggest_q_und` pins `und` itself
+#    and `suggest_q_cfq_unknown` pins an unknown context TAG; neither settles an
+#    unknown DICTIONARY. `q=qui` is the three-phrase query, so the fallback and a
+#    rejection are maximally far apart in the body.
+#
+# 2. EMPTY suggest.cfq. Wayfinder treats `suggest.cfq=` as "no filter" and
+#    admits every document (three `qui` phrases) -- while ALSO suppressing
+#    highlighting, because the handler keys highlight off `cfq.is_none()` and an
+#    empty value is Some(""). Solr builds the context filter as a BooleanQuery,
+#    and an empty BooleanQuery under a MUST clause matches nothing, which would
+#    make the empty string mean "match nothing". Three readings, no fixture.
+#
+# This block stands up its OWN container rather than reusing the #384 one above:
+# that block releases its container at its end, so an appended block after it has
+# nothing to talk to. Same corpus verbatim, so these fixtures are comparable with
+# the #384 ones and the same `suggest_lookup_corpus()` in tests/suggest.rs backs
+# both.
+#
+# Not runnable standalone: `$OUT`/`$HERE` come from the top of the script, so run
+# the whole script or `--only '^suggest_q_(dict_unknown|cfq_empty)$'`.
+SUGGESTQ390_CONTAINER=wayfinder-solr-390
+SUGGESTQ390_SOLR=http://localhost:9015/solr
+SUGGESTQ390_CORE=suggest
+if want_any '^suggest_q_'; then
+  docker rm -f "$SUGGESTQ390_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$SUGGESTQ390_CONTAINER" -p 9015:8983 \
+    -e SOLR_MODULES=analysis-extras \
+    -v "$HERE/search-api/configset:/opt/solr/server/solr/configsets/search-api:ro" \
+    solr:9 solr-precreate "$SUGGESTQ390_CORE" /opt/solr/server/solr/configsets/search-api >/dev/null
+  echo -n "waiting for issue #390 Solr"
+  for _ in $(seq 90); do
+    if curl -sf "$SUGGESTQ390_SOLR/$SUGGESTQ390_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n "."; sleep 1
+  done
+  curl -sf "$SUGGESTQ390_SOLR/$SUGGESTQ390_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"su1","twm_suggest":["quick brown fox","lazy dog"],"sm_context_tags":["site_alpha","lang_en"]},
+    {"id":"su2","twm_suggest":["quietly quacking quail","brown bear"],"sm_context_tags":["site_alpha","lang_und"]},
+    {"id":"su3","twm_suggest":["the quick fox jumps over the lazy dog","case studies show progress"],"sm_context_tags":["site_beta","lang_en"]},
+    {"id":"su4","twm_suggest":["running rivers carve valleys"],"sm_context_tags":["site_beta","lang_und"]},
+    {"id":"su5","twm_suggest":["\u212Aelvin degrees","\u0130stanbul airport"],"sm_context_tags":["site_gamma","lang_tr"]}
+  ]' >/dev/null
+  curl -sf "$SUGGESTQ390_SOLR/$SUGGESTQ390_CORE/suggest?suggest.buildAll=true&wt=json" >/dev/null
+fi
+
+# Same non-`-f` rationale as `capsuggestq`: an error body can itself be the
+# contract here (an unknown dictionary may well be a 400), so the guard is
+# "parses as a Solr JSON envelope", not "HTTP 2xx".
+capsuggest390() {  # capsuggest390 <name> <url-after-/solr/>
+  local name=$1 suffix=$2
+  want "$name" || return 0
+  curl -sg "$SUGGESTQ390_SOLR/$suffix" -o "$OUT/$name.json"
+  if ! python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if 'responseHeader' in d else 1)" \
+      "$OUT/$name.json" 2>/dev/null; then
+    echo "capsuggest390 $name: response is not a Solr JSON envelope -- refusing to write a fitted fixture" >&2
+    return 1
+  fi
+}
+
+capsuggest390 suggest_q_dict_unknown "$SUGGESTQ390_CORE/suggest?suggest.dictionary=xx&suggest.q=qui&wt=json"
+capsuggest390 suggest_q_cfq_empty "$SUGGESTQ390_CORE/suggest?suggest.dictionary=en&suggest.q=qui&suggest.cfq=&wt=json"
+
+if want_any '^suggest_q_'; then
+  release "$SUGGESTQ390_CONTAINER" "issue #390 unpinned-behaviour probes"
+fi
