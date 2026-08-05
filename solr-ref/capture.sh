@@ -4785,3 +4785,68 @@ cap353 hl353_fragmenter_gap 'select?q=body:lazy&hl=true&hl.fl=body&hl.method=ori
 
 release "$HL353_CONTAINER" "hl353 core '$HL353_CORE'"
 fi
+
+# --- form-encoded POST bodies (issue #350) ---------------------------------
+# Solarium's `postbigrequest` plugin (loaded by `search_api_solr` whenever
+# `http_method === 'AUTO'`, the default) silently turns any GET whose query
+# string exceeds `maxquerystringlength` (default 1024) into a POST with
+# `Content-Type: application/x-www-form-urlencoded` and the query string moved
+# into the raw body. Wayfinder read `RawQuery` only, so such a request arrived
+# with zero params and answered HTTP 200 / empty result set (issue #350).
+#
+# Finding 189 pins the merge model: query string + form body are MERGED with no
+# precedence -- query params first, body params appended, exactly like repeated
+# query-string params. So a GET and the matching form POST must answer
+# byte-identically, and that is what these three fixtures assert.
+#
+# Reuses the main `content` core ($CONTAINER/$CORE/$SOLR), which is always
+# stood up by the block at the top of this script -- no container of its own.
+want_any '^form_post_' && {
+
+# Build a query string deliberately longer than Solarium's 1024-byte
+# `maxquerystringlength` trigger. Real params only (no unknown-param padding):
+# the category facet plus a run of identical `fq=category:animals` filters,
+# which AND to the same set however many times repeated. `rows=1&fl=id` keeps
+# the envelope small and fully deterministic.
+BIG_QS='q=*:*&rows=1&fl=id&facet=true&facet.field=category&wt=json'
+for _ in $(seq 1 60); do
+  BIG_QS="$BIG_QS&fq=category:animals"
+done
+# Confirm the trigger threshold is genuinely crossed; this is the whole point
+# of the fixture, so a regression to a sub-1024 string would silently stop
+# exercising postbigrequest.
+BIG_LEN=${#BIG_QS}
+[ "$BIG_LEN" -gt 1024 ] || { echo "form_post: BIG_QS is only $BIG_LEN bytes, must exceed 1024" >&2; exit 1; }
+
+# `cap_form_post` -- the form-encoded counterpart of `cap_post`. Same
+# 6-column manifest-errors.tsv contract plus a 7th optional `content-type`
+# column (default `application/json` everywhere else); these rows declare
+# `application/x-www-form-urlencoded` so the differential harness sends the
+# body with the content-type Solarium would, not `application/json`.
+cap_form_post() {  # cap_form_post <name> <path-with-query> <form-body>
+  local name=$1 path=$2 body=$3
+  want "$name" || return 0
+  curl -sg -X POST "$SOLR/$CORE/$path" \
+    -H 'Content-Type: application/x-www-form-urlencoded' -d "$body" \
+    -o "$OUT/$name.json" -w '%{http_code}' > "$OUT/$name.status"
+  printf '%s\t%s\t%s\t%s\t%s\t\t%s\n' \
+    "$name" "$(cat "$OUT/$name.status")" POST "$CORE/$path" "$body" \
+    'application/x-www-form-urlencoded' >> "$MANIFEST_ERRORS"
+  rm -f "$OUT/$name.status"
+}
+
+# The core fixture pair: the SAME params as a >1024-byte GET (manifest.tsv)
+# and as the form-encoded POST Solarium would send (manifest-errors.tsv).
+# Both must answer identically -- the bug was that the POST answered empty.
+cap "form_post_big_get" "select?$BIG_QS"
+cap_form_post "form_post_big_post" 'select' "$BIG_QS"
+
+# Precedence / merge (finding 189): `rows` in BOTH query string and body. Solr
+# merges them like repeated query params (`rows == ["2","10"]`), and a
+# single-valued read takes the FIRST -- the query-string value -- so 2 docs
+# come back, not 5. `q` is also in both places to exercise the multi-valued
+# `q` path the way a real postbigrequest relocation would.
+cap_form_post "form_post_merge_rows" \
+  'select?q=*:*&rows=2&fl=id&wt=json' 'rows=10'
+
+}

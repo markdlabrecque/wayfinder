@@ -1,0 +1,32 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":5,
+    "params":{
+      "q":"*:*",
+      "facet.field":"category",
+      "fl":"id",
+      "fq":["category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals","category:animals"],
+      "rows":"1",
+      "facet":"true",
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":2,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"doc1"
+    }]
+  },
+  "facet_counts":{
+    "facet_queries":{ },
+    "facet_fields":{
+      "category":["animals",2,"classic",1,"garden",0,"misc",0]
+    },
+    "facet_ranges":{ },
+    "facet_intervals":{ },
+    "facet_heatmaps":{ }
+  }
+}

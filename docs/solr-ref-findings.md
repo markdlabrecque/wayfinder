@@ -3320,3 +3320,24 @@ exactly as `solr-ref/search-api/configset/schema.xml:199-200,340-341` has them:
     and falls back to gap behaviour for `regex`; the descope is guarded by
     `tests/hl353_regex_descope_guard.rs`, which fails the day upstream fixes the
     inversion.
+
+189. **A form-encoded POST body and the query string are MERGED, with no
+     precedence — query-string params come first, body params appended, exactly
+     like repeated query-string params.** Captured against `solr:9` (issue #350,
+     port 8991, the 5-doc `content` core) to pin Solarium's `postbigrequest`
+     behaviour: when `Content-Type: application/x-www-form-urlencoded`, a POST
+     `q=quick&df=body`(query) + `q=lazy`(body) answers identically to a GET
+     `q=quick&q=lazy&df=body` — `numFound` 2, `docs [doc3, doc1]`, and
+     `responseHeader.params.q == ["quick","lazy"]` in both. A repeatable param
+     (`fq`) present in both places ANDs both values; a single-valued param
+     (`rows`) present in both places takes the FIRST value (the query-string
+     one, since query params precede body params in the merged list). This is
+     `SolrParams.getParam` first-wins over a merged `MultiMapSolrParams` view;
+     there is no "body wins" or "query wins" rule. Consequence for Wayfinder:
+     parse the body with the same `application/x-www-form-urlencoded` decoder
+     the query string uses and APPEND the resulting pairs to the `Params`
+     vector after the query-string pairs — the existing `get`/`get_all`/`echo`
+     then reproduce Solr's precedence and echo byte-for-byte. Also observed: a
+     POST to `/select` with NO `Content-Type` at all 400s (`Bad contentType for
+     search handler :null`); an empty form body is fine and behaves like a
+     query-string-only request.
