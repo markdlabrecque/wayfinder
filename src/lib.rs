@@ -59,7 +59,7 @@ use std::time::Instant;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Path as AxPath, RawQuery, Request, State};
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, get};
@@ -1000,6 +1000,11 @@ async fn query_ui(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -
                 State(Arc::clone(&state)),
                 AxPath(state.core_name.clone()),
                 RawQuery(Some(query)),
+                // The admin UI issues a GET: no form body to merge, so an
+                // empty `HeaderMap` (no content-type) and empty bytes keep
+                // `params_with_form_body` a query-string-only parse.
+                HeaderMap::new(),
+                axum::body::Bytes::new(),
             )
             .await
             {
@@ -3225,12 +3230,59 @@ fn computed_fl_fields(
     Ok(out)
 }
 
+/// Builds a request's [`Params`] from its query string, and -- only when the
+/// request carries an `application/x-www-form-urlencoded` body -- appends the
+/// body's decoded pairs after the query-string pairs (issue #350).
+///
+/// Finding 189 pins the merge model: Solr treats a form-encoded POST body and
+/// the query string as one merged param set with NO precedence -- query params
+/// first, body params appended, exactly like repeated query-string params --
+/// which is what [`Params::merge_form_body`] reproduces. Every other content
+/// type (a JSON body on `/select`, an absent content type) leaves the body out
+/// of the params, matching Solr: it does not parse non-form bodies as params.
+///
+/// This is the shared intake for every `any_method` search route the client
+/// can POST to this way (`/select`, `/mlt`, `/terms`); Solarium's
+/// `postbigrequest` plugin is the traffic source the merge exists for.
+fn params_with_form_body(
+    query: Option<&str>,
+    content_type: Option<&HeaderValue>,
+    body: &[u8],
+) -> Params {
+    let mut params = Params::parse(query.unwrap_or(""));
+    if content_type.is_some_and(is_form_urlencoded)
+        && let Ok(text) = std::str::from_utf8(body)
+    {
+        params = params.merge_form_body(text);
+    }
+    params
+}
+
+/// Whether a `Content-Type` header value names `application/x-www-form-
+/// urlencoded`, the one body encoding Solarium's `postbigrequest` produces
+/// and the one this crate parses into params (issue #350). Compares the media
+/// type before any `;` parameter (so a `; charset=utf-8` suffix still matches),
+/// case-insensitively, because media types are case-insensitive by RFC.
+fn is_form_urlencoded(value: &HeaderValue) -> bool {
+    let Ok(ct) = value.to_str() else {
+        return false;
+    };
+    ct.split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+}
+
 async fn select(
     State(state): State<Arc<AppState>>,
     AxPath(core): AxPath<String>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> Result<Response, WfError> {
-    let params = Params::parse(query.as_deref().unwrap_or("")).allow_omit_header();
+    let params = params_with_form_body(query.as_deref(), headers.get(header::CONTENT_TYPE), &body)
+        .allow_omit_header();
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, SELECT_PARAMS, &params)?;
     let sort = check_sort(&state, &params)?;
@@ -3850,8 +3902,11 @@ async fn mlt(
     State(state): State<Arc<AppState>>,
     AxPath(core): AxPath<String>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> Result<Response, WfError> {
-    let params = Params::parse(query.as_deref().unwrap_or("")).allow_omit_header();
+    let params = params_with_form_body(query.as_deref(), headers.get(header::CONTENT_TYPE), &body)
+        .allow_omit_header();
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, MLT_PARAMS, &params)?;
 
@@ -4276,8 +4331,11 @@ async fn terms(
     State(state): State<Arc<AppState>>,
     AxPath(core): AxPath<String>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> Result<Response, WfError> {
-    let params = Params::parse(query.as_deref().unwrap_or("")).allow_omit_header();
+    let params = params_with_form_body(query.as_deref(), headers.get(header::CONTENT_TYPE), &body)
+        .allow_omit_header();
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, TERMS_PARAMS, &params)?;
 
