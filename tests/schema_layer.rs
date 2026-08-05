@@ -99,10 +99,17 @@ fn create_older_analyzer_index(dir: &std::path::Path, toml: &str, tokenizer: &st
         .replace("wayfinder_text_en_v3", tokenizer);
     // As above, but for `_dynamic_text`'s CURRENT identity
     // (`wayfinder_dynamic_text_v3` as of #388; it no longer coincides with
-    // static `text_en`'s v1 identity the way it did pre-#388). Only swapped
-    // when the caller wants the fully pre-#51 bare-`en_stem` state on both
-    // paths at once.
-    let schema_json = if tokenizer == "en_stem" {
+    // static `text_en`'s v1 identity the way it did pre-#388). Swapped
+    // whenever the caller wants a truly historical shared identity on both
+    // paths at once: the fully pre-#51 bare `en_stem` state, or the v1/v2-era
+    // state in which `_dynamic_text` had not yet diverged from static
+    // `text_en`'s v1 identity (`wayfinder_text_en_v1` was the catch-all's
+    // identity through the v2 contract bump too -- only static `text_en`
+    // moved to `_v2`; see the `DYNAMIC_TEXT_TOKENIZER` doc comment in
+    // `src/schema.rs`). A caller building an all-raw-dynamic-rule schema (no
+    // static analyzed field at all, so the first replace above is a no-op)
+    // relies on this branch to land the retired identity on `_dynamic_text`.
+    let schema_json = if tokenizer == "en_stem" || tokenizer == "wayfinder_text_en_v1" {
         schema_json.replace("wayfinder_dynamic_text_v3", tokenizer)
     } else {
         schema_json
@@ -624,8 +631,8 @@ fn v2_marker_on_analyzed_dynamic_rule_refuses_startup_requiring_reindex() {
 /// content), so it is not expected to be red on its own -- it guards against
 /// the v2-affected-data tests above being satisfied by a change that makes
 /// EVERY v2 marker bail unconditionally, which would break raw-only adoption.
-#[test]
-fn v2_marker_on_raw_only_schema_is_upgraded_without_reindex() {
+#[tokio::test]
+async fn v2_marker_on_raw_only_schema_is_upgraded_without_reindex() {
     let raw_only = r#"
 [core]
 name = "content"
@@ -642,6 +649,11 @@ required = true
 name = "body"
 type = "string"
 stored = true
+
+[[dynamic_fields]]
+pattern = "*_s"
+type = "string"
+stored = true
 "#;
     let dir = TempDir::new().expect("temp dir");
     let data_dir = dir.path().join("data");
@@ -650,12 +662,27 @@ stored = true
     std::fs::write(&marker, "text_en_porter_compatible_v2")
         .expect("write v2 analyzer contract marker");
 
-    let _app = common::app_with_schema(dir.path(), raw_only)
+    let app = common::app_with_schema(dir.path(), raw_only)
         .expect("a v2 index with no changed analyzer path must remain adoptable");
     assert_eq!(
         std::fs::read_to_string(&marker).expect("read upgraded analyzer contract"),
         schema::ANALYZER_CONTRACT,
         "safe v2 adoption must persist the current (v3) analyzer contract"
+    );
+
+    // A raw-only schema still has `[[dynamic_fields]]`, so `catch_all_fields`
+    // (`src/schema.rs`) gives it a `_dynamic_text` catch-all regardless of the
+    // rule's own (non-analyzed) type -- opening the index is not enough to
+    // prove that catch-all's tokenizer identity actually resolves; only a
+    // write through it does (`tests/schema_layer.rs` module background,
+    // issue #388 follow-up: `open().is_ok()` alone stayed green through a
+    // real `Error getting tokenizer for field: _dynamic_text` regression).
+    let (status, body) = common::post_docs(&app, &json!([{"id": "d1", "extra_s": "hello"}])).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a doc through the raw-only `_dynamic_text` catch-all must write after safe v2 \
+         adoption, got: {body:?}"
     );
 }
 
@@ -694,8 +721,8 @@ fn v1_text_en_analyzer_contract_refuses_startup_requiring_reindex() {
     );
 }
 
-#[test]
-fn v1_raw_only_analyzer_contract_is_upgraded_without_reindex() {
+#[tokio::test]
+async fn v1_raw_only_analyzer_contract_is_upgraded_without_reindex() {
     let raw_only = r#"
 [core]
 name = "raw-v1"
@@ -712,18 +739,44 @@ required = true
 name = "body"
 type = "string"
 stored = true
+
+[[dynamic_fields]]
+pattern = "*_s"
+type = "string"
+stored = true
 "#;
     let dir = TempDir::new().expect("temp dir");
     create_older_analyzer_index(dir.path(), raw_only, "wayfinder_text_en_v1");
     let marker = dir.path().join("data/wayfinder-analyzer-contract");
     std::fs::write(&marker, "text_en_stopwords_v1").expect("write v1 analyzer contract");
 
-    let _app = common::app_with_schema(dir.path(), raw_only)
+    let app = common::app_with_schema(dir.path(), raw_only)
         .expect("a v1 index with no changed analyzer path must remain adoptable");
     assert_eq!(
         std::fs::read_to_string(marker).expect("read upgraded analyzer contract"),
         schema::ANALYZER_CONTRACT,
         "safe v1 adoption must persist the current analyzer contract"
+    );
+
+    // Issue #388 follow-up: this schema's raw (`string`) `[[dynamic_fields]]`
+    // rule still gets a `_dynamic_text` catch-all (`catch_all_fields` does not
+    // look at the rule's own type), and `create_older_analyzer_index` with
+    // `wayfinder_text_en_v1` puts that CURRENTLY-retired identity on the
+    // persisted `_dynamic_text` field -- the exact shape a real pre-#388
+    // all-raw-dynamic index has. Opening successfully does not prove the
+    // identity actually resolves; only a write through it does.
+    let (status, body) = common::request_full(
+        &app,
+        "POST",
+        "raw-v1/update?commit=true",
+        Some(&json!([{"id": "d1", "extra_s": "hello"}]).to_string()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a doc through the raw-only `_dynamic_text` catch-all must write after safe v1 \
+         adoption, got: {body:?}"
     );
 }
 
@@ -779,8 +832,8 @@ stored = true
     );
 }
 
-#[test]
-fn v1_legacy_dynamic_contract_remains_fail_closed() {
+#[tokio::test]
+async fn v1_legacy_dynamic_contract_remains_fail_closed() {
     let raw_dynamic = r#"
 [core]
 name = "legacy-dynamic-v1"
@@ -804,13 +857,35 @@ stored = true
     std::fs::write(&marker, "text_en_stopwords_v1_legacy_dynamic_text")
         .expect("write v1 legacy-dynamic marker");
 
-    let _app = common::app_with_schema(dir.path(), raw_dynamic)
-        .expect("an unused legacy dynamic catch-all remains safe to open");
-    assert_eq!(
-        std::fs::read_to_string(&marker).expect("read upgraded legacy marker"),
-        schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT,
-        "v1 legacy-dynamic state must remain distinguished after upgrade"
-    );
+    {
+        let app = common::app_with_schema(dir.path(), raw_dynamic)
+            .expect("an unused legacy dynamic catch-all remains safe to open");
+        assert_eq!(
+            std::fs::read_to_string(&marker).expect("read upgraded legacy marker"),
+            schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT,
+            "v1 legacy-dynamic state must remain distinguished after upgrade"
+        );
+
+        // Issue #388 follow-up / item E: the legacy `en_stem` dynamic path
+        // (unlike `wayfinder_text_en_v1`/`_v2`, `en_stem` is Tantivy's own
+        // built-in tokenizer, always registered regardless of the #388
+        // retired-identity aliases) must still actually write through
+        // `_dynamic_text`, not merely open. Pins the "legacy-dynamic state is
+        // unaffected" finding so it is not re-litigated by a future change
+        // that only checks `.is_ok()`.
+        let (status, body) = common::request_full(
+            &app,
+            "POST",
+            "legacy-dynamic-v1/update?commit=true",
+            Some(&json!([{"id": "d1", "extra_value": "hello"}]).to_string()),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a doc through the legacy en_stem `_dynamic_text` catch-all must write, got: {body:?}"
+        );
+    }
 
     let now_analyzed = raw_dynamic.replace(
         "pattern = \"*_value\"\ntype = \"string\"",
@@ -822,6 +897,137 @@ stored = true
     assert!(
         msg.contains("text_en") && msg.to_lowercase().contains("reindex"),
         "legacy dynamic refusal must identify text_en and reindexing, got: {msg}"
+    );
+}
+
+// --- issue #388 follow-up: an all-raw-dynamic-rule schema's `_dynamic_text`
+// catch-all must actually resolve after adoption, not just open -----------
+//
+// `catch_all_fields` (`src/schema.rs`) gives `_dynamic_text` to any schema
+// with a `[[dynamic_fields]]` rule at all, regardless of the rule's own
+// declared type -- including a schema whose rules are ALL non-analyzed
+// (`string`/`int`). Such a schema's persisted Tantivy identity for
+// `_dynamic_text` is the pre-#388 shared identity `wayfinder_text_en_v1`
+// (see the `DYNAMIC_TEXT_TOKENIZER` doc comment in `src/schema.rs`: it
+// coincided with static `text_en`'s v1 identity through the v2 contract
+// bump), while `uses_changed_analyzed_path` is false for it -- so a v1 *or*
+// v2 marker is correctly adopted without a reindex and the marker rewritten
+// to v3. If the retired identity is not kept resolvable (aliased) as of the
+// rewrite, every subsequent write then fails with HTTP 500 `Error getting
+// tokenizer for field: _dynamic_text` -- a failure `open().is_ok()` alone
+// cannot see, since it only surfaces on the next write. v1 and v2 take
+// different arms in `src/core_index.rs`'s marker-upgrade match, so both are
+// covered separately.
+
+/// An all-raw dynamic-rule schema: every `[[dynamic_fields]]` rule is
+/// `string` or `int`, no analyzed field anywhere (static or dynamic).
+const ALL_RAW_DYNAMIC_SCHEMA_TOML: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "id"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+
+[[dynamic_fields]]
+pattern = "*_s"
+type = "string"
+stored = true
+
+[[dynamic_fields]]
+pattern = "*_i"
+type = "int"
+stored = true
+"#;
+
+#[tokio::test]
+async fn v1_marker_on_all_raw_dynamic_schema_adopts_rewrites_and_writes() {
+    let dir = TempDir::new().expect("temp dir");
+    create_older_analyzer_index(
+        dir.path(),
+        ALL_RAW_DYNAMIC_SCHEMA_TOML,
+        "wayfinder_text_en_v1",
+    );
+    let marker = dir.path().join("data/wayfinder-analyzer-contract");
+    std::fs::write(&marker, "text_en_stopwords_v1").expect("write v1 analyzer contract");
+
+    // 1. the index adopts (open succeeds).
+    let app = common::app_with_schema(dir.path(), ALL_RAW_DYNAMIC_SCHEMA_TOML).expect(
+        "an all-raw-dynamic-rule index has no changed analyzer path and must remain adoptable \
+         under a v1 marker",
+    );
+
+    // 2. the marker is rewritten to the current (v3) contract.
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("read upgraded analyzer contract"),
+        schema::ANALYZER_CONTRACT,
+        "safe v1 adoption of an all-raw-dynamic-rule index must persist the current analyzer \
+         contract"
+    );
+
+    // 3. a subsequently POSTed and committed document returns 200 -- the
+    // load-bearing assertion. (1) and (2) alone pass even when the retired
+    // `wayfinder_text_en_v1` identity is not kept resolvable; only a write
+    // through `_dynamic_text` proves the tokenizer manager can still resolve
+    // it.
+    let (status, body) = common::post_docs(
+        &app,
+        &json!([{"id": "d1", "extra_s": "hello", "count_i": 3}]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a doc through the all-raw-dynamic `_dynamic_text` catch-all must write after safe v1 \
+         adoption, got: {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn v2_marker_on_all_raw_dynamic_schema_adopts_rewrites_and_writes() {
+    let dir = TempDir::new().expect("temp dir");
+    create_older_analyzer_index(
+        dir.path(),
+        ALL_RAW_DYNAMIC_SCHEMA_TOML,
+        "wayfinder_text_en_v1",
+    );
+    let marker = dir.path().join("data/wayfinder-analyzer-contract");
+    // `_dynamic_text` did not change between v1 and v2 (only static `text_en`
+    // moved), so a genuinely pre-#388 all-raw-dynamic index carries the same
+    // on-disk `wayfinder_text_en_v1` identity under either marker -- only the
+    // marker file's own contents differ, exercising the v2 arm in
+    // `src/core_index.rs` instead of the v1 one.
+    std::fs::write(&marker, "text_en_porter_compatible_v2").expect("write v2 analyzer contract");
+
+    // 1. the index adopts (open succeeds).
+    let app = common::app_with_schema(dir.path(), ALL_RAW_DYNAMIC_SCHEMA_TOML).expect(
+        "an all-raw-dynamic-rule index has no changed analyzer path and must remain adoptable \
+         under a v2 marker",
+    );
+
+    // 2. the marker is rewritten to the current (v3) contract.
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("read upgraded analyzer contract"),
+        schema::ANALYZER_CONTRACT,
+        "safe v2 adoption of an all-raw-dynamic-rule index must persist the current analyzer \
+         contract"
+    );
+
+    // 3. the load-bearing write assertion -- see the v1 sibling test above.
+    let (status, body) = common::post_docs(
+        &app,
+        &json!([{"id": "d1", "extra_s": "hello", "count_i": 3}]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a doc through the all-raw-dynamic `_dynamic_text` catch-all must write after safe v2 \
+         adoption, got: {body:?}"
     );
 }
 
