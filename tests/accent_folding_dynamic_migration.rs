@@ -111,6 +111,50 @@ fn unmarked_pre_v3_static_text_presets_refuse_startup_and_require_reindex() {
     }
 }
 
+#[test]
+fn v3_static_text_presets_refuse_startup_for_uax29_reindexing() {
+    // v3 has the folded-but-SimpleTokenizer identities. Its marker must fail
+    // closed for every family of static preset that v5 moved to UAX #29,
+    // including the legacy-dynamic marker variant.
+    for (type_name, legacy_tokenizer) in [
+        ("text_general", "wayfinder_text_general_v3"),
+        ("text_en", "wayfinder_text_en_v3"),
+        ("text_de", "wayfinder_text_de_v3"),
+    ] {
+        for marker in [
+            schema::ANALYZER_CONTRACT_V3,
+            schema::ANALYZER_CONTRACT_V3_LEGACY_DYNAMIC_TEXT,
+        ] {
+            let toml = static_preset_schema(type_name);
+            let dir = TempDir::new().expect("temp dir");
+            let schema_path = dir.path().join("schema.toml");
+            std::fs::write(&schema_path, &toml).expect("write legacy schema");
+            let current = schema::load(&schema_path).expect("schema loads");
+            let mut persisted = serde_json::to_value(&current.tantivy_schema)
+                .expect("serialize current Tantivy schema");
+            replace_tokenizer_for_field(&mut persisted, "body", legacy_tokenizer)
+                .unwrap_or_else(|| panic!("legacy `{type_name}` tokenizer must be materialized"));
+
+            let data_dir = dir.path().join("data");
+            std::fs::create_dir_all(&data_dir).expect("create data dir");
+            Index::builder()
+                .schema(serde_json::from_value(persisted).expect("legacy Tantivy schema parses"))
+                .create_in_dir(&data_dir)
+                .expect("create legacy index");
+            std::fs::write(schema::snapshot_path(&data_dir), &toml).expect("write schema snapshot");
+            std::fs::write(schema::analyzer_contract_path(&data_dir), marker)
+                .expect("write v3 analyzer contract");
+
+            let err = app_with_schema(dir.path(), &toml)
+                .expect_err("a v3 static text preset index must require UAX #29 reindexing");
+            assert!(
+                format!("{err:#}").to_lowercase().contains("reindex"),
+                "v3 `{type_name}` marker `{marker}` must refuse startup with reindexing: {err:#}"
+            );
+        }
+    }
+}
+
 fn replace_tokenizer_for_field(
     value: &mut serde_json::Value,
     field_name: &str,

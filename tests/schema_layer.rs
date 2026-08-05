@@ -955,16 +955,34 @@ tokenizer = "simple"
 }
 
 #[test]
-fn custom_field_type_cannot_use_an_internal_text_en_tokenizer_identity() {
-    for name in [
-        "default",
-        "wayfinder_text_general_v3",
-        "wayfinder_text_en_v1",
-        "wayfinder_text_en_v2",
-        "wayfinder_text_en_v3",
-        "wayfinder_dynamic_text_v4",
-        "wayfinder_dynamic_text_v5",
-    ] {
+fn custom_field_type_cannot_use_an_internal_analyzer_identity() {
+    let mut names = vec![
+        "default".to_string(),
+        "wayfinder_text_general_v3".to_string(),
+        "wayfinder_text_general_v4".to_string(),
+        "wayfinder_text_en_v1".to_string(),
+        "wayfinder_text_en_v2".to_string(),
+        "wayfinder_text_en_v3".to_string(),
+        "wayfinder_text_en_v4".to_string(),
+        "wayfinder_dynamic_text_v4".to_string(),
+        "wayfinder_dynamic_text_v5".to_string(),
+    ];
+    // Current and legacy non-English identities are both derived from
+    // LANGUAGES in production. Deriving the assertions from the exported
+    // built-in list prevents one newly-added language from becoming shadowable.
+    names.extend(
+        schema::builtin_type_names()
+            .into_iter()
+            .filter(|name| name.starts_with("text_") && name != "text_en" && name != "text_general")
+            .flat_map(|name| {
+                [
+                    name.clone(),
+                    format!("wayfinder_{name}_v3"),
+                    format!("wayfinder_{name}_v4"),
+                ]
+            }),
+    );
+    for name in names {
         let toml = format!(
             r#"{FULL_SCHEMA_TOML}
 [[field_types]]
@@ -976,7 +994,7 @@ tokenizer = "simple"
         let err = schema::load(&path)
             .expect_err("a custom field type must not overwrite an internal text_en tokenizer");
         assert!(
-            format!("{err:#}").contains(name),
+            format!("{err:#}").contains(name.as_str()),
             "reserved tokenizer-name error must identify `{name}`: {err:#}"
         );
     }

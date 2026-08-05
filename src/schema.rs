@@ -943,10 +943,9 @@ impl<T: TokenStream> TokenStream for AccentFoldingTokenStream<'_, T> {
 /// UAX #29 word-boundary tokenizer for Wayfinder's built-in search analyzers.
 ///
 /// `unicode-segmentation` returns every UAX #29 boundary segment, including
-/// punctuation and whitespace. Only segments containing an alphanumeric
-/// character become terms: this preserves contractions, domain names, decimals,
-/// underscores, and meaningful single-codepoint CJK words while dropping
-/// punctuation-only and whitespace-only segments. The slice offsets come
+/// punctuation and whitespace. Whitespace-only and Unicode-punctuation-only
+/// segments are discarded; every other segment, including emoji, symbols, and
+/// combining-mark-only segments, becomes a term. The slice offsets come
 /// directly from the original input, so `Token` offsets remain original byte
 /// offsets for query prefix matching and highlighting.
 #[derive(Clone, Default)]
@@ -976,7 +975,20 @@ struct Uax29TokenStream<'a> {
 impl TokenStream for Uax29TokenStream<'_> {
     fn advance(&mut self) -> bool {
         for (offset_from, segment) in self.segments.by_ref() {
-            if !segment.chars().any(char::is_alphanumeric) {
+            if segment.chars().all(char::is_whitespace)
+                || segment.chars().all(|character| {
+                    matches!(
+                        character.general_category(),
+                        GeneralCategory::ConnectorPunctuation
+                            | GeneralCategory::DashPunctuation
+                            | GeneralCategory::ClosePunctuation
+                            | GeneralCategory::FinalPunctuation
+                            | GeneralCategory::InitialPunctuation
+                            | GeneralCategory::OtherPunctuation
+                            | GeneralCategory::OpenPunctuation
+                    )
+                })
+            {
                 continue;
             }
             self.token = Token {
@@ -1447,20 +1459,6 @@ fn build_tokenizers(
     };
     let english_stopwords =
         || StopWordFilter::new(Language::English).expect("Tantivy ships an English stopword list");
-    // UAX #29 makes a one-character word a real token. Keep `a` in the current
-    // search-quality chains rather than losing it through a Solr-era stopword
-    // rule; legacy analyzers retain Tantivy's untouched English list.
-    let english_stopwords_preserving_singletons = || {
-        StopWordFilter::remove(
-            [
-                "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into", "is",
-                "it", "no", "not", "of", "on", "or", "such", "that", "the", "their", "then",
-                "there", "these", "they", "this", "to", "was", "will", "with",
-            ]
-            .into_iter()
-            .map(str::to_owned),
-        )
-    };
     // Keep every pre-folding identity registered with its original chain. An
     // old schema can therefore be opened only long enough for migration
     // diagnosis; no new field is allowed to record one of these names.
@@ -1512,7 +1510,7 @@ fn build_tokenizers(
             .filter_dynamic(AccentFoldingFilter)
             .filter(RemoveLongFilter::limit(40))
             .filter(LowerCaser)
-            .filter(english_stopwords_preserving_singletons())
+            .filter(english_stopwords())
             .filter(Stemmer::new(Language::English))
             .build(),
     );
@@ -1545,7 +1543,7 @@ fn build_tokenizers(
             .filter_dynamic(AccentFoldingFilter)
             .filter(RemoveLongFilter::limit(40))
             .filter(LowerCaser)
-            .filter(english_stopwords_preserving_singletons())
+            .filter(english_stopwords())
             .filter(PorterTerminalYFilter)
             .filter(Stemmer::new(Language::English))
             .build(),
@@ -1670,7 +1668,7 @@ fn build_tokenizers(
             // compatibility rule `TEXT_EN_TOKENIZER` needs applies here too,
             // since it is the same SnowballPorter English filter being matched.
             chain = chain
-                .filter_dynamic(english_stopwords_preserving_singletons())
+                .filter_dynamic(english_stopwords())
                 .filter_dynamic(PorterTerminalYFilter);
         }
         register_both(
@@ -1781,12 +1779,13 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     // `tests/schema_layer.rs`: it asserts the plausible additions (`boolean`,
     // `bool`, `binary`, `location`) are still unresolvable, so the moment one
     // gains an arm the suite fails and names this list.
-    // `TEXT_EN_TOKENIZER` is not a schema type name but is
-    // reserved alongside them: it is the tokenizer identity `text_en` registers
-    // under, and a chain registering over it would redefine the built-in preset.
-    // The `wayfinder_suggest_*` identities (#384) are reserved for the same
-    // reason -- a custom chain under one of those names would redefine the
-    // analyzer the `/suggest` read path resolves through `dictionary_tokenizer`.
+    // The built-in tokenizer identities are reserved alongside the field type
+    // names: a custom chain registering over one would redefine that preset.
+    // Non-English current and legacy identities are derived from `LANGUAGES`,
+    // so adding a language cannot leave its internal analyzer shadowable. The
+    // `wayfinder_suggest_*` identities (#384) are reserved for the same reason
+    // -- a custom chain under one of those names would redefine the analyzer
+    // the `/suggest` read path resolves through `dictionary_tokenizer`.
     let reserved_type_names: Vec<String> = builtin_type_names()
         .into_iter()
         .chain([
@@ -1803,6 +1802,18 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
             BOOST_TERM_PAYLOAD_VERBATIM_TOKENIZER.to_string(),
             suggest_tokenizer(SUGGEST_UNDEFINED_DICTIONARY),
         ])
+        .chain(
+            LANGUAGES
+                .iter()
+                .filter(|(code, _)| *code != "en")
+                .flat_map(|(code, _)| {
+                    [
+                        legacy_language_tokenizer(code),
+                        language_tokenizer_v3(code),
+                        language_tokenizer(code),
+                    ]
+                }),
+        )
         .chain(LANGUAGES.iter().map(|(code, _)| suggest_tokenizer(code)))
         .collect();
     if let Some(field_type) = parsed
@@ -2293,4 +2304,51 @@ pub fn check_compatible(previous: &str, current: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn uax29_tokens(text: &str) -> Vec<Token> {
+        let mut tokenizer = Uax29Tokenizer;
+        let mut stream = tokenizer.token_stream(text);
+        let mut tokens = Vec::new();
+        while stream.advance() {
+            tokens.push(stream.token().clone());
+        }
+        tokens
+    }
+
+    #[test]
+    fn uax29_tokenizer_retains_emoji_symbols_and_combining_only_segments() {
+        let input = "😀 !!! ★";
+        let tokens = uax29_tokens(input);
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| token.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["😀", "★"],
+            "only whitespace-only and punctuation-only UAX #29 segments may be discarded"
+        );
+        for token in tokens {
+            assert_eq!(
+                &input[token.offset_from..token.offset_to],
+                token.text,
+                "UAX #29 terms must retain offsets into the original input"
+            );
+        }
+
+        let combining_only = "\u{301}";
+        let token = uax29_tokens(combining_only)
+            .pop()
+            .expect("a combining-only UAX #29 segment must be retained");
+        assert_eq!(token.text, combining_only);
+        assert_eq!(
+            (token.offset_from, token.offset_to),
+            (0, combining_only.len()),
+            "combining-only terms must retain original offsets"
+        );
+    }
 }

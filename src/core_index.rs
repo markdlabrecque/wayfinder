@@ -854,9 +854,9 @@ impl CoreIndex {
                 schema::ANALYZER_CONTRACT_V4_LEGACY_DYNAMIC_TEXT => {
                     Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
                 }
-                schema::ANALYZER_CONTRACT_V3 if uses_analyzed_dynamic => {
+                schema::ANALYZER_CONTRACT_V3 if uses_pre_v5_changed_path => {
                     bail!(
-                        "the index in {} uses the v3 dynamic-text analyzer contract; reindex into a fresh data directory for accent folding",
+                        "the index in {} uses the pre-UAX #29 text analyzer contract; reindex into a fresh data directory",
                         data_dir.display()
                     );
                 }
@@ -864,9 +864,9 @@ impl CoreIndex {
                     Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
                 }
                 schema::ANALYZER_CONTRACT_V3 => Some(schema::ANALYZER_CONTRACT),
-                schema::ANALYZER_CONTRACT_V3_LEGACY_DYNAMIC_TEXT if uses_analyzed_dynamic => {
+                schema::ANALYZER_CONTRACT_V3_LEGACY_DYNAMIC_TEXT if uses_pre_v5_changed_path => {
                     bail!(
-                        "the index in {} uses the v3 dynamic-text analyzer contract; reindex into a fresh data directory for accent folding",
+                        "the index in {} uses the pre-UAX #29 text analyzer contract; reindex into a fresh data directory",
                         data_dir.display()
                     );
                 }

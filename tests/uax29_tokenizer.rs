@@ -45,7 +45,7 @@ stored = true
 multi_valued = true
 "#;
 
-const UAX29_SAMPLE: &str = "don't www.example.com 3.14 foo_bar e-mail a@b.com 東京都 !!!";
+const UAX29_SAMPLE: &str = "don't www.example.com 3.14 3 foo_bar e-mail a@b.com 東京都 !!!";
 
 async fn uax29_app() -> (axum::Router, TempDir) {
     let dir = TempDir::new().expect("temp dir");
@@ -112,6 +112,7 @@ async fn text_presets_use_uax29_word_boundaries_without_discarding_meaningful_si
     assert_eq!(
         term_set(&body, "general"),
         BTreeSet::from([
+            "3",
             "3.14",
             "a",
             "b.com",
@@ -132,24 +133,41 @@ async fn text_presets_use_uax29_word_boundaries_without_discarding_meaningful_si
     // Search must use the same analyzer as indexing for both built-in text
     // presets. The sentinel ensures a discarded one-character/CJK query cannot
     // accidentally pass by becoming an empty query that matches everything.
-    for field in ["general", "english"] {
-        for term in [
-            "don%27t",
-            "www.example.com",
-            "3.14",
-            "foo_bar",
-            "e",
-            "mail",
-            "a",
-            "b.com",
-            "%E6%9D%B1%E4%BA%AC%E9%83%BD",
-        ] {
-            assert_field_term(&app, field, term, 1).await;
-        }
+    for term in [
+        "don%27t",
+        "www.example.com",
+        "3",
+        "3.14",
+        "foo_bar",
+        "e",
+        "mail",
+        "a",
+        "b.com",
+        "%E6%9D%B1%E4%BA%AC%E9%83%BD",
+    ] {
+        assert_field_term(&app, "general", term, 1).await;
+    }
+    // English chains retain Tantivy's complete stopword semantics: UAX #29
+    // removes only the blind min=2 cutoff, not the stopword filter.
+    for term in [
+        "don%27t",
+        "www.example.com",
+        "3",
+        "3.14",
+        "foo_bar",
+        "e",
+        "mail",
+        "b.com",
+        "%E6%9D%B1%E4%BA%AC%E9%83%BD",
+    ] {
+        assert_field_term(&app, "english", term, 1).await;
+    }
+    assert_field_term(&app, "english", "a", 0).await;
 
-        // These are only independently searchable under the old
-        // non-alphanumeric splitter. They must not match a UAX #29 token that
-        // contains the corresponding apostrophe, dot, or underscore.
+    // These are only independently searchable under the old
+    // non-alphanumeric splitter. They must not match a UAX #29 token that
+    // contains the corresponding apostrophe, dot, or underscore.
+    for field in ["general", "english"] {
         for fragment in ["don", "example", "14", "foo", "com"] {
             assert_field_term(&app, field, fragment, 0).await;
         }
@@ -181,6 +199,7 @@ async fn search_api_dynamic_text_and_suggest_use_the_uax29_chain() {
     for term in [
         "don%27t",
         "www.example.com",
+        "3",
         "3.14",
         "foo_bar",
         "e",
@@ -188,6 +207,7 @@ async fn search_api_dynamic_text_and_suggest_use_the_uax29_chain() {
     ] {
         assert_field_term(&app, "tm_X3b_en_body", term, 1).await;
     }
+    assert_field_term(&app, "tm_X3b_en_body", "a", 0).await;
     for fragment in ["don", "example", "14", "foo"] {
         assert_field_term(&app, "tm_X3b_en_body", fragment, 0).await;
     }
