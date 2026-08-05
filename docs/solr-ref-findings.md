@@ -3553,3 +3553,94 @@ garden}; for the misspelling `qwick`, `en`'s nearest is `quick` (1 edit) and
       `SELECT_PARAMS` as a repeatable param (trace 00021 sends it twice) so the
       echo and `strict_params` paths still accept the repeat — only the
       read-path consumes the first value, exactly as Solr does.
+
+194. **`search_api_solr_admin` is hard-gated on `SolrBackendInterface`; none
+      of its endpoints can reach a Wayfinder server, so the three it shares
+      with the standard connector — core reload, `analysis/field`, and
+      `admin/file` — are unreachable by stock `search_api_solr_admin` against
+      Wayfinder (#354).** Found by the 2026-08-04 full-source sweep of
+      `search_api_solr` 4.4.0's `modules/search_api_solr_admin/`. The three
+      endpoints are real on the standard (non-cloud) connector —
+      `StandardSolrConnector::reloadCore()`
+      (`src/Plugin/SolrConnector/StandardSolrConnector.php:24-40`, a CoreAdmin
+      `createReload()`), `SolrConnectorPluginBase::getAnalysisQueryField()`
+      (`src/SolrConnector/SolrConnectorPluginBase.php:971-973` → Solarium
+      `createAnalysisField()`), and `SolrConnectorPluginBase::getFile()`
+      (`:1403-1412`, handler `<core>/admin/file`) — and issue #354's premise
+      that the SolrCloud non-goal does not excuse them is correct *at the
+      connector layer*. But that layer is never in the path for a Wayfinder
+      site, because `search_api_solr_admin` cannot see a Wayfinder server at
+      all. **Every route and every command path in the module requires
+      `$backend instanceof SolrBackendInterface`**, and `WayfinderBackend`
+      (`drupal/search_api_wayfinder/src/Plugin/search_api/backend/
+      WayfinderBackend.php:41`) is `extends BackendPluginBase implements
+      PluginFormInterface` — a peer of `SearchApiSolrBackend`, not a Solr
+      connector, and deliberately so: Wayfinder is not Solr, so wrapping it in
+      `SolrConnectorInterface` (cores, configsets, Solarium query objects)
+      would be a category error. The `instanceof` gate appears in all three
+      access-check classes (`SolrAdminAccessCheck`, `SolrAdminCloudAccessCheck`,
+      `SolrAdminTrustedContextSupportedAccessCheck`, each
+      `modules/search_api_solr_admin/src/Access/...php:27`), the field-analysis
+      route's access check (`LocalActionAccessCheck:25`, in `search_api_solr`
+      core), the Drush commands (`SearchApiSolrAdminCommands.php:137`), and the
+      hooks (`SearchApiSolrAdminHooks.php:40`). The command path is the
+      strongest statement of intent: `Utility::getSolrConnector($server)`
+      (`src/Utility/Utility.php:1265-1272`) — which the reload Drush command
+      (`SolrAdminCommandHelper::reload()`, `:72-75`) and every other command
+      helper entry point calls — is declared `: SolrConnectorInterface` and
+      throws `SearchApiSolrException('Server %s is not a Solr server')` when the
+      backend is not a `SolrBackendInterface`, before it ever reaches
+      `reloadCore()`/`getAnalysisQueryField()`/`getFile()`. So against a
+      Wayfinder server: the reload-core and field-analysis *forms* 403 at the
+      route access check (not Solr's, Drupal's own `AccessResult::forbidden()`);
+      the reload *Drush command* throws "Server is not a Solr server" from
+      `Utility::getSolrConnector`; and no HTTP request for any of the three
+      endpoints is ever emitted. This is a stronger and cleaner descope basis
+      than "the capture site had no `search_api_solr_admin` interaction"
+      (issue #354's framing): the capture could not see these because the
+      module has no path to a non-Solr backend, not merely because that one
+      site happened not to use it. **Decision (#354): all three stay out of
+      Search API parity scope.** They are not built, not routed, and not added
+      to `SELECT_PARAMS`/`UPDATE_PARAMS`; a self-expiring guard
+      (`tests/search_api_solr_admin_descope_guard.rs`) fails the day the
+      `instanceof SolrBackendInterface` gate leaves the source, the day
+      `WayfinderBackend` starts implementing `SolrBackendInterface`, or the day
+      a trace carries one of the three — i.e. the day the unreachability
+      premise stops holding. The three are individually:
+      - **Core reload** (`GET /solr/admin/cores?action=RELOAD&core=<core>`):
+        server-level, and Wayfinder has no reload concept to answer it with
+        anyway — config is TOML loaded once at process start (§3/§6), the
+        schema is fixed at index creation and refused on incompatible change
+        (open question 4), and one process serves one core (open question 1);
+        there is no configset to re-read and no atomic searcher swap to do.
+        A 200-no-op would be the "silently wrong answer" the project rejects
+        (it would tell an operator their config change applied when it did
+        not).
+      - **`analysis/field`** (`GET /<core>/analysis/field`): the one with
+        real independent value — Wayfinder has a genuine analyzer chain
+        (`schema.rs::tokenize`) and v2.5's admin UI (§5) has no "what did the
+        analyzer do to my text?" answer. But as a `search_api_solr_admin`
+        parity endpoint it is unreachable (the `instanceof` gate), and building
+        a Solr-wire-shaped `/wayfinder/{core}/analysis/field` that no stock
+        client can ask would violate §5's "ship what clients demonstrably use."
+        Analyzer introspection is therefore recorded as a **v2.5 Wayfinder-own
+        candidate** (a `/ui` or Wayfinder-native surface, with its own scope
+        and shape, not necessarily Solr's per-component class-name breakdown),
+        not a parity endpoint built under #354.
+      - **`admin/file`** (`GET /<core>/admin/file?file=<name>`): serves raw
+        configset files (`schema.xml`, `solrconfig.xml`, …). Wayfinder has no
+        configset (§3), so there is nothing honest to return; the four
+        `getFile()` callers (`Utility::getServerFiles`, `SolrConfigForm`,
+        `SolrConfigSetController`'s config-zip download, and
+        `search_api_solr.install`'s requirements check) all read configset XML
+        that does not exist in a Wayfinder core, and all sit behind the same
+        `SolrBackendInterface` gate regardless.
+      None of the three is in any of the 28 committed traces
+      (`solr-ref/search-api/trace/`), so none is in the coverage contract's
+      denominator (`coverage/search_api_coverage_contract.json`'s 9 endpoints /
+      75 items), and the decision not to build them moves the coverage
+      fraction by zero — 75/75 is unchanged. The parity-roadmap table in PRD
+      §5 already carries the principle ("zero client evidence, deliberately
+      unscheduled"); these three are zero-*reachable*-client evidence, which
+      is a strictly stronger exclusion, and the descope is recorded next to
+      the `solr_document` one so the parity picture stays in one place.

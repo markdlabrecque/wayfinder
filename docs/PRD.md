@@ -928,6 +928,71 @@ fails the day either param stops being confined to the `solr_document` branch in
 the 4.4.0 source, or a captured trace sends it — at which point the descope must
 be revisited (issue #356), not silently kept.
 
+### `search_api_solr_admin` — a Solr connector module, unreachable against Wayfinder
+
+A second out-of-Wayfinder's-world descope, found by the 2026-08-04 full-source sweep of
+`search_api_solr` 4.4.0's `modules/search_api_solr_admin/` (issue #354). The module ships three
+endpoints that all live on the standard (non-cloud) connector, so the SolrCloud non-goal does
+not by itself exclude them — but a stronger exclusion does: **`search_api_solr_admin` cannot
+see a Wayfinder server at all.** Every route and every command path in the module hard-gates on
+`$backend instanceof SolrBackendInterface`, and `WayfinderBackend`
+(`drupal/search_api_wayfinder/.../WayfinderBackend.php`) is a separate Search API backend
+(`extends BackendPluginBase implements PluginFormInterface`), not a `search_api_solr` connector
+— deliberately, because Wayfinder is not Solr, so modelling it as a `SolrConnectorInterface`
+(cores, configsets, Solarium query objects) would be a category error. The gate appears in all
+three access-check classes, the field-analysis route's `LocalActionAccessCheck`, the Drush
+commands, and the hooks; and the command path is the strongest statement of intent:
+`Utility::getSolrConnector($server)` (`src/Utility/Utility.php:1265-1272`) — which the reload
+Drush command and every command-helper entry point call — is declared `: SolrConnectorInterface`
+and throws `SearchApiSolrException('Server %s is not a Solr server')` when the backend is not a
+`SolrBackendInterface`, before it can reach any connector method (finding 194).
+
+So against a Wayfinder server the reload-core and field-analysis **forms** 403 at Drupal's own
+route access check, the reload **Drush command** throws "Server is not a Solr server" from
+`Utility::getSolrConnector`, and no HTTP request for any of the three endpoints is ever emitted.
+The capture could not see these not merely because that one site happened not to use the module,
+but because the module has no path to a non-Solr backend. This is a strictly stronger exclusion
+than "zero client evidence in the trace," and it means **none of the three moves the coverage
+denominator**: they are in none of the 28 traces and in none of the contract's 9 endpoints / 75
+items, and the decision not to build them moves the coverage fraction by zero — 75/75 is
+unchanged (#225). A self-expiring guard, `tests/search_api_solr_admin_descope_guard.rs`, fails
+the day the `instanceof SolrBackendInterface` gate leaves the source, the day `WayfinderBackend`
+starts implementing `SolrBackendInterface`, or the day a trace carries one of the three — i.e.
+the day the unreachability premise stops holding. When it goes red, the fix is **not** to weaken
+it; it is to revisit this decision (#354) with the new evidence.
+
+The three, individually:
+
+- **Core reload** — `GET /solr/admin/cores?action=RELOAD&core=<core>` (server-level, note the
+  path shape). `StandardSolrConnector::reloadCore()` builds a CoreAdmin `createReload()`. Wayfinder
+  has no reload concept to answer it with regardless of reachability: config is TOML loaded once at
+  process start (§3/§6), the schema is fixed at index creation and refused on incompatible change
+  (open question 4), and one process serves one core (open question 1) — there is no configset to
+  re-read and no atomic searcher swap to perform. A 200-no-op would be the "silently wrong answer"
+  the project rejects (it would tell an operator their config change applied when it did not), so
+  the endpoint stays unrouted rather than faking success.
+- **Field analysis** — `GET /<core>/analysis/field`. `getAnalysisQueryField()` → Solarium
+  `createAnalysisField()`, setting `analysis.fieldtype` and `analysis.fieldvalue`; an interactive
+  AJAX form showing the analyzer chain's token output. This is the one with real independent value
+  — Wayfinder has a genuine analyzer chain (`schema.rs::tokenize`) and v2.5's admin UI (§5) has no
+  "what did the analyzer do to my text?" answer. But as a `search_api_solr_admin` parity endpoint
+  it is unreachable (the `instanceof` gate), and building a Solr-wire-shaped
+  `/wayfinder/{core}/analysis/field` that no stock client can ask would violate §5's "ship what
+  clients demonstrably use." Analyzer introspection is therefore recorded as a **v2.5
+  Wayfinder-own candidate** — a `/ui` or Wayfinder-native surface with its own scope and shape
+  (not necessarily Solr's per-component class-name breakdown, which names Java classes Wayfinder
+  has no equivalent of) — not a parity endpoint built under #354. It is listed as an out-of-scope
+  item in the v2.5 section below so the candidacy is visible rather than implicit.
+- **Configset file read** — `GET /<core>/admin/file?file=<name>`. `getFile()` serves raw configset
+  files (`schema.xml`, `solrconfig.xml`, …). Wayfinder has no configset (§3), so there is nothing
+  honest to return; the four `getFile()` callers (`Utility::getServerFiles`, `SolrConfigForm`,
+  `SolrConfigSetController`'s config-zip download, and `search_api_solr.install`'s requirements
+  check) all read configset XML that does not exist in a Wayfinder core, and all sit behind the
+  same `SolrBackendInterface` gate regardless.
+
+`uploadConfigset()` is Cloud-only (`StandardSolrCloudConnector.php:253-263`) and stays out under
+the SolrCloud non-goal, as issue #354 already noted.
+
 ### Solr 9.x parity roadmap — zero client evidence, deliberately unscheduled
 
 The remainder of Solr 9.x's feature surface, checked against the same evidence base as the
@@ -1004,6 +1069,17 @@ own scoping pass if ever pursued):
   alongside the Solr routes; only the two explicit health paths remain public.
 - Multi-instance/cluster views. Out of scope for the same reason SolrCloud is (§1 non-goals) — one
   process, one core.
+- **Analyzer introspection** (the "what did the analyzer do to my text?" tool, Solr's
+  `<core>/analysis/field`). Listed here as a **candidate**, not a commitment: Wayfinder has a
+  genuine analyzer chain (`schema.rs::tokenize`) and this dashboard has no answer for that
+  question today, so the operator value is real. It is out of the *v2.5 in-scope* list above
+  (core view, schema view, index stats, query tester, ping) because it is a new interactive
+  surface rather than a read of state the dashboard already shows, and because the honest
+  Wayfinder shape — over Wayfinder's own tokenizer/filter names — is not Solr's per-component
+  Java-class-name breakdown. It is explicitly **not** a `search_api_solr_admin` parity endpoint:
+  that module's field-analysis form is unreachable against a Wayfinder server (§5's
+  `search_api_solr_admin` descope, finding 194), so this candidacy is a Wayfinder-own feature,
+  not a wire-parity answer.
 
 **Architecture.** New routes under `/ui` (resolved by issue #94; `/admin` was the other
 candidate), served by the same axum app, alongside the existing `/wayfinder/*` API routes (issue
