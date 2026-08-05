@@ -500,4 +500,73 @@ class WayfinderClientTest extends TestCase {
     $client->terms(['terms' => 'true', 'terms.fl' => 'body']);
   }
 
+  /**
+   * SPEC-385 deliverable C / test 7: the Suggester autocomplete plugin needs
+   * a select()/terms()-shaped sibling for "GET {core}/suggest" -- same
+   * transport, same forced wt=json, same query-string encoding. Response
+   * shape ({"suggest":{<dictionary>:{<query>:{"suggestions":[...]}}}}) is
+   * ground truth from #384's captured fixture
+   * suggest_q_infix_en.json (extracted via `git show 6773c6f:solr-ref/
+   * responses/suggest_q_infix_en.json`, since this branch has not rebased
+   * onto #384's fixtures yet -- see the handoff note on WayfinderBackendTest
+   * test 12 for the full fixture body).
+   *
+   * @covers ::suggest
+   */
+  public function testSuggestReturnsDecodedBodyOn200(): void {
+    $body = '{"responseHeader":{"status":0,"QTime":12},"suggest":{"en":{"fox":{"numFound":2,"suggestions":[{"term":"quick brown <b>fox</b>","weight":0,"payload":""}]}}}}';
+    $client = $this->clientWithResponses([new Response(200, [], $body)]);
+
+    $result = $client->suggest(['suggest' => 'true', 'suggest.q' => 'fox', 'suggest.dictionary' => 'en']);
+
+    $this->assertSame('quick brown <b>fox</b>', $result['suggest']['en']['fox']['suggestions'][0]['term']);
+  }
+
+  /**
+   * SPEC-385 test 7 (continued): the request goes to `/suggest`, not
+   * `/select`, with the same forced `wt=json` every other endpoint gets.
+   *
+   * @covers ::suggest
+   */
+  public function testSuggestRequestsTheSuggestEndpointNotSelect(): void {
+    $history = [];
+    $mock = new MockHandler([new Response(200, [], '{"suggest":{}}')]);
+    $handlerStack = HandlerStack::create($mock);
+    $handlerStack->push(\GuzzleHttp\Middleware::history($history));
+    $client = new WayfinderClient(new Client(['handler' => $handlerStack]), 'http://localhost:8983/wayfinder/mycore');
+
+    $client->suggest([
+      'suggest' => 'true',
+      'suggest.q' => 'fox',
+      'suggest.dictionary' => 'en',
+      'suggest.count' => 10,
+      'suggest.highlight' => 'false',
+      'omitHeader' => 'true',
+    ]);
+
+    $request = $history[0]['request'];
+    $this->assertSame('GET', $request->getMethod());
+    $this->assertSame('/wayfinder/mycore/suggest', $request->getUri()->getPath());
+    $this->assertSame(
+      'suggest=true&suggest.q=fox&suggest.dictionary=en&suggest.count=10&suggest.highlight=false&omitHeader=true&wt=json',
+      $request->getUri()->getQuery()
+    );
+  }
+
+  /**
+   * SPEC-385 deliverable C / test 8: `suggest()` converts a Solr error
+   * envelope into `SearchApiException`, exactly like `terms()`/`select()`.
+   *
+   * @covers ::suggest
+   */
+  public function testSuggestThrowsSearchApiExceptionWithErrorMsgOnNon200(): void {
+    $body = (string) file_get_contents(__DIR__ . '/../../../../../solr-ref/responses/err_bad_sort.json');
+    $client = $this->clientWithResponses([new Response(400, [], $body)]);
+
+    $this->expectException(SearchApiException::class);
+    $this->expectExceptionMessage('can not sort on a field w/o docValues unless it is indexed=true uninvertible=true and the type supports Uninversion: body');
+
+    $client->suggest(['suggest' => 'true', 'suggest.q' => 'fox']);
+  }
+
 }

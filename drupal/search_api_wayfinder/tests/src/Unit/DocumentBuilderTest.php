@@ -726,4 +726,33 @@ class DocumentBuilderTest extends TestCase {
     $this->assertSame('SKU-1', $doc['sort_field_sku']);
   }
 
+  /**
+   * SPEC-385 deliverable E / test 16: `suggest.cfq` on a Suggester lookup
+   * filters on the document's `sm_context_tags` (src/core_index.rs:4859), and
+   * this module currently indexes no such field -- so without this, any
+   * context-filtered Suggester lookup returns nothing. Mirrors
+   * SearchApiSolrBackend.php:1343-1347 minus the site-hash tag (premise 6:
+   * this module has no site hash, DocumentBuilder.php:15). `sm_*` is a
+   * multi-valued dynamic field (presets/search-api.toml:115-116), so this
+   * asserts an array of exactly two tags. Values are hand-computed from
+   * FieldMapper's own documented `encodeSolrName()` transform (`;` ->
+   * `_X3b_`, `/` -> `_X2f_`, `:` -> `_X3a_`) -- the real output, not a
+   * substring match, per the spec's explicit instruction.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandIndexesContextTagsForIndexAndLanguage(): void {
+    $item = $this->mockItem('node/1:en', 'entity:node', 'en', [
+      'title' => $this->mockField('title', 'text', [new TextValue('Hello world')]),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper()))
+      ->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    $this->assertSame(
+      ['search_api_X2f_index_X3a_my_index', 'drupal_X2f_langcode_X3a_en'],
+      $doc['sm_context_tags']
+    );
+  }
+
 }
