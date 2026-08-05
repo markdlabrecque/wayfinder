@@ -22,6 +22,8 @@ use tantivy::tokenizer::{
     Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer, StopWordFilter, TextAnalyzer,
     Token, TokenFilter, TokenStream, Tokenizer, TokenizerManager, WhitespaceTokenizer,
 };
+use unicode_normalization::UnicodeNormalization;
+use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 /// Catch-all Tantivy field holding every document field that resolved through a
 /// `[[dynamic_fields]]` pattern to a non-analyzed type (string/keyword/numeric/
@@ -131,7 +133,10 @@ const TEXT_GENERAL_TOKENIZER: &str = "default";
 /// long-token removal, lowercase, English stopword removal, then stemming.
 /// It intentionally does not override Tantivy's `en_stem`, which remains
 /// available for custom analyzer chains and upstream defaults.
-const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v2";
+const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v3";
+/// The Phase-2 predecessor remains registered only so a legacy Tantivy schema
+/// can be diagnosed safely; no newly-built field records this identity.
+const TEXT_EN_TOKENIZER_V2: &str = "wayfinder_text_en_v2";
 /// The shared dynamic-text catch-all retains the pre-v2 Snowball analyzer.
 /// Drupal Search API's captured configset uses Snowball and preserves singular
 /// `day`; all analyzed dynamic rules share this one tokenizer in Tantivy.
@@ -182,11 +187,16 @@ const SUGGEST_UNDEFINED_DICTIONARY: &str = "und";
 /// Porter-compatible English preset. This is separate from Tantivy's schema:
 /// it lets startup identify pre-contract indexes before their old tokenizer
 /// identity can be adopted.
-pub const ANALYZER_CONTRACT: &str = "text_en_porter_compatible_v2";
-/// A safely adopted pre-v2 index whose unused `_dynamic_text` catch-all still
-/// has an older tokenizer identity. It is not full v2 certification: a later
-/// rule that starts writing analyzed dynamic values must reindex.
+pub const ANALYZER_CONTRACT: &str = "text_en_porter_compatible_v3";
+/// A safely adopted index whose unused `_dynamic_text` catch-all still has an
+/// older tokenizer identity. It is not full v3 certification: a later rule
+/// that starts writing analyzed dynamic values must reindex.
 pub const ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT: &str =
+    "text_en_porter_compatible_v3_legacy_dynamic_text";
+/// Phase 2 changes text_en terms, so a v2 marker needs reindexing whenever a
+/// static text_en field could contain those pre-folding terms.
+pub const ANALYZER_CONTRACT_V2: &str = "text_en_porter_compatible_v2";
+pub const ANALYZER_CONTRACT_V2_LEGACY_DYNAMIC_TEXT: &str =
     "text_en_porter_compatible_v2_legacy_dynamic_text";
 /// The v1 marker is recognized explicitly during upgrade, rather than treated
 /// as an unknown marker, so raw-only indexes can be adopted safely while
@@ -471,6 +481,19 @@ impl WayfinderSchema {
     /// v1 Snowball stemming to v2's Porter-compatible terminal-`y` behavior.
     pub fn uses_static_text_en(&self) -> bool {
         self.fields.iter().any(|field| field.type_ == "text_en")
+    }
+
+    /// Whether a static built-in text preset has indexed terms subject to
+    /// Phase 2 accent folding. Custom and dynamic chains are not included:
+    /// neither receives this built-in filter.
+    pub fn uses_static_accent_folded_text(&self) -> bool {
+        self.fields.iter().any(|field| {
+            field.type_ == "text_general"
+                || field.type_ == "text_en"
+                || LANGUAGES
+                    .iter()
+                    .any(|(code, _)| field.type_ == format!("text_{code}"))
+        })
     }
 
     /// Whether any configured dynamic rule can write analyzed text through
@@ -806,6 +829,96 @@ impl<T: TokenStream> TokenStream for PorterTerminalYTokenStream<T> {
     }
 }
 
+/// Folds accents after tokenization, keeping Tantivy's original byte offsets.
+///
+/// This deliberately is not a Solr-style char filter: a char filter would need
+/// an offset-correction map for expansions such as `ß` -> `ss`, while changing
+/// only `Token::text` leaves offsets into the original query intact for suggest
+/// prefix matching and highlighting (#389 Phase 2). UAX#29 already treats the
+/// affected characters as letters, so folding after tokenization cannot move a
+/// token boundary.
+#[derive(Clone)]
+struct AccentFoldingFilter;
+
+impl TokenFilter for AccentFoldingFilter {
+    type Tokenizer<T: Tokenizer> = AccentFoldingTokenizer<T>;
+
+    fn transform<T: Tokenizer>(self, tokenizer: T) -> Self::Tokenizer<T> {
+        AccentFoldingTokenizer {
+            inner: tokenizer,
+            buffer: String::new(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AccentFoldingTokenizer<T> {
+    inner: T,
+    buffer: String,
+}
+
+impl<T: Tokenizer> Tokenizer for AccentFoldingTokenizer<T> {
+    type TokenStream<'a> = AccentFoldingTokenStream<'a, T::TokenStream<'a>>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        AccentFoldingTokenStream {
+            tail: self.inner.token_stream(text),
+            buffer: &mut self.buffer,
+        }
+    }
+}
+
+struct AccentFoldingTokenStream<'a, T> {
+    tail: T,
+    buffer: &'a mut String,
+}
+
+impl<T: TokenStream> TokenStream for AccentFoldingTokenStream<'_, T> {
+    fn advance(&mut self) -> bool {
+        if !self.tail.advance() {
+            return false;
+        }
+
+        self.buffer.clear();
+        for character in self.tail.token().text.nfkd() {
+            if character.general_category() == GeneralCategory::NonspacingMark {
+                continue;
+            }
+            match character {
+                'ß' => self.buffer.push_str("ss"),
+                'ẞ' => self.buffer.push_str("SS"),
+                'æ' => self.buffer.push_str("ae"),
+                'Æ' => self.buffer.push_str("AE"),
+                'œ' => self.buffer.push_str("oe"),
+                'Œ' => self.buffer.push_str("OE"),
+                'þ' => self.buffer.push_str("th"),
+                'Þ' => self.buffer.push_str("TH"),
+                'ð' => self.buffer.push('d'),
+                'Ð' => self.buffer.push('D'),
+                'ø' => self.buffer.push('o'),
+                'Ø' => self.buffer.push('O'),
+                'đ' => self.buffer.push('d'),
+                'Đ' => self.buffer.push('D'),
+                'ł' => self.buffer.push('l'),
+                'Ł' => self.buffer.push('L'),
+                character => self.buffer.push(character),
+            }
+        }
+        let text = &mut self.tail.token_mut().text;
+        text.clear();
+        text.push_str(self.buffer);
+        true
+    }
+
+    fn token(&self) -> &Token {
+        self.tail.token()
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        self.tail.token_mut()
+    }
+}
+
 /// Solr's `LengthFilterFactory`: drops tokens shorter than `min` or longer than
 /// `max` characters. Tantivy ships only `RemoveLongFilter` (an upper bound), and
 /// `boost_term_payload` needs the lower bound too -- it is what makes `v="a"` a
@@ -1098,7 +1211,7 @@ pub fn split_delimited_payload(token: &str) -> Option<(&str, f32)> {
 /// global `text_en` / `text_general` presets, and conflating them is what made
 /// the read path diverge (see [`build_tokenizers`]).
 fn suggest_tokenizer(code: &str) -> String {
-    format!("wayfinder_suggest_{code}_v1")
+    format!("wayfinder_suggest_{code}_v3")
 }
 
 /// The analyzer (Tantivy tokenizer name) a `suggest.dictionary` value
@@ -1256,6 +1369,14 @@ fn build_tokenizers(
     let english_stopwords =
         || StopWordFilter::new(Language::English).expect("Tantivy ships an English stopword list");
     register_both(
+        TEXT_GENERAL_TOKENIZER,
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter_dynamic(AccentFoldingFilter)
+            .filter(RemoveLongFilter::limit(40))
+            .filter(LowerCaser)
+            .build(),
+    );
+    register_both(
         DYNAMIC_TEXT_TOKENIZER,
         TextAnalyzer::builder(SimpleTokenizer::default())
             .filter(RemoveLongFilter::limit(40))
@@ -1264,9 +1385,22 @@ fn build_tokenizers(
             .filter(Stemmer::new(Language::English))
             .build(),
     );
+    // Kept for opening and diagnosing legacy schemas; new text_en fields use
+    // the v3 identity below.
+    register_both(
+        TEXT_EN_TOKENIZER_V2,
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(RemoveLongFilter::limit(40))
+            .filter(LowerCaser)
+            .filter(english_stopwords())
+            .filter(PorterTerminalYFilter)
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
     register_both(
         TEXT_EN_TOKENIZER,
         TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter_dynamic(AccentFoldingFilter)
             .filter(RemoveLongFilter::limit(40))
             .filter(LowerCaser)
             .filter(english_stopwords())
@@ -1281,6 +1415,7 @@ fn build_tokenizers(
         register_both(
             &format!("text_{code}"),
             TextAnalyzer::builder(SimpleTokenizer::default())
+                .filter_dynamic(AccentFoldingFilter)
                 .filter(RemoveLongFilter::limit(40))
                 .filter(LowerCaser)
                 .filter(Stemmer::new(*lang))
@@ -1340,51 +1475,11 @@ fn build_tokenizers(
     // The other chains in this file keep it because it matches *their* Solr
     // field types, not this one.
     //
-    // ponytail: four differences from the shipped `suggestAnalyzerFieldType`
-    // chains (`text_en` at `schema_extra_types.xml:46`, `text_und` at `:167`)
-    // remain unimplemented; all four are filed as #389, and all four are now
-    // pinned by the `an389_*` fixtures (findings 195-204), captured by #389
-    // Phase 0. #388 is a different gap (the global `text_en` / `text_general`
-    // presets) and does not cover any of these.
-    //   1. `MappingCharFilterFactory mapping="accents_en.txt"` /
-    //      `"accents_und.txt"`, present on *both* the index and query analyzers
-    //      (`:48`, `:58`, `:169`, `:179`). Same class of defect as the U+0130
-    //      lowercasing bug, and more reachable: `suggest.q=cafe` matches an
-    //      accented `Cafe Central` in Solr and misses here.
-    //   2. `SynonymGraphFilterFactory synonyms="synonyms_en.txt" expand="true"
-    //      ignoreCase="true"` (`synonyms_und.txt` for `text_und`) -- query
-    //      analyzer only (`:60`, `:181`).
-    //   3. `StandardTokenizerFactory` where this chain uses `SimpleTokenizer`,
-    //      so the token boundaries themselves are only approximately Solr's.
-    //   4. `WordDelimiterGraphFilterFactory`, so a phrase with an internal
-    //      case/number/punctuation boundary analyzes differently than Solr
-    //      would. Closing this one has a dependency outside this file: the
-    //      `last_is_prefix` derivation in `core_index.rs` (see the comment
-    //      above `let last_is_prefix`) is only sound because no *graph* filter
-    //      is in this chain, so the last token's end offset is necessarily
-    //      `maxEndOffset`. Adding WDGF invalidates that and must be fixed there
-    //      at the same time; findings 203-204 re-derive the rule under WDGF.
-    //      WDGF is the *only* graph source to worry about -- the shipped synonym
-    //      tables in 2 are single-token on both sides, so `SynonymGraphFilter`
-    //      stacks alternatives at one position and produces no graph. That is a
-    //      property of the shipped data, not of the filter.
-    //
-    // ponytail: the shipped index and query analyzers for these field types
-    // differ -- synonyms are query-side only, and WDGF's `catenateNumbers` /
-    // `catenateWords` are `1` on the index side and `0` on the query side
-    // (`:51` vs `:62`, `:172` vs `:183`), which is observable
-    // (`an389_select_cat_joined_en` matches 2 docs, `an389_select_cat_delim_en`
-    // 1). #389 Phase 1 built the *seam* for that: there are now two complete
-    // tokenizer managers, index-side and query-side, keyed by the same
-    // identities, and `suggest_lookup` resolves the stored phrase from the index
-    // manager and `suggest.q` from the query one. The gap itself is still open,
-    // because `register_both` below puts the *same* analyzer into both managers
-    // for every chain here, so the two lookups still land on identical chains.
-    // Phases 2 and 4 split these calls into a per-side pair; because the query
-    // manager is keyed by the index identity, that is a change to what is
-    // registered here and nothing else -- no call site and no name has to move,
-    // including Tantivy's own `QueryParser`, which `parse_query`/edismax hand the
-    // query manager to.
+    // ponytail: three #389 gaps remain: query-side synonyms, UAX#29 token
+    // segmentation, and word-delimiter splitting. Accent folding is closed in
+    // Phase 2 below on both sides. The shipped synonym data has only
+    // single-token entries, so it would stack terms at one position rather than
+    // create a graph; WDGF is the graph-producing remaining feature.
     //
     // ponytail: this fixes the SUGGEST path only. Wayfinder's global `text_en` /
     // `text_general` presets still have no `LengthFilter` and still use Rust's
@@ -1393,6 +1488,7 @@ fn build_tokenizers(
     // #388 -- not closed by this change.
     let suggest_front = || {
         TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter_dynamic(AccentFoldingFilter)
             .filter_dynamic(LengthFilter {
                 min: SUGGEST_MIN_TOKEN_LEN,
                 max: SUGGEST_MAX_TOKEN_LEN,
@@ -1535,6 +1631,7 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
         .into_iter()
         .chain([
             TEXT_EN_TOKENIZER.to_string(),
+            TEXT_EN_TOKENIZER_V2.to_string(),
             DYNAMIC_TEXT_TOKENIZER.to_string(),
             BOOST_TERM_PAYLOAD_TOKENIZER.to_string(),
             BOOST_TERM_PAYLOAD_VERBATIM_TOKENIZER.to_string(),

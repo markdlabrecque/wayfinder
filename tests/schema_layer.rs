@@ -918,19 +918,16 @@ tokenizer = "{index_tok}"
     }
 }
 
-/// `ANALYZER_CONTRACT` guards on-disk term compatibility: Phase 1 changes no
-/// index-side term, so it must not bump the contract. A later phase (Phase 2,
-/// accent folding) is the one expected to move this to a `_v3` identity,
-/// following the `wayfinder_text_en_v2` precedent this file already pins
-/// elsewhere (see the `analyzer_contract_*` tests below).
+/// `ANALYZER_CONTRACT` guards on-disk term compatibility. Phase 2 folds
+/// indexed text_en terms, so its v3 identity must force a reindex rather than
+/// silently reuse a pre-folding index.
 #[test]
-fn analyzer_contract_is_not_bumped_by_the_index_query_split() {
+fn analyzer_contract_is_bumped_for_phase_2_accent_folding() {
     assert_eq!(
         schema::ANALYZER_CONTRACT,
-        "text_en_porter_compatible_v2",
-        "Phase 1 (issue #389) introduces the index/query analyzer seam but no \
-         index-side term change; bumping ANALYZER_CONTRACT here would be \
-         premature -- that is Phase 2's job"
+        "text_en_porter_compatible_v3",
+        "Phase 2 (issue #389) changes indexed text_en terms through accent \
+         folding, so the analyzer contract must move to v3"
     );
 }
 

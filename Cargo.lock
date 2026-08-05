@@ -2389,6 +2389,8 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
+ "unicode-properties",
  "wayfinder",
  "zip 8.6.0",
 ]

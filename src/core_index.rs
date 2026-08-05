@@ -781,35 +781,42 @@ impl CoreIndex {
         // empty data directory, so directory existence alone must never turn
         // a fresh index into a legacy one.
         let has_snapshot = snapshot.exists();
-        let (previous_static_text_en, previous_analyzed_dynamic, previous_has_dynamic_fields) =
-            if has_snapshot {
-                let previous = std::fs::read_to_string(&snapshot)
-                    .with_context(|| format!("reading stored schema {}", snapshot.display()))?;
-                schema::check_compatible(&previous, &schema_toml).with_context(|| {
-                    format!(
-                        "the index in {} was built with an incompatible schema",
-                        data_dir.display()
-                    )
-                })?;
-                let previous_schema = schema::parse(&previous)
-                    .context("parsing the index's stored schema for its analyzer contract")?;
-                (
-                    previous_schema.uses_static_text_en(),
-                    previous_schema.uses_analyzed_dynamic_path(),
-                    previous_schema.has_dynamic_fields(),
+        let (
+            previous_static_text_en,
+            previous_static_accent_folded_text,
+            previous_analyzed_dynamic,
+            previous_has_dynamic_fields,
+        ) = if has_snapshot {
+            let previous = std::fs::read_to_string(&snapshot)
+                .with_context(|| format!("reading stored schema {}", snapshot.display()))?;
+            schema::check_compatible(&previous, &schema_toml).with_context(|| {
+                format!(
+                    "the index in {} was built with an incompatible schema",
+                    data_dir.display()
                 )
-            } else {
-                (false, false, false)
-            };
+            })?;
+            let previous_schema = schema::parse(&previous)
+                .context("parsing the index's stored schema for its analyzer contract")?;
+            (
+                previous_schema.uses_static_text_en(),
+                previous_schema.uses_static_accent_folded_text(),
+                previous_schema.uses_analyzed_dynamic_path(),
+                previous_schema.has_dynamic_fields(),
+            )
+        } else {
+            (false, false, false, false)
+        };
 
-        // Analyzer contract v2 changes static built-in `text_en` from the v1
-        // Snowball pipeline to the captured Porter terminal-y behavior. The
-        // shared `_dynamic_text` catch-all deliberately keeps v1 Snowball
-        // semantics for Search API, so a normal v1 marker makes that path safe.
-        // Pre-v1/legacy-dynamic markers still require reindexing before an
-        // analyzed dynamic rule can use their older `en_stem` catch-all.
+        // Analyzer contract v2 changed static built-in `text_en` from the v1
+        // Snowball pipeline to the Porter-compatible behavior; v3 then folds
+        // its indexed accents. The shared `_dynamic_text` catch-all deliberately
+        // keeps v1 Snowball semantics, so static built-in text presets need the
+        // v3 reindex gate. Pre-v1/legacy-dynamic markers still require reindexing
+        // before an analyzed dynamic rule can use their older `en_stem` catch-all.
         let analyzer_contract = schema::analyzer_contract_path(data_dir);
         let uses_static_text_en = wf_schema.uses_static_text_en() || previous_static_text_en;
+        let uses_static_accent_folded_text =
+            wf_schema.uses_static_accent_folded_text() || previous_static_accent_folded_text;
         let uses_analyzed_dynamic =
             wf_schema.uses_analyzed_dynamic_path() || previous_analyzed_dynamic;
         let uses_pre_v1_changed_path = uses_static_text_en || uses_analyzed_dynamic;
@@ -829,6 +836,24 @@ impl CoreIndex {
                     );
                 }
                 schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT => None,
+                schema::ANALYZER_CONTRACT_V2 if uses_static_accent_folded_text => {
+                    bail!(
+                        "the index in {} uses the v2 text_en analyzer contract; reindex into a fresh data directory for accent folding",
+                        data_dir.display()
+                    );
+                }
+                schema::ANALYZER_CONTRACT_V2 => Some(schema::ANALYZER_CONTRACT),
+                schema::ANALYZER_CONTRACT_V2_LEGACY_DYNAMIC_TEXT
+                    if uses_static_accent_folded_text =>
+                {
+                    bail!(
+                        "the index in {} uses the v2 text_en analyzer contract; reindex into a fresh data directory for accent folding",
+                        data_dir.display()
+                    );
+                }
+                schema::ANALYZER_CONTRACT_V2_LEGACY_DYNAMIC_TEXT => {
+                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
+                }
                 // A normal v1 marker certifies the dynamic catch-all's still-
                 // current Snowball pipeline. Only static text_en changed in v2.
                 schema::ANALYZER_CONTRACT_V1 if uses_static_text_en => {
