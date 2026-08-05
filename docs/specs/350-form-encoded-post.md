@@ -1,3 +1,5 @@
+> **Historical implementation record.** This completed spec does not define current requirements or future work.
+
 # #350 — parse form-encoded POST bodies (`postbigrequest` silently yields zero results)
 
 Branch: `350-form-encoded-post`. **Group B — rebase onto #353**, which also edits

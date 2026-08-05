@@ -1,3 +1,5 @@
+> **Historical implementation record.** This completed spec does not define current requirements or future work.
+
 # #352 — `/suggest?suggest.buildAll=true` on the default cron path
 
 Branch: `352-suggest-buildall`. **Group C, lands first** — #351 depends on it.

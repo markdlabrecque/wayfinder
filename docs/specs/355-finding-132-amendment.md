@@ -1,3 +1,5 @@
+> **Historical implementation record.** This completed spec does not define current requirements or future work.
+
 # #355 — correct finding 132: the client's JSON facet is nested terms facets
 
 Branch: `355-finding-132-amendment`. Group C, but docs-only — land any time.

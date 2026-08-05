@@ -1,3 +1,5 @@
+> **Historical implementation record.** This completed spec does not define current requirements or future work.
+
 # #353 — five `hl.*` params the client sends are missing from `SELECT_PARAMS`
 
 Branch: `353-highlight-params`. **Group B — land this before #350**, which also

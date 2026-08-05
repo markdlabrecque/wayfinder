@@ -1,3 +1,5 @@
+> **Historical implementation record.** This completed spec does not define current requirements or future work.
+
 # #359 — server consumes only the first `spellcheck.dictionary` value
 
 Branch: `359-spellcheck-multi-dictionary`. Group A.

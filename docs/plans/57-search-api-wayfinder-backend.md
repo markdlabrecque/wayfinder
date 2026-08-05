@@ -1,3 +1,5 @@
+> **Historical implementation record.** This completed plan does not define current requirements, gates, or future work.
+
 # #57 (re-scoped): search_api_wayfinder — standalone Search API backend
 
 **Date:** 2026-07-29. **Supersedes** the 2026-07-29 decision record in the original

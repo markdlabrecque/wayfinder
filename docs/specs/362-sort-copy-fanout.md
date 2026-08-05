@@ -1,3 +1,5 @@
+> **Historical implementation record.** This completed spec does not define current requirements or future work.
+
 # #362 — N+1 identical sort copies written per text field
 
 Branch: `362-sort-copy-fanout`. Group A.

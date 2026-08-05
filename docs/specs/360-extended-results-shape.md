@@ -1,3 +1,5 @@
+> **Historical implementation record.** This completed spec does not define current requirements or future work.
+
 # #360 — `ResponseParser` drops the `{word, freq}` extendedResults shape
 
 Branch: `360-extended-results-shape`. Group A.

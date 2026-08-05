@@ -1,3 +1,5 @@
+> **Historical implementation record.** This completed spec does not define current requirements or future work.
+
 # #351 — serve `/autocomplete`; `/terms` has no upstream caller
 
 Branch: `351-autocomplete-endpoint`. **Group C. Depends on #352 (suggest

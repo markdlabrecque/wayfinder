@@ -1,8 +1,9 @@
 # Wayfinder
 
-A Solr-similar search backend in Rust, built on Tantivy: one static
-binary, one schema file, one data directory. See `docs/PRD.md` for scope and phases, 
-and [`docs/deployment.md`](docs/deployment.md) for the supported TLS deployment model.
+A search backend in Rust, built on Tantivy: one static binary, one schema file, one
+data directory. It retains the Solr-compatible wire used by existing clients. See
+`docs/PRD.md` for current scope and [`docs/deployment.md`](docs/deployment.md) for the
+supported TLS deployment model.
 
 ## Running
 
@@ -141,7 +142,6 @@ paths at the public proxy.
 cargo test          # hermetic: no network, no Docker
 ```
 
-Reference fixtures captured from a real Solr 9 live in `solr-ref/responses/` and
-are the ground truth for envelope shape; `solr-ref/capture.sh` regenerates them
-against `solr:9` in Docker. `docs/solr-ref-findings.md` records what those
-captures proved.
+`solr-ref/responses/` is the frozen regression baseline for the current wire.
+Expected test values come from those fixtures, never implementation output.
+`docs/solr-ref-findings.md` records their historical Solr and client evidence.
