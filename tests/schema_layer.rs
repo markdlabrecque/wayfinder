@@ -91,7 +91,8 @@ fn create_older_analyzer_index(dir: &std::path::Path, toml: &str, tokenizer: &st
     let wf_schema = schema::load(&schema_path).expect("legacy schema loads");
     let schema_json = serde_json::to_string(&wf_schema.tantivy_schema)
         .expect("serialize current Tantivy schema")
-        .replace("wayfinder_text_en_v2", tokenizer);
+        .replace("wayfinder_text_en_v3", tokenizer)
+        .replace("wayfinder_dynamic_text_v4", tokenizer);
     let schema_json = if tokenizer == "en_stem" {
         schema_json.replace("wayfinder_text_en_v1", tokenizer)
     } else {
@@ -283,7 +284,7 @@ stored = true
 }
 
 #[test]
-fn v1_analyzed_dynamic_contract_is_safely_upgraded() {
+fn v1_analyzed_dynamic_contract_requires_reindex_after_accent_folding() {
     let dynamic_text = r#"
 [core]
 name = "dynamic-v1"
@@ -306,12 +307,11 @@ stored = true
     let marker = dir.path().join("data/wayfinder-analyzer-contract");
     std::fs::write(&marker, "text_en_stopwords_v1").expect("write v1 analyzer contract");
 
-    let _app = common::app_with_schema(dir.path(), dynamic_text)
-        .expect("v1 already uses the dynamic catch-all's still-current Snowball analyzer");
-    assert_eq!(
-        std::fs::read_to_string(marker).expect("read upgraded analyzer contract"),
-        schema::ANALYZER_CONTRACT,
-        "normal v1 dynamic state must upgrade to the current contract"
+    let err = common::app_with_schema(dir.path(), dynamic_text)
+        .expect_err("a pre-folding dynamic catch-all must require reindexing");
+    assert!(
+        format!("{err:#}").to_lowercase().contains("reindex"),
+        "dynamic folding refusal must require reindexing, got: {err:#}"
     );
 }
 
@@ -464,11 +464,11 @@ stored = true
     let current = schema::load(&schema_path).expect("raw-only dynamic schema loads");
     let legacy_schema_json = serde_json::to_string(&current.tantivy_schema)
         .expect("serialize current Tantivy schema")
-        .replace("wayfinder_text_en_v1", "en_stem");
+        .replace("wayfinder_dynamic_text_v4", "en_stem");
     assert!(
         legacy_schema_json.contains("_dynamic_text")
             && legacy_schema_json.contains("en_stem")
-            && !legacy_schema_json.contains("wayfinder_text_en_v1"),
+            && !legacy_schema_json.contains("wayfinder_dynamic_text_v4"),
         "test setup: materialize the old `_dynamic_text` tokenizer identity"
     );
     let materialize_legacy = |root: &std::path::Path| {
@@ -831,21 +831,25 @@ fn shipped_chains_analyze_identically_on_both_managers() {
     // per-language `text_<code>` presets (via `builtin_type_names`), and the
     // per-dictionary suggest chains.
     let mut identities = vec![
+        "default".to_string(),
+        "wayfinder_text_general_v3".to_string(),
         "wayfinder_text_en_v1".to_string(),
         "wayfinder_text_en_v2".to_string(),
+        "wayfinder_text_en_v3".to_string(),
+        "wayfinder_dynamic_text_v4".to_string(),
         "wayfinder_boost_term_payload_v1".to_string(),
         "wayfinder_boost_term_payload_raw_v1".to_string(),
     ];
-    // `text_<code>` is both the type name and the registered identity for every
-    // language except English: `text_en` and `text_general` resolve to the two
-    // `wayfinder_text_en_v*` identities above instead, so they are type names
-    // rather than identities and are excluded here (they are covered as type
-    // names by `builtin_text_presets_query_analyzer_is_unaffected`).
-    identities.extend(
-        schema::builtin_type_names().into_iter().filter(|name| {
-            name.starts_with("text_") && name != "text_en" && name != "text_general"
-        }),
-    );
+    // Each non-English preset has both its old unversioned identity and its
+    // folded v3 identity registered. The old name is retained only to diagnose
+    // a persisted pre-folding schema; new fields record the versioned one.
+    identities.extend(schema::builtin_type_names().into_iter().flat_map(|name| {
+        if name.starts_with("text_") && name != "text_en" && name != "text_general" {
+            vec![name.clone(), format!("wayfinder_{name}_v3")]
+        } else {
+            Vec::new()
+        }
+    }));
     // `dictionary_tokenizer` maps every language code plus the fallback onto its
     // suggest identity, so this covers all of them without re-listing the table.
     identities.extend(
@@ -925,9 +929,9 @@ tokenizer = "{index_tok}"
 fn analyzer_contract_is_bumped_for_phase_2_accent_folding() {
     assert_eq!(
         schema::ANALYZER_CONTRACT,
-        "text_en_porter_compatible_v3",
-        "Phase 2 (issue #389) changes indexed text_en terms through accent \
-         folding, so the analyzer contract must move to v3"
+        "text_presets_accent_folding_v4",
+        "Phase 2 (issue #389) changes indexed dynamic text terms through accent \
+         folding, so the analyzer contract must move to v4"
     );
 }
 
@@ -951,7 +955,14 @@ tokenizer = "simple"
 
 #[test]
 fn custom_field_type_cannot_use_an_internal_text_en_tokenizer_identity() {
-    for name in ["wayfinder_text_en_v1", "wayfinder_text_en_v2"] {
+    for name in [
+        "default",
+        "wayfinder_text_general_v3",
+        "wayfinder_text_en_v1",
+        "wayfinder_text_en_v2",
+        "wayfinder_text_en_v3",
+        "wayfinder_dynamic_text_v4",
+    ] {
         let toml = format!(
             r#"{FULL_SCHEMA_TOML}
 [[field_types]]

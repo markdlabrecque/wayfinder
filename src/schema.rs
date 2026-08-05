@@ -126,9 +126,10 @@ pub fn builtin_type_names() -> Vec<String> {
     names
 }
 
-/// Tantivy's own `default` analyzer: simple tokenizer, long tokens dropped,
-/// lowercased, no stemming. Solr calls this shape `text_general`.
-const TEXT_GENERAL_TOKENIZER: &str = "default";
+/// Versioned `text_general` identity. `default` is kept registered as the
+/// pre-folding identity so an old Tantivy schema never receives new terms.
+const TEXT_GENERAL_TOKENIZER: &str = "wayfinder_text_general_v3";
+const TEXT_GENERAL_TOKENIZER_LEGACY: &str = "default";
 /// Wayfinder's versioned Solr-compatible English analyzer: simple tokenizer,
 /// long-token removal, lowercase, English stopword removal, then stemming.
 /// It intentionally does not override Tantivy's `en_stem`, which remains
@@ -137,10 +138,19 @@ const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v3";
 /// The Phase-2 predecessor remains registered only so a legacy Tantivy schema
 /// can be diagnosed safely; no newly-built field records this identity.
 const TEXT_EN_TOKENIZER_V2: &str = "wayfinder_text_en_v2";
-/// The shared dynamic-text catch-all retains the pre-v2 Snowball analyzer.
-/// Drupal Search API's captured configset uses Snowball and preserves singular
-/// `day`; all analyzed dynamic rules share this one tokenizer in Tantivy.
-const DYNAMIC_TEXT_TOKENIZER: &str = "wayfinder_text_en_v1";
+/// The versioned dynamic-text catch-all folds accents while retaining its
+/// captured Snowball behavior. The v1 identity remains registered below for
+/// safe diagnosis of indexes created before dynamic folding.
+const DYNAMIC_TEXT_TOKENIZER: &str = "wayfinder_dynamic_text_v4";
+const DYNAMIC_TEXT_TOKENIZER_V1: &str = "wayfinder_text_en_v1";
+
+fn language_tokenizer(code: &str) -> String {
+    format!("wayfinder_text_{code}_v3")
+}
+
+fn legacy_language_tokenizer(code: &str) -> String {
+    format!("text_{code}")
+}
 
 /// `boost_term_payload`'s **indexing** analyzer: the module's front half
 /// (whitespace, length min=2/max=100, lowercase, remove-duplicates) followed by
@@ -183,18 +193,22 @@ const SUGGEST_MAX_TOKEN_LEN: usize = 100;
 /// no stemmer for.
 const SUGGEST_UNDEFINED_DICTIONARY: &str = "und";
 
-/// The on-disk analyzer contract for indexes built with Wayfinder's
-/// Porter-compatible English preset. This is separate from Tantivy's schema:
-/// it lets startup identify pre-contract indexes before their old tokenizer
-/// identity can be adopted.
-pub const ANALYZER_CONTRACT: &str = "text_en_porter_compatible_v3";
+/// The on-disk analyzer contract for the folded built-in presets and dynamic
+/// catch-all. This is separate from Tantivy's schema: it lets startup identify
+/// old term formats before their tokenizer identity can be adopted.
+pub const ANALYZER_CONTRACT: &str = "text_presets_accent_folding_v4";
 /// A safely adopted index whose unused `_dynamic_text` catch-all still has an
-/// older tokenizer identity. It is not full v3 certification: a later rule
+/// older tokenizer identity. It is not full v4 certification: a later rule
 /// that starts writing analyzed dynamic values must reindex.
 pub const ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT: &str =
+    "text_presets_accent_folding_v4_legacy_dynamic_text";
+/// The first folding contract changed static built-in text terms but left the
+/// dynamic catch-all unchanged. Its marker is recognized so static-only and
+/// raw-only indexes can upgrade safely while analyzed dynamic indexes reindex.
+pub const ANALYZER_CONTRACT_V3: &str = "text_en_porter_compatible_v3";
+pub const ANALYZER_CONTRACT_V3_LEGACY_DYNAMIC_TEXT: &str =
     "text_en_porter_compatible_v3_legacy_dynamic_text";
-/// Phase 2 changes text_en terms, so a v2 marker needs reindexing whenever a
-/// static text_en field could contain those pre-folding terms.
+/// The pre-folding Porter-compatible contract.
 pub const ANALYZER_CONTRACT_V2: &str = "text_en_porter_compatible_v2";
 pub const ANALYZER_CONTRACT_V2_LEGACY_DYNAMIC_TEXT: &str =
     "text_en_porter_compatible_v2_legacy_dynamic_text";
@@ -691,7 +705,7 @@ fn resolve_type(type_: &str, custom: &[FieldTypeConfig]) -> Result<ResolvedType>
             });
             match code {
                 Some(code) => ResolvedType::Text {
-                    tokenizer: format!("text_{code}"),
+                    tokenizer: language_tokenizer(code),
                 },
                 None => bail!("unsupported field type `{other}`"),
             }
@@ -1360,14 +1374,25 @@ fn build_tokenizers(
     // have a single analyzer, and Phase 1 is deliberately behaviour-free, so the
     // query manager must be analyzer-for-analyzer identical to the index one for
     // everything Wayfinder ships (pinned by
-    // `shipped_chains_analyze_identically_on_both_managers`). Phases 2 and 4
-    // replace the `text_en` / `text_und` / suggest calls here with two chains.
+    // `shipped_chains_analyze_identically_on_both_managers`). Phase 2 added
+    // folding to the built-in and suggest chains while preserving that
+    // same-analyzer invariant.
     let register_both = |name: &str, analyzer: TextAnalyzer| {
         manager.register(name, analyzer.clone());
         query_manager.register(name, analyzer);
     };
     let english_stopwords =
         || StopWordFilter::new(Language::English).expect("Tantivy ships an English stopword list");
+    // Keep every pre-folding identity registered with its original chain. An
+    // old schema can therefore be opened only long enough for migration
+    // diagnosis; no new field is allowed to record one of these names.
+    register_both(
+        TEXT_GENERAL_TOKENIZER_LEGACY,
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(RemoveLongFilter::limit(40))
+            .filter(LowerCaser)
+            .build(),
+    );
     register_both(
         TEXT_GENERAL_TOKENIZER,
         TextAnalyzer::builder(SimpleTokenizer::default())
@@ -1377,8 +1402,18 @@ fn build_tokenizers(
             .build(),
     );
     register_both(
+        DYNAMIC_TEXT_TOKENIZER_V1,
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(RemoveLongFilter::limit(40))
+            .filter(LowerCaser)
+            .filter(english_stopwords())
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    register_both(
         DYNAMIC_TEXT_TOKENIZER,
         TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter_dynamic(AccentFoldingFilter)
             .filter(RemoveLongFilter::limit(40))
             .filter(LowerCaser)
             .filter(english_stopwords())
@@ -1413,7 +1448,15 @@ fn build_tokenizers(
             continue; // registered above under Wayfinder's versioned identity.
         }
         register_both(
-            &format!("text_{code}"),
+            &legacy_language_tokenizer(code),
+            TextAnalyzer::builder(SimpleTokenizer::default())
+                .filter(RemoveLongFilter::limit(40))
+                .filter(LowerCaser)
+                .filter(Stemmer::new(*lang))
+                .build(),
+        );
+        register_both(
+            &language_tokenizer(code),
             TextAnalyzer::builder(SimpleTokenizer::default())
                 .filter_dynamic(AccentFoldingFilter)
                 .filter(RemoveLongFilter::limit(40))
@@ -1630,9 +1673,12 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     let reserved_type_names: Vec<String> = builtin_type_names()
         .into_iter()
         .chain([
+            TEXT_GENERAL_TOKENIZER_LEGACY.to_string(),
+            TEXT_GENERAL_TOKENIZER.to_string(),
             TEXT_EN_TOKENIZER.to_string(),
             TEXT_EN_TOKENIZER_V2.to_string(),
             DYNAMIC_TEXT_TOKENIZER.to_string(),
+            DYNAMIC_TEXT_TOKENIZER_V1.to_string(),
             BOOST_TERM_PAYLOAD_TOKENIZER.to_string(),
             BOOST_TERM_PAYLOAD_VERBATIM_TOKENIZER.to_string(),
             suggest_tokenizer(SUGGEST_UNDEFINED_DICTIONARY),
@@ -1884,8 +1930,8 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     for name in catch_all_fields(&parsed.dynamic_fields) {
         // ponytail: Tantivy gives this shared JSON catch-all one analyzer for
         // every analyzed dynamic rule. Keep the captured Search API configset's
-        // Snowball behavior (`day` stays `day`) here; static built-in `text_en`
-        // uses the v2 Porter-compatible analyzer independently.
+        // Snowball behavior (`day` stays `day`) here while folding accents;
+        // static built-in `text_en` uses its Porter-compatible analyzer independently.
         let tokenizer = if *name == DYNAMIC_TEXT_FIELD {
             DYNAMIC_TEXT_TOKENIZER
         } else {

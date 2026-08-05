@@ -807,12 +807,10 @@ impl CoreIndex {
             (false, false, false, false)
         };
 
-        // Analyzer contract v2 changed static built-in `text_en` from the v1
-        // Snowball pipeline to the Porter-compatible behavior; v3 then folds
-        // its indexed accents. The shared `_dynamic_text` catch-all deliberately
-        // keeps v1 Snowball semantics, so static built-in text presets need the
-        // v3 reindex gate. Pre-v1/legacy-dynamic markers still require reindexing
-        // before an analyzed dynamic rule can use their older `en_stem` catch-all.
+        // The v3 folding release changed every static built-in text preset;
+        // v4 extends folding to the shared `_dynamic_text` catch-all. A marker
+        // or a tokenizer identity from an earlier contract must never be
+        // adopted for any path that can contain those old terms.
         let analyzer_contract = schema::analyzer_contract_path(data_dir);
         let uses_static_text_en = wf_schema.uses_static_text_en() || previous_static_text_en;
         let uses_static_accent_folded_text =
@@ -820,6 +818,7 @@ impl CoreIndex {
         let uses_analyzed_dynamic =
             wf_schema.uses_analyzed_dynamic_path() || previous_analyzed_dynamic;
         let uses_pre_v1_changed_path = uses_static_text_en || uses_analyzed_dynamic;
+        let uses_pre_v4_changed_path = uses_static_accent_folded_text || uses_analyzed_dynamic;
         let marker_to_write = if analyzer_contract.exists() {
             let persisted = std::fs::read_to_string(&analyzer_contract).with_context(|| {
                 format!(
@@ -836,36 +835,57 @@ impl CoreIndex {
                     );
                 }
                 schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT => None,
-                schema::ANALYZER_CONTRACT_V2 if uses_static_accent_folded_text => {
+                schema::ANALYZER_CONTRACT_V3 if uses_analyzed_dynamic => {
                     bail!(
-                        "the index in {} uses the v2 text_en analyzer contract; reindex into a fresh data directory for accent folding",
+                        "the index in {} uses the v3 dynamic-text analyzer contract; reindex into a fresh data directory for accent folding",
                         data_dir.display()
                     );
                 }
-                schema::ANALYZER_CONTRACT_V2 => Some(schema::ANALYZER_CONTRACT),
-                schema::ANALYZER_CONTRACT_V2_LEGACY_DYNAMIC_TEXT
-                    if uses_static_accent_folded_text =>
-                {
+                schema::ANALYZER_CONTRACT_V3 if previous_has_dynamic_fields => {
+                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
+                }
+                schema::ANALYZER_CONTRACT_V3 => Some(schema::ANALYZER_CONTRACT),
+                schema::ANALYZER_CONTRACT_V3_LEGACY_DYNAMIC_TEXT if uses_analyzed_dynamic => {
                     bail!(
-                        "the index in {} uses the v2 text_en analyzer contract; reindex into a fresh data directory for accent folding",
+                        "the index in {} uses the v3 dynamic-text analyzer contract; reindex into a fresh data directory for accent folding",
+                        data_dir.display()
+                    );
+                }
+                schema::ANALYZER_CONTRACT_V3_LEGACY_DYNAMIC_TEXT => {
+                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
+                }
+                schema::ANALYZER_CONTRACT_V2 if uses_pre_v4_changed_path => {
+                    bail!(
+                        "the index in {} uses a pre-folding text_en/text preset analyzer contract; reindex into a fresh data directory for accent folding",
+                        data_dir.display()
+                    );
+                }
+                schema::ANALYZER_CONTRACT_V2 if previous_has_dynamic_fields => {
+                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
+                }
+                schema::ANALYZER_CONTRACT_V2 => Some(schema::ANALYZER_CONTRACT),
+                schema::ANALYZER_CONTRACT_V2_LEGACY_DYNAMIC_TEXT if uses_pre_v4_changed_path => {
+                    bail!(
+                        "the index in {} uses a pre-folding text_en/text preset analyzer contract; reindex into a fresh data directory for accent folding",
                         data_dir.display()
                     );
                 }
                 schema::ANALYZER_CONTRACT_V2_LEGACY_DYNAMIC_TEXT => {
                     Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
                 }
-                // A normal v1 marker certifies the dynamic catch-all's still-
-                // current Snowball pipeline. Only static text_en changed in v2.
-                schema::ANALYZER_CONTRACT_V1 if uses_static_text_en => {
+                schema::ANALYZER_CONTRACT_V1 if uses_pre_v4_changed_path => {
                     bail!(
-                        "the index in {} uses the v1 text_en analyzer contract; reindex into a fresh data directory for the Porter-compatible text_en analyzer",
+                        "the index in {} uses a pre-folding text_en/text preset analyzer contract; reindex into a fresh data directory for accent folding",
                         data_dir.display()
                     );
                 }
+                schema::ANALYZER_CONTRACT_V1 if previous_has_dynamic_fields => {
+                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
+                }
                 schema::ANALYZER_CONTRACT_V1 => Some(schema::ANALYZER_CONTRACT),
-                schema::ANALYZER_CONTRACT_V1_LEGACY_DYNAMIC_TEXT if uses_pre_v1_changed_path => {
+                schema::ANALYZER_CONTRACT_V1_LEGACY_DYNAMIC_TEXT if uses_pre_v4_changed_path => {
                     bail!(
-                        "the index in {} predates the current text_en/_dynamic_text analyzer contract; reindex into a fresh data directory",
+                        "the index in {} predates the current text_en/text preset/dynamic-text analyzer contract; reindex into a fresh data directory",
                         data_dir.display()
                     );
                 }
@@ -879,9 +899,9 @@ impl CoreIndex {
                     );
                 }
             }
-        } else if has_snapshot && uses_pre_v1_changed_path {
+        } else if has_snapshot && uses_pre_v4_changed_path {
             bail!(
-                "the index in {} predates the current text_en/_dynamic_text analyzer contract; reindex into a fresh data directory",
+                "the index in {} predates the current text_en/text preset/dynamic-text analyzer contract; reindex into a fresh data directory",
                 data_dir.display()
             );
         } else if has_snapshot && previous_has_dynamic_fields {

@@ -47,7 +47,7 @@ const NON_ENGLISH_LANGUAGE_CODES: &[&str] = &[
 /// `float`/`double`, `date`, `location` (#331)/`location_rpt` (#334),
 /// `boost_term_payload` (#340), and `date_range` (#341). `text_en` is listed
 /// separately below since it is the one `text_*` preset with its own
-/// dedicated tokenizer identity (`wayfinder_text_en_v2`), not a `LANGUAGES`-
+/// dedicated tokenizer identity (`wayfinder_text_en_v3`), not a `LANGUAGES`-
 /// table lookup.
 const NON_LANGUAGE_BUILTIN_TYPES: &[&str] = &[
     "string",
