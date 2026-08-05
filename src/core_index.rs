@@ -850,14 +850,13 @@ impl CoreIndex {
                 schema::ANALYZER_CONTRACT_V2 => Some(schema::ANALYZER_CONTRACT),
                 // A v1 marker certified the dynamic catch-all's Snowball
                 // pipeline, which v2 left alone -- but v3 re-cases and
-                // length-bounds it, so an index with an analyzed dynamic rule is
-                // no longer adoptable either. Its terms are stale, and its
-                // persisted Tantivy schema still names the retired
-                // `wayfinder_text_en_v1` catch-all identity that nothing
-                // registers any more (#388).
+                // length-bounds it too, so an index with an analyzed dynamic
+                // rule is no longer adoptable either: its terms are stale on
+                // both counts. This branch spans two contract steps, so the
+                // message names both reasons.
                 schema::ANALYZER_CONTRACT_V1 if uses_changed_analyzed_path => {
                     bail!(
-                        "the index in {} uses the v1 text_en analyzer contract; reindex into a fresh data directory for the Porter-compatible text_en analyzer",
+                        "the index in {} uses the v1 text_en analyzer contract; reindex into a fresh data directory for the Porter-compatible text_en analyzer and the length-bounded, simple-case-folded text_en/text_general/_dynamic_text analyzers",
                         data_dir.display()
                     );
                 }

@@ -144,11 +144,23 @@ const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v3";
 /// #388 gave it its own name: it carried static `text_en`'s v1 identity while
 /// the two chains happened to coincide, and they no longer do.
 const DYNAMIC_TEXT_TOKENIZER: &str = "wayfinder_dynamic_text_v3";
-/// Retired `text_en` tokenizer identities. Nothing registers them any more --
-/// they exist so the reservation list below still refuses a custom
-/// `[[field_types]]` entry that would adopt one, which on an older index is a
-/// name that really is on disk.
-const RETIRED_TEXT_TOKENIZERS: [&str; 2] = ["wayfinder_text_en_v1", "wayfinder_text_en_v2"];
+/// The pre-#388 `text_en` identities. Both are still *registered*, as aliases
+/// of the chain that replaced each (see `build_tokenizers`), because a
+/// tokenizer name lives in the persisted Tantivy schema: an index that predates
+/// #388 and is legitimately adopted without a reindex still names one of these
+/// on its `_dynamic_text` catch-all, and a name the manager cannot resolve
+/// turns every later write into `Error getting tokenizer for field:
+/// _dynamic_text`. They also stay in the reserved list below, so a custom
+/// `[[field_types]]` entry still cannot redefine one.
+///
+/// `wayfinder_text_en_v1` was *both* the v1 static `text_en` identity and the
+/// `_dynamic_text` catch-all identity through v2; `wayfinder_text_en_v2` was
+/// the v2 static `text_en` identity.
+const TEXT_EN_TOKENIZER_V1: &str = "wayfinder_text_en_v1";
+const TEXT_EN_TOKENIZER_V2: &str = "wayfinder_text_en_v2";
+/// Built from the two consts above so the reservation list cannot drift from
+/// the set that is actually registered.
+const RETIRED_TEXT_TOKENIZERS: [&str; 2] = [TEXT_EN_TOKENIZER_V1, TEXT_EN_TOKENIZER_V2];
 
 /// `LengthFilterFactory min/max` on every text field type in the shipped
 /// `search_api_solr` configset (`schema_extra_types.xml`), applied on both the
@@ -1256,7 +1268,7 @@ fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager>
     // ponytail: the length filter they already had is `RemoveLongFilter`, whose
     // 40-byte cut is a divergence from `_default` (which drops nothing at any
     // length) in its own right. Pre-existing, unpinned by any fixture, and
-    // deliberately out of #388's scope -- filed as a follow-up.
+    // deliberately out of #388's scope -- filed as #393.
     //
     // `_dynamic_text`, by contrast, drops `RemoveLongFilter` entirely: that
     // filter is byte-based (`token.text.len() < limit`) while
@@ -1267,28 +1279,43 @@ fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager>
     // Solr orders the chain `Stop -> WDGF -> Length -> LowerCase -> Snowball`;
     // running `Length` before the stopword filter cannot change the surviving
     // set, because both filters only ever remove tokens.
-    manager.register(
-        DYNAMIC_TEXT_TOKENIZER,
-        TextAnalyzer::builder(SimpleTokenizer::default())
-            .filter_dynamic(LengthFilter {
-                min: TEXT_MIN_TOKEN_LEN,
-                max: TEXT_MAX_TOKEN_LEN,
-            })
-            .filter_dynamic(SimpleLowerCaseFilter)
-            .filter_dynamic(english_stopwords())
-            .filter_dynamic(Stemmer::new(Language::English))
-            .build(),
-    );
-    manager.register(
-        TEXT_EN_TOKENIZER,
-        TextAnalyzer::builder(SimpleTokenizer::default())
-            .filter_dynamic(RemoveLongFilter::limit(40))
-            .filter_dynamic(SimpleLowerCaseFilter)
-            .filter_dynamic(english_stopwords())
-            .filter_dynamic(PorterTerminalYFilter)
-            .filter_dynamic(Stemmer::new(Language::English))
-            .build(),
-    );
+    let dynamic_text = TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter_dynamic(LengthFilter {
+            min: TEXT_MIN_TOKEN_LEN,
+            max: TEXT_MAX_TOKEN_LEN,
+        })
+        .filter_dynamic(SimpleLowerCaseFilter)
+        .filter_dynamic(english_stopwords())
+        .filter_dynamic(Stemmer::new(Language::English))
+        .build();
+    let text_en = TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter_dynamic(RemoveLongFilter::limit(40))
+        .filter_dynamic(SimpleLowerCaseFilter)
+        .filter_dynamic(english_stopwords())
+        .filter_dynamic(PorterTerminalYFilter)
+        .filter_dynamic(Stemmer::new(Language::English))
+        .build();
+    manager.register(DYNAMIC_TEXT_TOKENIZER, dynamic_text.clone());
+    manager.register(TEXT_EN_TOKENIZER, text_en.clone());
+    // The pre-#388 identities stay resolvable, aliased to the chain that
+    // replaced each. A tokenizer name is part of the *persisted Tantivy
+    // schema*, and `catch_all_fields` gives `_dynamic_text` to any schema with
+    // a dynamic rule at all -- including the all-raw (`string`/`int`) schemas
+    // the v1/v2 contract branches legitimately adopt without a reindex. Such an
+    // index still names `wayfinder_text_en_v1` on that field, and leaving the
+    // name unregistered does not fail the open: it fails every subsequent
+    // write, with `Error getting tokenizer for field: _dynamic_text`, on an
+    // index the marker now claims is at the current contract.
+    //
+    // The aliases are inert, not a second semantics: reaching one of those
+    // branches requires `uses_changed_analyzed_path` to be false, which is
+    // computed over the persisted snapshot as well as the incoming schema, so
+    // the catch-all provably holds nothing. Pointing them at the *current*
+    // chains rather than reconstructing the old ones is deliberate -- if such a
+    // field ever did receive a value, it would be analyzed the way the v3
+    // marker on disk says it is.
+    manager.register(TEXT_EN_TOKENIZER_V1, dynamic_text);
+    manager.register(TEXT_EN_TOKENIZER_V2, text_en);
     // `text_general` is `_default`'s stemmer-free analyzed text type, so it gets
     // no stopword or stemmer filter. Pre-#388 it was Tantivy's own `default`
     // tokenizer, whose chain is exactly this one with `LowerCaser` in place of
