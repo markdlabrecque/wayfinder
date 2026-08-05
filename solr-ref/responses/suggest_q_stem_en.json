@@ -1,0 +1,12 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":3},
+  "suggest":{
+    "en":{
+      "study":{
+        "numFound":1,
+        "suggestions":[{
+            "term":"case <b>studi</b>es show progress",
+            "weight":0,
+            "payload":""}]}}}}

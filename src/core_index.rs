@@ -34,7 +34,7 @@ use tantivy::schema::{Field, IndexRecordOption, OwnedValue};
 use tantivy::snippet::SnippetGenerator;
 use tantivy::time::OffsetDateTime;
 use tantivy::time::format_description::well_known::Rfc3339;
-use tantivy::tokenizer::TokenStream;
+use tantivy::tokenizer::{TextAnalyzer, TokenStream};
 use tantivy::{
     DateTime, DocAddress, Index, IndexReader, IndexWriter, ReloadPolicy, Score, TantivyDocument,
     Term,
@@ -4108,6 +4108,175 @@ impl CoreIndex {
         dir_size_bytes(&self.data_dir)
     }
 
+    /// One `suggest.q` lookup hit, in the wire shape Solr's `solr.SuggestComponent`
+    /// emits per suggestion (issue #384): the (optionally highlighted) phrase,
+    /// its `weight` (always `0` -- the shipped config sets no `weightField`, so
+    /// `DocumentDictionaryFactory` defaults every phrase to `0`), and its
+    /// `payload` (always `""` -- no `payloadField` is configured either).
+    ///
+    /// ponytail: this is a brute-force scan, not a suggester index. Solr builds
+    /// a side FST (`AnalyzingInfixLookupFactory` over
+    /// `DocumentDictionaryFactory`); Wayfinder walks every live doc in every
+    /// segment, re-analysing each `twm_suggest` phrase per request, and stops
+    /// early only once `count` hits accumulate. Two named ceilings:
+    ///
+    /// 1. **Cost is O(live docs x phrases per doc) per request**, with a stored-
+    ///    doc fetch each. Autocomplete is the one read path that fires on every
+    ///    keystroke, so this is the ceiling that will actually bite; it is
+    ///    acceptable now because the alternative is a second persisted index
+    ///    with its own build/invalidate lifecycle (`suggest.buildAll` is inert
+    ///    per #352), which is a much larger change than serving the wire shape.
+    /// 2. **Result order is `(segment_ord, doc_id)`, which is not a stable
+    ///    global order.** It happens to match the captured fixtures because the
+    ///    capture corpus is four docs indexed in order into one segment. After a
+    ///    merge, or across segments, the same corpus can legitimately come back
+    ///    in a different order than Solr's (which ranks by the suggester's
+    ///    weight, then by its own tie-break). Nothing pins cross-segment order,
+    ///    so do not read the fixtures as evidence that it is right.
+    ///
+    /// Revisit both together: they are the same change (build a real suggester
+    /// structure with a defined ordering), not two independent fixes.
+    pub fn suggest_lookup(
+        &self,
+        dictionary: &str,
+        query: &str,
+        cfq: Option<&str>,
+        count: usize,
+        highlight: bool,
+    ) -> Result<Vec<SuggestHit>> {
+        let tokenizer_name = schema::dictionary_tokenizer(dictionary);
+        let Some(mut tokenizer) = self.wf_schema.tokenizers.get(&tokenizer_name) else {
+            // No analyzer registered for this dictionary -> nothing to match.
+            // Should not happen: `dictionary_tokenizer` always names one that
+            // `build_tokenizers` registers, but the index is the trust boundary.
+            return Ok(Vec::new());
+        };
+        // Analyze the query into stems. The analyzer chain removes stopwords
+        // (`text_en` carries an English `StopWordFilter`), so a stopword-only
+        // query yields no tokens and matches nothing -- matching the captured
+        // `the`-as-`suggest.q` behaviour (zero suggestions) exactly.
+        // The query's token stems, plus one bit derived from its offsets:
+        // whether the analyzed stream reaches the END of the query string.
+        // `AnalyzingInfixSuggester.lookup` makes the last token a `PrefixQuery`
+        // only when `maxEndOffset == offsetAtt.endOffset()` after `ts.end()` --
+        // i.e. when nothing was discarded after the last surviving token. A
+        // trailing separator (the ordinary "user typed a space" case) makes it a
+        // plain `TermQuery` instead, so `suggest.q=qui ` matches nothing where
+        // `suggest.q=qui` matches three (`suggest_q_trailing_space_en` vs
+        // `suggest_q_prefix_en`).
+        let qtokens = analyzer_tokens(&mut tokenizer, query);
+        let Some((_, _, last_end)) = qtokens.last() else {
+            return Ok(Vec::new());
+        };
+        // Tokens come out in order, so the last one's end IS `maxEndOffset`.
+        // ponytail: a query whose trailing text is a *stopword* rather than
+        // whitespace (`suggest.q=qui the`) follows from the same rule -- the
+        // stopword is discarded, so the stream no longer reaches the end and the
+        // final token becomes exact. That is implied, not captured: no fixture
+        // pins it.
+        let last_is_prefix = *last_end == query.len();
+        let query_tokens: Vec<String> = qtokens.into_iter().map(|(stem, _, _)| stem).collect();
+        let cfq = parse_cfq(cfq);
+
+        // No `twm_suggest` field at all -> the schema carries no suggestion
+        // phrases, so every lookup is empty (an empty `suggest` block is still
+        // a valid, fixture-shaped answer).
+        let has_phrases = self.wf_schema.field(PHRASE_FIELD).is_some()
+            || self.dynamic_stored_field_exists(PHRASE_FIELD);
+        if !has_phrases {
+            return Ok(Vec::new());
+        }
+
+        let searcher = self.reader.searcher();
+        let mut hits: Vec<SuggestHit> = Vec::new();
+        for (seg_ord, segment_reader) in searcher.segment_readers().iter().enumerate() {
+            for doc_id in 0..segment_reader.max_doc() {
+                if segment_reader.is_deleted(doc_id) {
+                    continue;
+                }
+                let addr = DocAddress {
+                    segment_ord: seg_ord as u32,
+                    doc_id,
+                };
+                let Ok(doc) = searcher.doc(addr) else {
+                    continue;
+                };
+                let contexts = self.stored_string_values(&doc, CONTEXT_FIELD);
+                // `cfq` is a per-document gate: a phrase inherits its source
+                // document's `sm_context_tags`, so the whole document is in or
+                // out before any of its phrases are considered.
+                if !cfq_passes(&contexts, &cfq) {
+                    continue;
+                }
+                for phrase in self.stored_string_values(&doc, PHRASE_FIELD) {
+                    if let Some(term) = suggest_match(
+                        &mut tokenizer,
+                        &phrase,
+                        &query_tokens,
+                        last_is_prefix,
+                        highlight,
+                    ) {
+                        hits.push(SuggestHit {
+                            term,
+                            weight: 0,
+                            payload: String::new(),
+                        });
+                        if hits.len() >= count {
+                            return Ok(hits);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(hits)
+    }
+
+    /// Every stored string value of `name` on `doc`, whether `name` is a
+    /// declared static stored field or a stored dynamic field living in the
+    /// `_dynamic` / `_dynamic_text` JSON catch-alls -- the same two loops
+    /// `render_doc` walks. The suggest read path uses this to gather a
+    /// document's `twm_suggest` phrases and `sm_context_tags` contexts (issue
+    /// #384).
+    fn stored_string_values(&self, doc: &TantivyDocument, name: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(field) = self.wf_schema.field(name) {
+            for v in doc.get_all(field) {
+                if let Some(s) = v.as_str() {
+                    out.push(s.to_string());
+                }
+            }
+            if !out.is_empty() {
+                return out;
+            }
+        }
+        for container in [schema::DYNAMIC_FIELD, schema::DYNAMIC_TEXT_FIELD] {
+            let Some(field) = self.wf_schema.field(container) else {
+                continue;
+            };
+            for value in doc.get_all(field) {
+                let OwnedValue::Object(entries) = OwnedValue::from(value) else {
+                    continue;
+                };
+                for (key, v) in entries {
+                    if key == name {
+                        collect_owned_strings(&v, &mut out);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// True iff a stored dynamic field named `name` exists in the schema (any
+    /// matching `[[dynamic_fields]]` rule that is `stored`). Used to short-circuit
+    /// the suggest path when neither a static nor a dynamic `twm_suggest` is
+    /// present.
+    fn dynamic_stored_field_exists(&self, name: &str) -> bool {
+        self.wf_schema
+            .match_dynamic(name)
+            .is_some_and(|rule| rule.stored)
+    }
+
     /// Every term in a **string** field's term dictionary, with how many of
     /// `query`'s matches carry it — Solr's `facet.field`.
     ///
@@ -4682,6 +4851,322 @@ impl FacetOrderKey {
     }
 }
 
+/// The field the shipped `solr.SuggestComponent` reads suggestion phrases from
+/// (`field=twm_suggest` in `solrconfig_extra.xml`).
+const PHRASE_FIELD: &str = "twm_suggest";
+/// The suggester's `contextField` (`sm_context_tags`): the stored per-document
+/// tags `suggest.cfq` filters against.
+const CONTEXT_FIELD: &str = "sm_context_tags";
+
+/// One `suggest.q` lookup hit, in the wire shape Solr's `solr.SuggestComponent`
+/// emits per suggestion (issue #384).
+pub struct SuggestHit {
+    /// The (optionally `<b>`-highlighted) suggestion phrase.
+    pub term: String,
+    /// Always `0`: the shipped config sets no `weightField`, so
+    /// `DocumentDictionaryFactory` defaults every phrase to weight 0.
+    pub weight: i64,
+    /// Always `""`: no `payloadField` is configured.
+    pub payload: String,
+}
+
+/// `(stem, offset_from, offset_to)` for one analyzed token. `offset_*` are byte
+/// offsets into the ORIGINAL text -- Tantivy's stemmer preserves them, which is
+/// what lets the suggest highlight wrap the right span of the verbatim phrase.
+///
+/// The token's own `stem.len()` is NOT commensurable with those offsets: filters
+/// change a token's byte length (in both directions -- see `suggest_match`), so
+/// `offset_from + stem.len()` is not a position in the original text and is not
+/// even guaranteed to be a char boundary.
+type Tok = (String, usize, usize);
+
+/// Analyzes `text` with `tokenizer` into its surviving (post-stopword,
+/// post-stem) tokens with their original byte offsets. Empty for a stopword-only
+/// input. Used for both the `suggest.q` query and each stored phrase.
+fn analyzer_tokens(tokenizer: &mut TextAnalyzer, text: &str) -> Vec<Tok> {
+    let mut stream = tokenizer.token_stream(text);
+    let mut out = Vec::new();
+    while stream.advance() {
+        let t = stream.token();
+        out.push((t.text.clone(), t.offset_from, t.offset_to));
+    }
+    out
+}
+
+/// `AnalyzingInfixSuggester` matching + highlighting for one phrase (issue
+/// #384). Returns the wire `term` (the phrase, highlighted when `highlight`)
+/// when the phrase matches, else `None`.
+///
+/// Matching (pinned by `suggest_q_*.json` fixtures): `AnalyzingInfixSuggester`
+/// analyzes every query token EXCEPT THE LAST as an exact term, and only the
+/// last as a prefix -- the last token is the one the user is still typing.
+/// So each non-final query token must EQUAL some phrase-token stem, and the
+/// final one need only PREFIX some phrase-token stem.
+///
+/// This is deliberately not the bag-of-token-PREFIXES rule it looks like from
+/// the single-token fixtures, which cannot tell the two apart. Two captures
+/// falsify that reading, both empty where bag-of-prefixes predicts a hit:
+/// `suggest_q_prefix_nonfinal_en` (`qui fox` -- "qui" prefixes "quick" but is
+/// not a token) and `suggest_q_overlap_en` (`qu quick`). Within that rule the
+/// match is order-independent (`suggest_q_order_swap_en`: "fox quick" hits the
+/// same two phrases as "quick fox") and allows gaps ("quick fox" hits "quick
+/// brown fox"). It is never a character-substring test ("row" misses "brown":
+/// `suggest_q_substr_miss_en`).
+///
+/// Highlighting: `AnalyzingInfixSuggester` wraps EVERY matched phrase token,
+/// not one per query token. `suggest_q_multihl_en` pins this -- `qu` against
+/// "quietly quacking quail" bolds all three (`<b>qu</b>ietly <b>qu</b>acking
+/// <b>qu</b>ail`). (`suggest_q_prefix_en` looks like a counterexample and is
+/// not: `qui` bolds only "quietly" because "quacking"/"quail" begin "qua", so
+/// `qui` is not their prefix at all.)
+///
+/// The two span rules are Lucene's `addWholeMatch` / `addPrefixMatch`, and they
+/// are NOT the same rule:
+///
+/// * An **exact** (non-final, or trailing-separator) hit bolds the WHOLE surface
+///   token -- `text.substring(startOffset, endOffset)`, verbatim, regardless of
+///   what the analyzed form's length is. `suggest_q_hl_wholetoken_en` pins it:
+///   `studies show` comes back `case <b>studies</b> <b>show</b> progress`, with
+///   the full `studies` bolded even though its stem is `studi`.
+/// * The **final prefix** token bolds `surface.substring(0, prefixToken.length())`
+///   -- the ANALYZED query token's length, in CHARACTERS, measured against the
+///   surface token; when the prefix is at least as long as the surface, Lucene
+///   falls back to the whole match. `suggest_q_stem_en` pins the truncating
+///   case (`study` -> `studi`, so `case <b>studi</b>es show progress`) and
+///   `suggest_q_hl_stemspan_en` pins both rules in one phrase
+///   (`<b>running</b> <b>river</b>s carve valleys`).
+///
+/// Characters, not bytes: token filters change a token's byte length in both
+/// directions (`Kelvin`'s U+212A folds 3 bytes to 1, `İstanbul`'s U+0130 grows
+/// 2 to 3), so adding an analyzed byte length to a surface byte offset can land
+/// mid-codepoint. `suggest_q_multibyte_short_en` (`ke` -> `<b>Ke</b>lvin`) is
+/// exactly that case, and it used to panic (a 500) rather than mis-highlight.
+fn suggest_match(
+    tokenizer: &mut TextAnalyzer,
+    phrase: &str,
+    query_tokens: &[String],
+    last_is_prefix: bool,
+    highlight: bool,
+) -> Option<String> {
+    let ptokens = analyzer_tokens(tokenizer, phrase);
+    // `query_tokens` is never empty -- `suggest_lookup` returns early on an
+    // all-stopword query -- so `split_last` always yields a final token.
+    let (last, init) = query_tokens.split_last()?;
+    // When the analyzed query did not reach the end of the query string, Lucene
+    // adds the final token to `matchedTokens` and queries it as a `TermQuery`:
+    // every token is exact and every hit highlights as a whole match.
+    let (exact, prefix): (&[String], Option<&str>) = if last_is_prefix {
+        (init, Some(last))
+    } else {
+        (query_tokens, None)
+    };
+    // Exact tokens must equal a phrase-token stem; the prefix token (when there
+    // is one) need only prefix one. Both are order-independent.
+    if exact
+        .iter()
+        .any(|qt| !ptokens.iter().any(|(ps, _, _)| ps == qt))
+    {
+        return None;
+    }
+    if let Some(prefix) = prefix
+        && !ptokens.iter().any(|(ps, _, _)| ps.starts_with(prefix))
+    {
+        return None;
+    }
+    if !highlight {
+        return Some(phrase.to_string());
+    }
+    // Walk PHRASE tokens, not query tokens: every phrase token a query token
+    // covers gets bolded, so one query token can light up several phrase
+    // tokens (`suggest_q_multihl_en`).
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (stem, off_from, off_to) in &ptokens {
+        // Lucene's own order: `matchedTokens.contains(...)` first, the prefix
+        // branch only as an `else if`.
+        //
+        // ponytail: when BOTH apply to one phrase token (`q=quick qu` -- "quick"
+        // exact and "qu" a prefix of the same token) the exact hit wins here,
+        // as it does in Lucene. No fixture pins that overlap; the discriminating
+        // queries that were captured (`suggest_q_overlap_en`,
+        // `suggest_q_prefix_nonfinal_en`) are both misses, so the case is
+        // unreachable from any pinned input.
+        let end = if exact.iter().any(|qt| qt == stem) {
+            // addWholeMatch: the entire surface token.
+            *off_to
+        } else if let Some(prefix) = prefix.filter(|p| stem.starts_with(*p)) {
+            // addPrefixMatch: `prefix.length()` CHARACTERS of the surface token,
+            // or the whole token when the surface is no longer than the prefix.
+            // `char_indices().nth(n)` yields a real char boundary or nothing, so
+            // no byte index here can ever split a code point.
+            let surface = &phrase[*off_from..*off_to];
+            match surface.char_indices().nth(prefix.chars().count()) {
+                Some((offset, _)) => off_from + offset,
+                None => *off_to,
+            }
+        } else {
+            continue;
+        };
+        spans.push((*off_from, end));
+    }
+    Some(highlight_spans(phrase, &mut spans))
+}
+
+/// Inserts `<b>`/`</b>` around each `(start, end)` byte span of `phrase`, in
+/// order, non-overlapping. Every boundary is either an analyzer offset or a
+/// `char_indices()` result (see `suggest_match`), so the slices are always on
+/// UTF-8 code point boundaries and cannot panic.
+fn highlight_spans(phrase: &str, spans: &mut Vec<(usize, usize)>) -> String {
+    spans.sort();
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    for (s, e) in spans.drain(..) {
+        if s < cursor || s >= e {
+            continue;
+        }
+        if s > cursor {
+            out.push_str(&phrase[cursor..s]);
+        }
+        out.push_str("<b>");
+        out.push_str(&phrase[s..e]);
+        out.push_str("</b>");
+        cursor = e;
+    }
+    out.push_str(&phrase[cursor..]);
+    out
+}
+
+/// A parsed `suggest.cfq`, as the Lucene BooleanQuery against the context field
+/// that Solr's SuggestComponent runs it as.
+#[derive(Debug, Default)]
+struct Cfq {
+    /// One entry per MUST clause. A `+tag` is a clause of one alternative; a
+    /// `+(a b)` paren group is a nested BooleanQuery of SHOULDs, so the clause is
+    /// satisfied by AT LEAST ONE of its alternatives.
+    must: Vec<Vec<String>>,
+    should: Vec<String>,
+    must_not: Vec<String>,
+    /// 1 when there are SHOULD clauses but no MUST, else 0 -- BooleanQuery's
+    /// `minimumNumberShouldMatch` default.
+    min_should: usize,
+}
+
+/// Parses `suggest.cfq` into [`Cfq`]: `+tag` (MUST), bare `tag` (SHOULD), `-tag`
+/// (MUST_NOT), and parenthesised groups of any of the three.
+///
+/// `Utility::buildSuggesterContextFilterQuery`
+/// (`coverage/search_api_solr_4.4.0_source/src/Utility/Utility.php:476-487`)
+/// emits only space-joined `'+' . $tag` terms -- it has no grouping syntax at
+/// all -- and its only caller
+/// (`modules/search_api_solr_autocomplete/src/Plugin/search_api_autocomplete/suggester/Suggester.php:282`)
+/// passes that straight through. So `+tag` MUST is the only form the real client
+/// can send, and it is the fixture-covered one. SHOULD, MUST_NOT and the paren
+/// group are unreachable from that client; they are implemented anyway because
+/// Solr's query parser does accept them, and a branch that answers the WRONG
+/// question is worse than no branch. `suggest_q_cfq_group` is the capture that
+/// settles the group's semantics: `+(site_alpha site_beta)` is
+/// MUST(at-least-one-of), so it matches both `site_alpha` and `site_beta` docs.
+fn parse_cfq(cfq: Option<&str>) -> Cfq {
+    let mut out = Cfq::default();
+    let Some(cfq) = cfq else {
+        return out;
+    };
+    let mut rest = cfq;
+    loop {
+        rest = rest.trim_start();
+        let mut chars = rest.chars();
+        let Some(first) = chars.next() else { break };
+        // An occur prefix binds to whatever follows it: a single term or a group.
+        let occur = match first {
+            '+' | '-' => {
+                rest = chars.as_str();
+                first
+            }
+            _ => ' ',
+        };
+        rest = rest.trim_start();
+        let terms: Vec<String> = if let Some(body) = rest.strip_prefix('(') {
+            // ponytail: no nesting and no per-member occur prefix inside a
+            // group. Nothing can emit either (see above), and no fixture pins
+            // them; an unclosed group runs to the end of the input, which is how
+            // Lucene's parser recovers from `+(a b` too.
+            let (group, tail) = match body.split_once(')') {
+                Some((group, tail)) => (group, tail),
+                None => (body, ""),
+            };
+            rest = tail;
+            group.split_whitespace().map(str::to_string).collect()
+        } else {
+            let end = rest
+                .find(|c: char| c.is_whitespace() || c == ')')
+                .unwrap_or(rest.len());
+            let (term, tail) = rest.split_at(end);
+            rest = tail;
+            if term.is_empty() {
+                // `rest` was trimmed, so an empty term means it starts with a
+                // stray `)` -- or is empty, which a dangling occur prefix (`+`
+                // at the end of the input) leaves behind. Skip the `)` rather
+                // than spin forever; stop on the dangling prefix rather than
+                // slicing an empty string (which would panic).
+                match rest.strip_prefix(')') {
+                    Some(tail) => {
+                        rest = tail;
+                        continue;
+                    }
+                    None => break,
+                }
+            }
+            vec![term.to_string()]
+        };
+        match occur {
+            // MUST of a group is satisfied by any one member; MUST of a single
+            // term is the same clause with one alternative.
+            '+' => out.must.push(terms),
+            // MUST_NOT of a group excludes a doc carrying ANY member, which is
+            // the same as one MUST_NOT clause per member.
+            '-' => out.must_not.extend(terms),
+            // A bare group is a nested SHOULD inside the outer SHOULD set, which
+            // (at `minimumNumberShouldMatch` 1) is equivalent to flattening it.
+            _ => out.should.extend(terms),
+        }
+    }
+    out.min_should = if out.must.is_empty() && !out.should.is_empty() {
+        1
+    } else {
+        0
+    };
+    out
+}
+
+/// Does a document's `sm_context_tags` satisfy the parsed `cfq` BooleanQuery?
+/// MUST: every clause satisfied by at least one of its alternatives; MUST_NOT:
+/// none present; SHOULD: at least `min_should` present. Mirrors Lucene's
+/// BooleanQuery semantics, which is what Solr's SuggestComponent runs `cfq` as
+/// against the context field.
+fn cfq_passes(contexts: &[String], cfq: &Cfq) -> bool {
+    let has = |t: &String| contexts.iter().any(|c| c == t);
+    // An EMPTY group (`+()`) leaves a clause with no alternatives, which `any`
+    // reports as unsatisfied -- matching an empty Lucene BooleanQuery, which
+    // matches no document.
+    cfq.must.iter().all(|alts| alts.iter().any(has))
+        && !cfq.must_not.iter().any(has)
+        && cfq.should.iter().filter(|t| has(t)).count() >= cfq.min_should
+}
+
+/// Collects every string held by an `OwnedValue` -- a leaf `Str` or every
+/// element of an `Array` (multi-valued dynamic fields store their values as an
+/// array). Used by `stored_string_values`'s dynamic-field path.
+fn collect_owned_strings(v: &OwnedValue, out: &mut Vec<String>) {
+    match v {
+        OwnedValue::Str(s) => out.push(s.clone()),
+        OwnedValue::Array(items) => {
+            for item in items {
+                collect_owned_strings(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Issue #34 (`fl=score`): unit-level pin for the `render_doc` contract
 /// stage 2 must implement, independent of the hermetic differential
 /// harness's fixture comparison. Solr renders each doc's BM25 score as a
@@ -4703,6 +5188,66 @@ mod tests {
         assert!(fl_pattern_matches("*_txt", "alpha_txt_beta_txt"));
         assert!(fl_pattern_matches("*a*b", "aXbYb"));
         assert!(!fl_pattern_matches("*_txt", "alpha_txt_beta_txt_suffix"));
+    }
+
+    /// `parse_cfq` is a hand-rolled scanner over an attacker-supplied query
+    /// param, so its termination and its slicing are the two things that must
+    /// not depend on the input being well-formed. Both are reachable: a bare
+    /// `+` at the end of the input leaves an empty term after the occur prefix
+    /// is consumed, and an unbalanced `)` leaves one mid-input. Neither is
+    /// fixture-covered (`suggest_q_cfq_group` sends a balanced group), so the
+    /// panic-freedom claim needs its own guard. Each case must terminate and
+    /// must not slice off a char boundary.
+    #[test]
+    fn parse_cfq_terminates_on_malformed_input_without_panicking() {
+        for malformed in [
+            "+",
+            "-",
+            "+ ",
+            ")",
+            "))",
+            "+)",
+            "-)",
+            "()",
+            "+()",
+            "+(",
+            "+(a",
+            "a)b",
+            "+(a b))",
+            "+(ä)",
+            "ä)",
+            "+  (a  b)  -c  d",
+        ] {
+            let cfq = parse_cfq(Some(malformed));
+            // A parse that produced nothing at all must also match everything,
+            // not accidentally gate every document out.
+            assert!(
+                cfq_passes(&["a".to_string()], &cfq) || !cfq.must.is_empty() || cfq.min_should > 0,
+                "`{malformed}` parsed to a filter that rejects every document \
+                 without holding a single MUST or SHOULD clause: {cfq:?}"
+            );
+        }
+        // The one malformed shape whose intent is unambiguous: an unclosed group
+        // runs to the end of the input, as Lucene's parser also recovers.
+        let unclosed = parse_cfq(Some("+(site_alpha site_beta"));
+        assert_eq!(
+            unclosed.must,
+            vec![vec!["site_alpha".to_string(), "site_beta".to_string()]],
+            "an unclosed MUST group keeps both members in one at-least-one-of clause"
+        );
+        assert!(cfq_passes(&["site_beta".to_string()], &unclosed));
+        assert!(!cfq_passes(&["site_gamma".to_string()], &unclosed));
+    }
+
+    /// An EMPTY MUST group (`+()`) is an empty Lucene BooleanQuery under a MUST
+    /// clause, which matches no document. Easy to get backwards: `all()` over an
+    /// empty alternatives list would vacuously pass and admit everything.
+    #[test]
+    fn parse_cfq_empty_must_group_matches_nothing() {
+        let cfq = parse_cfq(Some("+()"));
+        assert_eq!(cfq.must, vec![Vec::<String>::new()]);
+        assert!(!cfq_passes(&[], &cfq));
+        assert!(!cfq_passes(&["site_alpha".to_string()], &cfq));
     }
 
     const SCHEMA_TOML: &str = r#"

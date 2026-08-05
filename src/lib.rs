@@ -630,17 +630,15 @@ const TERMS_DEFAULT_LIMIT: usize = 10;
 /// same component accepts (captured: each echoes its own `command` field,
 /// inertly).
 ///
-/// ponytail: `suggest.q` (the lookup path) is deliberately NOT admitted yet.
-/// The connector module (`search_api_wayfinder`) reaches live token-prefix
+/// `suggest.q` (the lookup path, issue #384) is the Suggester autocomplete
+/// plugin's read request: infix match over `twm_suggest` with `suggest.cfq`
+/// filtering on `sm_context_tags`. It is admitted alongside `suggest.cfq` and
+/// `suggest.highlight`, the other two params `Suggester.php` sends. The
+/// connector module (`search_api_wayfinder`) still reaches live token-prefix
 /// completion through a direct `/terms?terms.prefix=` GET over `twm_suggest`
 /// (findings 141/142/154-156) -- that is its reimplementation of the Terms
-/// autocomplete plugin, not a stock-client path. Stock `search_api_solr`
-/// autocomplete hits the `/autocomplete` handler directly (finding 192, issue
-/// #351) and never requests `/terms` or `/suggest`; serving the Suggester
-/// plugin needs a real `suggest.q` read path (infix match + `suggest.cfq` over
-/// `sm_context_tags`), which is the recorded prerequisite, not yet built. Until
-/// it lands, a `/suggest?suggest.q=` lookup 400s under `strict_params` rather
-/// than pretending to answer it.
+/// autocomplete plugin; stock `search_api_solr` autocomplete hits the
+/// `/autocomplete` handler directly (finding 192, issue #351).
 const SUGGEST_PARAMS: &[&str] = &[
     "suggest",
     "suggest.buildAll",
@@ -648,9 +646,16 @@ const SUGGEST_PARAMS: &[&str] = &[
     "suggest.reload",
     "suggest.dictionary",
     "suggest.count",
+    "suggest.q",
+    "suggest.cfq",
+    "suggest.highlight",
     "wt",
     "omitHeader",
 ];
+
+/// `suggest.count` handler default (`request_handler_suggest_default_7_0_0.yml`,
+/// and Solr's own SuggestComponent default).
+const SUGGEST_DEFAULT_COUNT: usize = 10;
 
 /// Builds the Wayfinder HTTP app for a single core with all server-config
 /// defaults (PRD §6). Use `app_with_config` to supply a config file.
@@ -4323,8 +4328,88 @@ async fn suggest(
             }),
         );
     }
-    if let Some(cmd) = command {
-        body.insert("command".to_string(), json!(cmd));
+    // A `suggest.q` selects the lookup path (the Suggester plugin's read
+    // request, issue #384) over the build/command path (#352). Solr runs a
+    // build command first when both are present, but the build is inert in
+    // Wayfinder (Tantivy's term dictionary is already an FST), so the lookup
+    // alone shapes the response: a `suggest` block, never a `command` key.
+    match params.get("suggest.q") {
+        Some(q) => {
+            let dictionary = params.get("suggest.dictionary").unwrap_or("und");
+            // Parsed SIGNED so a negative reaches the guard below rather than
+            // failing the parse and silently becoming the default.
+            //
+            // ponytail: a non-numeric `suggest.count` still falls back to the
+            // handler default rather than erroring. No fixture covers that
+            // (Solr applies its own numeric coercion), so the ceiling is
+            // "unpinned, deliberately not invented" -- unlike negatives, which
+            // ARE pinned (`suggest_q_count_neg_en.json`).
+            let count = params
+                .get("suggest.count")
+                .and_then(|c| c.parse::<i64>().ok())
+                .unwrap_or(SUGGEST_DEFAULT_COUNT as i64);
+            // A `suggest.count` of zero OR LESS is a 500, not an empty result:
+            // Solr passes the count straight into Lucene's
+            // `TopFieldCollectorManager`, which rejects it. Both
+            // `suggest_q_count_zero_en.json` and `suggest_q_count_neg_en.json`
+            // carry the identical envelope. The component has already emitted
+            // its empty container by then, so it carries `suggest:{}` alongside
+            // `error`, and that error object is the `msg`/`trace`/`code` shape
+            // with no `metadata` key.
+            if count <= 0 {
+                return Err(WfError::internal(
+                    "wayfinder::SuggestError",
+                    "numHits must be > 0; please use TotalHitCountCollector \
+                     if you just need the total hit count",
+                )
+                .envelope(Envelope::NoParams)
+                .with_suggest(json!({}))
+                // The fixture's `trace` is Solr's Java stack. Wayfinder states
+                // the equivalent in its own terms rather than forging JVM
+                // frames -- `trace` is free text the differential normaliser
+                // drops (finding 10/59); only its presence is contract.
+                .with_trace(
+                    "wayfinder::SuggestError: suggest.count must be > 0 \
+                     (rejected before the suggester lookup runs)",
+                ));
+            }
+            let cfq = params.get("suggest.cfq");
+            // Captured Solr 9 quirk (issue #384): AnalyzingInfixSuggester
+            // highlights unconditionally EXCEPT when a context filter is
+            // present -- `cfq` engages the context-filtered lookup path, which
+            // does not highlight. So `suggest_q_infix_en` carries
+            // `<b>fox</b>` while `suggest_q_cfq_match` carries plain
+            // `quick brown fox`.
+            let highlight = cfq.is_none();
+            let hits = state
+                .index
+                // Guarded above: `count` is strictly positive here.
+                .suggest_lookup(dictionary, q, cfq, count as usize, highlight)
+                .map_err(|e| {
+                    WfError::internal("wayfinder::SuggestError", e.to_string()).with_params(&params)
+                })?;
+            let suggestions: Vec<Value> = hits
+                .iter()
+                .map(|h| json!({"term": h.term, "weight": h.weight, "payload": h.payload}))
+                .collect();
+            let num_found = suggestions.len();
+            // Dynamic object keys (the dictionary name and the verbatim
+            // `suggest.q`), so build the nested objects by hand rather than via
+            // `json!`, which would treat them as literal keys.
+            let mut q_obj = Map::new();
+            q_obj.insert("numFound".to_string(), json!(num_found));
+            q_obj.insert("suggestions".to_string(), Value::Array(suggestions));
+            let mut dict_obj = Map::new();
+            dict_obj.insert(q.to_string(), Value::Object(q_obj));
+            let mut suggest_obj = Map::new();
+            suggest_obj.insert(dictionary.to_string(), Value::Object(dict_obj));
+            body.insert("suggest".to_string(), Value::Object(suggest_obj));
+        }
+        None => {
+            if let Some(cmd) = command {
+                body.insert("command".to_string(), json!(cmd));
+            }
+        }
     }
     Ok(axum::Json(Value::Object(body)).into_response())
 }

@@ -1,0 +1,12 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":4},
+  "suggest":{
+    "en":{
+      "fox":{
+        "numFound":1,
+        "suggestions":[{
+            "term":"quick brown fox",
+            "weight":0,
+            "payload":""}]}}}}

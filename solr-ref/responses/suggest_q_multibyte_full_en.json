@@ -1,0 +1,12 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1},
+  "suggest":{
+    "en":{
+      "kelvin":{
+        "numFound":1,
+        "suggestions":[{
+            "term":"<b>Kelvin</b> degrees",
+            "weight":0,
+            "payload":""}]}}}}

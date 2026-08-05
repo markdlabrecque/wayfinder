@@ -1,0 +1,12 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1},
+  "suggest":{
+    "en":{
+      "qui":{
+        "numFound":1,
+        "suggestions":[{
+            "term":"<b>qui</b>ck brown fox",
+            "weight":0,
+            "payload":""}]}}}}
