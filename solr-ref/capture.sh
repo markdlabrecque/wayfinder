@@ -5251,3 +5251,160 @@ capsuggest390 suggest_q_cfq_empty "$SUGGESTQ390_CORE/suggest?suggest.dictionary=
 if want_any '^suggest_q_'; then
   release "$SUGGESTQ390_CONTAINER" "issue #390 unpinned-behaviour probes"
 fi
+
+
+# --- global text_en / text_und analyzer bounds (issue #388) ------------------
+# Wayfinder's GLOBAL `text_en` / `text_general` presets, and the `_dynamic_text`
+# catch-all every analyzed dynamic rule actually flows through, diverge from the
+# shipped configset's text field types in two ways. #384 fixed both for the
+# SUGGEST chain only; nothing on the `/select` side was ever captured, so this
+# block is that evidence.
+#
+#   1. `LengthFilterFactory min="2" max="100"` (characters, inclusive) is on
+#      EVERY text field type in `schema_extra_types.xml` -- all 15 occurrences,
+#      index and query side. Wayfinder's presets have no lower bound at all, and
+#      their upper bound is `RemoveLongFilter::limit(40)`, which counts BYTES.
+#      So a one-character token survives here where Solr drops it, and a 41-100
+#      character token is dropped here where Solr keeps it. Both directions are
+#      captured.
+#   2. Lucene's `LowerCaseFilterFactory` is `Character.toLowerCase`, Unicode's
+#      SIMPLE (1:1) mapping; Tantivy's `LowerCaser` is Rust's `str::to_lowercase`,
+#      the FULL mapping. They disagree on U+0130 LATIN CAPITAL LETTER I WITH DOT
+#      ABOVE: Java folds it to a bare `i`, Rust to `i` + U+0307 COMBINING DOT
+#      ABOVE. `SimpleLowerCaseFilter` in `src/schema.rs` already exists for the
+#      suggest chain; these fixtures are what pin it for `/select`.
+#
+# Dedicated Search API configset core, for the same reason #196 and #223 use
+# one: the tracer-bullet `content` core is built from the `_default` configset
+# and has none of these field types. `tm_X3b_en_*` is the configset's `text_en`
+# (`schema_extra_fields.xml:26`) and `tm_*` its `text_und` (`:65`) -- the two
+# types Wayfinder's `text_en` and `text_general` presets stand in for.
+#
+# Every corpus token is chosen so that ONLY length and case folding vary:
+#   - none is in `stopwords_en.txt` or `stopwords_und.txt`;
+#   - none appears in `synonyms_en.txt` (query-analyzer-only, unimplemented,
+#     ponytail 2 on `build_tokenizers`);
+#   - none carries an accent, so the unimplemented `MappingCharFilterFactory`
+#     (ponytail 1) cannot move a result;
+#   - none has an internal case/number/punctuation boundary, so the
+#     unimplemented `WordDelimiterGraphFilterFactory` (ponytail 4) cannot
+#     either;
+#   - none stems differently under `text_en`'s SnowballPorter than it does
+#     unstemmed, so the `en`/`und` fixture pairs isolate the two bugs rather
+#     than re-pinning the known `text_general`-collapses-the-chains divergence.
+# Without that discipline a fixture would pin a mix of this issue and #389, and
+# could not be made to pass by fixing this issue alone.
+#
+# Fixture-only: no manifest row. `manifest.tsv`'s harness replays every row
+# against the single tracer-bullet app, which cannot serve these field types,
+# and the differential harness is being retired. The evidence is the direct
+# fixture comparison in `tests/select_analyzer_bounds.rs`, the same shape
+# `select_fl_ss_wildcard` and the `suggest_q_*` set use.
+#
+# Not runnable standalone: `$OUT`/`$HERE` come from the top of the script, so
+# run the whole script or `--only '^select_analyzer_'`.
+SEL388_CONTAINER=wayfinder-solr-388
+SEL388_PORT=9015
+SEL388_CORE=select_analyzer_388
+SEL388_SOLR=http://127.0.0.1:$SEL388_PORT/solr
+SEL388_CONFIGSET=/opt/solr/server/solr/configsets/search-api
+if want_any '^select_analyzer_'; then
+  docker rm -f "$SEL388_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$SEL388_CONTAINER" -p "127.0.0.1:$SEL388_PORT:8983" \
+    -e SOLR_MODULES=analysis-extras \
+    -v "$HERE/search-api/configset:$SEL388_CONFIGSET:ro" \
+    solr:9 solr-precreate "$SEL388_CORE" "$SEL388_CONFIGSET" >/dev/null
+  printf 'waiting for issue #388 Solr'
+  for _ in $(seq 90); do
+    if curl -sf "$SEL388_SOLR/$SEL388_CORE/admin/ping?wt=json" >/dev/null 2>&1; then
+      echo ' ok'
+      break
+    fi
+    printf '.'
+    sleep 1
+  done
+  curl -sf "$SEL388_SOLR/$SEL388_CORE/admin/ping?wt=json" >/dev/null
+  # Every doc carries the SAME value on both `tm_X3b_en_*` (text_en) and `tm_*`
+  # (text_und), so an `en`/`und` fixture pair over one doc set isolates the
+  # field type as the only variable.
+  #
+  # a1  "count i seven" -- `i` is the one-character token. It is in NEITHER
+  #     stopword list (`a an and are as at be ...` has no `i`), so a hit or miss
+  #     on `q=...:i` is the LengthFilter lower bound and nothing else. `count`
+  #     and `seven` are the controls: same field, same doc, two characters or
+  #     more, and both stem to themselves.
+  # a2  "İstanbul airport" -- the U+0130 case. `istanbul` (all-ASCII query)
+  #     must match under Java's simple folding and cannot under Rust's full
+  #     folding, because the indexed token would carry a trailing combining dot
+  #     the query token does not. `airport` is the control token on the same doc.
+  # a3  45 x `a` -- 45 characters and 45 bytes: inside the configset's max=100
+  #     and OUTSIDE `RemoveLongFilter::limit(40)`. This is the upper-bound
+  #     divergence, in the direction where Wayfinder drops a token Solr keeps.
+  # a4  100 x `b` -- exactly max, which is inclusive, so it survives in Solr.
+  # a5  101 x `c` -- one over, so Solr drops it. a4/a5 together pin that the
+  #     bound is 100 and inclusive rather than "some large number".
+  # The three long tokens use three DIFFERENT letters so no query can match the
+  # wrong doc, and a repeated single letter has no Porter suffix to strip.
+  A45=$(printf 'a%.0s' $(seq 45))
+  B100=$(printf 'b%.0s' $(seq 100))
+  C101=$(printf 'c%.0s' $(seq 101))
+  curl -sf "$SEL388_SOLR/$SEL388_CORE/update?commit=true&wt=json" \
+    -H 'Content-Type: application/json' -d "[
+      {\"id\":\"a1\",\"tm_X3b_en_title\":[\"count i seven\"],\"tm_title\":[\"count i seven\"]},
+      {\"id\":\"a2\",\"tm_X3b_en_title\":[\"İstanbul airport\"],\"tm_title\":[\"İstanbul airport\"]},
+      {\"id\":\"a3\",\"tm_X3b_en_title\":[\"$A45\"],\"tm_title\":[\"$A45\"]},
+      {\"id\":\"a4\",\"tm_X3b_en_title\":[\"$B100\"],\"tm_title\":[\"$B100\"]},
+      {\"id\":\"a5\",\"tm_X3b_en_title\":[\"$C101\"],\"tm_title\":[\"$C101\"]}
+    ]" >/dev/null
+fi
+
+# Fixture-only capture (no manifest row -- see the block comment above).
+# `fl=id&sort=id+asc` because only the matching id set is the evidence here:
+# scores would make the fixture churn on any norms change, and stored-field
+# echo would make it churn on the corpus.
+#
+# The validity guard checks for `response`, not `responseHeader`: the shipped
+# `solrconfig.xml` sets `omitHeader=true` for `/select`, so these fixtures carry
+# no header at all (and therefore no `QTime` to normalise away, unlike every
+# `_default`-configset fixture in this file). Checking `responseHeader` here
+# rejected every well-formed capture.
+capsel388() {  # capsel388 <name> <query-after-select?>
+  local name=$1 query=$2
+  want "$name" || return 0
+  curl -sg "$SEL388_SOLR/$SEL388_CORE/select?$query" -o "$OUT/$name.json"
+  if ! python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if 'response' in d else 1)" \
+      "$OUT/$name.json" 2>/dev/null; then
+    echo "capsel388 $name: response is not a Solr JSON envelope -- refusing to write a fitted fixture" >&2
+    return 1
+  fi
+}
+
+SEL388_BASE='wt=json&fl=id&sort=id+asc&rows=10'
+# 1. LengthFilter lower bound. `q=...:i` analyzes to NO tokens in Solr, so the
+#    expected answer is numFound 0 -- against a doc that visibly contains `i`.
+capsel388 select_analyzer_onechar_en "q=tm_X3b_en_title:i&$SEL388_BASE"
+capsel388 select_analyzer_onechar_und "q=tm_title:i&$SEL388_BASE"
+#    The controls: same doc, same field, tokens of two characters or more.
+capsel388 select_analyzer_onechar_control_en "q=tm_X3b_en_title:count&$SEL388_BASE"
+capsel388 select_analyzer_onechar_control_und "q=tm_title:count&$SEL388_BASE"
+# 2. U+0130 simple-vs-full lowercasing. An all-ASCII `istanbul` against an
+#    indexed `İstanbul`.
+capsel388 select_analyzer_dotted_i_en "q=tm_X3b_en_title:istanbul&$SEL388_BASE"
+capsel388 select_analyzer_dotted_i_und "q=tm_title:istanbul&$SEL388_BASE"
+#    The same query written with the UPPERCASE U+0130 (%C4%B0), which pins the
+#    QUERY-side folding: both sides fold, so this must hit under either mapping
+#    -- it is the control that says a miss above is about the mapping and not
+#    about the field being unsearchable.
+capsel388 select_analyzer_dotted_i_upper_en "q=tm_X3b_en_title:%C4%B0stanbul&$SEL388_BASE"
+#    The control token on the same doc, pure ASCII throughout.
+capsel388 select_analyzer_dotted_i_control_en "q=tm_X3b_en_title:airport&$SEL388_BASE"
+# 3. Upper bound: 45 chars (over RemoveLongFilter's 40-byte cut, under max=100),
+#    then exactly 100 (inclusive, kept) and 101 (dropped).
+capsel388 select_analyzer_long45_en "q=tm_X3b_en_title:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&$SEL388_BASE"
+capsel388 select_analyzer_long45_und "q=tm_title:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&$SEL388_BASE"
+capsel388 select_analyzer_long100_en "q=tm_X3b_en_title:$(printf 'b%.0s' $(seq 100))&$SEL388_BASE"
+capsel388 select_analyzer_long101_en "q=tm_X3b_en_title:$(printf 'c%.0s' $(seq 101))&$SEL388_BASE"
+
+if want_any '^select_analyzer_'; then
+  release "$SEL388_CONTAINER" "issue #388 analyzer-bounds core '$SEL388_CORE' (port $SEL388_PORT)"
+fi
