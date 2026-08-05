@@ -3510,3 +3510,46 @@ for the full write-up and the suggester read-path scope.
       `spellcheck.count=1` default; Suggester→`/suggest`, blocked on a real
       `suggest.q` read path, which is the sole prerequisite and carries the
       infix-matching and `cfq`/`sm_context_tags` design work).
+
+## Finding from issue #359 (`spellcheck.dictionary` is first-wins, not merged)
+
+Issue #359's premise — that a Solr client sends `spellcheck.dictionary` several
+times to "consult multiple dictionaries" and Wayfinder is wrong to "read only
+the first" — is contradicted by real Solr 9. Verified live against the same
+`spellcheck_223` core and `search-api` configset `capture.sh` uses for #223
+(port 9099, `solr:9`, `solr-precreate`), which registers TWO named
+spellcheckers (`solrconfig_extra.xml`: `<str name="name">en</str>` over
+`field=spellcheck_en` and `<str name="name">und</str>` over
+`field=spellcheck_und`). The corpus is built to make them disagree:
+`spellcheck_en` = {quick, rocket, brown, fox}, `spellcheck_und` = {quack,
+garden}; for the misspelling `qwick`, `en`'s nearest is `quick` (1 edit) and
+`und`'s nearest is `quack` (2 edits).
+
+193. **Solr consumes ONLY the first `spellcheck.dictionary` value; repeated
+      values after the first are ignored, and the output is byte-identical to
+      sending just that first dictionary alone.** `spellcheck.dictionary=en&
+      spellcheck.dictionary=und` returns only `qwick→quick` (en's term), while
+      `spellcheck.dictionary=und&spellcheck.dictionary=en` returns only
+      `qwick→quack` (und's term) — in each case the FIRST dictionary wins, and
+      the response equals the single-dictionary response for that first value
+      (verified directly: single-`en` and single-`und` reproduce the en-first
+      and und-first multi responses exactly). Two readings this rules out: a
+      "merge and pick the closest candidate" reading would have returned
+      `quick` in BOTH orders (1 edit beats 2), but und-first returned `quack`;
+      a "merge all and return one suggestion per dictionary" reading would have
+      returned two suggestions, but only one came back. (Also confirmed under
+      `json.nl=map`: same first-wins, single suggestion.) This is already
+      captured as ground truth — `solr-ref/responses/spellcheck_dictionary_
+      en_first.json` / `_und_first.json`, captured by the #223 block of
+      `capture.sh` precisely because "repeated dictionary precedence is
+      observable rather than inferred" — and asserted by `tests/spellcheck.rs`
+      (`first_repeated_spellcheck_dictionary_wins_*`). Wayfinder's `spellcheck()`
+      in `src/lib.rs` reads the dictionary through `params.get(
+      "spellcheck.dictionary")` (first value), so it ALREADY matches Solr here.
+      **Conclusion (#359): wrong premise — there is no Solr-compatible change
+      to make.** Implementing the merge the issue asks for would itself be a
+      divergence from Solr and so a bug under the compatibility contract; the
+      issue is closed rather than built. `spellcheck.dictionary` stays in
+      `SELECT_PARAMS` as a repeatable param (trace 00021 sends it twice) so the
+      echo and `strict_params` paths still accept the repeat — only the
+      read-path consumes the first value, exactly as Solr does.
