@@ -87,8 +87,9 @@ the type prefix is followed by a forced `m` (cardinality is ignored for text),
 then the language separator `;`, then the langcode, and the whole name is run
 through `encodeSolrName()`, which replaces every character outside
 `[a-zA-Z0-9_]` with `_X<lowercase hex>_`. So `title`/`text` in English is
-**`tm_X3b_en_title`**, and its sort copy is `sort_X3b_en_title`. Non-text
-fields are unchanged (`its_count`, `sm_tags`, …). Two fixed sinks are named
+**`tm_X3b_en_title`**, and its sort copy is the language-agnostic
+**`sort_title`** (issue #362 — see below). Non-text fields are unchanged
+(`its_count`, `sm_tags`, …). Two fixed sinks are named
 without the `;` encoding: `twm_suggest` (`solr_text_suggester`) and
 `spellcheck_<lang>` with `-` replaced by `_` (`solr_text_spellcheck`,
 `:2440-2446` — "Don't use the language separator here!").
@@ -115,16 +116,21 @@ one (its missing-field alternative is true for every absent variant) all `AND`;
 keeps a field-exists requirement) all `OR`. `search_api_solr` states the same
 rule for its own NULL case at `:3450-3459`.
 
-A text field's **sort copy is written for every enabled site language plus
-`und`**, all carrying the same first value (`:1469-1481`, "To allow sorted
-multilingual searches we need to fill *all* language-specific sort fields!"),
-so a German document is still sortable by a query resolved to English. Follow-up
-worth knowing before sizing an index: with N enabled languages every text field
-therefore carries N+1 identical sort copies (a 5-language site stores each
-sortable text value six times). That is `search_api_solr`'s behaviour exactly,
-not a Wayfinder amplification, and narrowing it would need upstream's
-per-index `use_universal_collation` / language-narrowing config, which
-Wayfinder has no counterpart for.
+A text field's **sort copy is a single language-agnostic `sort_<id>` field**,
+not one per language (issue #362). `search_api_solr` writes a sort copy for
+every enabled site language plus `und` (`:1469-1481`, "To allow sorted
+multilingual searches we need to fill *all* language-specific sort fields!")
+so a query resolved to one collation can sort a document indexed under
+another — load-bearing only because real Solr types each copy as a
+language-specific `collated_<lang>`, producing different orderings. Wayfinder
+has no collation type (every `sort_*` maps to plain `string`), so the
+per-language copies would be byte-identical with no ordering benefit. A single
+field reclaims that redundancy: measured at ~30% index overhead on a
+monolingual site and ~3.5x on an 8-language site
+(`docs/reports/2026-08-12-362-identical-sort-copies.md`). **This renames every
+sort copy on the wire (`sort_X3b_en_title` -> `sort_title`), so an index
+built before #362 must be reindexed — queries target `sort_<id>`, which older
+documents do not carry.**
 
 ## Not supported
 
