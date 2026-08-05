@@ -872,6 +872,45 @@ than hand-written format implementations: `chardetng` + `encoding_rs`, `html5eve
 PDF issue. Exact versions, licenses, evidence, captures, and rejected alternatives are recorded in
 `docs/reports/2026-08-01-text-extraction-exploration.md`.
 
+### `solr_document` datasource — out of Wayfinder's world (`q.op`, `qt`)
+
+A distinct descope category from the parity roadmap below: `q.op` and `qt` ARE
+emitted by `search_api_solr` 4.4.0, but only on a datasource path Wayfinder
+deliberately does not serve. `SearchApiSolrBackend.php:1808-1830` branches the
+query builder on `Utility::hasIndexJustSolrDocumentDatasource($index)`: a normal
+Drupal-owned datasource gets the index/site filter, and only the `else` — the
+index is *just* the `solr_document` datasource, which indexes/searches documents
+in a **foreign Solr core that Drupal does not own** — emits
+`addParam('qt', $config['request_handler'])` (line 1814) and
+`addParam('q.op', 'OR')` unless already set (line 1828), the latter with the
+comment that the query builder assumes OR "but a foreign schema could have a
+non-default config for q.op".
+
+That datasource is out of Wayfinder's world. A Wayfinder core is Drupal-owned by
+construction — #301 settled **one core per site** as the supported topology
+(PR #323; the server serves a single core per process, open question 1) — so the
+`solr_document` / `SolrMultisiteDocument` datasources that target a foreign core
+have no Wayfinder to point at, and the two params only that path emits never
+reach a request Wayfinder serves. They therefore stay absent from
+`SELECT_PARAMS` and 400 under `strict_params = true` (asserted by
+`tests/q_op_qt_descope_guard.rs`), rather than being admitted inertly. Admitting
+them would be the wrong half-measure either way: `qt` is meaningless for a server
+with one select handler, and `q.op` is not inert — it carries real OR/AND
+default-operator semantics — so admitting it without implementing the operator
+would be a silently wrong answer, and there is no served client to implement it
+for. The descope is recorded here rather than left implicit so the parity
+picture is in one place (finding 190).
+
+Two facts keep this narrow, both pinned by the guard. The module's only other
+`q.op` occurrence (`SearchApiSolrBackend.php:2085-2093`) is dead code — a
+`/* We keep this as an example. */` block inside `applySearchWorkarounds()`,
+never executed — not a second live path. And the Solr 3.6 legacy connector
+(`modules/search_api_solr_legacy/.../Solr36Connector.php:76-77`) also adds
+`q.op`, but that connector is out of scope for a Solr 9.x backend. The guard
+fails the day either param stops being confined to the `solr_document` branch in
+the 4.4.0 source, or a captured trace sends it — at which point the descope must
+be revisited (issue #356), not silently kept.
+
 ### Solr 9.x parity roadmap — zero client evidence, deliberately unscheduled
 
 The remainder of Solr 9.x's feature surface, checked against the same evidence base as the

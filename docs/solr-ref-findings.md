@@ -3341,3 +3341,41 @@ exactly as `solr-ref/search-api/configset/schema.xml:199-200,340-341` has them:
      POST to `/select` with NO `Content-Type` at all 400s (`Bad contentType for
      search handler :null`); an empty form body is fine and behaves like a
      query-string-only request.
+
+## Finding from issue #356 (`q.op` / `qt` on the `solr_document` datasource)
+
+Like findings 129-135, this is from reading the module, not from a capture —
+the code path it names is one the capture site did not exercise. Line numbers
+are the vendored 4.4.0 snapshot's
+(`coverage/search_api_solr_4.4.0_source/src/Plugin/search_api/backend/SearchApiSolrBackend.php`).
+It is scope evidence only; there is no response shape to derive because the
+finding's conclusion is that the path is out of Wayfinder's world.
+
+190. **`q.op` and `qt` are emitted ONLY on the `solr_document` datasource
+     path — the datasource for indexing/searching documents in a foreign Solr
+     core that Drupal does not own — and so are not admitted to `SELECT_PARAMS`.**
+     `SearchApiSolrBackend.php:1808-1830`: the query builder branches on
+     `Utility::hasIndexJustSolrDocumentDatasource($index)`. When the index is a
+     normal Drupal-owned datasource, it sets the index/site filter (line 1809);
+     only in the `else` — the index has *just* the `solr_document` datasource —
+     does it `addParam('qt', $config['request_handler'])` when a request handler
+     is configured (line 1814) and `addParam('q.op', 'OR')` unless already set
+     (line 1828), with the comment that the module's query builder assumes OR
+     "but a foreign schema could have a non-default config for q.op".
+
+     A Wayfinder core is Drupal-owned by construction — #301 settled one core
+     per site as the supported topology (PR #323), and the server serves a
+     single core per process (PRD open question 1) — so the `solr_document` /
+     `SolrMultisiteDocument` datasources that target a *foreign* core are out of
+     Wayfinder's world, and the two params that only that path emits never reach
+     a request Wayfinder serves. They stay absent from `SELECT_PARAMS` and 400
+     under `strict_params = true`; the descope is recorded in PRD §5 and guarded
+     by `tests/q_op_qt_descope_guard.rs`, which fails the day either param stops
+     being confined to the `solr_document` branch or a captured trace sends it.
+
+     Two things that keep this small, both pinned by the guard. The module's
+     only other `q.op` occurrence (`:2085-2093`) is dead code — a `/* We keep
+     this as an example. ... */` block inside `applySearchWorkarounds()`, never
+     executed — not a second live path. And `modules/search_api_solr_legacy/...
+     Solr36Connector.php:76-77` also adds `q.op`, but that is the Solr 3.6
+     legacy connector, out of scope for a Solr 9.x backend. (Issue #356.)
