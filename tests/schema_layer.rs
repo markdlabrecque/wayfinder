@@ -288,38 +288,54 @@ fn text_en_preset_enforces_the_configsets_length_bounds_and_simple_case_folding(
     let (_dir, path) = write_schema(FULL_SCHEMA_TOML);
     let wf = schema::load(&path).expect("schema loads");
 
+    // AMENDMENT 1 (issue #388): static text_en/text_general stand in for
+    // Solr's `_default` configset (capture.sh:1686 boots the edismax
+    // reference core with `solr-precreate content`, no configset argument),
+    // whose text_en has NO LengthFilterFactory at all. Five edismax fixtures
+    // pin this: the one-character `b`/`c`/`d` tokens in the pA/pB/mmA-mmD
+    // docs move BM25's average field length and flip a 1% score gap, so a
+    // one-character token surviving here is ground truth, not an unfixed bug.
+    // The min=2 lower bound belongs to the dynamic-catch-all test only
+    // (`_dynamic_text` stands in for the search_api_solr configset instead).
     assert_eq!(
         wf.tokenize("text_en", "i").expect("text_en preset"),
-        Vec::<String>::new(),
-        "issue #388: LengthFilterFactory min=\"2\" must drop a one-character token; `i` is \
-         in neither stopword list, so today's miss (if any) can only ever be a stopword, not \
-         a length bound -- and today there IS no length bound, so this survives"
+        vec!["i"],
+        "issue #388 AMENDMENT 1: static text_en stands in for Solr's `_default` configset, \
+         which has no LengthFilterFactory at all -- a one-character token must survive, \
+         pinned by the edismax fixtures' BM25 average-field-length behaviour"
     );
     assert_eq!(
         wf.tokenize("text_en", "hi").expect("text_en preset"),
         vec!["hi"],
-        "a two-character token must survive -- the lower bound is inclusive"
+        "a two-character token must survive -- unaffected either way"
     );
 
+    // ponytail: RemoveLongFilter::limit(40) counting bytes (not
+    // LengthFilterFactory's characters, which `_default` doesn't have at
+    // all) is a pre-existing divergence from `_default`, which drops
+    // nothing at any length. Unpinned by any fixture; out of scope for
+    // #388 (AMENDMENT 1 corrected the spec to leave this filter alone) and
+    // filed as a follow-up.
     let a45 = "a".repeat(45);
     assert_eq!(
         wf.tokenize("text_en", &a45).expect("text_en preset"),
-        vec![a45.clone()],
-        "issue #388: a 45-character token is inside max=\"100\" and must survive. Regression \
-         guard against RemoveLongFilter::limit(40) (bytes) being re-added instead of \
-         LengthFilter (characters) -- today's 40-byte cut drops this"
+        Vec::<String>::new(),
+        "issue #388 AMENDMENT 1: static text_en keeps RemoveLongFilter::limit(40) (bytes) \
+         unchanged -- a 45-character/45-byte token must still be dropped"
     );
     let b100 = "b".repeat(100);
     assert_eq!(
         wf.tokenize("text_en", &b100).expect("text_en preset"),
-        vec![b100.clone()],
-        "issue #388: the upper bound is inclusive -- exactly 100 characters must survive"
+        Vec::<String>::new(),
+        "issue #388 AMENDMENT 1: 100 bytes is still well over RemoveLongFilter::limit(40) -- \
+         must be dropped, same as before this issue"
     );
     let c101 = "c".repeat(101);
     assert_eq!(
         wf.tokenize("text_en", &c101).expect("text_en preset"),
         Vec::<String>::new(),
-        "101 characters must be dropped -- one over the inclusive max=\"100\" bound"
+        "issue #388 AMENDMENT 1: 101 bytes is still well over RemoveLongFilter::limit(40) -- \
+         must be dropped, same as before this issue"
     );
 
     assert_eq!(
@@ -348,42 +364,57 @@ fn text_general_preset_enforces_the_configsets_length_bounds_and_simple_case_fol
     let (_dir, path) = write_schema(FULL_SCHEMA_TOML);
     let wf = schema::load(&path).expect("schema loads");
 
+    // AMENDMENT 1 (issue #388): static text_general stands in for Solr's
+    // `_default` configset the same way text_en does (see the comment on
+    // that test above) -- ground truth is the edismax/select/terms fixtures,
+    // not the search_api_solr configset's `text_und`. A one-character token
+    // must survive; the min=2 lower bound belongs to the dynamic-catch-all
+    // test only.
     assert_eq!(
         wf.tokenize("text_general", "i")
             .expect("text_general preset"),
-        Vec::<String>::new(),
-        "issue #388: text_general is not currently a Wayfinder-owned chain at all (it \
-         resolves to Tantivy's built-in `default` tokenizer) and has no length bound; a \
-         one-character token must be dropped once it becomes a registered, versioned chain"
+        vec!["i"],
+        "issue #388 AMENDMENT 1: static text_general stands in for Solr's `_default` \
+         configset, which has no LengthFilterFactory at all -- a one-character token must \
+         survive"
     );
     assert_eq!(
         wf.tokenize("text_general", "hi")
             .expect("text_general preset"),
         vec!["hi"],
-        "a two-character token must survive -- the lower bound is inclusive"
+        "a two-character token must survive -- unaffected either way"
     );
 
+    // ponytail: text_general currently resolves to Tantivy's own built-in
+    // `default` tokenizer (SimpleTokenizer -> RemoveLongFilter::limit(40) ->
+    // LowerCaser), so it already carries this same byte-based 40-byte cut
+    // `_default` (no length filter at all) does not have. Pre-existing,
+    // unpinned by any fixture, and out of scope for #388 (AMENDMENT 1
+    // corrected the spec to leave this filter alone on both static
+    // presets) -- filed as a follow-up.
     let a45 = "a".repeat(45);
     assert_eq!(
         wf.tokenize("text_general", &a45)
             .expect("text_general preset"),
-        vec![a45.clone()],
-        "issue #388: a 45-character token is inside max=\"100\" and must survive -- \
-         text_general's chain must carry no byte-based upper bound at all"
+        Vec::<String>::new(),
+        "issue #388 AMENDMENT 1: static text_general keeps RemoveLongFilter::limit(40) \
+         (bytes) unchanged -- a 45-character/45-byte token must still be dropped"
     );
     let b100 = "b".repeat(100);
     assert_eq!(
         wf.tokenize("text_general", &b100)
             .expect("text_general preset"),
-        vec![b100.clone()],
-        "issue #388: the upper bound is inclusive -- exactly 100 characters must survive"
+        Vec::<String>::new(),
+        "issue #388 AMENDMENT 1: 100 bytes is still well over RemoveLongFilter::limit(40) \
+         -- must be dropped, same as before this issue"
     );
     let c101 = "c".repeat(101);
     assert_eq!(
         wf.tokenize("text_general", &c101)
             .expect("text_general preset"),
         Vec::<String>::new(),
-        "101 characters must be dropped -- one over the inclusive max=\"100\" bound"
+        "issue #388 AMENDMENT 1: 101 bytes is still well over RemoveLongFilter::limit(40) \
+         -- must be dropped, same as before this issue"
     );
 
     assert_eq!(
@@ -696,8 +727,18 @@ stored = true
     );
 }
 
+// AMENDMENT 1 (issue #388): this test used to be
+// `v1_analyzed_dynamic_contract_is_safely_upgraded` and asserted a silent
+// upgrade, because pre-#388 the dynamic catch-all's analyzer hadn't changed
+// since v1. v3 changes `_dynamic_text`'s chain (the length bound and simple
+// case folding), so a v1-marker index with an analyzed dynamic rule now
+// carries stale terms on disk *and* a persisted Tantivy schema naming the
+// retired `wayfinder_text_en_v1` identity nothing registers any more --
+// upgrading it silently would produce silently wrong results. This test
+// encodes an invariant the change deliberately invalidates, so it is amended
+// to expect the reindex bail instead of a safe upgrade.
 #[test]
-fn v1_analyzed_dynamic_contract_is_safely_upgraded() {
+fn v1_analyzed_dynamic_contract_now_requires_reindexing() {
     let dynamic_text = r#"
 [core]
 name = "dynamic-v1"
@@ -720,12 +761,21 @@ stored = true
     let marker = dir.path().join("data/wayfinder-analyzer-contract");
     std::fs::write(&marker, "text_en_stopwords_v1").expect("write v1 analyzer contract");
 
-    let _app = common::app_with_schema(dir.path(), dynamic_text)
-        .expect("v1 already uses the dynamic catch-all's still-current Snowball analyzer");
+    let err = common::app_with_schema(dir.path(), dynamic_text).expect_err(
+        "issue #388 AMENDMENT 1: a v1-marker index with an analyzed dynamic rule must now \
+         require reindexing -- v3 changes _dynamic_text's chain, so silently upgrading would \
+         leave stale terms on disk and a persisted schema naming the retired \
+         wayfinder_text_en_v1 identity",
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.to_lowercase().contains("reindex"),
+        "v1-analyzed-dynamic refusal must require reindexing, got: {msg}"
+    );
     assert_eq!(
-        std::fs::read_to_string(marker).expect("read upgraded analyzer contract"),
-        schema::ANALYZER_CONTRACT,
-        "normal v1 dynamic state must upgrade to the current contract"
+        std::fs::read_to_string(&marker).expect("read analyzer contract marker"),
+        "text_en_stopwords_v1",
+        "a refused startup must not touch the on-disk marker"
     );
 }
 
