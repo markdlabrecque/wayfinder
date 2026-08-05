@@ -161,6 +161,23 @@ pub const BOOST_TERM_PAYLOAD_DELIMITER: char = '|';
 const BOOST_TERM_PAYLOAD_MIN_LEN: usize = 2;
 const BOOST_TERM_PAYLOAD_MAX_LEN: usize = 100;
 
+/// `LengthFilterFactory min/max` on the shipped `suggestAnalyzerFieldType`
+/// chains (`text_en` / `text_und` in `schema_extra_types.xml`). The lower bound
+/// is observable on the read path: a one-character `suggest.q` analyzes to
+/// nothing and returns zero suggestions (`suggest_q_multibyte_prefix_en`,
+/// `suggest_q_multibyte_onechar_en`).
+/// Both bounds are in *characters*, as Lucene's `LengthFilter` measures them,
+/// and both are inclusive. The upper bound is the binding one on long tokens:
+/// the suggest chain deliberately carries no byte-based `RemoveLongFilter`, so
+/// a 45-byte ASCII token or a 14-character CJK token survives here exactly as
+/// it does in Solr.
+const SUGGEST_MIN_TOKEN_LEN: usize = 2;
+const SUGGEST_MAX_TOKEN_LEN: usize = 100;
+/// The `suggest.dictionary` value the shipped `solr.SuggestComponent` gives the
+/// stemmer-free `text_und` analyzer, and the fallback for any code Wayfinder has
+/// no stemmer for.
+const SUGGEST_UNDEFINED_DICTIONARY: &str = "und";
+
 /// The on-disk analyzer contract for indexes built with Wayfinder's
 /// Porter-compatible English preset. This is separate from Tantivy's schema:
 /// it lets startup identify pre-contract indexes before their old tokenizer
@@ -789,6 +806,82 @@ impl<T: TokenStream> TokenStream for LengthFilterTokenStream<T> {
     }
 }
 
+/// Lucene's `LowerCaseFilterFactory`, which is `Character.toLowerCase` --
+/// Unicode's **simple** (1:1) case mapping. Tantivy's `LowerCaser` uses Rust's
+/// `str::to_lowercase`, which applies the **full** mapping, and the two disagree
+/// on the characters whose full lowercasing expands: `İ` (U+0130) folds to a
+/// bare `i` under Java's mapping but to `i` + U+0307 COMBINING DOT ABOVE under
+/// Rust's. That difference is observable on the suggest read path --
+/// `suggest_q_multibyte_grow_en` pins `suggest.q=istanbul` matching
+/// `İstanbul airport`, which it cannot do if the phrase token carries a trailing
+/// combining dot the query token does not.
+///
+/// `char::to_lowercase().next()` IS Java's simple mapping wherever the two
+/// differ: Rust's iterator yields the full expansion, whose first character is
+/// the simple one. (U+212A KELVIN SIGN, the other multi-byte character in the
+/// #384 corpus, already agrees between the two -- it folds to `k` either way.)
+#[derive(Clone)]
+struct SimpleLowerCaseFilter;
+
+impl TokenFilter for SimpleLowerCaseFilter {
+    type Tokenizer<T: Tokenizer> = SimpleLowerCaseTokenizer<T>;
+
+    fn transform<T: Tokenizer>(self, tokenizer: T) -> Self::Tokenizer<T> {
+        SimpleLowerCaseTokenizer { inner: tokenizer }
+    }
+}
+
+#[derive(Clone)]
+struct SimpleLowerCaseTokenizer<T> {
+    inner: T,
+}
+
+impl<T: Tokenizer> Tokenizer for SimpleLowerCaseTokenizer<T> {
+    type TokenStream<'a> = SimpleLowerCaseTokenStream<T::TokenStream<'a>>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        SimpleLowerCaseTokenStream {
+            tail: self.inner.token_stream(text),
+            buffer: String::new(),
+        }
+    }
+}
+
+struct SimpleLowerCaseTokenStream<T> {
+    tail: T,
+    /// Scratch space, reused across tokens so the common already-lowercase case
+    /// costs one pass and no allocation.
+    buffer: String,
+}
+
+impl<T: TokenStream> TokenStream for SimpleLowerCaseTokenStream<T> {
+    fn advance(&mut self) -> bool {
+        if !self.tail.advance() {
+            return false;
+        }
+        let text = &mut self.tail.token_mut().text;
+        if text.chars().any(|c| c.to_lowercase().next() != Some(c)) {
+            self.buffer.clear();
+            for c in text.chars() {
+                // `to_lowercase()` never yields an empty iterator, so the
+                // `unwrap_or(c)` is unreachable defensive cover, not a case.
+                self.buffer.push(c.to_lowercase().next().unwrap_or(c));
+            }
+            text.clear();
+            text.push_str(&self.buffer);
+        }
+        true
+    }
+
+    fn token(&self) -> &Token {
+        self.tail.token()
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        self.tail.token_mut()
+    }
+}
+
 /// Solr's `RemoveDuplicatesTokenFilterFactory`: drops a token whose text
 /// duplicates one already emitted *at the same position*. Tokens at different
 /// positions are never duplicates, which is why d3's two `dog|...` values
@@ -930,33 +1023,33 @@ pub fn split_delimited_payload(token: &str) -> Option<(&str, f32)> {
     value.is_finite().then_some((term, value))
 }
 
+/// The tokenizer identity of the suggest-path analyzer for one dictionary
+/// (language) code. Namespaced away from the `text_*` presets on purpose: the
+/// shipped `suggestAnalyzerFieldType` chain is NOT the same chain as Wayfinder's
+/// global `text_en` / `text_general` presets, and conflating them is what made
+/// the read path diverge (see [`build_tokenizers`]).
+fn suggest_tokenizer(code: &str) -> String {
+    format!("wayfinder_suggest_{code}_v1")
+}
+
 /// The analyzer (Tantivy tokenizer name) a `suggest.dictionary` value
 /// selects, mirroring the shipped `solr.SuggestComponent`'s
 /// `suggestAnalyzerFieldType` per-dictionary analyzer: `text_en` for `en`,
 /// `text_und` for `und`. The dictionary name IS the ISO language code the
 /// Suggester plugin passes (`Suggester.php` derives it from the langcode tag);
-/// `en` maps to Wayfinder's Solr-compatible English preset, any other code in
-/// [`LANGUAGES`] to its `text_<code>` stemmer, and `und`/anything-else to the
-/// stemming-free `text_general` default (Solr's `text_und` is the "undefined
-/// language" analyzer). Used by the `/suggest?suggest.q=` read path
+/// a code in [`LANGUAGES`] gets that language's suggest chain, and
+/// `und`/anything-else the stemming-free one (Solr's `text_und` is the
+/// "undefined language" analyzer). Used by the `/suggest?suggest.q=` read path
 /// (issue #384).
 ///
-/// `und` falling back to `text_general` rather than an exact `text_und` is a
-/// ponytail: Solr's `text_und` adds a `WordDelimiterGraphFilter` Wayfinder's
-/// `text_general` lacks, so the two diverge on inputs with internal
-/// case/number/punctuation boundaries. For the lowercase-word autocomplete
-/// corpus the suggester reads they agree (no boundaries to split on), which is
-/// what the `suggest_q_*.json` fixtures exercise.
+/// These are the dedicated `wayfinder_suggest_*` chains, not the `text_*`
+/// presets, because the shipped suggest field types carry filters the presets do
+/// not -- see [`build_tokenizers`] for the chain and its remaining ceiling.
 pub fn dictionary_tokenizer(dictionary: &str) -> String {
-    if dictionary == "en" {
-        TEXT_EN_TOKENIZER.to_string()
-    } else if LANGUAGES
-        .iter()
-        .any(|(code, _)| *code == dictionary && *code != "en")
-    {
-        format!("text_{dictionary}")
+    if LANGUAGES.iter().any(|(code, _)| *code == dictionary) {
+        suggest_tokenizer(dictionary)
     } else {
-        TEXT_GENERAL_TOKENIZER.to_string()
+        suggest_tokenizer(SUGGEST_UNDEFINED_DICTIONARY)
     }
 }
 
@@ -1082,6 +1175,104 @@ fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager>
         BOOST_TERM_PAYLOAD_VERBATIM_TOKENIZER,
         boost_term_payload_front().build(),
     );
+    // The `/suggest` read path's per-dictionary analyzers (#384). The shipped
+    // `solrconfig_extra.xml` points each dictionary's `suggestAnalyzerFieldType`
+    // at `text_en` / `text_und`, and *those* field types in
+    // `schema_extra_types.xml` carry filters Wayfinder's global `text_en` /
+    // `text_general` presets do not:
+    //
+    //   Stop(ignoreCase) -> WordDelimiterGraph -> Length(min=2,max=100)
+    //     -> LowerCase -> [SnowballPorter English, text_en only]
+    //     -> RemoveDuplicates
+    //
+    // Two of those gaps are observable in the captured fixtures and are
+    // reproduced here: the `Length` lower bound (a one-character `suggest.q`
+    // analyzes to nothing -- `suggest_q_multibyte_prefix_en`,
+    // `suggest_q_multibyte_onechar_en`) and Lucene's SIMPLE case folding
+    // (`suggest_q_multibyte_grow_en`; see `SimpleLowerCaseFilter`). `Stop` runs
+    // after `Length` rather than before it, which cannot change the surviving
+    // set: both filters only remove tokens.
+    //
+    // Unlike Wayfinder's other chains, this one has *no* `RemoveLongFilter`:
+    // that filter is byte-based (`token.text.len() < limit`), and the shipped
+    // field types bound length only with `LengthFilterFactory min="2"
+    // max="100"`, which Lucene measures in characters. `LengthFilter` above is
+    // the character-counting equivalent and is the whole bound here. Do not
+    // re-add `RemoveLongFilter`: a 40-byte cut would drop tokens Solr keeps
+    // (`pneumonoultramicroscopicsilicovolcanoconiosis` is 45 bytes; 14 CJK
+    // characters are 42) and would make `SUGGEST_MAX_TOKEN_LEN` unreachable.
+    // The other chains in this file keep it because it matches *their* Solr
+    // field types, not this one.
+    //
+    // ponytail: four differences from the shipped `suggestAnalyzerFieldType`
+    // chains (`text_en` at `schema_extra_types.xml:46`, `text_und` at `:167`)
+    // remain unimplemented; all four are filed as #389, and none is pinned by a
+    // fixture. #388 is a different gap (the global `text_en` / `text_general`
+    // presets) and does not cover any of these.
+    //   1. `MappingCharFilterFactory mapping="accents_en.txt"` /
+    //      `"accents_und.txt"`, present on *both* the index and query analyzers
+    //      (`:48`, `:58`, `:169`, `:179`). Same class of defect as the U+0130
+    //      lowercasing bug, and more reachable: `suggest.q=cafe` matches an
+    //      accented `Cafe Central` in Solr and misses here.
+    //   2. `SynonymGraphFilterFactory synonyms="synonyms_en.txt" expand="true"
+    //      ignoreCase="true"` (`synonyms_und.txt` for `text_und`) -- query
+    //      analyzer only (`:60`, `:181`).
+    //   3. `StandardTokenizerFactory` where this chain uses `SimpleTokenizer`,
+    //      so the token boundaries themselves are only approximately Solr's.
+    //   4. `WordDelimiterGraphFilterFactory`, so a phrase with an internal
+    //      case/number/punctuation boundary analyzes differently than Solr
+    //      would. Closing this one has a dependency outside this file: the
+    //      `last_is_prefix` derivation in `core_index.rs` (see the comment
+    //      above `let last_is_prefix`) is only sound because no *graph* filter
+    //      is in this chain, so the last token's end offset is necessarily
+    //      `maxEndOffset`. Adding WDGF (or the synonym graph filter in 2)
+    //      invalidates that and must be fixed there at the same time.
+    //
+    // ponytail: one chain serves both the `suggest.q` analysis and the stored
+    // phrase, whereas Solr's index and query analyzers for these field types
+    // differ -- synonyms are query-side only, and WDGF's `catenateNumbers` /
+    // `catenateWords` are `1` on the index side and `0` on the query side
+    // (`:51` vs `:62`, `:172` vs `:183`). Unpinned by any fixture.
+    //
+    // ponytail: this fixes the SUGGEST path only. Wayfinder's global `text_en` /
+    // `text_general` presets still have no `LengthFilter` and still use Rust's
+    // full-Unicode `LowerCaser`, so `/select` over a `text_en` field keeps
+    // diverging from Solr on both counts. That is a real, separate bug, filed as
+    // #388 -- not closed by this change.
+    let suggest_front = || {
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter_dynamic(LengthFilter {
+                min: SUGGEST_MIN_TOKEN_LEN,
+                max: SUGGEST_MAX_TOKEN_LEN,
+            })
+            .filter_dynamic(SimpleLowerCaseFilter)
+    };
+    // `stopwords_und.txt` is empty in the shipped configset, so the `und` chain
+    // has no stopword filter at all -- unlike `text_en`'s 33-word list.
+    manager.register(
+        &suggest_tokenizer(SUGGEST_UNDEFINED_DICTIONARY),
+        suggest_front()
+            .filter_dynamic(RemoveDuplicatesFilter)
+            .build(),
+    );
+    for (code, lang) in LANGUAGES {
+        let mut chain = suggest_front();
+        if *code == "en" {
+            // Only `text_en` ships a stopword list; the same Porter terminal-y
+            // compatibility rule `TEXT_EN_TOKENIZER` needs applies here too,
+            // since it is the same SnowballPorter English filter being matched.
+            chain = chain
+                .filter_dynamic(english_stopwords())
+                .filter_dynamic(PorterTerminalYFilter);
+        }
+        manager.register(
+            &suggest_tokenizer(code),
+            chain
+                .filter_dynamic(Stemmer::new(*lang))
+                .filter_dynamic(RemoveDuplicatesFilter)
+                .build(),
+        );
+    }
     for ft in field_types {
         manager.register(&ft.name, build_analyzer(ft)?);
     }
@@ -1166,6 +1357,9 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     // `TEXT_EN_TOKENIZER` is not a schema type name but is
     // reserved alongside them: it is the tokenizer identity `text_en` registers
     // under, and a chain registering over it would redefine the built-in preset.
+    // The `wayfinder_suggest_*` identities (#384) are reserved for the same
+    // reason -- a custom chain under one of those names would redefine the
+    // analyzer the `/suggest` read path resolves through `dictionary_tokenizer`.
     let reserved_type_names: Vec<String> = builtin_type_names()
         .into_iter()
         .chain([
@@ -1173,7 +1367,9 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
             DYNAMIC_TEXT_TOKENIZER.to_string(),
             BOOST_TERM_PAYLOAD_TOKENIZER.to_string(),
             BOOST_TERM_PAYLOAD_VERBATIM_TOKENIZER.to_string(),
+            suggest_tokenizer(SUGGEST_UNDEFINED_DICTIONARY),
         ])
+        .chain(LANGUAGES.iter().map(|(code, _)| suggest_tokenizer(code)))
         .collect();
     if let Some(field_type) = parsed
         .field_types
