@@ -1100,6 +1100,21 @@ pub fn dictionary_tokenizer(dictionary: &str) -> String {
 /// is "no configset, so no per-deployment suggester list" (PRD: wire format
 /// only, never Solr's config format); the alternative -- inventing a config
 /// surface to narrow it -- would be worse than being permissive.
+///
+/// ponytail: the same gap runs the OTHER way, and that direction is the one
+/// with a live client. #385's `QueryBuilder::suggesterParams`
+/// (`drupal/search_api_wayfinder/src/QueryBuilder.php:497`) sends the Drupal
+/// langcode as the dictionary, and Drupal has far more langcodes than
+/// [`LANGUAGES`] has entries -- so a `ja`, `pl` or `zh-hans` site now gets a
+/// 400 where its real Solr, having installed `text_ja`, answers 200. Before
+/// this gate it got 200 with `und` results. Neither answer is right for both
+/// inputs: `xx` is the fixture's 400 and `ja` is Solr's 200, and with no
+/// configset to consult nothing here can tell the two apart. The 400 is chosen
+/// because it is consistent with the real ceiling -- Wayfinder has no `text_ja`
+/// chain at all, so a `ja` suggest dictionary was never being served, only
+/// silently substituted -- and because failing loudly names the ceiling instead
+/// of hiding it. Closing it properly means the 18-language set growing, which
+/// is its own issue.
 pub fn is_configured_suggester(dictionary: &str) -> bool {
     dictionary == SUGGEST_UNDEFINED_DICTIONARY
         || LANGUAGES.iter().any(|(code, _)| *code == dictionary)

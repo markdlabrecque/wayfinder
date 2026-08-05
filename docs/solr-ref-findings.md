@@ -3719,6 +3719,18 @@ guessed behaviour was wrong in each case.
       supplied *unconfigured* name is rejected —
       `tests/suggest.rs::suggest_q_no_dictionary_still_served_as_und` is the
       guard that keeps the new check from being widened into the default path.
+      **The gap that remains, and it has a live client:** #385's
+      `QueryBuilder::suggesterParams`
+      (`drupal/search_api_wayfinder/src/QueryBuilder.php:497`) sends the Drupal
+      langcode as the dictionary, and Drupal has far more langcodes than
+      `LANGUAGES` has entries, so a `ja`, `pl` or `zh-hans` site now gets a 400
+      where its own Solr — having installed `text_ja` — answers 200. Before this
+      gate it got 200 with `und` results. Neither answer is right for both
+      inputs (`xx` is this fixture's 400, `ja` is Solr's 200) and with no
+      configset to consult nothing server-side can tell them apart; the 400 is
+      chosen because Wayfinder has no `text_ja` chain at all, so a `ja`
+      dictionary was never served, only silently substituted. Closing it means
+      the 18-language set growing, which is its own issue.
       `dictionary_tokenizer` keeps its `und` fallback: it is the analyzer
       resolver, and the build/command path does not go through this gate.
 
