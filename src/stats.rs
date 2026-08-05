@@ -9,7 +9,7 @@
 //!
 //! Every expected value comes from a committed fixture in
 //! `solr-ref/responses/stats_*.json`, captured against a dedicated `stats`
-//! Solr core (`solr-ref/capture.sh`'s issue-#5 block) — see
+//! Solr core (the dedicated Solr capture's issue-#5 block) — see
 //! `docs/solr-ref-findings.md` finding 51 for what that capture found,
 //! including two shapes a naive implementation gets wrong:
 //! - `min`/`max` render as JSON floats even for an integer field (Solr's

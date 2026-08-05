@@ -12,9 +12,8 @@
 //! - anything else, including the empty string, is a 400 with
 //!   `error.msg = "invalid boolean value: <raw>"`
 //!
-//! All nine cases below have `solr-ref/manifest.tsv` rows, so
-//! `cargo test --test differential` is the primary gate; this file exists to
-//! give the same nine cases readable names, a facet-bucket-shaped assertion,
+//! All nine cases below have committed fixtures. This file gives them readable
+//! names, a facet-bucket-shaped assertion,
 //! and coverage of the two different error-envelope shapes (`facet=1` is
 //! read before the base query runs, so the error is envelope-only; the
 //! `facet.missing=nope` case is read inside faceting, after the base query
@@ -66,7 +65,7 @@ fn fixture_bucket(fixture_name: &str, label: &str) -> Vec<Value> {
 /// (`org.apache.solr.common.SolrException`), while Wayfinder deliberately
 /// emits its own honest analogues (`wayfinder::InvalidBoolean`,
 /// `wayfinder::FacetError`) -- `src/error.rs` documents those values as
-/// outside the comparison contract, `tests/differential.rs`'s normaliser drops
+/// outside the comparison contract, the retained fixture tests' normaliser drops
 /// `error.metadata` outright, and `tests/error_shapes.rs` compares its *shape*
 /// only. Matching the fixture wholesale would mean impersonating Solr's Java
 /// class names, so this pins everything the fixture actually proves and
@@ -563,7 +562,7 @@ async fn select_rejects_each_invalid_boolean() {
 /// one, and deliberately so (finding 115): real Solr answers an invalid
 /// `omitHeader` with a Jetty HTML error page, because header suppression is
 /// decided before the JSON response writer exists. Only the status is shared,
-/// which is why there is no fixture and no `manifest.tsv` row. Solr's *message*
+/// which is why there is no fixture and no the captured fixture request set row. Solr's *message*
 /// is still matched, from the captured
 /// `solr-ref/responses/omit_header_invalid_one.html`.
 #[tokio::test]

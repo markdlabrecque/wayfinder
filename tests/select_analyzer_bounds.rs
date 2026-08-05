@@ -20,11 +20,11 @@
 //!
 //! Ground truth: `solr-ref/responses/select_analyzer_*.json`, captured from a
 //! real `solr:9` running the `search-api` configset (commit 9e4c8d6, capture
-//! block `--only '^select_analyzer_'` at the end of `solr-ref/capture.sh`).
-//! **Do not re-run capture.sh.**
+//! block `--only '^select_analyzer_'` at the end of the dedicated Solr capture).
+//! **Do not re-run the dedicated Solr capture.**
 //!
-//! Fixture-only, like `tests/select_fl_wildcard.rs`: no `manifest.tsv` row,
-//! because the differential harness's single tracer-bullet app cannot serve
+//! Fixture-only, like `tests/select_fl_wildcard.rs`: no the captured fixture request set row,
+//! because the fixture comparison suite's single tracer-bullet app cannot serve
 //! `tm_X3b_en_*`/`tm_*` dynamic field types. Every test here requests
 //! `fl=id&sort=id asc&rows=10&omitHeader=true` against the schema below and
 //! compares the whole normalised envelope to the named fixture.
@@ -73,7 +73,7 @@ type = "text_general"
 multi_valued = true
 "#;
 
-/// The exact 5-doc corpus `solr-ref/capture.sh`'s `select_analyzer_*` block
+/// The exact 5-doc corpus the dedicated Solr capture's `select_analyzer_*` block
 /// indexed, byte-identical (long tokens built with `"a".repeat(n)` rather than
 /// pasted). Every value is written to *both* `tm_X3b_en_title` and `tm_title`,
 /// so an `en`/`und` fixture pair over the same doc isolates the field type as

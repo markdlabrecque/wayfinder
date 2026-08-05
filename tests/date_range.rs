@@ -4,18 +4,16 @@
 //! date math, and the 400/500 error split.
 //!
 //! Ground truth is `solr-ref/responses/dr341_*.json`, captured against a
-//! dedicated `daterange` Solr core (`solr-ref/capture.sh`'s `#341` block) and
-//! indexed in `solr-ref/manifest-errors.tsv` (own core, so not a
-//! `content`-core-relative GET). Findings 165-172 in
+//! dedicated `daterange` Solr core. Findings 165-172 in
 //! `docs/solr-ref-findings.md` are the authoritative prose; every assertion
 //! below traces to one of them, cited per test.
 //!
 //! This file builds its own dedicated schema/corpus (named `content` so
 //! `common::get`/`common::post_docs`/`common::CORE` address it unchanged --
 //! the same trick `tests/grouping.rs`/`tests/stats.rs`/`tests/spatial.rs` use)
-//! rather than wiring a `daterange_app` into the generic
-//! `tests/differential.rs` manifest-errors dispatcher: the five `dr341_err_*`
-//! 500-error fixtures carry a full Java stack trace under `error.trace` that
+//! rather than wiring a `daterange_app` into a generic fixture dispatcher: the
+//! five `dr341_err_*` 500-error fixtures carry a full Java stack trace under
+//! `error.trace` that
 //! this compatibility contract does not pin at all (finding 10: only
 //! `error.code`/HTTP status, plus here `error.msg` per finding 184, are in
 //! scope) -- a generic byte-for-byte differ against those fixtures could never
@@ -64,7 +62,7 @@ multi_valued = true
 stored = true
 "#;
 
-/// The exact 9-doc corpus `solr-ref/capture.sh`'s `#341` block indexes (see
+/// The exact 9-doc corpus the dedicated Solr capture's `#341` block indexes (see
 /// the module doc on `capdr341`/the corpus comment there). d1/d2 are bare
 /// literals at year/month precision; d3 an explicit closed interval; d4 a
 /// full-instant literal (whole second); d5/d6 open-ended; d7 fully open; d8
@@ -582,7 +580,7 @@ async fn multivalued_within_matches_both_once_the_query_covers_the_whole_union()
 /// `NOW/YEAR` and `NOW/YEAR+1YEAR` resolve, and the resulting interval
 /// matches d6 (`[2021-01-01T00:00:00Z TO *]`) and d7 (fully open) -- true for
 /// any `NOW` through the year 2100, per the fixture's own choice of corpus
-/// (see `capture.sh`'s comment on this pair).
+/// (see the dedicated Solr capture's comment on this pair).
 #[tokio::test]
 async fn date_math_now_slash_year_resolves_in_a_date_range_query() {
     let (app, _dir) = date_range_app().await;

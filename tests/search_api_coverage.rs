@@ -1336,7 +1336,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // the contract, just unmet. Lucene-identity keys in `index{}` and the
     // per-field `schema`/`index` flag strings stay omitted or placeheld
     // deliberately (PRD section 5 v2.75), which is why the endpoint carries no
-    // `manifest.tsv` row and cannot be differentially diffed.
+    // the captured fixture request set row and cannot be fixture-wise diffed.
     // 50/75 -> 53/75 when issue #155 landed the TermsComponent endpoint
     // (`GET /wayfinder/{core}/terms`, `terms`/`terms.fl`, the inverted-index term
     // dictionary read in `CoreIndex::field_terms`), flipping three entries in
@@ -1397,7 +1397,7 @@ fn coverage_command_requires_complete_deterministic_contract_schema_and_output()
     // 67/75 -> 68/75 when issue #153 added `json.nl` to `UPDATE_PARAMS`,
     // letting the existing strict `/update?json.nl=flat` probe complete.
     // The request semantic was already in the frozen contract; selection
-    // rendering remains covered by the fixture-backed differential suite.
+    // rendering remains covered by the fixture-backed fixture suite.
     // 68/75 -> 69/75 when issue #189 implemented `mlt.maxntp` by capping
     // analyzer-emitted seed tokens per stored field value before noise-word
     // filtering, flipping the existing `mlt.maxntp` probe. Denominator

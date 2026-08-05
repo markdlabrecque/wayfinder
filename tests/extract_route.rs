@@ -329,12 +329,10 @@ async fn extract_explicit_json_nl_flat_matches_the_flat_baseline_fixture() {
 /// unsupported media type, but the captured `extract_corrupt_pdf.json` is a
 /// 500, so the row was a recorded status divergence (PRD divergence 10).
 /// Now Wayfinder can fail *inside* a PDF parser, the captured 500 is
-/// reachable, and the divergence entry in `DIVERGENT_STATUS_MULTIPART` is
-/// deleted rather than re-justified — exactly as the PRD predicted. The
-/// differential harness (`extract_multipart_manifest_matches_captured_fixtures`)
-/// diffs the full envelope; this route-level test pins the status and the
-/// `NoParams` envelope shape directly so a regression here names itself
-/// without reading the manifest.
+/// reachable, and the former divergence is retired rather than re-justified —
+/// exactly as the PRD predicted. The extraction feature tests compare the full
+/// fixture envelope; this route-level test pins the status and the `NoParams`
+/// envelope shape directly so a regression here names itself.
 #[tokio::test]
 async fn broken_pdf_is_a_500_parse_failure_matching_the_capture() {
     let (app, _dir) = default_app().await;

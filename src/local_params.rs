@@ -306,7 +306,7 @@ where
 /// Both the "bind the next run only" rule and each terminator below are
 /// confirmed by Solr's own parse tree, not inferred from `numFound`
 /// consistency (issue #147). Two `debugQuery=true` captures, one per
-/// terminator, taken against a real `solr:9` with `capture.sh`'s edismax block
+/// terminator, taken against a real `solr:9` with the dedicated edismax
 /// schema and 10-doc corpus and with `qf=title body` against `df=id` so the
 /// parsed query names the field each token resolved through:
 /// - `solr-ref/responses/edismax_shape_b_debug_parsedquery.json` —
@@ -332,12 +332,11 @@ where
 ///   depth-zero-only whitespace rule would bind the complete balanced inner
 ///   expression and parse successfully.
 ///
-/// All three are checked by `tests/edismax.rs`'s `shape_b_*` tests. None is a
-/// `manifest.tsv` row: Wayfinder emits no `debug` section, and the third is an
-/// error envelope whose Java parser text cannot match Wayfinder verbatim. The
-/// whole-body sweeps could only pass by widening a normaliser over real gaps
-/// (same exclusion as `edismax_qf_partial_invalid`, #111). The commands are
-/// commented at the end of `solr-ref/capture.sh`.
+/// All three are checked by `tests/edismax.rs`'s `shape_b_*` tests. Wayfinder
+/// emits no `debug` section, and the third is an error envelope whose Java
+/// parser text cannot match verbatim; whole-envelope comparison would require
+/// widening normalisation over real gaps (same exclusion as
+/// `edismax_qf_partial_invalid`, #111).
 ///
 /// Terminators, all of them capture-derived rather than assumed:
 /// - whitespace outside a quoted phrase, *at any paren depth*.

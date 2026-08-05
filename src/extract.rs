@@ -2789,7 +2789,7 @@ fn decode_pdf_text_string(bytes: &[u8]) -> String {
 /// resolved every title/author field to the Info-dict value on conflict, and
 /// `pdf-extract` has no XMP reader, so the two are aligned for this case. The
 /// risk is one-directional (a future Tika/PDFBox change making XMP override
-/// Info would diverge Wayfinder); the differential harness guards it.
+/// Info would diverge Wayfinder); committed extraction fixtures guard it.
 fn pdf_info_string(doc: &pdf_extract::Document, key: &[u8]) -> Option<String> {
     let info_ref = doc
         .trailer
@@ -4891,8 +4891,8 @@ mod tests {
     /// capture exists. Remapping 415 to 500 on the strength of the corrupt
     /// PDF would have set the status for that whole population from a fixture
     /// that does not describe it. The corrupt-PDF row is instead a recorded
-    /// status divergence (`DIVERGENT_STATUS_MULTIPART` in
-    /// `tests/differential.rs`), which retires when a PDF extractor lands.
+    /// status divergence recorded with the captured fixture, which retires
+    /// when a PDF extractor lands.
     ///
     /// Recheck #2 (issue #261, the PDF corpus exploration): the eight new
     /// `extract_pdf_*.json` fixtures are six 200s and two 500s. The 200s are
@@ -4905,15 +4905,15 @@ mod tests {
     /// in `docs/reports/2026-08-03-pdf-extraction-corpus.md`.
     ///
     /// Recheck #3 (issue #294, the PDF extractor landing): the eight #261 PDF
-    /// fixtures are now wired into `manifest-multipart.tsv` and exercised by
-    /// the differential runner. `broken.pdf` (`extract_corrupt_pdf`) now
+    /// fixtures are exercised directly by the extraction feature tests.
+    /// `broken.pdf` (`extract_corrupt_pdf`) now
     /// reaches a parse failure inside `lopdf` and answers 500, matching the
-    /// capture — the former 415 status divergence is retired and deleted from
-    /// `DIVERGENT_STATUS_MULTIPART`. `extract_pdf_encrypted` answers 500
+    /// capture — the former 415 status divergence is retired.
+    /// `extract_pdf_encrypted` answers 500
     /// (`Parse`, the empty-password decrypt fails) matching the capture.
     /// `extract_pdf_malformed_objects` answers **200** — `pdf-extract`
     /// swallows the broken content stream as empty where Tika throws 500 — a
-    /// *new* status divergence recorded in `DIVERGENT_STATUS_MULTIPART`. The
+    /// *new* status divergence recorded with its fixture. The
     /// six 200s match after `normalize_extract`'s PDF branch. Still no fixture
     /// lands on a budget-violation status, so the mapping is unchanged.
     const CAPTURED_EXTRACT_FIXTURES: [&str; 42] = [

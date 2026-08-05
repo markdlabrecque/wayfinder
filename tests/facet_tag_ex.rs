@@ -2,8 +2,8 @@
 //! multi-select faceting (issue #295). Findings 136-140 in
 //! `docs/solr-ref-findings.md` are the spec.
 //!
-//! Every behaviour here also has a `solr-ref/manifest.tsv` row, so the
-//! differential harness replays it verbatim against the committed fixture and
+//! Every behaviour here also has a the captured fixture request set row, so the
+//! fixture comparison suite replays it verbatim against the committed fixture and
 //! diffs the whole envelope. These tests spell the *counts* out explicitly so
 //! the acceptance criterion — which filter was excluded, which stayed — is
 //! visible without diffing an opaque envelope, and so a regression shows up in

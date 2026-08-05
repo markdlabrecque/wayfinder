@@ -1,7 +1,7 @@
 //! MoreLikeThis (`/mlt`, issue #6, PRD §5) — `GET /wayfinder/<core>/mlt`.
 //!
 //! Every fixture-backed expected value here comes from the dedicated 20-doc
-//! corpus in `solr-ref/capture.sh`'s MLT block. The original fixtures used
+//! corpus in the dedicated Solr capture's MLT block. The original fixtures used
 //! `wayfinder-solr-6` on port 8993; `mlt_maxntp_low.json` was captured later
 //! against the identical schema/corpus in `wayfinder-solr-189` (issue #189's
 //! follow-up to the findings 97-101 MLT refinement block). The canonical 5-doc
@@ -28,37 +28,26 @@
 //! at all when `mlt.interestingTerms` is set to a truthy value, as a bare
 //! top-level array sibling to `match`/`response`.
 //!
-//! ## Why the `mlt_*` manifest rows are diffed here, not in `differential.rs`
+//! ## Dedicated request coverage
 //!
-//! `solr-ref/manifest.tsv` carries every `mlt_*` row (plain core-relative
-//! GETs, per `CLAUDE.md`'s compatibility-contract section), but
-//! `tests/differential.rs::hermetic_whole_query_set_matches_committed_fixtures`
-//! runs each manifest row against `common::indexed_app()`'s 5-doc
-//! tracer-bullet corpus, which has none of `mlt1`..`mlt20`. Extending that
-//! corpus to a superset is not a safe fix: dozens of existing fixtures
-//! (`facet_*`, `select_all`, etc.) pin exact `numFound`/facet counts against
-//! exactly 5 docs. So that loop skips `mlt_`-prefixed entries
-//! (`tests/differential.rs`, the `entry.name.starts_with("mlt_")` guard) and
-//! this file's own dedicated-corpus loop
-//! (`hermetic_mlt_manifest_entries_match_committed_fixtures` below) owns them
-//! instead — the same split `differential.rs` already uses for
-//! `manifest-errors.tsv` rows needing a non-canonical corpus.
+//! The retained fixture requests are declared in this file because each one
+//! requires the dedicated 20-doc corpus. Extending the shared 5-doc corpus is
+//! not safe: existing fixtures pin its exact counts and facet buckets.
 
 mod common;
 
 use axum::Router;
 use axum::http::StatusCode;
-use common::diff::{diff, diff_ranked_ids, load_manifest, normalize, ranked_docs};
+use common::diff::{diff, diff_ranked_ids, normalize, ranked_docs};
 use common::key_order::{assert_same_key_order, get_text};
 use common::{CORE, fixture, get};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 /// Same field shape as the canonical tracer-bullet schema
 /// (`tests/common::SCHEMA_TOML`) — `id` (string, fast, stored, unique key),
 /// `body` (text_en, stored), `category` (string, fast, multi_valued, stored)
-/// — matching `solr-ref/capture.sh`'s MLT block schema exactly, so the
+/// — matching the dedicated Solr capture's MLT block schema exactly, so the
 /// captured fixtures are ground truth here too. Core named `content` per the
 /// established convention (`tests/faceting.rs`'s `RANGE_SCHEMA_TOML` comment):
 /// Wayfinder's core name is independent of the Solr core the fixtures came
@@ -118,7 +107,7 @@ tokenizer = "simple"
 kind = "lowercase"
 "#;
 
-/// The exact 20-doc corpus `solr-ref/capture.sh`'s MLT block indexes: four
+/// The exact 20-doc corpus the dedicated Solr capture's MLT block indexes: four
 /// topic clusters (cooking, gardening, astronomy, outdoors) with real shared
 /// vocabulary within a cluster, plus two deliberately unrelated docs
 /// (`mlt19`, `mlt20`).
@@ -191,7 +180,7 @@ fn assert_matches_mlt_fixture(actual: Value, fixture_name: &str) {
 }
 
 /// Recursively blanks every `score`/`maxScore` value to `null`. PRD
-/// ratified-divergence 4 (also `tests/differential.rs`'s
+/// ratified-divergence 4 (also the retained fixture tests'
 /// `RANKED_SCORE_VALUE_RATIFIED`, applied there to `select_term_scored`/
 /// `select_quick_scored`): Tantivy's BM25 magnitude is a real,
 /// permanently-accepted scoring-formula divergence from Solr/Lucene's
@@ -327,7 +316,7 @@ async fn mlt_mintf_mindf_maxdf_tuning_matches_ranked_fixture() {
     // Loosening mintf/mindf from the too-strict defaults surfaces 4 real
     // matches from the astronomy cluster (finding 64/65) — compared by
     // ranked-id list per PRD §8 ("compare ranked ID lists, not just result
-    // sets"), reusing tests/differential.rs's own machinery
+    // sets"), reusing feature tests' own machinery
     // (`common::diff::diff_ranked_ids`) rather than inventing a second one.
     let (app, _dir) = mlt_app().await;
     let (status, body) = get(
@@ -424,7 +413,7 @@ async fn mlt_fl_rows_start_paginates_the_similar_docs_result_set() {
     // returned page (PRD ratified-divergence 4's `/select` semantics extend
     // here). The raw score magnitude itself is exempt from exact-equality
     // comparison for the same reason `select_term_scored`/`select_quick_scored`
-    // are in `tests/differential.rs`'s `RANKED_SCORE_VALUE_RATIFIED`
+    // are in the retained fixture tests' `RANKED_SCORE_VALUE_RATIFIED`
     // (Tantivy's BM25 vs. Solr/Lucene's BM25Similarity is a real, permanent,
     // ratified scoring-formula divergence, not a wiring bug) — doc set,
     // order, and every other field still must match exactly.
@@ -441,19 +430,9 @@ async fn mlt_fl_rows_start_paginates_the_similar_docs_result_set() {
 
 // --- key order (finding 61: responseHeader, match, response[, interestingTerms]) --
 
-/// The `/mlt` row's own manifest query (rather than hand-copying it), so
-/// editing `manifest.tsv` can't silently desynchronise this test from the
-/// request the fixture was actually captured against — same rationale as
-/// `tests/json_key_order.rs::keyorder_query_from_manifest`.
-fn mlt_manifest_query(name: &str) -> String {
-    let entries = load_manifest(&manifest_path());
-    entries
-        .iter()
-        .find(|e| e.name == name)
-        .unwrap_or_else(|| panic!("manifest.tsv has no row named `{name}`"))
-        .path
-        .clone()
-}
+const MLT_BASELINE_PATH: &str = "mlt?q=id:mlt1&mlt.fl=body,category&wt=json";
+const MLT_INTERESTING_TERMS_DETAILS_PATH: &str =
+    "mlt?q=id:mlt1&mlt.fl=body&mlt.interestingTerms=details&wt=json";
 
 #[tokio::test]
 async fn mlt_baseline_key_order_matches_solr() {
@@ -462,7 +441,7 @@ async fn mlt_baseline_key_order_matches_solr() {
     // requested), plus `match`/`response`'s own inner
     // `numFound, start, numFoundExact, docs` order.
     let (app, _dir) = mlt_app().await;
-    let (status, text) = get_text(&app, CORE, &mlt_manifest_query("mlt_baseline")).await;
+    let (status, text) = get_text(&app, CORE, MLT_BASELINE_PATH).await;
     assert_eq!(status, StatusCode::OK, "mlt_baseline must be a 200: {text}");
     assert_same_key_order(&text, "mlt_baseline");
 }
@@ -472,12 +451,7 @@ async fn mlt_interesting_terms_details_key_order_matches_solr() {
     // The only fixture exercising `interestingTerms`'s trailing position as a
     // top-level sibling of `match`/`response`.
     let (app, _dir) = mlt_app().await;
-    let (status, text) = get_text(
-        &app,
-        CORE,
-        &mlt_manifest_query("mlt_interesting_terms_details"),
-    )
-    .await;
+    let (status, text) = get_text(&app, CORE, MLT_INTERESTING_TERMS_DETAILS_PATH).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -958,12 +932,9 @@ async fn mlt_json_nl_flat_renders_interesting_terms_as_the_default_array() {
 /// Doc set, ranking order and every non-score field still have to match the
 /// fixture exactly.
 ///
-/// This replaces #141's expiring guard
-/// (`mlt_fl_wildcard_plus_score_still_drops_every_field_until_issue_188`),
-/// deleted along with `mlt_fl_wildcard_score`'s `MLT_EXPECTED_DIVERGENCES`
-/// entry. The fixture stays in the manifest loop's `SCORE_MAGNITUDE_EXEMPT`
-/// set for the ratified-divergence reason above, which is unrelated to the
-/// wildcard.
+/// `mlt_fl_wildcard_score` stays in the fixture loop's
+/// `SCORE_MAGNITUDE_EXEMPT` set for the ratified score-magnitude divergence,
+/// which is unrelated to wildcard field expansion.
 #[tokio::test]
 async fn mlt_fl_wildcard_plus_score_returns_every_stored_field_plus_score() {
     let (app, _dir) = mlt_app().await;
@@ -1222,110 +1193,115 @@ async fn mlt_after_reindexing_overwrites_does_not_panic_or_garbage_score() {
     );
 }
 
-// --- differential-harness-style coverage over the mlt_* manifest rows -------
+// --- fixture-backed coverage over the dedicated MLT requests ----------------
 
-/// The subset of `solr-ref/manifest.tsv` this file owns: every row whose name
-/// starts with `mlt_`. See the module doc comment for why these cannot run
-/// through `tests/differential.rs`'s generic hermetic loop unmodified (that
-/// loop's `common::indexed_app()` seeds a different, 5-doc corpus).
-fn manifest_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("solr-ref/manifest.tsv")
-}
-
-/// `mlt_*` manifest rows Wayfinder deliberately does not match yet, each with
-/// the issue that owns the gap. Same self-expiring contract as
-/// `tests/differential.rs::EXPECTED_DIVERGENCES`: an entry whose fixture
-/// *starts* matching fails the loop below, so the entry cannot rot into a
-/// permanently green lie — the row must be removed when its issue lands.
-///
-/// Currently empty: the last entry, `mlt_fl_wildcard_score`, was removed when
-/// issue #188 taught `CoreIndex::render_doc` about `fl=*` — the row now matches
-/// its fixture (modulo the blanked BM25 magnitudes `SCORE_MAGNITUDE_EXEMPT`
-/// below still allows), and `mlt_fl_wildcard_plus_score_returns_every_stored_field_plus_score`
-/// asserts it directly.
-const MLT_EXPECTED_DIVERGENCES: &[(&str, &str)] = &[];
+/// Every dedicated-corpus request whose response fixture this suite verifies.
+const MLT_FIXTURE_REQUESTS: &[(&str, &str)] = &[
+    ("mlt_baseline", "mlt?q=id:mlt1&mlt.fl=body,category&wt=json"),
+    ("mlt_fl_restricted", "mlt?q=id:mlt1&mlt.fl=body&wt=json"),
+    (
+        "mlt_mintf_mindf_maxdf",
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&wt=json",
+    ),
+    (
+        "mlt_minwl_maxwl",
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.minwl=6&mlt.maxwl=10&wt=json",
+    ),
+    (
+        "mlt_maxqt",
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxqt=2&wt=json",
+    ),
+    (
+        "mlt_boost",
+        "mlt?q=id:mlt1&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.boost=true&wt=json",
+    ),
+    (
+        "mlt_fl_rows_start",
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fl=id,score&rows=2&start=1&wt=json",
+    ),
+    (
+        "mlt_interesting_terms_details",
+        "mlt?q=id:mlt1&mlt.fl=body&mlt.interestingTerms=details&wt=json",
+    ),
+    (
+        "mlt_no_interesting_terms",
+        "mlt?q=id:mlt20&mlt.fl=body&wt=json",
+    ),
+    (
+        "mlt_nonexistent_doc",
+        "mlt?q=id:nosuchdoc&mlt.fl=body&wt=json",
+    ),
+    (
+        "mlt_fq_scope",
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:astronomy&wt=json",
+    ),
+    (
+        "mlt_fq_seed_not_filtered",
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:cooking&wt=json",
+    ),
+    (
+        "mlt_fq_multiple_and",
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fq=category:astronomy&fq=category:outdoors&wt=json",
+    ),
+    (
+        "mlt_match_include_false",
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.match.include=false&wt=json",
+    ),
+    (
+        "mlt_match_offset",
+        "mlt?q=category:astronomy&mlt.fl=body&mlt.match.offset=1&wt=json",
+    ),
+    (
+        "mlt_json_nl_map_empty_terms",
+        "mlt?q=id:mlt1&mlt.fl=body&mlt.interestingTerms=details&json.nl=map&wt=json",
+    ),
+    (
+        "mlt_fl_wildcard_score",
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fl=*,score&wt=json",
+    ),
+    (
+        "mlt_maxntp_noop",
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&mlt.maxntp=5000&wt=json",
+    ),
+    (
+        "mlt_maxntp_low",
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&mlt.maxdf=10&mlt.maxntp=1&wt=json",
+    ),
+];
 
 #[tokio::test]
-async fn hermetic_mlt_manifest_entries_match_committed_fixtures() {
+async fn hermetic_mlt_fixture_requests_match_committed_fixtures() {
     let (app, _dir) = mlt_app().await;
-    let entries: Vec<_> = load_manifest(&manifest_path())
-        .into_iter()
-        .filter(|e| e.name.starts_with("mlt_"))
-        .collect();
-    assert!(
-        !entries.is_empty(),
-        "expected the mlt_* rows capture.sh's MLT blocks append to manifest.tsv"
-    );
-
     let mut failures = Vec::new();
-    for entry in &entries {
-        let (status, actual) = get(&app, &entry.path).await;
-        if status.as_u16() != entry.status {
-            failures.push(format!(
-                "{}: HTTP status {} vs expected {}",
-                entry.name, status, entry.status
-            ));
+    for &(name, path) in MLT_FIXTURE_REQUESTS {
+        let (status, actual) = get(&app, path).await;
+        if status != StatusCode::OK {
+            failures.push(format!("{name}: HTTP status {status} vs expected 200"));
             continue;
         }
 
-        // The two manifest rows requesting a `score` in `fl`
-        // (`mlt_fl_rows_start`'s `fl=id,score`, `mlt_fl_wildcard_score`'s
-        // `fl=*,score`). Their BM25 magnitudes are exempt from exact
-        // comparison for the same ratified reason
-        // `assert_matches_mlt_fixture_ignoring_score_magnitude` documents
-        // above (PRD ratified-divergence 4).
-        //
-        // `mlt_fl_wildcard_score` stays in this set after issue #188 for the
-        // same reason it was put here: BM25 score magnitude is a permanent
-        // divergence #188 does not change, so without blanking this row could
-        // never match its fixture at all. Blanked, it is an ordinary
-        // non-diverging row -- which is exactly why its
-        // `MLT_EXPECTED_DIVERGENCES` entry was able to expire when the
-        // wildcard landed. Do NOT widen this set to cover any other row: the
-        // narrow membership is what keeps the loop able to see a real
-        // regression.
-        //
-        // For `mlt_fl_rows_start` the real (un-blanked) `maxScore` semantics
-        // are still checked directly, so this loop can't be fooled by a
-        // regression that blanking alone would hide.
         const SCORE_MAGNITUDE_EXEMPT: &[&str] = &["mlt_fl_rows_start", "mlt_fl_wildcard_score"];
-        let (expected, actual) = if SCORE_MAGNITUDE_EXEMPT.contains(&entry.name.as_str()) {
+        let (expected, actual) = if SCORE_MAGNITUDE_EXEMPT.contains(&name) {
             let normalized_actual = normalize_mlt(actual);
-            if entry.name == "mlt_fl_rows_start" {
+            if name == "mlt_fl_rows_start" {
                 assert_mlt_fl_rows_start_maxscore_semantics(&normalized_actual);
             }
             (
-                blank_bm25_score_magnitudes(normalize_mlt(fixture(&entry.name))),
+                blank_bm25_score_magnitudes(normalize_mlt(fixture(name))),
                 blank_bm25_score_magnitudes(normalized_actual),
             )
         } else {
-            (normalize_mlt(fixture(&entry.name)), normalize_mlt(actual))
+            (normalize_mlt(fixture(name)), normalize_mlt(actual))
         };
         let report = diff(&expected, &actual);
-        match MLT_EXPECTED_DIVERGENCES
-            .iter()
-            .find(|(name, _)| *name == entry.name)
-        {
-            Some((_, reason)) => {
-                if report.diffs.is_empty() {
-                    failures.push(format!(
-                        "{}: listed in MLT_EXPECTED_DIVERGENCES but now matches its fixture — \
-                         delete the entry (and its guard test). Reason given: {reason}",
-                        entry.name
-                    ));
-                }
-            }
-            None => {
-                if !report.diffs.is_empty() {
-                    failures.push(format!("{}: {:?}", entry.name, report.diffs));
-                }
-            }
+        if !report.diffs.is_empty() {
+            failures.push(format!("{name}: {:?}", report.diffs));
         }
     }
 
     assert!(
         failures.is_empty(),
-        "hermetic mlt differential failures against solr-ref fixtures:\n{}",
+        "hermetic MLT fixture failures:\n{}",
         failures.join("\n")
     );
 }

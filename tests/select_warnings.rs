@@ -8,7 +8,7 @@
 //! `facet.field` raised to `mincount` 1 — still fires and is checked last.
 //!
 //! Exact score behaviour for function queries is fixture-backed in
-//! `tests/differential.rs`'s `fnq` rows; this file covers only the
+//! the retained fixture tests' `fnq` rows; this file covers only the
 //! warning-envelope contract.
 
 // The `dead_code` allow for partially-used shared helpers is an inner attribute

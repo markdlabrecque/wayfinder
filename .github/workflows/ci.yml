@@ -43,9 +43,8 @@ jobs:
       - run: vendor/bin/phpunit
 
   # search_api_wayfinder integration harness (issue #80, part of #57). Manual
-  # only -- gated behind WAYFINDER_INTEGRATION=1 the same way
-  # tests/differential.rs's live-Solr mode is gated behind
-  # WAYFINDER_DIFF_SOLR=1, so it never runs on push/pull_request. Trigger by
+  # only -- gated behind WAYFINDER_INTEGRATION=1, so it never runs on
+  # push/pull_request. Trigger by
   # hand from the Actions tab (workflow_dispatch). M5 (#79) decided it stays
   # manual: it needs Docker and network, which breaks the hermetic-gate
   # contract the unit job above upholds.

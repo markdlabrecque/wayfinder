@@ -3,9 +3,9 @@
 //! Unit-level: calls `extract::extract_document` directly (no HTTP) and pins
 //! the internal `ExtractedDocument` fields against the committed Solr
 //! fixtures captured by #261 (`solr-ref/responses/extract_pdf_*.json`), never
-//! hand-typed, per CLAUDE.md's compatibility contract. The differential
-//! harness (`tests/differential.rs`) separately proves the full rendered
-//! envelope matches end to end after the ratified PDF normalisation; this
+//! hand-typed, per CLAUDE.md's compatibility contract. The extraction feature
+//! tests separately prove the full rendered envelope matches end to end after
+//! the ratified PDF normalisation; this
 //! suite pins the extractor's own field-by-field behaviour so a regression
 //! names itself immediately, and it is where the cancellation,
 //! malformed-input, and encrypted-input checks hang off.
@@ -139,7 +139,7 @@ fn pdf_corpus_extracts_body_and_metadata() {
         );
 
         // The XHTML body is not captured for PDF (#261 captured
-        // extractFormat=text only), so it is not differentially pinned, but a
+        // extractFormat=text only), so it is not fixture-wise pinned, but a
         // text-bearing page must still render its content inside `<p>` blocks.
         if !doc.body_text.is_empty() {
             assert!(
@@ -158,7 +158,7 @@ fn pdf_corpus_extracts_body_and_metadata() {
 /// Tika/PDFBox throw `DataFormatException` and answer 500. `pdf-extract`
 /// cannot tell "broken document" from "legitimately empty document" (an
 /// image-only scanned page), so Wayfinder emits the same 200-empty shape for
-/// both and records the status divergence in the differential harness.
+/// both and records the status divergence in the fixture comparison suite.
 ///
 /// Mutation target: if a guard is added that turns empty output into an error
 /// (trying to "fix" the divergence by guessing), this `Ok` assertion fails.

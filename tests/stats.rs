@@ -4,7 +4,7 @@
 //!
 //! Every expected value here comes from a committed fixture in
 //! `solr-ref/responses/`, captured against a dedicated `stats` Solr core
-//! (`solr-ref/capture.sh`'s issue-#5 block, container `wayfinder-solr-5`, port
+//! (the dedicated Solr capture's issue-#5 block, container `wayfinder-solr-5`, port
 //! 8992) — never from what Wayfinder happens to produce. See
 //! `docs/solr-ref-findings.md` finding 51 for what that capture found.
 //!
@@ -63,7 +63,7 @@ stored = true
 fast = true
 "#;
 
-/// The exact 6-doc corpus `solr-ref/capture.sh`'s issue-#5 block indexes into
+/// The exact 6-doc corpus the dedicated Solr capture's issue-#5 block indexes into
 /// the `stats` Solr core: `views` missing on `st6`, `price` missing on `st5`
 /// — two independent gaps.
 fn stats_corpus() -> Value {

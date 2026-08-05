@@ -936,7 +936,7 @@ impl<T: TokenStream> TokenStream for SimpleLowerCaseTokenStream<T> {
 /// Solr's `RemoveDuplicatesTokenFilterFactory`: drops a token whose text
 /// duplicates one already emitted *at the same position*. Tokens at different
 /// positions are never duplicates, which is why d3's two `dog|...` values
-/// (`solr-ref/capture.sh`'s pls corpus) both survive -- consecutive multiValued
+/// (the dedicated payload-score corpus) both survive -- consecutive multiValued
 /// values sit at consecutive positions.
 #[derive(Clone)]
 struct RemoveDuplicatesFilter;
@@ -1255,8 +1255,8 @@ fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager>
     //   - static `text_en` / `text_general` stand in for Solr's *`_default`*
     //     configset instead -- that is what pins `text_en`'s `day` -> `dai`
     //     Porter terminal-y rule (PRD open question 5), which the Search API
-    //     configset's Snowball chain contradicts, and `capture.sh:1686` boots
-    //     the edismax reference core with no configset argument at all.
+    //     configset's Snowball chain contradicts; the dedicated edismax
+    //     reference core used no configset argument at all.
     //     `_default`'s `text_en` has no `LengthFilterFactory`, and five edismax
     //     fixtures pin that: `edismax_basic`, `edismax_score_baseline`,
     //     `edismax_boost_multiplicative`, `edismax_term_boost` and

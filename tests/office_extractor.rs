@@ -4,8 +4,8 @@
 //! the internal `ExtractedDocument` fields against the committed Solr
 //! fixtures. Expected `body_xhtml`/`body_text` are *derived* from
 //! `solr-ref/responses/extract_<fmt>_{xml,text}.json`, never hand-typed, per
-//! CLAUDE.md's compatibility contract. The differential harness
-//! (`tests/differential.rs`) separately proves the full rendered envelope
+//! CLAUDE.md's compatibility contract. The fixture comparison suite
+//! (the retained fixture tests) separately proves the full rendered envelope
 //! matches end to end after the ratified office-metadata normalisation; this
 //! suite pins the extractor's own field-by-field behaviour so a regression in
 //! any one format names itself immediately, and it is what the
@@ -150,7 +150,7 @@ fn each_office_format_extracts_the_fixture_body_and_metadata() {
 }
 
 /// Malformed office inputs must fail gracefully — an `Err`, never a panic and
-/// never a false success. The differential harness already proves the route
+/// never a false success. The fixture comparison suite already proves the route
 /// renders these as the captured Solr 500; this pins the extractor's own
 /// contract (`extract_document` returns `Err`) so a regression that panics or
 /// silently returns empty output fails here rather than only in the HTTP

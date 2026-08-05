@@ -1,6 +1,6 @@
 //! Spellcheck compatibility (issue #223).
 //!
-//! The fixtures use capture.sh's dedicated `spellcheck_223` corpus: `en` has
+//! The fixtures use the dedicated Solr capture's dedicated `spellcheck_223` corpus: `en` has
 //! `quick`/`rocket`, while `und` has `quack`/`garden`. Their disagreement makes
 //! repeated `spellcheck.dictionary` precedence observable.
 

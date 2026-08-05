@@ -38,9 +38,8 @@
 //!    way the task brief warned against. Per `CLAUDE.md`'s compatibility
 //!    contract, fixtures are ground truth, so bug-compatible (option (a) in
 //!    the issue) is what these tests assert; if a human later ratifies
-//!    option (b) ("deliberately correct", a documented divergence),
-//!    those two tests are the ones that must move to
-//!    `EXPECTED_DIVERGENCES`-style entries, not be silently relaxed.
+//!    option (b) ("deliberately correct", a documented divergence), those
+//!    two tests must be revised explicitly, not silently relaxed.
 //! 4. Shape A (traces 00002, 00009 — expanded per-language fields, plain
 //!    lucene, no local params) already returns `numFound == 2` today
 //!    (verified by running these tests before any implementation): see

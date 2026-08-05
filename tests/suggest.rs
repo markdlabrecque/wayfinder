@@ -86,8 +86,7 @@ async fn suggest_build_all_returns_captured_envelope() {
 }
 
 /// The build envelope matches the committed fixture byte-for-byte outside the
-/// volatile `QTime` — the wire-contract claim, asserted here in addition to the
-/// differential harness's manifest-errors row.
+/// volatile `QTime`.
 #[tokio::test]
 async fn suggest_build_all_matches_committed_fixture() {
     let (app, _dir) = build_app_with_config(None).expect("app must build");
@@ -234,7 +233,7 @@ async fn suggest_strict_params_rejects_unknown_suggest_param() {
 /// phrase source the shipped `solr.SuggestComponent` reads) and
 /// `sm_context_tags` (its `contextField`, the `suggest.cfq` target), both
 /// stored and multi-valued, plus the `id` unique key. Mirrors the corpus
-/// `solr-ref/capture.sh`'s #384 block indexes into its own `suggest` core, so
+/// the dedicated Solr capture's #384 block indexes into its own `suggest` core, so
 /// the captured fixtures under `solr-ref/responses/suggest_q_*.json` are ground
 /// truth for the same documents here.
 ///
@@ -269,7 +268,7 @@ stored = true
 multi_valued = true
 "#;
 
-/// The exact 5-doc corpus `solr-ref/capture.sh`'s #384 block indexes, so the
+/// The exact 5-doc corpus the dedicated Solr capture's #384 block indexes, so the
 /// `suggest_q_*.json` fixtures are ground truth for it. `twm_suggest` carries
 /// the suggestion phrases; `sm_context_tags` carries the per-doc context tags
 /// `suggest.cfq` filters against (`site_alpha`/`site_beta` vary by doc so cfq
@@ -287,7 +286,7 @@ multi_valued = true
 /// `site_gamma`/`lang_tr`, used by no `cfq` fixture, and none of its tokens is
 /// touched by any pre-su5 query, so adding it must leave the other 25
 /// fixtures byte-identical outside `QTime` -- that invariance is itself the
-/// check that su5 is inert (`solr-ref/capture.sh`'s capture comment for this
+/// check that su5 is inert (the dedicated Solr capture's capture comment for this
 /// block makes the same claim against the real Solr capture).
 fn suggest_lookup_corpus() -> Value {
     json!([
@@ -783,7 +782,7 @@ async fn suggest_q_order_swap_en_matches_fixture() {
 // --- round-3 review probes: nine fixtures settling four behaviours the first
 // 25 fixtures left open (highlight-span rule for non-final/final tokens,
 // trailing-separator handling, multi-byte highlight-span arithmetic, and the
-// cfq paren-group branch). See `solr-ref/capture.sh`'s "round-3 review
+// cfq paren-group branch). See the dedicated Solr capture's "round-3 review
 // probes" comment block for the capture rationale.
 
 /// Highlight length for a NON-FINAL (exact) query token whose stem differs

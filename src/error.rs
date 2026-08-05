@@ -68,7 +68,7 @@ struct ErrorExtra {
     /// `err_regex_bad_class.json`: a regex that parses as a query but fails
     /// automaton compilation) — every other error here, 400 or 500, keeps
     /// the `metadata` array. `trace` itself is free text (a Java stack
-    /// trace on Solr's side) the differential normaliser drops the same way
+    /// trace on Solr's side) the fixture normaliser drops the same way
     /// it drops `error.msg` (finding 10), so its content never has to
     /// match; only its *shape* — present, and `metadata` absent — does.
     trace: Option<String>,

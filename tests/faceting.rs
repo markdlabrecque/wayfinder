@@ -27,8 +27,8 @@
 //!   tracer-bullet review follow-up 1 calls a bug. Wayfinder diverges
 //!   deliberately: Tantivy cannot aggregate a non-`fast` field, so it is a hard
 //!   400 with the Solr error envelope. Those fixtures are therefore in
-//!   `manifest-errors.tsv` (ground truth for the divergence) rather than
-//!   `manifest.tsv` (a target the differential harness must match).
+//!   the captured fixture request set (ground truth for the divergence) rather than
+//!   the captured fixture request set (a target the fixture comparison suite must match).
 
 // The `dead_code` allow for partially-used shared helpers is an inner attribute
 // inside `tests/common/mod.rs`; repeating it here is a clippy error under
@@ -47,7 +47,7 @@ use common::{assert_matches_fixture, corpus, fixture, get, indexed_app, post_doc
 /// A second core's schema, so `facet.range` gets numeric and date fields
 /// without touching `common::SCHEMA_TOML` (adding a field there would rewrite
 /// ground truth for every doc-returning fixture). Mirrors the `facets` core
-/// `solr-ref/capture.sh` creates for the `facet_range_*` captures:
+/// the dedicated Solr capture creates for the `facet_range_*` captures:
 /// `views` (int, fast), `created` (date, fast), `note` (string, stored only —
 /// *not* fast, so unfacetable).
 ///
@@ -90,7 +90,7 @@ type = "string"
 stored = true
 "#;
 
-/// The 4-doc corpus `capture.sh` indexes into the `facets` core.
+/// The 4-doc corpus the dedicated Solr capture indexes into the `facets` core.
 fn range_corpus() -> Value {
     json!([
         {"id":"r1","views":5, "created":"2020-01-02T00:00:00Z","note":"alpha"},
@@ -1060,8 +1060,8 @@ async fn strict_params_accepts_every_implemented_facet_param() {
 //     r4 views=35 created=2020-01-05T00:00:00Z
 //
 // The queries below are copied verbatim from the corresponding row in
-// `solr-ref/manifest-errors.tsv` (these are `facets`-core GETs, so the
-// differential harness does not pick them up).
+// the captured fixture request set (these are `facets`-core GETs, so the
+// fixture comparison suite does not pick them up).
 //
 // Ground truth establishes two things:
 //
@@ -1444,7 +1444,7 @@ async fn date_facet_field_key_is_rendered_as_solr_rfc3339_not_a_raw_i64() {
 // `RANGE_SCHEMA_TOML`: the debt items need field types neither of those
 // carries (`pdouble`, `pfloat`, a millisecond-precision `pdate`, plus a
 // stored-only field to combine with a broken `facet.query`). Mirrors the
-// `facets33` core / 5-doc corpus in `solr-ref/capture.sh`'s issue-33 block
+// `facets33` core / 5-doc corpus in the dedicated Solr capture's issue-33 block
 // exactly (see the task spec's "Ground truth" section): `views` (Solr
 // `pint`) -> `int`, `price` (`pdouble`) -> `double`, `rating` (`pfloat`) ->
 // `float`, `stamp` (`pdate`, millisecond values) -> `date`, `tag` (`string`,
@@ -1505,7 +1505,7 @@ type = "string"
 stored = true
 "#;
 
-/// The 5-doc corpus `capture.sh`'s issue-33 block indexes into `facets33`.
+/// The 5-doc corpus the dedicated Solr capture's issue-33 block indexes into `facets33`.
 fn debt_corpus() -> Value {
     json!([
         {"id":"r1","views":5, "price":5.0, "rating":5.0,

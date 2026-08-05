@@ -1,6 +1,5 @@
-# Solr reference fixtures (solr-ref/responses/, manifest.tsv) are committed:
-# the test suite asserts against them, so they must be present without Docker.
-# Regenerate with solr-ref/capture.sh.
+# Frozen Solr reference fixtures (solr-ref/responses/) are committed because
+# the test suite asserts against them and must run without Docker.
 
 # Rust
 /target/

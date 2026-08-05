@@ -1,7 +1,7 @@
 //! Issue #332 — `{!geofilt}`/`{!bbox}` filters and `geodist()` in `sort`.
 //!
 //! The wire-compatibility evidence (Solr's circle-vs-square distinction, the
-//! `sort=geodist() asc` ordering) lives in the differential harness against
+//! `sort=geodist() asc` ordering) lives in the fixture comparison suite against
 //! captured `geo_*` fixtures. This file covers the two behaviours no fixture
 //! exercises: a `{!geofilt}` excluding a document that has *no* `location`
 //! point at all, and a local-param block overriding the request params

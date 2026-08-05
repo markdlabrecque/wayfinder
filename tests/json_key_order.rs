@@ -22,11 +22,8 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
-
 use axum::Router;
 use axum::http::StatusCode;
-use common::diff::load_manifest_errors;
 use common::key_order::{
     KeyOrder, assert_same_key_order, assert_same_key_order_texts, fixture_key_order, get_text,
     is_alphabetical,
@@ -35,32 +32,10 @@ use common::{CORE, indexed_app, post_docs};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-fn manifest_errors_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("solr-ref/manifest-errors.tsv")
-}
-
-/// Looks up `name`'s row in `solr-ref/manifest-errors.tsv` and returns its
-/// URL with the `keyorder/` core prefix stripped, so the three query
-/// constants below are read out of the manifest at runtime instead of
-/// hand-copied (issue #31 follow-up: "editing the manifest must not silently
-/// desynchronise them").
-fn keyorder_query_from_manifest(name: &str) -> String {
-    let entries = load_manifest_errors(&manifest_errors_path());
-    let entry = entries
-        .iter()
-        .find(|e| e.name == name)
-        .unwrap_or_else(|| panic!("manifest-errors.tsv has no row named `{name}`"));
-    entry
-        .url
-        .strip_prefix("keyorder/")
-        .unwrap_or_else(|| {
-            panic!(
-                "row `{name}`'s url `{}` must start with `keyorder/`",
-                entry.url
-            )
-        })
-        .to_string()
-}
+const WIDE_RANGE_QUERY: &str = "select?q=*:*&rows=0&facet=true&facet.range=views&facet.range.start=0&facet.range.end=200&facet.range.gap=10&json.nl=map&wt=json";
+const FIELD_MAP_QUERY: &str = "select?q=*:*&rows=0&facet=true&facet.field=tag&json.nl=map&wt=json";
+const FIELD_MAP_INDEX_QUERY: &str =
+    "select?q=*:*&rows=0&facet=true&facet.field=tag&facet.sort=index&json.nl=map&wt=json";
 
 // --- 0. helper self-tests -------------------------------------------------
 //
@@ -134,16 +109,15 @@ fn serde_json_is_built_with_preserve_order() {
 
 // --- 2. the key-order core ------------------------------------------------
 
-/// Mirrors the `keyorder` Solr core created at the end of `solr-ref/capture.sh`:
+/// Mirrors the dedicated `keyorder` Solr capture core:
 /// `views` (pint, indexed+stored+docValues) and `tag` (string,
 /// indexed+stored+docValues+multiValued), on the `_default` configset whose
 /// `string`/`pint` types carry `docValues="true"` — hence `fast = true` here, the
 /// same reasoning as `common::SCHEMA_TOML`'s `id`.
 ///
 /// The core is named `content` because `common::CORE` is what the request
-/// helpers address; the Solr-side core name (`keyorder`) only ever appears in the
-/// manifest row. `tests/faceting.rs`'s `RANGE_SCHEMA_TOML` does the same for the
-/// `facets` core.
+/// helpers address; the Solr-side core was named `keyorder`.
+/// `tests/faceting.rs`'s `RANGE_SCHEMA_TOML` does the same for the `facets` core.
 ///
 /// `core.default_field` must name a declared field, and the captured corpus has
 /// no text field, so `id` serves — every query used here is `q=*:*`, which never
@@ -175,7 +149,7 @@ fast = true
 multi_valued = true
 "#;
 
-/// The exact 8-doc corpus `capture.sh` indexes into the `keyorder` core.
+/// The exact 8-doc corpus indexed in the dedicated `keyorder` Solr capture.
 ///
 /// `views` spans 5..195 so a 0-200-by-10 range facet has bucket keys
 /// `0,10,...,190`, where numeric order and alphabetical order differ ("100"
@@ -205,24 +179,6 @@ async fn keyorder_app() -> (Router, TempDir) {
         "indexing the key-order corpus must succeed, got {body}"
     );
     (app, dir)
-}
-
-/// The query from `keyorder_range_wide_map`'s row in
-/// `solr-ref/manifest-errors.tsv`, minus the core prefix — derived at
-/// runtime via `keyorder_query_from_manifest`, not hand-copied, so editing
-/// the manifest row cannot silently desynchronise this from ground truth.
-fn wide_range_query() -> String {
-    keyorder_query_from_manifest("keyorder_range_wide_map")
-}
-
-/// The query from `keyorder_facet_field_map`'s manifest-errors row.
-fn field_map_query() -> String {
-    keyorder_query_from_manifest("keyorder_facet_field_map")
-}
-
-/// The query from `keyorder_facet_field_map_index`'s manifest-errors row.
-fn field_map_index_query() -> String {
-    keyorder_query_from_manifest("keyorder_facet_field_map_index")
 }
 
 /// Asserts the keys at `path` in `text` match the same path in `fixture`, and
@@ -258,7 +214,7 @@ fn assert_keys_match_fixture(
 #[tokio::test]
 async fn wide_range_json_nl_map_bucket_order_matches_solr() {
     let (app, _dir) = keyorder_app().await;
-    let (status, text) = get_text(&app, CORE, &wide_range_query()).await;
+    let (status, text) = get_text(&app, CORE, WIDE_RANGE_QUERY).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -277,7 +233,7 @@ async fn wide_range_json_nl_map_bucket_order_matches_solr() {
 #[tokio::test]
 async fn facet_range_sub_key_order_matches_solr() {
     let (app, _dir) = keyorder_app().await;
-    let (status, text) = get_text(&app, CORE, &wide_range_query()).await;
+    let (status, text) = get_text(&app, CORE, WIDE_RANGE_QUERY).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -297,7 +253,7 @@ async fn facet_range_sub_key_order_matches_solr() {
 #[tokio::test]
 async fn facet_field_json_nl_map_count_order_matches_solr() {
     let (app, _dir) = keyorder_app().await;
-    let (status, text) = get_text(&app, CORE, &field_map_query()).await;
+    let (status, text) = get_text(&app, CORE, FIELD_MAP_QUERY).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -318,7 +274,7 @@ async fn facet_field_json_nl_map_count_order_matches_solr() {
 #[tokio::test]
 async fn facet_field_json_nl_map_index_order_matches_solr() {
     let (app, _dir) = keyorder_app().await;
-    let (status, text) = get_text(&app, CORE, &field_map_index_query()).await;
+    let (status, text) = get_text(&app, CORE, FIELD_MAP_INDEX_QUERY).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -420,7 +376,7 @@ async fn error_envelope_key_order_matches_solr() {
 
 /// Mirrors `tests/faceting.rs::RANGE_SCHEMA_TOML` / `range_corpus`, which is
 /// the same schema and corpus the `facets` Solr core in
-/// `solr-ref/capture.sh` builds — duplicated locally rather than shared
+/// the dedicated Solr capture builds — duplicated locally rather than shared
 /// across integration-test binaries, the same choice `keyorder_app` above
 /// makes for the `keyorder` core.
 const FACETS_SCHEMA_TOML: &str = r#"
@@ -489,7 +445,7 @@ async fn facets_app() -> (Router, TempDir) {
 /// `plain_select_envelope_key_order_matches_solr`, issue #31 follow-up 5):
 /// this query is `rows=0`, so an empty `docs` is legitimate, not a vacuity
 /// bug — the whole point of the query is the facet counts, and
-/// `facet_field_numeric_all`'s own capture (`capture.sh`) is `rows=0` too.
+/// `facet_field_numeric_all`'s own capture (the dedicated Solr capture) is `rows=0` too.
 #[tokio::test]
 async fn response_header_warnings_leads_not_trails() {
     let (app, _dir) = facets_app().await;
@@ -588,7 +544,7 @@ fn select_fl_reversed_fixture_discriminates_input_order_from_fl_order() {
         doc_keys,
         vec!["body".to_string(), "id".to_string()],
         "select_fl_reversed's fixture doc keys must not be in fl order (fl=body,id) — \
-         if they are, capture.sh's premise for this fixture is wrong and it cannot pin \
+         if they are, the dedicated Solr capture's premise for this fixture is wrong and it cannot pin \
          finding 24's fl-order half"
     );
 }

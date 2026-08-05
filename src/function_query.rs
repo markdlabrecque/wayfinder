@@ -219,8 +219,8 @@ const EARTH_RADIUS_KM: f64 = 6_371.008_771_4;
 /// lat/lon re-read from Lucene's lossy 32-bit BKD quantisation. Wayfinder
 /// computes the exact haversine on the full-precision f64 columns instead; the
 /// two agree to well under a centimetre here, the same "same logical value,
-/// different floating-point path" category the differential harness already
-/// tolerates for BM25 `score` magnitudes and stats `sum`/`mean` (#331).
+/// different floating-point path" category fixture comparisons tolerate for
+/// BM25 `score` magnitudes and stats `sum`/`mean` (#331).
 fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let dlat = (lat2 - lat1).to_radians();
     let dlon = (lon2 - lon1).to_radians();
@@ -231,8 +231,8 @@ fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 }
 
 /// A parse error carrying a Solr-shaped `SyntaxError` message. The message is
-/// normalised away by the differential harness (`error.msg`), so only its
-/// presence — a 400 — is wire-compared; it nonetheless stays Solr-shaped for
+/// normalised away by fixture comparison (`error.msg`), so only its presence
+/// — a 400 — is wire-compared; it nonetheless stays Solr-shaped for
 /// an operator reading raw JSON.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FuncQueryError(pub String);
@@ -1305,7 +1305,7 @@ impl PayloadFunction {
 /// `pls_multiterm_v`); the module never emits one, since every `boost_term`
 /// value is a single `sprintf('%s|%.1F')` token. `includeSpanScore=true`
 /// (fixture `pls_span_true`) is descoped for the same reason. Both are declared
-/// divergences with self-expiring guards in `tests/differential.rs`.
+/// documented fixture divergences outside Wayfinder's supported behavior.
 pub struct PayloadScoreQuery {
     child: Box<dyn Query>,
     /// The fast-field column name — the declared field name, since

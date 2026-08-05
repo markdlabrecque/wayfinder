@@ -5,12 +5,12 @@
 //!
 //! Ground truth is `docs/solr-ref-findings.md` findings 46-49 and the
 //! fixtures they cite in `solr-ref/responses/update_*` / `ping_unknown_core*`,
-//! captured against a self-contained `update9` core (`solr-ref/capture.sh`'s
+//! captured against a self-contained `update9` core (the dedicated Solr capture's
 //! tail block). This file mirrors that core's schema and `u1..u5` seed corpus
 //! locally — `tests/common/` is compiled once per integration-test binary and
 //! is hardcoded to the tracer-bullet `content` schema/corpus (`CORE`), so a
 //! second schema/corpus needs its own copy here, the same precedent
-//! `tests/differential.rs::SORTDEBT_SCHEMA_TOML` and
+//! `feature tests' SORTDEBT_SCHEMA_TOML` and
 //! `tests/sort.rs::SORTDEBT_SCHEMA_TOML` already establish. Request/response
 //! helpers below are local for the same reason `tests/error_shapes.rs` gives:
 //! `common`'s `get`/`post_docs`/`request` are hardcoded to `common::CORE`
@@ -42,7 +42,7 @@ use tempfile::TempDir;
 
 use common::{assert_matches_fixture, request_full};
 
-/// Mirrors `solr-ref/capture.sh`'s `update9` core schema exactly: `id`
+/// Mirrors the dedicated Solr capture's `update9` core schema exactly: `id`
 /// (string, required, fast, stored, unique key), `body` (text_en, stored),
 /// `category` (string, stored, fast, multi-valued), `title`/`nick`/`alias`
 /// (string, stored, fast, single-valued), `nick` -> `alias` copy field, and a
@@ -102,7 +102,7 @@ stored = true
 fast = true
 "#;
 
-/// The exact `u1..u5` seed corpus `capture.sh`'s reset step reseeds before
+/// The exact `u1..u5` seed corpus the dedicated Solr capture's reset step reseeds before
 /// every run.
 fn update9_corpus() -> Value {
     json!([
@@ -135,7 +135,7 @@ async fn method9(
 }
 
 /// Builds a fresh `update9`-schema app and seeds `update9_corpus()` via
-/// `commit=true`, mirroring `capture.sh`'s reset-and-reseed step.
+/// `commit=true`, mirroring the dedicated Solr capture's reset-and-reseed step.
 async fn update9_app() -> (Router, TempDir) {
     let dir = TempDir::new().expect("temp dir");
     let app = common::app_with_schema(dir.path(), UPDATE9_SCHEMA_TOML).expect("app must build");
@@ -855,7 +855,7 @@ async fn autocommit_max_time_arms_even_when_a_later_doc_in_the_batch_is_invalid(
 // The pre-existing fixtures (`update_add_commit.json` /
 // `update_mixed_commands.json` / etc.) are all single-command bodies and
 // repeat no key, and trace 00001 is only client-side evidence. Stage 2 closed
-// that gap: `capture.sh`'s issue-#154 block captured the repeated-`add`
+// that gap: the dedicated Solr capture's issue-#154 block captured the repeated-`add`
 // shapes against a real `solr:9` (`update_repeated_add_*.json` and their
 // `update_select_after_repeated_add_*.json` corpus states, finding 96), and
 // the `..._from_fixtures` tests further down are derived from them. The four
@@ -1010,15 +1010,15 @@ async fn empty_object_body_is_a_200_no_op() {
 //
 // Captured for this issue against a one-off `solr:9` (port 8992, same
 // `update9` schema and `u1..u5` seed as the rest of this file; the block is
-// appended at the end of `solr-ref/capture.sh` and the container was removed
+// appended at the end of the dedicated Solr capture and the container was removed
 // afterwards). Every expectation below is read out of those fixtures, not out
 // of what Wayfinder produces. Finding 76 records what they settle:
 //
 //   1. Every repeated `add` executes -- `update_select_after_repeated_add_batch`
 //      has BOTH `r1`/alpha and `r2`/bravo, so the body is not last-wins.
 //      (The corpus selects are scoped to the ids each body touches, not
-//      `q=*:*`: `manifest-errors.tsv` rows replay in sequence against one
-//      accumulated hermetic core in `tests/differential.rs`, so a whole-corpus
+//      `q=*:*`: the captured fixture request set rows replay in sequence against one
+//      accumulated hermetic core in the retained fixture tests, so a whole-corpus
 //      count would pin this capture's fresh-core state and nothing else's.)
 //   2. Commands execute in BODY ORDER, not grouped by kind:
 //      `update_repeated_add_delete_before` deletes `r4` and then re-adds it in

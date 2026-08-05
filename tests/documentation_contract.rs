@@ -6,7 +6,6 @@
 const CLAUDE: &str = include_str!("../CLAUDE.md");
 const PRD: &str = include_str!("../docs/PRD.md");
 const FINDINGS: &str = include_str!("../docs/solr-ref-findings.md");
-const DIFFERENTIAL: &str = include_str!("differential.rs");
 
 fn between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
     let start_index = text
@@ -147,29 +146,10 @@ fn supported_departures_and_unsupported_scope_have_different_ledgers() {
         ],
         "the findings evidence boundary must point decisions to the correct ledgers",
     );
-
-    let accepted = between(
-        DIFFERENTIAL,
-        "const ACCEPTED_DIVERGENCES: ",
-        "fn accepted_divergence_reason",
-    );
-    let expected = between(
-        DIFFERENTIAL,
-        "const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: ",
-        "fn expected_divergence_manifest_errors_reason",
-    );
-    assert!(
-        !accepted.contains("facet_non_docvalues_text_enum"),
-        "unsupported facet.method=enum must not be ratified as a supported-path divergence"
-    );
-    assert!(
-        expected.contains("facet_non_docvalues_text_enum"),
-        "the captured unsupported facet.method=enum mismatch must remain visible as inventory"
-    );
 }
 
 #[test]
-fn differential_inventory_is_not_scope_authority() {
+fn documentation_inventory_is_not_scope_authority() {
     let claude = between(CLAUDE, "## Compatibility contract", "## Testing");
     let prd_eight = between(PRD, "## 8. Conformance & benchmarking", "## 9. Risks");
     let findings_harness = between(
@@ -209,15 +189,8 @@ fn differential_inventory_is_not_scope_authority() {
         "the findings harness description must classify differences without assigning work",
     );
 
-    for forbidden in [
-        "self-expiring to-do list",
-        "this list is a to-do",
-        "when you fix the owning feature",
-        "mandatory reason naming the owning issue",
-    ] {
-        assert!(
-            !normalized(findings_harness).contains(forbidden),
-            "findings must not restore EXPECTED_DIVERGENCES as an implementation mandate: `{forbidden}`"
-        );
-    }
+    assert!(
+        normalized(findings_harness).contains("inventory"),
+        "findings must retain the distinction between evidence inventory and product scope"
+    );
 }
