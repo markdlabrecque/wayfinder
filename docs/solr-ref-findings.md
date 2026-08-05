@@ -3,6 +3,14 @@
 Source: `solr:9` (`_default` configset), core `content`, 5 docs.
 Regenerate with `solr-ref/capture.sh` (gitignored). Fixtures in `solr-ref/responses/`, index in `solr-ref/manifest.tsv`.
 
+## Evidence boundary
+
+This document records factual Solr capture and client-source evidence. Fixtures provide expected
+values but do not automatically create product scope. A deliberate departure on any supported
+path belongs in PRD §2 with fixture or client evidence, a reason, and its
+issue/report. Unsupported or out-of-scope behaviour belongs in PRD §5 and its issue/report.
+Captured but unexercised behaviour is evidence, not an implementation obligation.
+
 Schema: `id` (string, uniqueKey), `body` (text_en, stored), `category` (string, stored,
 docValues, multiValued). `doc5` has no `category` — that is what makes `facet.missing`
 observable.
@@ -58,15 +66,11 @@ of them dangles and the guard catches it.
     decision to require `fast = true` for sortable fields — same constraint, better error
     message available to us.
 
-## Decision this forces
+## Evidence relevant to unknown parameters
 
-**Open question 3 (reject vs ignore unknown params) now has real evidence against rejecting.**
-Solr ignores them. A strict Wayfinder would 400 on requests real Solr serves, which breaks the
-compatibility claim for any client that sends extra params — and Solr clients do, routinely.
-
-Recommendation: **ignore unknown params by default, log them at debug, and offer a
-`strict_params = true` config flag** for development. Keeps the compatibility promise while
-still giving a way to discover gaps during the Search API phase.
+**Open question 3 (reject vs ignore unknown params) has direct Solr evidence:** Solr ignores
+unknown parameters. Client evidence and the PRD determine whether a Wayfinder path supports them;
+this finding does not make that scope decision.
 
 ## Not yet captured
 
@@ -106,10 +110,9 @@ core-relative GETs (other core, POST body, non-GET method), so they are indexed 
     returns 400 with the bare envelope above. `GET /update` was not captured.
 
 15. **An unknown core 404s with an HTML page, not JSON.** `err_missing_core.json` is Solr's
-    "Searching for Solr? You must type the correct path." easter egg.
-    **Deliberate divergence:** Wayfinder matches the 404 status but returns its normal JSON error
-    envelope, on the grounds that clients parse JSON and no client depends on the HTML. Wants PRD
-    ratification — it is the one place this branch knowingly does not match captured behaviour.
+    "Searching for Solr? You must type the correct path." easter egg. Any Wayfinder departure on
+    this supported path is recorded, with its rationale, in PRD §2's ratified-divergence list;
+    this finding supplies the fixture fact.
 
 ---
 
@@ -144,28 +147,26 @@ those numbers ambiguous. These three are issue #3's, renumbered to 105-107; issu
     so unknown facet fields are **not** a divergence at all. `capture.sh` now runs the probe on its
     own throwaway core, and the fixture is re-captured at 400.
 
-    That is precisely the silent-empty-counts behaviour tracer-bullet review follow-up 1 names as
-    a bug: the client cannot tell "this field has no values" from "I asked for something
-    impossible". **Deliberate divergence:** Tantivy cannot aggregate a non-`fast` column at all,
-    and Wayfinder answers all three with a hard 400 in the Solr error envelope
-    (`can not facet on undefined field: <name>` / `can not facet on a field w/o fast values
-    (docValues): <name>`, mirroring finding 11's `sort` wording). **Wants PRD ratification**, the
-    same treatment as finding 15's unknown-core divergence — it is a knowing mismatch with
-    captured behaviour, chosen because the captured behaviour is wrong.
+    This establishes the silent-empty-counts fact: a client cannot distinguish "this field has no
+    values" from "you asked for something impossible" from this Solr response alone. Whether the
+    path is supported and any deliberate Wayfinder departure are PRD §2 decisions; this finding
+    supplies the fixture evidence.
 
-    These three fixtures are therefore in `manifest-errors.tsv` rather than `manifest.tsv`, even
-    though they *are* core-relative GETs: a `manifest.tsv` row would demand a permanent
-    `EXPECTED_DIVERGENCES` entry, and that list is a self-expiring to-do list, not a home for
-    accepted divergences.
+    These fixtures are in `manifest-errors.tsv` rather than `manifest.tsv`, even though they are
+    core-relative GETs. The harness classifies the default-method non-docValues and stored-only
+    requests through `ACCEPTED_DIVERGENCES` because PRD §2 ratifies those supported-path
+    departures. The `facet.method=enum` fixture instead remains mechanically self-expiring
+    inventory because that method is unsupported and out of scope (finding 106; issue #399).
 
 106. **The empty array is a property of the default `fc` facet method, not of the field.**
     `facet.field=body&facet.method=enum` on that same non-docValues field **does** enumerate the
     term dictionary — `["dog",2,"lazi",2,"quick",2,"afternoon",1,...]`, the stemmed `text_en`
     tokens (`facet_non_docvalues_text_enum.json`). Solr's `enum` method walks the inverted index
     instead of the uninverted field, so the data is reachable; the default just declines to reach
-    it. `facet.method` is out of scope for #3 (Wayfinder has one implementation, the fast-field
-    aggregation), recorded so nobody later concludes from finding 105 that Solr *cannot* facet a
-    non-docValues field.
+    it. Wayfinder has one implementation, the fast-field aggregation; `facet.method=enum` is
+    unsupported and belongs in PRD §5, not §2's ratified-divergence list. The capture remains
+    evidence so nobody later concludes from finding 105 that Solr *cannot* facet a non-docValues
+    field. (issues #3, #399)
 
 107. **`facet_ranges` envelope — the part that is not guessable.** From
     `facet_range_numeric.json` / `facet_range_date.json` / `facet_range_json_nl_map.json`:
@@ -228,18 +229,21 @@ the shape of the `ACCEPTED_DIVERGENCES` rows below.
 Two distinct lists, both self-documenting, printed during their runs, never silent:
 
 - **`ACCEPTED_DIVERGENCES`** (`tests/differential.rs`, manifest-errors runner only) — *ratified,
-  permanent* divergences from captured Solr behaviour, each citing the PRD/findings section that
-  ratifies it: `err_missing_core` (finding 15, HTML vs JSON 404 body — checked as a raw-text
+  permanent* divergences from captured Solr behaviour, each citing the PRD §2 entry that ratifies
+  it and the finding that supplies evidence: `err_missing_core` (finding 15, HTML vs JSON 404 body — checked as a raw-text
   non-JSON assertion, since `common::fixture` would panic parsing it), `update_unknown_field_schemaless`
-  (PRD ratified-divergence 3, no schemaless mode), and the three unfacetable-field rows
-  (finding 105, `facet_non_docvalues_text[/_enum]`, `facet_stored_only_field`). These never
-  expire — there is nothing to build, the PRD says this is Wayfinder's intended shape — so they
+  (PRD ratified-divergence 3, no schemaless mode), and the two supported unfacetable-field rows
+  (finding 105, `facet_non_docvalues_text`, `facet_stored_only_field`). The unsupported
+  `facet_non_docvalues_text_enum` row is expected-difference inventory instead. Accepted entries
+  never expire — there is nothing to build, the PRD says this is Wayfinder's intended shape — so they
   are checked by a narrower, row-specific assertion instead of the generic differ, and are not
   expected to ever leave the list.
 - **`EXPECTED_DIVERGENCES`** (`manifest.tsv` loop) / **`EXPECTED_DIVERGENCES_MANIFEST_ERRORS`**
-  (`manifest-errors.tsv` loop) — a *self-expiring to-do list* for an unbuilt feature or an
-  as-yet-unfixed bug, not a harness bug and not ratified. Every entry's diff is still computed;
-  the moment it comes back empty the suite goes red, naming the entry to delete. See "Expected-
+  (`manifest-errors.tsv` loop) — a mechanically self-expiring regression/inventory
+  classification, not product scope, an implementation queue, or ratification. Every entry's
+  diff is still computed; the moment it comes back empty the suite goes red, naming the entry to
+  delete. Creating or retaining an entry does not authorize work; a separate PRD and issue/PR
+  scope decision is required. See "Expected-
   divergence list" below for the `manifest.tsv` history; `EXPECTED_DIVERGENCES_MANIFEST_ERRORS`
   is now **empty** — issue #35 closed the gap it tracked (`facet_unknown_field` and four more
   rows surfaced by issue #33: Wayfinder's facet-field/facet-query errors omitted the `response`
@@ -273,9 +277,10 @@ hand-edit the manifest or fixtures.
 
 ### Expected-divergence list
 
-`tests/differential.rs::EXPECTED_DIVERGENCES` names manifest entries with a *known, currently
-real* Wayfinder-vs-Solr divergence caused by an unbuilt feature (not a harness bug) — currently
-just `ping` (reason below). `sort` *ordering* (issue #2) and the seven faceting entries this list
+`tests/differential.rs::EXPECTED_DIVERGENCES` inventories manifest entries with a *known,
+currently real* Wayfinder-vs-Solr difference — currently just `ping` (reason below). The list
+neither creates product scope nor commits Wayfinder to implementation; only a separate PRD and
+issue/PR decision can do that. `sort` *ordering* (issue #2) and the seven faceting entries this list
 used to carry (`facet.mincount`/`limit`/`missing`/`query`, `json.nl=map`, term-dictionary
 enumeration for the zero/all-filtered facets) were deleted when issues #2/#3 landed and they
 stopped diverging — the mechanism working exactly as designed. `select_term_scored`/
@@ -283,19 +288,19 @@ stopped diverging — the mechanism working exactly as designed. `select_term_sc
 support); issue #34 landed `fl=score`, and their remaining divergence (BM25 score magnitude)
 turned out to be a permanent scoring-formula difference rather than an unbuilt feature, so they
 moved to `RANKED_SCORE_VALUE_RATIFIED` (PRD ratified-divergence 4, finding 31) instead of being
-deleted outright. Each entry carries a mandatory reason naming the owning issue.
+deleted outright. Each entry carries a reason identifying why the harness classifies it; that
+reason is not an owning implementation issue.
 
 Note what does **not** belong here: an *accepted, permanent* divergence (finding 15's unknown
-core, finding 105's unfacetable-field 400). Those get their fixtures in `manifest-errors.tsv` and
-a numbered finding, because this list is a to-do list that fails when an entry stops diverging —
-an accepted divergence parked here would sit unexpiring forever.
+core, finding 105's unfacetable-field 400). Those get their fixtures in `manifest-errors.tsv`, a
+numbered factual finding, and PRD §2 ratification; an expected-difference entry is mechanically
+self-expiring and cannot represent a permanent policy decision.
 
-This list is a to-do, not a permanent skip. The whole-query-set test still runs every one of
-those entries and computes their real diff; it just doesn't count a listed entry's diff as a
-failure. But if a listed entry ever stops diverging — i.e. its diff comes back empty — that
-means the underlying feature landed, and the test **fails** telling you to delete the entry.
-There is no way for an entry to sit in this list after the fix has shipped without the suite
-turning red first.
+This list is inventory, not a permanent skip or implementation queue. The whole-query-set test
+still runs every entry and computes its real diff; it just does not count a listed entry's diff as
+a failure. If an entry starts matching, the test fails and requests deletion of the stale
+classification. That mechanical cleanup says nothing about whether a nonmatching behavior should
+ever be implemented.
 
 `ping` is in this list too, not given a normaliser carve-out: its fixture's
 `responseHeader.params` includes Solr ping-handler internals such as a per-run `rid` counter
@@ -304,9 +309,10 @@ only asserts ping's essential shape rather than diffing the full envelope). Norm
 away generically would risk quietly swallowing a real `params` diff on every other manifest
 entry, so it is handled as a named, reasoned exclusion instead.
 
-When you fix the owning feature: remove the corresponding entry (or entries) from
+When scoped work happens to make an entry match, remove the corresponding entry from
 `EXPECTED_DIVERGENCES` in `tests/differential.rs`. If you forget, the test fails with a message
-telling you exactly which entry to remove.
+telling you exactly which stale classification to remove; the entry itself never scopes that
+work.
 
 ---
 

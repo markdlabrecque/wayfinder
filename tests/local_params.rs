@@ -379,23 +379,23 @@ async fn local_params_in_q_value_does_not_400_under_strict_params() {
     );
 }
 
-/// PRD §2 divergence 6, end to end. The prose ratifies a *specific* answer for
-/// a local-params block naming any parser other than `edismax`: HTTP 400 with a
-/// `wayfinder::SyntaxError` in the Solr error envelope. Until this test the only
-/// coverage was `src/local_params.rs`'s unit test on the message string, which
-/// says nothing about the status or the envelope — so the ratified divergence
-/// could have drifted to a 500, or to a 200 with zero hits, with the PRD still
-/// claiming otherwise and every test green.
+/// PRD §5's unsupported local-params boundary, end to end. The prose records a
+/// *specific* shipped answer for a block naming any parser other than
+/// `edismax`, `func`, or `boost`: HTTP 400 with a `wayfinder::SyntaxError` in
+/// the Solr error envelope. Until this test the only coverage was
+/// `src/local_params.rs`'s unit test on the message string, which says nothing
+/// about status or envelope, so the documented boundary could have drifted to
+/// a 500 or a silently empty 200 with every test green.
 ///
 /// Per `tests/error_shapes.rs`'s narrow contract (and `tests/edismax.rs`'s
 /// `mm_present_but_empty_400s_like_a_malformed_spec`, the closest precedent),
 /// `error.msg` is free text and is never compared verbatim — only its presence.
 /// The `root-error-class` *is* compared, because "a `SyntaxError` 400" is the
-/// literal content of the ratified divergence.
+/// literal content of the documented unsupported boundary.
 #[tokio::test]
 async fn unrecognised_local_params_type_400s_with_a_syntax_error_envelope() {
     let (app, _dir) = search_api_app().await;
-    // The types PRD §2 divergence 6 names by hand, plus the type-less
+    // The types PRD §5's unsupported boundary names by hand, plus the type-less
     // block `src/local_params.rs`'s ceiling note rejects alongside them.
     // (`{!func}` and `{!boost}` are now implemented (#289), so they are not
     // in this unrecognised set.)
@@ -411,7 +411,7 @@ async fn unrecognised_local_params_type_400s_with_a_syntax_error_envelope() {
         assert_eq!(
             status,
             StatusCode::BAD_REQUEST,
-            "PRD §2 divergence 6 ratifies a hard 400 for `{shape}`, not a 500 and not a \
+            "PRD §5 records a hard 400 for unsupported `{shape}`, not a 500 and not a \
              silently-empty 200: {body}"
         );
         assert_eq!(
@@ -439,17 +439,17 @@ async fn unrecognised_local_params_type_400s_with_a_syntax_error_envelope() {
         assert_eq!(
             root,
             Some(&"wayfinder::SyntaxError"),
-            "`{shape}`: divergence 6 ratifies a *SyntaxError* 400 specifically -- a different \
-             error class means the PRD entry no longer describes what ships: {body}"
+            "`{shape}`: PRD §5 records a *SyntaxError* 400 specifically -- a different error \
+             class means the unsupported-boundary statement no longer describes what ships: {body}"
         );
     }
 }
 
-// --- Documentation guards for issue #137's ratified decisions --------------
+// --- Documentation guards for issue #137's recorded decisions --------------
 //
 // Issue #137's acceptance criteria require two decisions to be *recorded*, not
-// merely implemented: the Shape-B bug-compatible reading (PRD §5) and the hard
-// 400 on unrecognised local-params types (PRD §2's ratified-divergence list).
+// merely implemented: the Shape-B bug-compatible reading and the unsupported
+// parser-type hard 400 (both PRD §5, with only the former client-exercised).
 // These are tripwires against that prose being dropped or reverted.
 //
 // ponytail: keyword co-occurrence scoped to one blank-line-separated block,
@@ -523,27 +523,27 @@ fn prd_records_the_shape_b_bug_compatible_decision() {
 }
 
 #[test]
-fn prd_ratifies_the_hard_400_on_unrecognised_local_params_types() {
-    let blocks = prd_blocks("#### Ratified divergences from captured Solr behaviour");
+fn prd_records_the_hard_400_on_unsupported_local_params_types() {
+    let blocks = prd_blocks("### v1 exception — edismax");
     let entry = blocks
         .iter()
         .find(|b| b.contains("{!lucene}") && b.contains("400"))
         .unwrap_or_else(|| {
             panic!(
-                "issue #137's open question 5 was ratified as a deliberate divergence: PRD §2's \
-                 ratified-divergence list must carry an entry for Wayfinder 400ing local-params \
-                 blocks naming a parser other than edismax, which real Solr parses"
+                "issue #137's open question 5 is an unsupported boundary: PRD §5 must record \
+                 Wayfinder 400ing local-params blocks naming an unsupported parser, although \
+                 real Solr parses registered types such as lucene"
             )
         });
     assert!(
         entry.contains("not a regression"),
-        "the entry must state accurately that this is **not a regression**: origin/main already \
+        "the scope statement must say accurately that this is **not a regression**: origin/main already \
          400s these because Tantivy's grammar rejects the raw `{{!` string, and issue #137 changed \
          only the error message"
     );
     assert!(
         entry.contains("{!func}") && entry.contains("#289"),
-        "the entry must reflect that `{{!func}}`/`{{!boost}}` landed in #289 (a real evaluator) \
+        "the scope statement must reflect that `{{!func}}`/`{{!boost}}` landed in #289 (a real evaluator) \
          and no longer silently half-work or belong to v4"
     );
     assert!(

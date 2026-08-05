@@ -1714,8 +1714,8 @@ async fn spellcheck_223_app() -> (Router, TempDir) {
 /// Ratified, **permanent** divergences from captured Solr behaviour, whose
 /// bodies are not diffed at all — `accepted_divergence_reason` short-circuits
 /// before `diff()` runs. `EXPECTED_DIVERGENCES` below still runs the real
-/// differ and only suppresses the failure, so it holds both the self-expiring
-/// to-do entries for unbuilt features *and* the permanent-but-still-diffed
+/// differ and only suppresses the failure, so it is mechanically self-expiring
+/// inventory for both optional/unimplemented behavior and permanent-but-still-diffed
 /// entries (`admin_system`, `admin_info_system`), which stay there
 /// deliberately: moving them here would reduce, not increase, checking.
 /// Every entry here cites the PRD/findings
@@ -1738,10 +1738,6 @@ const ACCEPTED_DIVERGENCES: &[(&str, &str)] = &[
         "facet_non_docvalues_text",
         "finding 105 / PRD ratified-divergence 2: Wayfinder 400s a facet on an unfacetable \
          (non-docValues) field where Solr 200s with empty counts",
-    ),
-    (
-        "facet_non_docvalues_text_enum",
-        "finding 105 / PRD ratified-divergence 2, facet.method=enum variant of the same field",
     ),
     (
         "facet_stored_only_field",
@@ -1824,7 +1820,7 @@ fn ranked_score_value_ratified_reason(name: &str) -> Option<&'static str> {
         .map(|(_, reason)| *reason)
 }
 
-/// `manifest-errors.tsv`'s own self-expiring to-do list — the counterpart of
+/// `manifest-errors.tsv`'s own mechanically self-expiring difference inventory — the counterpart of
 /// `EXPECTED_DIVERGENCES` below for `manifest.tsv`, but scoped to this file's
 /// runner since the two loops have different app-selection and check logic.
 ///
@@ -1844,8 +1840,7 @@ fn ranked_score_value_ratified_reason(name: &str) -> Option<&'static str> {
 /// Issue #5 (stats component) is fixed: `stats=true`/`stats.field` land in
 /// `src/stats.rs`, wired into `src/lib.rs::select`, so `stats_views`,
 /// `stats_multi_fields`, `stats_zero`, and `stats_zero_fq` all now match the
-/// captured fixtures for real and their entries are removed rather than left
-/// here — this list is empty until the next unbuilt-feature entry needs it.
+/// captured fixtures for real and their stale classifications were removed.
 /// Issue #59 (`/admin/info/system` version handshake): the reported version
 /// (issue #325 renamed the key from `lucene.solr-spec-version` to
 /// `lucene.wayfinder-spec-version`) is deliberately configured (default
@@ -1853,10 +1848,16 @@ fn ranked_score_value_ratified_reason(name: &str) -> Option<&'static str> {
 /// own `9.10.1`, and the rest of the envelope (`jvm`/`system` stats —
 /// uptime, memory, load, hostnames, command-line args) is inherently
 /// unreproducible host-specific volatility, same category as `ping`'s `rid`
-/// problem below. Both are permanent, not a to-do: there is no real
+/// problem below. Both are permanent inventory entries: there is no real
 /// Wayfinder host JVM/OS to introspect meaningfully, and the version is a
 /// config choice, not a bug.
 const EXPECTED_DIVERGENCES_MANIFEST_ERRORS: &[(&str, &str)] = &[
+    (
+        "facet_non_docvalues_text_enum",
+        "issue #3 / finding 106: facet.method=enum is unsupported and out of scope; the fixture \
+         remains inventory evidence that Solr can enumerate a non-docValues field where \
+         Wayfinder ignores the unsupported method and returns 400",
+    ),
     (
         "admin_info_system",
         "issue #59: `responseHeader` and `mode` are compared exactly and do match. The \
@@ -2509,14 +2510,11 @@ const RANKED_RELEVANCE_ENTRIES: &[&str] =
     &["select_term", "select_term_scored", "select_quick_scored"];
 
 /// Manifest entries with a *known, currently real* Wayfinder-vs-Solr
-/// divergence, each caused by an unbuilt feature rather than a harness bug
-/// (escalated and accepted by the orchestrator — see this issue's handoff).
-/// Excluded from the pass/fail loop below, but only ever as a documented,
-/// self-expiring to-do: every reason names the issue that owns the fix, and
-/// the guard at the end of the test loop below FAILS the moment any of these
-/// entries stops diverging — that means the feature landed and the entry
-/// must be deleted from this list, not that the harness can go quiet about
-/// it. `ping` gets no normaliser carve-out for its unreproducible `rid`
+/// difference. This is regression/inventory evidence, not scope authority,
+/// ratification, or an implementation queue. The guard at the end of the test
+/// loop fails when an entry starts matching so the stale classification must
+/// be deleted; it does not imply that a nonmatching behavior must be built.
+/// `ping` gets no normaliser carve-out for its unreproducible `rid`
 /// value; encoding that in the normaliser would risk hiding a real
 /// `params` diff on every other entry, so it lives here instead, alongside
 /// the rest.
@@ -2533,7 +2531,7 @@ const RANKED_RELEVANCE_ENTRIES: &[&str] =
 // `score` key, correct key order, `response.maxScore`) and the *ranking*
 // (doc id order) now matches Solr exactly for both entries. The score
 // *magnitudes* still don't (Tantivy's own BM25 numerically disagrees with
-// Solr's BM25Similarity), but that's no longer parked here as a to-do: it's
+// Solr's BM25Similarity), but that's no longer parked in this inventory: it's
 // ratified permanently as PRD ratified-divergence 4 and handled by
 // `RANKED_SCORE_VALUE_RATIFIED` above, so both entries are gone from this
 // list.
@@ -2869,11 +2867,11 @@ fn live_solr_matches_committed_query_set() {
             // Currently unreachable: `select_term_scored`/`select_quick_scored`
             // (issue #31/#34) used to be the only `RANKED_RELEVANCE_ENTRIES`
             // members with an `EXPECTED_DIVERGENCES` entry, and both are gone
-            // from that list now that `fl=score` has landed and their
+            // from that list now that `fl=score` is implemented and their
             // remaining BM25-magnitude divergence is ratified permanently
             // (PRD ratified-divergence 4, `RANKED_SCORE_VALUE_RATIFIED`) —
-            // not tracked as a to-do here. The arm stays for the next
-            // Wayfinder-feature-gap `RANKED_RELEVANCE_ENTRIES` entry, if one
+            // not tracked in this inventory. The arm stays for the next
+            // `RANKED_RELEVANCE_ENTRIES` difference, if one
             // shows up.
             (true, Some(reason)) if RANKED_RELEVANCE_ENTRIES.contains(&entry.name.as_str()) => {
                 eprintln!(
@@ -3190,9 +3188,7 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
                         ));
                     }
                 }
-                "facet_non_docvalues_text"
-                | "facet_non_docvalues_text_enum"
-                | "facet_stored_only_field" => {
+                "facet_non_docvalues_text" | "facet_stored_only_field" => {
                     if status.as_u16() == entry.status {
                         failures.push(format!(
                             "{}: Wayfinder matched the fixture's status — the documented \
@@ -3298,13 +3294,22 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
             continue;
         }
 
-        if status.as_u16() != entry.status {
-            failures.push(format!(
-                "{}: HTTP status {} vs expected {}",
-                entry.name, status, entry.status
-            ));
-            ran += 1;
-            continue;
+        let status_differs = status.as_u16() != entry.status;
+        if status_differs {
+            match expected_divergence_manifest_errors_reason(&entry.name) {
+                Some(reason) => eprintln!(
+                    "{}: HTTP status {} vs fixture status {} (expected divergence: {reason})",
+                    entry.name, status, entry.status
+                ),
+                None => {
+                    failures.push(format!(
+                        "{}: HTTP status {} vs expected {}",
+                        entry.name, status, entry.status
+                    ));
+                    ran += 1;
+                    continue;
+                }
+            }
         }
 
         let expected = fixture(&entry.name);
@@ -3369,10 +3374,10 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
         }
 
         match expected_divergence_manifest_errors_reason(&entry.name) {
-            Some(reason) if report.diffs.is_empty() => failures.push(format!(
+            Some(reason) if !status_differs && report.diffs.is_empty() => failures.push(format!(
                 "{}: EXPECTED_DIVERGENCES_MANIFEST_ERRORS says this should still diverge \
-                 ({reason}), but it now matches — the underlying fix has landed, so remove \
-                 this entry from EXPECTED_DIVERGENCES_MANIFEST_ERRORS in tests/differential.rs",
+                 ({reason}), but it now matches — remove this stale classification from \
+                 EXPECTED_DIVERGENCES_MANIFEST_ERRORS in tests/differential.rs",
                 entry.name
             )),
             Some(reason) => eprintln!("  (expected divergence: {reason})"),
