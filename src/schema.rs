@@ -24,6 +24,7 @@ use tantivy::tokenizer::{
 };
 use unicode_normalization::UnicodeNormalization;
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Catch-all Tantivy field holding every document field that resolved through a
 /// `[[dynamic_fields]]` pattern to a non-analyzed type (string/keyword/numeric/
@@ -126,25 +127,32 @@ pub fn builtin_type_names() -> Vec<String> {
     names
 }
 
-/// Versioned `text_general` identity. `default` is kept registered as the
-/// pre-folding identity so an old Tantivy schema never receives new terms.
-const TEXT_GENERAL_TOKENIZER: &str = "wayfinder_text_general_v3";
+/// Versioned UAX #29 `text_general` identity. `default` and v3 remain
+/// registered for legacy-index diagnosis; newly-built fields record v4.
+const TEXT_GENERAL_TOKENIZER: &str = "wayfinder_text_general_v4";
+const TEXT_GENERAL_TOKENIZER_V3: &str = "wayfinder_text_general_v3";
 const TEXT_GENERAL_TOKENIZER_LEGACY: &str = "default";
-/// Wayfinder's versioned Solr-compatible English analyzer: simple tokenizer,
-/// long-token removal, lowercase, English stopword removal, then stemming.
+/// Wayfinder's versioned English analyzer uses UAX #29 word segmentation,
+/// then long-token removal, lowercase, English stopword removal, and stemming.
 /// It intentionally does not override Tantivy's `en_stem`, which remains
 /// available for custom analyzer chains and upstream defaults.
-const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v3";
+const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v4";
 /// The Phase-2 predecessor remains registered only so a legacy Tantivy schema
 /// can be diagnosed safely; no newly-built field records this identity.
+const TEXT_EN_TOKENIZER_V3: &str = "wayfinder_text_en_v3";
 const TEXT_EN_TOKENIZER_V2: &str = "wayfinder_text_en_v2";
-/// The versioned dynamic-text catch-all folds accents while retaining its
-/// captured Snowball behavior. The v1 identity remains registered below for
-/// safe diagnosis of indexes created before dynamic folding.
-const DYNAMIC_TEXT_TOKENIZER: &str = "wayfinder_dynamic_text_v4";
+/// The versioned dynamic-text catch-all retains Search API's Snowball behavior
+/// while using UAX #29 segmentation. Earlier identities remain registered only
+/// for legacy-index diagnosis.
+const DYNAMIC_TEXT_TOKENIZER: &str = "wayfinder_dynamic_text_v5";
+const DYNAMIC_TEXT_TOKENIZER_V4: &str = "wayfinder_dynamic_text_v4";
 const DYNAMIC_TEXT_TOKENIZER_V1: &str = "wayfinder_text_en_v1";
 
 fn language_tokenizer(code: &str) -> String {
+    format!("wayfinder_text_{code}_v4")
+}
+
+fn language_tokenizer_v3(code: &str) -> String {
     format!("wayfinder_text_{code}_v3")
 }
 
@@ -176,31 +184,31 @@ pub const BOOST_TERM_PAYLOAD_DELIMITER: char = '|';
 const BOOST_TERM_PAYLOAD_MIN_LEN: usize = 2;
 const BOOST_TERM_PAYLOAD_MAX_LEN: usize = 100;
 
-/// `LengthFilterFactory min/max` on the shipped `suggestAnalyzerFieldType`
-/// chains (`text_en` / `text_und` in `schema_extra_types.xml`). The lower bound
-/// is observable on the read path: a one-character `suggest.q` analyzes to
-/// nothing and returns zero suggestions (`suggest_q_multibyte_prefix_en`,
-/// `suggest_q_multibyte_onechar_en`).
-/// Both bounds are in *characters*, as Lucene's `LengthFilter` measures them,
-/// and both are inclusive. The upper bound is the binding one on long tokens:
-/// the suggest chain deliberately carries no byte-based `RemoveLongFilter`, so
-/// a 45-byte ASCII token or a 14-character CJK token survives here exactly as
-/// it does in Solr.
-const SUGGEST_MIN_TOKEN_LEN: usize = 2;
+/// Search-quality upper bound on `wayfinder_suggest_*` terms. It is measured
+/// in characters and inclusive; the chains deliberately carry no byte-based
+/// `RemoveLongFilter`, so a 45-byte ASCII token or a 14-character CJK token
+/// survives. There is intentionally no lower bound: one-character and CJK
+/// tokens are meaningful (#389 Phase 3).
 const SUGGEST_MAX_TOKEN_LEN: usize = 100;
 /// The `suggest.dictionary` value the shipped `solr.SuggestComponent` gives the
 /// stemmer-free `text_und` analyzer, and the fallback for any code Wayfinder has
 /// no stemmer for.
 const SUGGEST_UNDEFINED_DICTIONARY: &str = "und";
 
-/// The on-disk analyzer contract for the folded built-in presets and dynamic
-/// catch-all. This is separate from Tantivy's schema: it lets startup identify
-/// old term formats before their tokenizer identity can be adopted.
-pub const ANALYZER_CONTRACT: &str = "text_presets_accent_folding_v4";
+/// The on-disk analyzer contract for built-in text and dynamic analyzers using
+/// UAX #29 segmentation. This is separate from Tantivy's schema: it lets
+/// startup identify old term formats before their tokenizer identity can be
+/// adopted.
+pub const ANALYZER_CONTRACT: &str = "text_presets_uax29_v5";
 /// A safely adopted index whose unused `_dynamic_text` catch-all still has an
-/// older tokenizer identity. It is not full v4 certification: a later rule
+/// older tokenizer identity. It is not full v5 certification: a later rule
 /// that starts writing analyzed dynamic values must reindex.
 pub const ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT: &str =
+    "text_presets_uax29_v5_legacy_dynamic_text";
+/// Phase 2's accent-folding contract, superseded by UAX #29 segmentation in
+/// v5. It is recognized only to fail closed or safely adopt raw-only indexes.
+pub const ANALYZER_CONTRACT_V4: &str = "text_presets_accent_folding_v4";
+pub const ANALYZER_CONTRACT_V4_LEGACY_DYNAMIC_TEXT: &str =
     "text_presets_accent_folding_v4_legacy_dynamic_text";
 /// The first folding contract changed static built-in text terms but left the
 /// dynamic catch-all unchanged. Its marker is recognized so static-only and
@@ -933,6 +941,64 @@ impl<T: TokenStream> TokenStream for AccentFoldingTokenStream<'_, T> {
     }
 }
 
+/// UAX #29 word-boundary tokenizer for Wayfinder's built-in search analyzers.
+///
+/// `unicode-segmentation` returns every UAX #29 boundary segment, including
+/// punctuation and whitespace. Only segments containing an alphanumeric
+/// character become terms: this preserves contractions, domain names, decimals,
+/// underscores, and meaningful single-codepoint CJK words while dropping
+/// punctuation-only and whitespace-only segments. The slice offsets come
+/// directly from the original input, so `Token` offsets remain original byte
+/// offsets for query prefix matching and highlighting.
+#[derive(Clone, Default)]
+struct Uax29Tokenizer;
+
+impl Tokenizer for Uax29Tokenizer {
+    type TokenStream<'a> = Uax29TokenStream<'a>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        Uax29TokenStream {
+            segments: text.split_word_bound_indices().collect::<Vec<_>>().into_iter(),
+            token: Token::default(),
+            position: 0,
+        }
+    }
+}
+
+struct Uax29TokenStream<'a> {
+    segments: std::vec::IntoIter<(usize, &'a str)>,
+    token: Token,
+    position: usize,
+}
+
+impl TokenStream for Uax29TokenStream<'_> {
+    fn advance(&mut self) -> bool {
+        for (offset_from, segment) in self.segments.by_ref() {
+            if !segment.chars().any(char::is_alphanumeric) {
+                continue;
+            }
+            self.token = Token {
+                offset_from,
+                offset_to: offset_from + segment.len(),
+                position: self.position,
+                position_length: 1,
+                text: segment.to_owned(),
+            };
+            self.position += 1;
+            return true;
+        }
+        false
+    }
+
+    fn token(&self) -> &Token {
+        &self.token
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        &mut self.token
+    }
+}
+
 /// Solr's `LengthFilterFactory`: drops tokens shorter than `min` or longer than
 /// `max` characters. Tantivy ships only `RemoveLongFilter` (an upper bound), and
 /// `boost_term_payload` needs the lower bound too -- it is what makes `v="a"` a
@@ -1225,7 +1291,7 @@ pub fn split_delimited_payload(token: &str) -> Option<(&str, f32)> {
 /// global `text_en` / `text_general` presets, and conflating them is what made
 /// the read path diverge (see [`build_tokenizers`]).
 fn suggest_tokenizer(code: &str) -> String {
-    format!("wayfinder_suggest_{code}_v3")
+    format!("wayfinder_suggest_{code}_v4")
 }
 
 /// The analyzer (Tantivy tokenizer name) a `suggest.dictionary` value
@@ -1370,19 +1436,29 @@ fn build_tokenizers(
 ) -> Result<(TokenizerManager, TokenizerManager)> {
     let manager = TokenizerManager::default();
     let query_manager = TokenizerManager::default();
-    // Registers one analyzer as *both* sides of a chain: the shipped chains all
-    // have a single analyzer, and Phase 1 is deliberately behaviour-free, so the
-    // query manager must be analyzer-for-analyzer identical to the index one for
-    // everything Wayfinder ships (pinned by
-    // `shipped_chains_analyze_identically_on_both_managers`). Phase 2 added
-    // folding to the built-in and suggest chains while preserving that
-    // same-analyzer invariant.
+    // Registers one analyzer as *both* sides of a chain. Built-in, dynamic,
+    // and suggest chains use the same UAX #29 tokenizer at index and query time
+    // so punctuation boundaries and meaningful singletons remain symmetric.
     let register_both = |name: &str, analyzer: TextAnalyzer| {
         manager.register(name, analyzer.clone());
         query_manager.register(name, analyzer);
     };
     let english_stopwords =
         || StopWordFilter::new(Language::English).expect("Tantivy ships an English stopword list");
+    // UAX #29 makes a one-character word a real token. Keep `a` in the current
+    // search-quality chains rather than losing it through a Solr-era stopword
+    // rule; legacy analyzers retain Tantivy's untouched English list.
+    let english_stopwords_preserving_singletons = || {
+        StopWordFilter::remove(
+            [
+                "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into",
+                "is", "it", "no", "not", "of", "on", "or", "such", "that", "the", "their", "then",
+                "there", "these", "they", "this", "to", "was", "will", "with",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+    };
     // Keep every pre-folding identity registered with its original chain. An
     // old schema can therefore be opened only long enough for migration
     // diagnosis; no new field is allowed to record one of these names.
@@ -1394,8 +1470,16 @@ fn build_tokenizers(
             .build(),
     );
     register_both(
-        TEXT_GENERAL_TOKENIZER,
+        TEXT_GENERAL_TOKENIZER_V3,
         TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter_dynamic(AccentFoldingFilter)
+            .filter(RemoveLongFilter::limit(40))
+            .filter(LowerCaser)
+            .build(),
+    );
+    register_both(
+        TEXT_GENERAL_TOKENIZER,
+        TextAnalyzer::builder(Uax29Tokenizer)
             .filter_dynamic(AccentFoldingFilter)
             .filter(RemoveLongFilter::limit(40))
             .filter(LowerCaser)
@@ -1411,12 +1495,22 @@ fn build_tokenizers(
             .build(),
     );
     register_both(
-        DYNAMIC_TEXT_TOKENIZER,
+        DYNAMIC_TEXT_TOKENIZER_V4,
         TextAnalyzer::builder(SimpleTokenizer::default())
             .filter_dynamic(AccentFoldingFilter)
             .filter(RemoveLongFilter::limit(40))
             .filter(LowerCaser)
             .filter(english_stopwords())
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    register_both(
+        DYNAMIC_TEXT_TOKENIZER,
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter(RemoveLongFilter::limit(40))
+            .filter(LowerCaser)
+            .filter(english_stopwords_preserving_singletons())
             .filter(Stemmer::new(Language::English))
             .build(),
     );
@@ -1433,12 +1527,23 @@ fn build_tokenizers(
             .build(),
     );
     register_both(
-        TEXT_EN_TOKENIZER,
+        TEXT_EN_TOKENIZER_V3,
         TextAnalyzer::builder(SimpleTokenizer::default())
             .filter_dynamic(AccentFoldingFilter)
             .filter(RemoveLongFilter::limit(40))
             .filter(LowerCaser)
             .filter(english_stopwords())
+            .filter(PorterTerminalYFilter)
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    register_both(
+        TEXT_EN_TOKENIZER,
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter(RemoveLongFilter::limit(40))
+            .filter(LowerCaser)
+            .filter(english_stopwords_preserving_singletons())
             .filter(PorterTerminalYFilter)
             .filter(Stemmer::new(Language::English))
             .build(),
@@ -1456,8 +1561,17 @@ fn build_tokenizers(
                 .build(),
         );
         register_both(
-            &language_tokenizer(code),
+            &language_tokenizer_v3(code),
             TextAnalyzer::builder(SimpleTokenizer::default())
+                .filter_dynamic(AccentFoldingFilter)
+                .filter(RemoveLongFilter::limit(40))
+                .filter(LowerCaser)
+                .filter(Stemmer::new(*lang))
+                .build(),
+        );
+        register_both(
+            &language_tokenizer(code),
+            TextAnalyzer::builder(Uax29Tokenizer)
                 .filter_dynamic(AccentFoldingFilter)
                 .filter(RemoveLongFilter::limit(40))
                 .filter(LowerCaser)
@@ -1499,13 +1613,11 @@ fn build_tokenizers(
     //     -> LowerCase -> [SnowballPorter English, text_en only]
     //     -> RemoveDuplicates
     //
-    // Two of those gaps are observable in the captured fixtures and are
-    // reproduced here: the `Length` lower bound (a one-character `suggest.q`
-    // analyzes to nothing -- `suggest_q_multibyte_prefix_en`,
-    // `suggest_q_multibyte_onechar_en`) and Lucene's SIMPLE case folding
-    // (`suggest_q_multibyte_grow_en`; see `SimpleLowerCaseFilter`). `Stop` runs
-    // after `Length` rather than before it, which cannot change the surviving
-    // set: both filters only remove tokens.
+    // The Solr-derived lower length bound is deliberately not reproduced: a
+    // one-character or CJK word is meaningful for search quality. Simple case
+    // folding is retained (`suggest_q_multibyte_grow_en`; see
+    // `SimpleLowerCaseFilter`). `Stop` runs after `Length`, which cannot change
+    // the surviving set because both filters only remove tokens.
     //
     // Unlike Wayfinder's other chains, this one has *no* `RemoveLongFilter`:
     // that filter is byte-based (`token.text.len() < limit`), and the shipped
@@ -1518,11 +1630,11 @@ fn build_tokenizers(
     // The other chains in this file keep it because it matches *their* Solr
     // field types, not this one.
     //
-    // ponytail: three #389 gaps remain: query-side synonyms, UAX#29 token
-    // segmentation, and word-delimiter splitting. Accent folding is closed in
-    // Phase 2 below on both sides. The shipped synonym data has only
-    // single-token entries, so it would stack terms at one position rather than
-    // create a graph; WDGF is the graph-producing remaining feature.
+    // ponytail: two #389 gaps remain: query-side synonyms and word-delimiter
+    // splitting. UAX #29 segmentation and accent folding are complete on both
+    // sides. The shipped synonym data has only single-token entries, so it
+    // would stack terms at one position rather than create a graph; WDGF is the
+    // graph-producing remaining feature.
     //
     // ponytail: this fixes the SUGGEST path only. Wayfinder's global `text_en` /
     // `text_general` presets still have no `LengthFilter` and still use Rust's
@@ -1530,10 +1642,13 @@ fn build_tokenizers(
     // diverging from Solr on both counts. That is a real, separate bug, filed as
     // #388 -- not closed by this change.
     let suggest_front = || {
-        TextAnalyzer::builder(SimpleTokenizer::default())
+        TextAnalyzer::builder(Uax29Tokenizer)
             .filter_dynamic(AccentFoldingFilter)
+            // Search-quality UAX #29 words may be meaningful one-character
+            // terms (including CJK), so retain the upper bound but do not
+            // carry forward Solr's blind min=2 cutoff.
             .filter_dynamic(LengthFilter {
-                min: SUGGEST_MIN_TOKEN_LEN,
+                min: 1,
                 max: SUGGEST_MAX_TOKEN_LEN,
             })
             .filter_dynamic(SimpleLowerCaseFilter)
@@ -1553,7 +1668,7 @@ fn build_tokenizers(
             // compatibility rule `TEXT_EN_TOKENIZER` needs applies here too,
             // since it is the same SnowballPorter English filter being matched.
             chain = chain
-                .filter_dynamic(english_stopwords())
+                .filter_dynamic(english_stopwords_preserving_singletons())
                 .filter_dynamic(PorterTerminalYFilter);
         }
         register_both(
@@ -1675,9 +1790,12 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
         .chain([
             TEXT_GENERAL_TOKENIZER_LEGACY.to_string(),
             TEXT_GENERAL_TOKENIZER.to_string(),
+            TEXT_GENERAL_TOKENIZER_V3.to_string(),
             TEXT_EN_TOKENIZER.to_string(),
+            TEXT_EN_TOKENIZER_V3.to_string(),
             TEXT_EN_TOKENIZER_V2.to_string(),
             DYNAMIC_TEXT_TOKENIZER.to_string(),
+            DYNAMIC_TEXT_TOKENIZER_V4.to_string(),
             DYNAMIC_TEXT_TOKENIZER_V1.to_string(),
             BOOST_TERM_PAYLOAD_TOKENIZER.to_string(),
             BOOST_TERM_PAYLOAD_VERBATIM_TOKENIZER.to_string(),

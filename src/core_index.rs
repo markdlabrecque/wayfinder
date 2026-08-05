@@ -782,7 +782,7 @@ impl CoreIndex {
         // a fresh index into a legacy one.
         let has_snapshot = snapshot.exists();
         let (
-            previous_static_text_en,
+            _previous_static_text_en,
             previous_static_accent_folded_text,
             previous_analyzed_dynamic,
             previous_has_dynamic_fields,
@@ -807,18 +807,19 @@ impl CoreIndex {
             (false, false, false, false)
         };
 
-        // The v3 folding release changed every static built-in text preset;
-        // v4 extends folding to the shared `_dynamic_text` catch-all. A marker
-        // or a tokenizer identity from an earlier contract must never be
-        // adopted for any path that can contain those old terms.
+        // The v3/v4 folding releases changed built-in and dynamic text terms;
+        // v5 replaces their tokenizer with UAX #29 word segmentation. A marker
+        // or tokenizer identity from an earlier contract must never be adopted
+        // for any path that can contain those old terms.
         let analyzer_contract = schema::analyzer_contract_path(data_dir);
-        let uses_static_text_en = wf_schema.uses_static_text_en() || previous_static_text_en;
+        let _uses_static_text_en =
+            wf_schema.uses_static_text_en() || _previous_static_text_en;
         let uses_static_accent_folded_text =
             wf_schema.uses_static_accent_folded_text() || previous_static_accent_folded_text;
         let uses_analyzed_dynamic =
             wf_schema.uses_analyzed_dynamic_path() || previous_analyzed_dynamic;
-        let uses_pre_v1_changed_path = uses_static_text_en || uses_analyzed_dynamic;
         let uses_pre_v4_changed_path = uses_static_accent_folded_text || uses_analyzed_dynamic;
+        let uses_pre_v5_changed_path = uses_static_accent_folded_text || uses_analyzed_dynamic;
         let marker_to_write = if analyzer_contract.exists() {
             let persisted = std::fs::read_to_string(&analyzer_contract).with_context(|| {
                 format!(
@@ -828,13 +829,32 @@ impl CoreIndex {
             })?;
             match persisted.trim() {
                 schema::ANALYZER_CONTRACT => None,
-                schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT if uses_pre_v1_changed_path => {
+                schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT if uses_pre_v5_changed_path => {
                     bail!(
-                        "the index in {} predates the current text_en/_dynamic_text analyzer contract; reindex into a fresh data directory",
+                        "the index in {} predates the current UAX #29 text analyzer contract; reindex into a fresh data directory",
                         data_dir.display()
                     );
                 }
                 schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT => None,
+                schema::ANALYZER_CONTRACT_V4 if uses_pre_v5_changed_path => {
+                    bail!(
+                        "the index in {} uses the pre-UAX #29 text analyzer contract; reindex into a fresh data directory",
+                        data_dir.display()
+                    );
+                }
+                schema::ANALYZER_CONTRACT_V4 if previous_has_dynamic_fields => {
+                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
+                }
+                schema::ANALYZER_CONTRACT_V4 => Some(schema::ANALYZER_CONTRACT),
+                schema::ANALYZER_CONTRACT_V4_LEGACY_DYNAMIC_TEXT if uses_pre_v5_changed_path => {
+                    bail!(
+                        "the index in {} uses the pre-UAX #29 text analyzer contract; reindex into a fresh data directory",
+                        data_dir.display()
+                    );
+                }
+                schema::ANALYZER_CONTRACT_V4_LEGACY_DYNAMIC_TEXT => {
+                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
+                }
                 schema::ANALYZER_CONTRACT_V3 if uses_analyzed_dynamic => {
                     bail!(
                         "the index in {} uses the v3 dynamic-text analyzer contract; reindex into a fresh data directory for accent folding",
