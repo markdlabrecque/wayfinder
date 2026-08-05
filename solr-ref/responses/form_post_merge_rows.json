@@ -1,0 +1,22 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1,
+    "params":{
+      "q":"*:*",
+      "fl":"id",
+      "rows":["2","10"],
+      "wt":"json"
+    }
+  },
+  "response":{
+    "numFound":5,
+    "start":0,
+    "numFoundExact":true,
+    "docs":[{
+      "id":"doc1"
+    },{
+      "id":"doc2"
+    }]
+  }
+}

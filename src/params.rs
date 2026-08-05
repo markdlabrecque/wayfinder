@@ -20,21 +20,25 @@ pub struct Params {
 
 impl Params {
     pub fn parse(query: &str) -> Params {
-        let mut pairs = Vec::new();
-        for segment in query.split('&') {
-            if segment.is_empty() {
-                continue;
-            }
-            let (key, value) = match segment.split_once('=') {
-                Some((k, v)) => (k, v),
-                None => (segment, ""),
-            };
-            pairs.push((decode(key), decode(value)));
-        }
         Params {
-            pairs,
+            pairs: parse_pairs(query),
             omit_header_allowed: false,
         }
+    }
+
+    /// Appends the `application/x-www-form-urlencoded` pairs from a request
+    /// body after the query-string pairs (issue #350).
+    ///
+    /// Body and query string share one decoder because they share one wire
+    /// format, and finding 189 pins that Solr MERGES them with no precedence
+    /// -- query params first, body params appended, exactly like repeated
+    /// query-string params. A single-valued read then takes the FIRST value
+    /// (the query-string one when present) via `Params::get`, and `echo`
+    /// renders the merged list. The caller decides whether the request's
+    /// `Content-Type` warrants the merge; this method trusts its input.
+    pub fn merge_form_body(mut self, body: &str) -> Params {
+        self.pairs.extend(parse_pairs(body));
+        self
     }
 
     /// Enables `omitHeader` envelope handling for an endpoint that implements
@@ -228,6 +232,25 @@ pub fn parse_bool(raw: &str) -> Option<bool> {
 /// cannot drift apart.
 pub fn invalid_bool_msg(raw: &str) -> String {
     format!("invalid boolean value: {raw}")
+}
+
+/// Splits an `application/x-www-form-urlencoded` string into decoded
+/// `(key, value)` pairs in order, skipping empty segments. Shared by the
+/// query-string ([`Params::parse`]) and body ([`Params::merge_form_body`])
+/// paths so the two cannot drift (issue #350, finding 189).
+fn parse_pairs(query: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for segment in query.split('&') {
+        if segment.is_empty() {
+            continue;
+        }
+        let (key, value) = match segment.split_once('=') {
+            Some((k, v)) => (k, v),
+            None => (segment, ""),
+        };
+        pairs.push((decode(key), decode(value)));
+    }
+    pairs
 }
 
 /// Decodes `application/x-www-form-urlencoded`: `+` is a space, `%XX` is a

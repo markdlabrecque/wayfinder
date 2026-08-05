@@ -30,7 +30,7 @@ use common::diff::{
     ranked_docs, score_tolerance,
 };
 use common::key_order::fixture_text;
-use common::{fixture, get, indexed_app, post_docs, request_full};
+use common::{fixture, get, indexed_app, post_docs, request_full_with_content_type};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -2422,6 +2422,7 @@ fn load_manifest_errors_parses_every_line_of_the_real_manifest_errors() {
             url: "nosuchcore/select?q=*:*&wt=json".to_string(),
             body: None,
             base_url: None,
+            content_type: None,
         }),
         "loader must parse err_missing_core with no body/base-url columns, got {:?}",
         entries
@@ -2434,6 +2435,7 @@ fn load_manifest_errors_parses_every_line_of_the_real_manifest_errors() {
             url: "content/update?commit=true&wt=json".to_string(),
             body: Some("{not json".to_string()),
             base_url: None,
+            content_type: None,
         }),
         "loader must parse err_update_bad_json's body column, got {:?}",
         entries
@@ -2473,6 +2475,7 @@ fn load_manifest_errors_skips_blanks_and_comments_and_tolerates_missing_columns(
             url: "nosuchcore/select?q=*:*&wt=json".to_string(),
             body: None,
             base_url: None,
+            content_type: None,
         },
         "empty body/base-url columns must parse as None, not Some(\"\")"
     );
@@ -2485,6 +2488,7 @@ fn load_manifest_errors_skips_blanks_and_comments_and_tolerates_missing_columns(
             url: "content/update?wt=json".to_string(),
             body: Some("[]".to_string()),
             base_url: Some("http://localhost:8984/solr".to_string()),
+            content_type: None,
         }
     );
 }
@@ -3028,6 +3032,15 @@ fn app_and_request_url<'a>(
     }
 }
 
+/// The request `Content-Type` for a manifest-errors row: the row's declared
+/// content-type when present, else the JSON default every `/update`-style
+/// row assumes. Form-POST rows (issue #350) declare
+/// `application/x-www-form-urlencoded` and ride this through to
+/// `request_full_with_content_type` / the live curl runner.
+fn entry_content_type(entry: &ManifestErrorEntry) -> &str {
+    entry.content_type.as_deref().unwrap_or("application/json")
+}
+
 #[tokio::test]
 async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
     let entries = load_manifest_errors(&manifest_errors_path());
@@ -3114,8 +3127,14 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
         let (status, actual) = if entry.name == "update_select_commitwithin_visible" {
             let start = Instant::now();
             loop {
-                let (status, actual) =
-                    request_full(app, &entry.method, &url, entry.body.as_deref()).await;
+                let (status, actual) = request_full_with_content_type(
+                    app,
+                    &entry.method,
+                    &url,
+                    entry.body.as_deref(),
+                    entry_content_type(entry),
+                )
+                .await;
                 let expected_n = normalize(fixture(&entry.name));
                 let actual_n = normalize(actual.clone());
                 let report = diff(&expected_n.value, &actual_n.value);
@@ -3125,7 +3144,14 @@ async fn manifest_errors_every_row_runs_against_the_matching_hermetic_app() {
                 std::thread::sleep(Duration::from_millis(50));
             }
         } else {
-            request_full(app, &entry.method, &url, entry.body.as_deref()).await
+            request_full_with_content_type(
+                app,
+                &entry.method,
+                &url,
+                entry.body.as_deref(),
+                entry_content_type(entry),
+            )
+            .await
         };
 
         if let Some(reason) = accepted_divergence_reason(&entry.name) {

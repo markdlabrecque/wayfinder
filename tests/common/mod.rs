@@ -211,16 +211,36 @@ pub async fn get(app: &Router, path_and_query: &str) -> (StatusCode, Value) {
 /// Consolidated from `tests/error_shapes.rs`'s local `request()` (issue #31
 /// follow-up — deferred there only to avoid colliding with the
 /// then-concurrent #1 branch, which owns this file).
+///
+/// Always sends `Content-Type: application/json` — the content-type every
+/// JSON-body `/update` row uses. Form-encoded bodies (issue #350) go through
+/// [`request_full_with_content_type`].
 pub async fn request_full(
     app: &Router,
     method: &str,
     path_and_query: &str,
     body: Option<&str>,
 ) -> (StatusCode, Value) {
+    request_full_with_content_type(app, method, path_and_query, body, "application/json").await
+}
+
+/// [`request_full`] with an explicit `Content-Type`, for the manifest-errors
+/// rows whose body is not JSON — today, only Solarium's
+/// `application/x-www-form-urlencoded` `postbigrequest` form POSTs (issue
+/// #350, finding 189). The body is sent verbatim under that content-type;
+/// callers rely on Wayfinder's `params_with_form_body` to decide whether the
+/// body becomes params.
+pub async fn request_full_with_content_type(
+    app: &Router,
+    method: &str,
+    path_and_query: &str,
+    body: Option<&str>,
+    content_type: &str,
+) -> (StatusCode, Value) {
     let req = Request::builder()
         .method(method)
         .uri(format!("/wayfinder/{path_and_query}"))
-        .header("content-type", "application/json")
+        .header("content-type", content_type)
         .body(match body {
             Some(b) => Body::from(b.to_string()),
             None => Body::empty(),
