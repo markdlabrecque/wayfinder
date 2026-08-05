@@ -1,0 +1,10 @@
+{
+  "responseHeader":{
+    "status":400,
+    "QTime":0},
+  "error":{
+    "metadata":[
+      "error-class","org.apache.solr.common.SolrException",
+      "root-error-class","org.apache.solr.common.SolrException"],
+    "msg":"No suggester named xx was configured",
+    "code":400}}
