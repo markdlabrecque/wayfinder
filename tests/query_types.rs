@@ -705,10 +705,9 @@ async fn quoted_phrase_containing_colon_is_a_phrase_not_a_field_query() {
 // =============================================================================
 
 /// A schema with a `*_i` dynamic int rule, default field `body`. One doc
-/// whose `body` contains the literal token sequence `count i seven` (which is
-/// exactly what the phrase `"count_i: seven"` tokenizes to on built-in
-/// `text_en`'s versioned analyzer — `SimpleTokenizer` splits on the non-alphanumeric `_`
-/// and `:`), plus a `count_i` value the unquoted control query exercises.
+/// whose `body` contains the literal UAX #29 token sequence `count_i seven`
+/// (the tokenizer preserves `_` inside a word and splits at `:`), plus a
+/// `count_i` value the unquoted control query exercises.
 const DYNAMIC_QUOTE_SCHEMA_TOML: &str = r#"
 [core]
 name = "content"
@@ -739,7 +738,7 @@ async fn dynamic_quote_app() -> (Router, TempDir) {
         common::app_with_schema(dir.path(), DYNAMIC_QUOTE_SCHEMA_TOML).expect("app must build");
     let (status, body) = post_docs(
         &app,
-        &json!([{"id": "d1", "body": "the count i seven report", "count_i": 7}]),
+        &json!([{"id": "d1", "body": "the count_i seven report", "count_i": 7}]),
     )
     .await;
     assert_eq!(
@@ -769,17 +768,13 @@ async fn dynamic_field_rewrite_still_applies_unquoted() {
 
 /// The regression: a QUOTED phrase containing `count_i:` must NOT be rewritten
 /// to a `_dynamic.count_i` field query — it is a literal phrase on `df`
-/// (`body`), and `body`'s doc contains exactly that token sequence
-/// (`count i seven`), so the correct answer is `numFound: 1`.
+/// (`body`), and `body`'s doc contains exactly that UAX #29 token sequence
+/// (`count_i seven`), so the correct answer is `numFound: 1`.
 ///
-/// Today `rewrite_dynamic_fields`'s `<ident>:` scan has no notion of being
-/// inside a quoted string (its own `ponytail:` comment says so explicitly),
-/// so it rewrites `count_i:` to `_dynamic.count_i:` even here, changing the
-/// phrase's token sequence from `["count", "i", "seven"]` to
-/// `["dynam", "count", "i", "seven"]` (verified against Wayfinder's actual
-/// `text_en` tokenizer pipeline, not assumed) — which does not occur in the
-/// doc's body, so today this answers `numFound: 0`, the wrong-for-the-right-
-/// reason failure this test exists to catch.
+/// If `rewrite_dynamic_fields` applied inside the quoted string, it would
+/// change the phrase's first token away from `count_i`, which does not occur
+/// in the doc's body. Keeping the expected hit therefore continues to guard
+/// the rewrite boundary without relying on the retired SimpleTokenizer shape.
 #[tokio::test]
 async fn dynamic_field_rewrite_must_not_apply_inside_a_quoted_phrase() {
     let (app, _dir) = dynamic_quote_app().await;
@@ -795,7 +790,7 @@ async fn dynamic_field_rewrite_must_not_apply_inside_a_quoted_phrase() {
     assert_eq!(
         returned_ids,
         vec!["d1".to_string()],
-        "the phrase must match doc d1's body (`count i seven`), not be silently swallowed by \
+        "the phrase must match doc d1's body (`count_i seven`), not be silently swallowed by \
          an incorrect rewrite: {body}"
     );
 }

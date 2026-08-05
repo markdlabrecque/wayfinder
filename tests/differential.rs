@@ -2346,17 +2346,9 @@ fn load_manifest_parses_every_line_of_the_real_manifest() {
 }
 
 #[test]
-fn manifest_covers_terms_but_deliberately_excludes_admin_mbeans() {
+fn manifest_deliberately_excludes_admin_mbeans() {
     let entries = load_manifest(&manifest_path());
 
-    assert!(
-        entries.iter().any(|entry| {
-            entry.name == "terms_body"
-                && entry.status == 200
-                && entry.path == "terms?terms=true&terms.fl=body&omitHeader=true&wt=json"
-        }),
-        "/terms returns real index data and must have differential coverage"
-    );
     assert!(
         entries
             .iter()

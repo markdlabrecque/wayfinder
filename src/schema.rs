@@ -203,8 +203,7 @@ pub const ANALYZER_CONTRACT: &str = "text_presets_uax29_v5";
 /// A safely adopted index whose unused `_dynamic_text` catch-all still has an
 /// older tokenizer identity. It is not full v5 certification: a later rule
 /// that starts writing analyzed dynamic values must reindex.
-pub const ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT: &str =
-    "text_presets_uax29_v5_legacy_dynamic_text";
+pub const ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT: &str = "text_presets_uax29_v5_legacy_dynamic_text";
 /// Phase 2's accent-folding contract, superseded by UAX #29 segmentation in
 /// v5. It is recognized only to fail closed or safely adopt raw-only indexes.
 pub const ANALYZER_CONTRACT_V4: &str = "text_presets_accent_folding_v4";
@@ -958,7 +957,10 @@ impl Tokenizer for Uax29Tokenizer {
 
     fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
         Uax29TokenStream {
-            segments: text.split_word_bound_indices().collect::<Vec<_>>().into_iter(),
+            segments: text
+                .split_word_bound_indices()
+                .collect::<Vec<_>>()
+                .into_iter(),
             token: Token::default(),
             position: 0,
         }
@@ -1451,8 +1453,8 @@ fn build_tokenizers(
     let english_stopwords_preserving_singletons = || {
         StopWordFilter::remove(
             [
-                "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into",
-                "is", "it", "no", "not", "of", "on", "or", "such", "that", "the", "their", "then",
+                "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into", "is",
+                "it", "no", "not", "of", "on", "or", "such", "that", "the", "their", "then",
                 "there", "these", "they", "this", "to", "was", "will", "with",
             ]
             .into_iter()

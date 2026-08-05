@@ -92,7 +92,7 @@ fn create_older_analyzer_index(dir: &std::path::Path, toml: &str, tokenizer: &st
     let schema_json = serde_json::to_string(&wf_schema.tantivy_schema)
         .expect("serialize current Tantivy schema")
         .replace("wayfinder_text_en_v3", tokenizer)
-        .replace("wayfinder_dynamic_text_v4", tokenizer);
+        .replace("wayfinder_dynamic_text_v5", tokenizer);
     let schema_json = if tokenizer == "en_stem" {
         schema_json.replace("wayfinder_text_en_v1", tokenizer)
     } else {
@@ -356,8 +356,8 @@ stored = true
         .expect_err("activating an analyzed rule on the old en_stem catch-all must reindex");
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("text_en") && msg.to_lowercase().contains("reindex"),
-        "legacy dynamic refusal must identify text_en and reindexing, got: {msg}"
+        msg.to_lowercase().contains("uax #29") && msg.to_lowercase().contains("reindex"),
+        "legacy dynamic refusal must identify the current UAX #29 contract and reindexing, got: {msg}"
     );
 }
 
@@ -464,12 +464,12 @@ stored = true
     let current = schema::load(&schema_path).expect("raw-only dynamic schema loads");
     let legacy_schema_json = serde_json::to_string(&current.tantivy_schema)
         .expect("serialize current Tantivy schema")
-        .replace("wayfinder_dynamic_text_v4", "en_stem");
+        .replace("wayfinder_dynamic_text_v5", "en_stem");
     assert!(
         legacy_schema_json.contains("_dynamic_text")
             && legacy_schema_json.contains("en_stem")
-            && !legacy_schema_json.contains("wayfinder_dynamic_text_v4"),
-        "test setup: materialize the old `_dynamic_text` tokenizer identity"
+            && !legacy_schema_json.contains("wayfinder_dynamic_text_v5"),
+        "test setup: materialize the pre-UAX #29 `_dynamic_text` tokenizer identity"
     );
     let materialize_legacy = |root: &std::path::Path| {
         std::fs::write(root.join("schema.toml"), raw_only).expect("write legacy schema");
@@ -837,6 +837,7 @@ fn shipped_chains_analyze_identically_on_both_managers() {
         "wayfinder_text_en_v2".to_string(),
         "wayfinder_text_en_v3".to_string(),
         "wayfinder_dynamic_text_v4".to_string(),
+        "wayfinder_dynamic_text_v5".to_string(),
         "wayfinder_boost_term_payload_v1".to_string(),
         "wayfinder_boost_term_payload_raw_v1".to_string(),
     ];
@@ -922,16 +923,16 @@ tokenizer = "{index_tok}"
     }
 }
 
-/// `ANALYZER_CONTRACT` guards on-disk term compatibility. Phase 2 folds
-/// indexed text_en terms, so its v3 identity must force a reindex rather than
-/// silently reuse a pre-folding index.
+/// `ANALYZER_CONTRACT` guards on-disk term compatibility. The Phase 2
+/// pre-folding marker must still be refused, while Phase 3's UAX #29 change
+/// advances the current contract to v5.
 #[test]
-fn analyzer_contract_is_bumped_for_phase_2_accent_folding() {
+fn analyzer_contract_is_v5_after_phase_3_uax29_segmentation() {
     assert_eq!(
         schema::ANALYZER_CONTRACT,
-        "text_presets_accent_folding_v4",
-        "Phase 2 (issue #389) changes indexed dynamic text terms through accent \
-         folding, so the analyzer contract must move to v4"
+        "text_presets_uax29_v5",
+        "Phase 3 (issue #389) changes indexed text segmentation, so the analyzer \
+         contract must identify UAX #29 v5"
     );
 }
 
@@ -962,6 +963,7 @@ fn custom_field_type_cannot_use_an_internal_text_en_tokenizer_identity() {
         "wayfinder_text_en_v2",
         "wayfinder_text_en_v3",
         "wayfinder_dynamic_text_v4",
+        "wayfinder_dynamic_text_v5",
     ] {
         let toml = format!(
             r#"{FULL_SCHEMA_TOML}

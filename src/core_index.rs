@@ -812,8 +812,7 @@ impl CoreIndex {
         // or tokenizer identity from an earlier contract must never be adopted
         // for any path that can contain those old terms.
         let analyzer_contract = schema::analyzer_contract_path(data_dir);
-        let _uses_static_text_en =
-            wf_schema.uses_static_text_en() || _previous_static_text_en;
+        let _uses_static_text_en = wf_schema.uses_static_text_en() || _previous_static_text_en;
         let uses_static_accent_folded_text =
             wf_schema.uses_static_accent_folded_text() || previous_static_accent_folded_text;
         let uses_analyzed_dynamic =

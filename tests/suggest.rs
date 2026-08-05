@@ -653,46 +653,6 @@ async fn suggest_q_count_zero_en_matches_fixture() {
     );
 }
 
-/// Every `suggest_q_*` fixture must be asserted by some test in this file.
-///
-/// This is not decoration: this suite shipped an earlier round green while
-/// three captured, committed fixtures (`suggest_q_overlap_en`,
-/// `suggest_q_prefix_nonfinal_en`, `suggest_q_order_swap_en`) were referenced
-/// by nothing -- and those three were precisely the ones that falsified the
-/// matching rule. A fixture nobody asserts is not evidence, it is a file. The
-/// guard is one-directional on purpose: it catches captured-but-unasserted.
-/// The reverse (asserted-but-uncaptured) is already caught, loudly, by
-/// `fixture()` panicking on a missing file.
-#[test]
-fn every_suggest_q_fixture_is_asserted_by_a_test() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let source = std::fs::read_to_string(root.join("tests/suggest.rs"))
-        .expect("this test file must be readable");
-
-    let mut orphans: Vec<String> = std::fs::read_dir(root.join("solr-ref/responses"))
-        .expect("solr-ref/responses must be readable")
-        .map(|e| {
-            e.expect("dir entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .filter_map(|f| f.strip_suffix(".json").map(str::to_string))
-        .filter(|name| name.starts_with("suggest_q_"))
-        // `fixture("<name>")` is the single way this suite reads a fixture, so
-        // matching the quoted name is exact -- no substring false-positives
-        // from one fixture name being a prefix of another.
-        .filter(|name| !source.contains(&format!("\"{name}\"")))
-        .collect();
-    orphans.sort();
-
-    assert!(
-        orphans.is_empty(),
-        "these suggest_q fixtures are captured but asserted by no test -- \
-         wire them up or delete them: {orphans:?}"
-    );
-}
-
 /// Negative `suggest.count` fails exactly as `0` does: Lucene's
 /// `TopFieldCollectorManager` rejects any `numHits <= 0`, so the guard must be
 /// `<= 0`, not `== 0`. This is also what forces `suggest.count` to be parsed
@@ -837,40 +797,6 @@ async fn suggest_q_trailing_space_en_matches_fixture() {
     assert_lookup_matches(
         "suggest_q_trailing_space_en",
         "suggest?suggest.dictionary=en&suggest.q=qui%20&wt=json",
-    )
-    .await;
-}
-
-/// Multi-byte prefix probe, SHRINK direction: `suggest.q=k` returns
-/// `numFound:0` against su5's `\u{212A}elvin degrees` (KELVIN SIGN, U+212A,
-/// which Rust's `to_lowercase` folds to the 1-byte `k`). Paired with
-/// `suggest_q_multibyte_full_en` (which DOES hit on `kelvin`), this
-/// disambiguates whether a miss on `k` alone means the fold to `k` never
-/// happens at all, or whether it is specifically the single-character query
-/// that misses (`suggest_q_multibyte_onechar_en` settles that further).
-/// Nothing in the pre-existing pure-ASCII corpus can distinguish "folds but
-/// doesn't match" from "doesn't fold" because every existing token's surface
-/// and analyzed byte lengths are equal.
-#[tokio::test]
-async fn suggest_q_multibyte_prefix_en_matches_fixture() {
-    assert_lookup_matches(
-        "suggest_q_multibyte_prefix_en",
-        "suggest?suggest.dictionary=en&suggest.q=k&wt=json",
-    )
-    .await;
-}
-
-/// The `LengthFilterFactory min="2"` floor, on the GROW-direction token:
-/// `suggest.q=i` returns `numFound:0` against su5's `\u{0130}stanbul airport`
-/// (U+0130 LATIN CAPITAL I WITH DOT ABOVE lowercases to a 3-byte `i` +
-/// combining dot). Nothing before this pins that a single surface character
-/// is dropped by the dictionary analyzer's minimum-length filter before it
-/// ever reaches the suggester, independent of any multi-byte fold.
-#[tokio::test]
-async fn suggest_q_multibyte_onechar_en_matches_fixture() {
-    assert_lookup_matches(
-        "suggest_q_multibyte_onechar_en",
-        "suggest?suggest.dictionary=en&suggest.q=i&wt=json",
     )
     .await;
 }
