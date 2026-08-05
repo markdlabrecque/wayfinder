@@ -14,6 +14,7 @@ mod common;
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
+use tantivy::tokenizer::TokenStream;
 use tantivy::{
     Index, Term,
     collector::Count,
@@ -21,7 +22,6 @@ use tantivy::{
     schema::IndexRecordOption,
     tokenizer::{Language, LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer},
 };
-use tantivy::tokenizer::TokenStream;
 use tempfile::TempDir;
 use wayfinder::schema;
 
@@ -731,7 +731,10 @@ fn v1_text_en_analyzer_contract_refuses_startup_requiring_reindex() {
 fn v1_marker_with_old_dynamic_postings_hidden_by_raw_snapshot_refuses_reindex() {
     let old_dynamic = DYNAMIC_ANALYZED_SCHEMA_TOML;
     let raw_dynamic = old_dynamic.replace("type = \"text_general\"", "type = \"string\"");
-    assert_ne!(old_dynamic, raw_dynamic, "test setup: evolution must remove the analyzed rule");
+    assert_ne!(
+        old_dynamic, raw_dynamic,
+        "test setup: evolution must remove the analyzed rule"
+    );
 
     let dir = TempDir::new().expect("temp dir");
     let schema_path = dir.path().join("schema.toml");
