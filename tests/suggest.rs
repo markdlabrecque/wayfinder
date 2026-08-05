@@ -1018,3 +1018,128 @@ async fn suggest_build_all_is_inert_and_does_not_leak_across_runs() {
         assert!(body.get("suggest").is_none(), "no suggest block: {body}");
     }
 }
+
+// --- issue #390: the two behaviours #384 left unpinned ------------------
+//
+// `suggest_q_dict_unknown.json` and `suggest_q_cfq_empty.json` are the two
+// fixtures captured against real Solr for this issue (docs/solr-ref-findings.md
+// gets the corresponding findings appended in a later stage).
+
+/// An empty `suggest.cfq=` must match the captured fixture: numFound 3, with
+/// highlighting INCLUDED (`<b>qui</b>...`). Wayfinder today suppresses
+/// highlighting for any `Some(_)` cfq value, including the empty string, so
+/// this is expected to fail on that leaf until `highlight` is derived from
+/// whether a context filter is actually engaged.
+#[tokio::test]
+async fn suggest_q_cfq_empty_matches_fixture() {
+    assert_lookup_matches(
+        "suggest_q_cfq_empty",
+        "suggest?suggest.dictionary=en&suggest.q=qui&suggest.cfq=&wt=json",
+    )
+    .await;
+}
+
+/// The finding in its strongest form: an empty `suggest.cfq=` must produce a
+/// response BYTE-IDENTICAL (modulo QTime) to the same query with no `cfq` at
+/// all (`suggest_q_prefix_en`'s query). Pinning this against the sibling
+/// fixture, not just against `suggest_q_cfq_empty.json` directly, is what
+/// stops a future edit from re-introducing a cfq-shaped special case that
+/// happens to reproduce the fixture by some other means (e.g. hardcoding
+/// highlight-on for an empty string specifically, rather than routing empty
+/// cfq through the exact same "no context filter" path as absent cfq).
+#[tokio::test]
+async fn suggest_q_cfq_empty_matches_no_cfq_body() {
+    let (app, _dir) = suggest_lookup_app().await;
+    let (status_empty, body_empty) = get(
+        &app,
+        "suggest?suggest.dictionary=en&suggest.q=qui&suggest.cfq=&wt=json",
+    )
+    .await;
+    let (status_absent, body_absent) =
+        get(&app, "suggest?suggest.dictionary=en&suggest.q=qui&wt=json").await;
+
+    assert_eq!(
+        status_empty,
+        StatusCode::OK,
+        "empty suggest.cfq must answer 200, got {status_empty}: {body_empty}"
+    );
+    assert_eq!(
+        status_absent,
+        StatusCode::OK,
+        "no suggest.cfq must answer 200, got {status_absent}: {body_absent}"
+    );
+    assert_eq!(
+        drop_qtime(body_empty),
+        drop_qtime(body_absent),
+        "suggest.cfq= (empty) must be byte-identical (modulo QTime) to no cfq at all"
+    );
+}
+
+/// An unknown `suggest.dictionary` must be a 400 with the fixture's exact
+/// `msg`, `NoParams` envelope (no `params` under `responseHeader`), `error.code`
+/// 400, `error.metadata` present, no `error.trace`, and no `suggest` block at
+/// all. Wayfinder today falls back to the `und` dictionary for any
+/// unrecognised name and answers 200, so every assertion below is expected to
+/// fail against that behaviour.
+#[tokio::test]
+async fn suggest_q_dict_unknown_matches_fixture() {
+    let (app, _dir) = suggest_lookup_app().await;
+    let (status, body) = get(&app, "suggest?suggest.dictionary=xx&suggest.q=qui&wt=json").await;
+    let expected = fixture("suggest_q_dict_unknown");
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unknown suggest.dictionary must be a 400, got {status}: {body}"
+    );
+    assert_eq!(
+        body["responseHeader"]["status"], expected["responseHeader"]["status"],
+        "responseHeader.status must match the fixture's 400: {body}"
+    );
+    assert!(
+        body["responseHeader"].get("params").is_none(),
+        "responseHeader must NOT carry params (Solr's /suggest never echoes them): {body}"
+    );
+    assert_eq!(
+        body["error"]["code"], expected["error"]["code"],
+        "error.code must match the fixture: {body}"
+    );
+    assert_eq!(
+        body["error"]["msg"], expected["error"]["msg"],
+        "error.msg must match the fixture's wording verbatim: {body}"
+    );
+    assert!(
+        body["error"].get("metadata").is_some(),
+        "error.metadata must be present (this is WfError's default shape, not the \
+         trace-carrying suggest.count<=0 shape): {body}"
+    );
+    assert!(
+        body["error"].get("trace").is_none(),
+        "error must NOT carry a trace (that shape is reserved for the \
+         suggest.count<=0 500): {body}"
+    );
+    assert!(
+        body.get("suggest").is_none(),
+        "an unknown suggest.dictionary must carry no suggest block at all: {body}"
+    );
+}
+
+/// The guard against over-widening the new validation: an ABSENT
+/// `suggest.dictionary` must still be served as `und` (200, with a `suggest`
+/// block), not rejected. This is the default-value path
+/// (`params.get("suggest.dictionary").unwrap_or("und")`); it must keep
+/// working once an explicit unknown name starts being checked.
+#[tokio::test]
+async fn suggest_q_no_dictionary_still_served_as_und() {
+    let (app, _dir) = suggest_lookup_app().await;
+    let (status, body) = get(&app, "suggest?suggest.q=qui&wt=json").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an absent suggest.dictionary must still be served (defaults to und), got {status}: {body}"
+    );
+    assert!(
+        body["suggest"].get("und").is_some(),
+        "an absent suggest.dictionary must default to the und dictionary: {body}"
+    );
+}
