@@ -316,16 +316,26 @@ async fn configured_members_are_folded_and_reject_unsafe_analyzer_inputs() {
         b"smorrebrod,strasse,encyclopaedia\n"
     );
 
-    // Canonicalization must reject every member which the real query analyzer
-    // turns into multiple UAX terms, delimiter graph positions, or alternatives.
+    // Validation follows the analyzer graph rather than a hand-maintained
+    // script or numeric blacklist. U+2F800 folds to U+4E3D before the UAX and
+    // delimiter checks, while a numeric one-position token is equally safe.
+    let (status, _headers, body) = post_synonym_form(&app, "groups=%F0%AF%A0%80%2Cbaz").await;
+    assert_save_succeeded(status, &body);
+    assert_eq!(
+        std::fs::read(dir.path().join(SYNONYM_FILE)).expect("compatibility ideograph synonym file"),
+        "丽,baz\n".as_bytes(),
+        "U+2F800 must persist its analyzer-folded form"
+    );
+    let (status, _headers, body) = post_synonym_form(&app, "groups=42%2Cbaz").await;
+    assert_save_succeeded(status, &body);
+
+    // Canonicalization must still reject every member which the real query
+    // analyzer turns into multiple UAX terms or delimiter graph positions.
     for invalid in [
         "foo-bar%2Cbaz",
         "sku42%2Cbaz",
-        "42%2Cbaz",
         "camelCase%2Cbaz",
-        "%E6%9D%B1%2Cbaz",
         "%E6%9D%B1%E4%BA%AC%E9%83%BD%2Cbaz",
-        "%F0%9F%98%80%2Cbaz",
         "%CC%81%2Cbaz",
     ] {
         let (status, _headers, body) = post_synonym_form(&app, &format!("groups={invalid}")).await;

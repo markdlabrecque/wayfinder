@@ -1158,22 +1158,18 @@ fn delimiter_parts(text: &str, base_offset: usize, original_end: usize) -> Vec<D
             offset_to,
         });
     }
+    // UAX deliberately retains non-punctuation symbols (for example emoji) as
+    // meaningful terms. They have no alphanumeric run, but must remain a graph
+    // part rather than disappearing or being catenated to a linked word.
+    if parts.is_empty() && !text.is_empty() {
+        let (offset_from, offset_to) = offsets(0, text.len());
+        parts.push(DelimiterPart {
+            text: text.to_string(),
+            offset_from,
+            offset_to,
+        });
+    }
     parts
-}
-
-fn is_cjk_character(character: char) -> bool {
-    matches!(
-        character as u32,
-        0x3040..=0x30ff
-            | 0x3130..=0x318f
-            | 0x3400..=0x4dbf
-            | 0x4e00..=0x9fff
-            | 0xac00..=0xd7af
-            | 0xf900..=0xfaff
-            | 0x1100..=0x11ff
-            | 0x20000..=0x2ebef
-            | 0x30000..=0x323af
-    )
 }
 
 /// Canonicalizes one configured synonym member through the same pre-synonym
@@ -1181,24 +1177,17 @@ fn is_cjk_character(character: char) -> bool {
 /// position-length-one alternative, so the member must be one actual UAX term
 /// and its pre-lowercase delimiter graph must produce exactly that one term.
 pub(crate) fn canonicalize_synonym_member(member: &str) -> Result<String> {
-    let mut uax = Uax29Tokenizer;
-    let mut uax_stream = uax.token_stream(member);
-    if !uax_stream.advance() {
-        bail!("synonym members must each be one nonempty UAX token");
-    }
-    let uax_token = uax_stream.token().text.clone();
-    if uax_stream.advance() {
-        bail!("synonym members must each be one nonempty UAX token");
-    }
-    if uax_token
-        .chars()
-        .any(|character| character.is_numeric() || is_cjk_character(character))
-    {
-        bail!("synonym members must not contain digits or CJK characters");
-    }
-
     let mut folded = String::new();
     fold_accents(member, &mut folded);
+
+    // The analyzer, rather than a hand-maintained script or numeric blacklist,
+    // decides whether a member is safe. Folding is included because it is part
+    // of the query chain and compatibility ideographs can change under NFKD.
+    let mut uax = Uax29Tokenizer;
+    let mut uax_stream = uax.token_stream(&folded);
+    if !uax_stream.advance() || uax_stream.advance() {
+        bail!("synonym members must each be one nonempty UAX token");
+    }
     let mut delimiter = TextAnalyzer::builder(Uax29Tokenizer)
         .filter_dynamic(WordDelimiterFilter::search())
         .build();
@@ -1225,10 +1214,10 @@ struct WordDelimiterTokenStream<'a, T> {
     input: &'a str,
     pending: VecDeque<Token>,
     lookahead: Option<Token>,
-    /// Delimiter expansion increases graph width beyond the number of upstream
-    /// UAX positions it consumed. Later upstream positions must carry that
-    /// cumulative shift instead of being compacted behind the graph.
-    position_shift: usize,
+    /// Delimiter expansion can widen or narrow a graph relative to the span
+    /// of upstream positions it consumed. Later positions carry this signed
+    /// cumulative shift instead of being compacted or underflowing.
+    position_shift: isize,
     preserve_original: bool,
 }
 
@@ -1281,19 +1270,31 @@ impl<T: TokenStream> WordDelimiterTokenStream<'_, T> {
             .iter()
             .flat_map(|source| delimiter_parts(&source.text, source.offset_from, source.offset_to))
             .collect();
+        let upstream_start = sources[0].position;
+        let Some(upstream_end) = sources
+            .last()
+            .and_then(|source| source.position.checked_add(source.position_length))
+        else {
+            return false;
+        };
+        let Some(upstream_span) = upstream_end.checked_sub(upstream_start) else {
+            return false;
+        };
+        let width = parts.len();
         if parts.is_empty() {
-            // A symbol or combining-only UAX segment has no lexical form. It
-            // is ignored like whitespace, but must not panic or consume the
-            // following source token.
-            return true;
+            // Accent folding removes combining-only input. It still consumes
+            // an upstream span, so carry its negative graph delta forward.
+            return self.apply_position_delta(width, upstream_span);
         }
 
         // Map every graph start from its upstream position. A split such as
         // `sku42` consumes one UAX position but emits two, so it shifts every
         // later upstream position by one; an already-present stopword gap must
-        // remain a gap after that expansion.
-        let start = sources[0].position + self.position_shift;
-        let width = parts.len();
+        // remain a gap after that expansion. checked_add_signed also prevents
+        // a narrowing delta from producing a negative output position.
+        let Some(start) = upstream_start.checked_add_signed(self.position_shift) else {
+            return false;
+        };
         let mut seen = HashSet::new();
         let mut push =
             |text: String, position: usize, position_length: usize, from: usize, to: usize| {
@@ -1366,11 +1367,13 @@ impl<T: TokenStream> WordDelimiterTokenStream<'_, T> {
                 );
             }
         }
-        let all = parts
-            .iter()
-            .map(|part| part.text.as_str())
-            .collect::<String>();
-        push(all, start, width, compound_start, compound_end);
+        if !source_has_symbol {
+            let all = parts
+                .iter()
+                .map(|part| part.text.as_str())
+                .collect::<String>();
+            push(all, start, width, compound_start, compound_end);
+        }
 
         let mut run_start = 0;
         while run_start < parts.len() {
@@ -1402,7 +1405,26 @@ impl<T: TokenStream> WordDelimiterTokenStream<'_, T> {
         self.pending
             .make_contiguous()
             .sort_by_key(|token| token.position);
-        self.position_shift += width - sources.len();
+        self.apply_position_delta(width, upstream_span)
+    }
+
+    /// Apply the graph-width delta against the positions actually covered by
+    /// the upstream graph. Source count is not that span: punctuation-linked
+    /// emoji and folded-away combining marks make the distinction observable.
+    fn apply_position_delta(&mut self, width: usize, upstream_span: usize) -> bool {
+        let Some(width) = isize::try_from(width).ok() else {
+            return false;
+        };
+        let Some(upstream_span) = isize::try_from(upstream_span).ok() else {
+            return false;
+        };
+        let Some(delta) = width.checked_sub(upstream_span) else {
+            return false;
+        };
+        let Some(shift) = self.position_shift.checked_add(delta) else {
+            return false;
+        };
+        self.position_shift = shift;
         true
     }
 }

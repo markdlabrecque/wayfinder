@@ -53,7 +53,9 @@ async fn delimiter_app() -> (axum::Router, TempDir) {
             {"id": "stopword-gap", "body": "quick the fox"},
             {"id": "dynamic-compound", "tm_X3b_en_code": ["SKU-42 wifi_router"]},
             {"id": "dynamic-independent", "tm_X3b_en_code": ["happy sky"]},
-            {"id": "suggest-delimiter", "twm_suggest": ["foo_bar"]}
+            {"id": "suggest-delimiter", "twm_suggest": ["foo_bar"]},
+            {"id": "emoji-compound", "body": "😀-foo raven", "twm_suggest": ["😀-foo"]},
+            {"id": "combining-compound", "body": "\u{301}-bar zebra"}
         ]),
     )
     .await;
@@ -138,8 +140,8 @@ async fn suggest_keeps_mid_delimiter_input_as_a_prefix() {
     assert_eq!(
         body.pointer("/suggest/en/foo_/numFound")
             .and_then(Value::as_u64),
-        Some(1),
-        "`foo_` must remain a useful prefix for `foo_bar`: {body}"
+        Some(2),
+        "`foo_` must remain a useful prefix for `foo_bar` after adding `😀-foo`: {body}"
     );
 }
 
@@ -176,20 +178,37 @@ async fn delimiter_compounds_are_real_position_graphs_for_sequential_and_catenat
 }
 
 #[tokio::test]
-async fn symbol_and_combining_only_queries_never_panic_or_hide_following_words() {
+async fn punctuation_linked_symbols_and_combining_marks_keep_safe_graph_positions() {
     let (app, _dir) = delimiter_app().await;
 
-    // These inputs can reach the delimiter filter as zero-part UAX segments.
-    // They may legitimately have no lexical match, but must remain ordinary
-    // empty-result requests instead of panicking or consuming later tokens.
-    for query in [
-        "select?q=body%3A%F0%9F%98%80&rows=0",
-        "select?q=body%3A%CC%81&rows=0",
-        "suggest?suggest.dictionary=en&suggest.q=%F0%9F%98%80&wt=json",
-        "suggest?suggest.dictionary=en&suggest.q=%CC%81&wt=json",
-    ] {
-        let (status, body) = get(&app, query).await;
-        assert_eq!(status, StatusCode::OK, "/{query} must not panic: {body}");
-    }
-    assert_field_query_count(&app, "body", "next", 1).await;
+    // Emoji remains a meaningful Phase-3 UAX part when punctuation links it
+    // to a word. It is sequential with `foo`, never catenated into `😀foo`.
+    assert_field_query_count(&app, "body", "%22%F0%9F%98%80+foo+raven%22", 1).await;
+    let terms = field_terms(&app, "body").await;
+    assert!(
+        terms.contains(&"😀".to_owned()),
+        "emoji term missing: {terms:?}"
+    );
+    assert!(
+        !terms.contains(&"😀foo".to_owned()),
+        "symbols and words must not be catenated: {terms:?}"
+    );
+
+    // A combining-only source disappears during accent folding, so its linked
+    // lexical part has a narrower graph width than the upstream source span.
+    // The following word must remain visible at the next graph position.
+    assert_field_query_count(&app, "body", "%22bar+zebra%22", 1).await;
+
+    let (status, body) = get(
+        &app,
+        "suggest?suggest.dictionary=en&suggest.q=%F0%9F%98%80-foo&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "/suggest must succeed: {body}");
+    assert_eq!(
+        body.pointer("/suggest/en/😀-foo/numFound")
+            .and_then(Value::as_u64),
+        Some(1),
+        "emoji-linked suggestion input must retain its graph parts: {body}"
+    );
 }
