@@ -1024,17 +1024,26 @@ evidence does not support building most of that.**
 on the request side. This is a real feature described in the Phases table only because it's a Solr
 concept, the same premise gap the capture is supposed to close (§5's "coverage instrument" note).
 
-**What the client actually does with `_version_` (finding 132, #307; premise corrected in #293).**
-The client reads `_version_` only through a **JSON facet aggregation**: Solarium's
-`createJsonFacetAggregation` with `function: 'max(_version_)'` (PHP 4938-4940, 5052-5092),
-optionally nested under `terms` facets on `hash`, `index_id`, and `ss_search_api_datasource`.
-These are the server-status "max document `_version_`" admin diagnostics screens; the PHP comment
-at 4934 says the field was picked only because it is "the only field we can be 99% sure exists in
-any index" — a cheap always-present probe for a facet, not a version.
+**What the client actually does with `_version_` (finding 132, shape corrected by finding 191,
+#307/#293).** The client reads `_version_` only through JSON facets — but the **primary** shape is
+nested `terms` facets, not an aggregation. (The stats component is nonetheless a capability of
+the field; see the next paragraph — it is just not a path any captured request takes.)
+`doDocumentCounts()` (PHP `:4895`) sends top-level `siteHashes` (`hash`) carrying a nested
+`numDocsPerIndex` (`index_id`) and uses **no `_version_`**; `max(_version_)` is only its `catch`
+fallback (PHP `:4934-4940`), a deliberately minimal facet over the one always-present field
+(comment at `:4934`: "the only field we can be 99% sure exists in any index" — a cheap
+always-present probe for a facet, not a version). The other caller, `doGetMaxDocumentVersions()`
+(`:5033`), sends a top-level `max(_version_)` plus a four-level nested topology (`hash` →
+`index_id` → `ss_search_api_datasource` → per-datasource `max(_version_)`). Both are server-status
+admin diagnostics screens. Finding 190 has the full shape, the `local_key` response-keying, and
+the `omitHeader=false` / SOLR-13509 detail (and corrects the issue's `:5079-5085` mis-cite: that
+range is the `addFacet` nesting, not an `omitHeader` guard — the guard is `:4943-4949` in
+`doDocumentCounts()`).
 
-An earlier draft of this section wrongly described `_version_` as read through
-`stats.field`; finding 132 is the correction. `stats.field` remains a valid capability of the
-delivered field (see below), not a path any captured request takes.
+An earlier draft of this section wrongly described `_version_` as read through `stats.field`;
+finding 132 corrected that (never `stats.field`), and finding 191 in turn corrects finding 132's
+*shape* (nested terms primary, `max()` the fallback). `stats.field` remains a valid capability of
+the delivered field (see below), not a path any captured request takes.
 
 **Delivered in v1 (#99/#102), and kept as-is.** A real `_version_` field: `i64`, `fast` (docValues),
 auto-populated per document from a per-core `AtomicI64` seeded at process start (so a restart begins
