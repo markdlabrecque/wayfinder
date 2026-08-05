@@ -1313,6 +1313,29 @@ impl CoreIndex {
         Ok(())
     }
 
+    /// Tantivy's own `QueryParser`, wired to the **query**-side tokenizer
+    /// manager (issue #389 Phase 1).
+    ///
+    /// Deliberately not `QueryParser::for_index`, which is literally
+    /// `QueryParser::new(index.schema(), default_fields, index.tokenizers()
+    /// .clone())` (tantivy-0.26.1) — i.e. the *indexing* manager. Tantivy
+    /// resolves each field's analyzer itself, inside the parser, from the manager
+    /// it was handed and keyed by the tokenizer name recorded in the schema; the
+    /// query manager is keyed by those same identities, so handing it over here
+    /// is the entire wiring the `q` path needs. Nothing else is lost: schema and
+    /// default fields are the only other things `for_index` supplied.
+    ///
+    /// Every chain Wayfinder ships registers one analyzer in both managers, so
+    /// this resolves exactly what `for_index` did until Phase 2/4 give `text_en`
+    /// / `text_und` a real query-side chain.
+    fn query_parser(&self, default_field: Field) -> QueryParser {
+        QueryParser::new(
+            self.index.schema(),
+            vec![default_field],
+            self.wf_schema.query_tokenizers.clone(),
+        )
+    }
+
     /// Parses a Solr `q` (or `fq`) query string into a Tantivy query.
     /// `*:*` is special-cased to `AllQuery`, matching Solr's match-all idiom.
     ///
@@ -1401,7 +1424,7 @@ impl CoreIndex {
         let rewritten = self.rewrite_dynamic_fields(&self.rewrite_wildcard_subclause(source));
         let user_ast = tantivy::query_grammar::parse_query(&rewritten)
             .map_err(|_| anyhow!("could not parse query `{query_str}`"))?;
-        let parser = QueryParser::for_index(&self.index, vec![default_field]);
+        let parser = self.query_parser(default_field);
         self.build_ast(user_ast, &parser, default_field_name, &nested)
             .map_err(anyhow::Error::from)
     }
@@ -1862,10 +1885,18 @@ impl CoreIndex {
         // LengthFilter min=2 rather than a term nothing carries. `parse_block`
         // has already stripped the quotes `escapePhrase()` adds.
         //
-        // `tokenize` returns `None` for a type with no analysis chain at all (a
-        // numeric field, say). That is deliberately *not* treated as "analyzes
-        // to empty": such a field is not payload-bearing either, and the
-        // non-payload-field error below names the real problem.
+        // `tokenize_query` -- the query-side manager (#389 Phase 1) -- because
+        // that is what "its own query analyzer" means now that the two sides can
+        // differ. Inert today: `boost_term_payload` has one analysis chain, so
+        // both managers hold the same analyzer for it. It stops being inert the
+        // moment a payload-bearing field type declares two, and the bug it would
+        // cause then (a `v` analyzed by the index chain, matched against
+        // query-chain terms) is silent.
+        //
+        // `tokenize_query` returns `None` for a type with no analysis chain at
+        // all (a numeric field, say). That is deliberately *not* treated as
+        // "analyzes to empty": such a field is not payload-bearing either, and
+        // the non-payload-field error below names the real problem.
         //
         // With no `v` at all, the query text is the *bound* run after `}` --
         // Solr's general local-params contract (finding 173), which
@@ -1880,7 +1911,8 @@ impl CoreIndex {
         let analyzed = if query_text.is_empty() {
             None
         } else {
-            self.wf_schema.tokenize(&field_config.type_, query_text)
+            self.wf_schema
+                .tokenize_query(&field_config.type_, query_text)
         };
         if let Some(terms) = &analyzed {
             if terms.is_empty() {
@@ -2048,7 +2080,7 @@ impl CoreIndex {
             .map_err(|_| QueryError::Syntax(format!("could not parse query `{q}`")))?;
         let flat = flatten_edismax_clauses(user_ast);
 
-        let parser = QueryParser::for_index(&self.index, vec![default_field]);
+        let parser = self.query_parser(default_field);
         let mut literal_texts: Vec<String> = Vec::new();
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::with_capacity(flat.len());
         for (occur, leaf_boost, leaf) in flat {
@@ -2487,8 +2519,9 @@ impl CoreIndex {
     }
 
     /// Tokenizes free-standing `text` (not a stored doc value — a `q`/`pf`
-    /// clause's own literal text) with `target`'s own indexing analyzer, the
-    /// same tokenizer chain `mlt_query` mines stored values with. For a
+    /// clause's own literal text) with `target`'s own **query** analyzer
+    /// (issue #389 Phase 1): the field's index identity, resolved against the
+    /// query-side tokenizer manager. For a
     /// dynamic target that analyzer is the catch-all container's, not a
     /// declared field's (see the `JsonObject` arm below). A non-text target
     /// (or one with no configured tokenizer) falls back to the raw text as a
@@ -2513,14 +2546,12 @@ impl CoreIndex {
                 .map(|o| o.tokenizer()),
             _ => None,
         };
-        // Query text, so the *query*-side analyzer of whatever the field's
-        // index-side identity is (#389 Phase 1). Absent a declared query
-        // chain -- which is every field type Wayfinder ships today --
-        // `query_tokenizer_name` returns the index identity unchanged, so this
-        // resolves exactly the analyzer it did before the seam existed.
-        let Some(mut tokenizer) = tokenizer_name
-            .map(|name| self.wf_schema.query_tokenizer_name(name))
-            .and_then(|name| self.index.tokenizers().get(&name))
+        // Query text, so the field's index identity is looked up in the
+        // *query*-side manager (#389 Phase 1). Every chain Wayfinder ships today
+        // has the same analyzer registered in both managers, so this resolves
+        // exactly the analyzer it did before the seam existed.
+        let Some(mut tokenizer) =
+            tokenizer_name.and_then(|name| self.wf_schema.query_tokenizers.get(name))
         else {
             return vec![text.to_string()];
         };
@@ -3832,18 +3863,23 @@ impl CoreIndex {
             let tantivy::schema::FieldType::Str(text_options) = field_entry.field_type() else {
                 continue;
             };
-            // Deliberately the *index*-side analyzer, not the #389 Phase 1
-            // query-side one. What is being analyzed here is a stored source
-            // document, mined for terms that are then looked up in the posting
-            // lists directly (`searcher.doc_freq(&term)` below drops anything
-            // with `doc_freq == 0`) -- so the tokens must be index terms, the
-            // same way `Analyzer` on Lucene's `MoreLikeThis` is the index
-            // analyzer in Solr's MLT handler. Routing this through
-            // `query_tokenizer_name` would be inert today (nothing registers a
-            // query variant yet) and wrong the moment Phase 4 adds query-side
-            // synonyms: every synonym mined off the source doc would be a term
-            // the doc does not contain. No fixture pins MLT's analyzer choice;
-            // if one ever does and contradicts this, the fixture wins.
+            // Deliberately the *index*-side manager, not the #389 Phase 1
+            // query-side one -- `searcher.index().tokenizers()` is the index
+            // manager, since that is what `CoreIndex::open` hands Tantivy. What
+            // is analyzed here is a stored source document, mined for terms that
+            // are then looked up in the posting lists directly
+            // (`searcher.doc_freq(&term)` below drops anything with
+            // `doc_freq == 0`) -- so the tokens must be index terms. Routing this
+            // through the query manager would be inert today (both managers hold
+            // the same chain for every shipped type) and wrong the moment Phase 4
+            // adds query-side synonyms: every synonym mined off the source doc
+            // would be a term the doc does not contain, and the `doc_freq == 0`
+            // filter below would thin `interestingTerms` as soon as the two
+            // chains produce different tokens for the same text.
+            //
+            // Both of those are arguments from what this code does, not from what
+            // any other engine does: the input is stored document text and the
+            // output must be terms that exist in the postings.
             let Some(mut tokenizer) = text_options
                 .get_indexing_options()
                 .map(|o| o.tokenizer())
@@ -4165,23 +4201,21 @@ impl CoreIndex {
     ) -> Result<Vec<SuggestHit>> {
         // This path analyzes two different things, and #389 Phase 1 splits them:
         // the stored `twm_suggest` phrase, which stands in for indexed terms and
-        // therefore takes the *index*-side analyzer, and `suggest.q`, which is
-        // query text and takes the *query*-side one. The `wayfinder_suggest_*`
-        // identities register no query variant in this phase, so
-        // `query_tokenizer_name` hands the same identity back and both are the
-        // same chain -- exactly as before the seam existed. Phase 2/4 give
-        // `text_en`/`text_und` a real query analyzer, and this is where the
-        // asymmetry (query-side synonyms, index-side catenation) lands.
-        let index_tokenizer_name = schema::dictionary_tokenizer(dictionary);
-        let query_tokenizer_name = self.wf_schema.query_tokenizer_name(&index_tokenizer_name);
-        let Some(mut phrase_tokenizer) = self.wf_schema.tokenizers.get(&index_tokenizer_name)
-        else {
+        // therefore comes off the *index*-side manager, and `suggest.q`, which is
+        // query text and comes off the *query*-side one. Both managers are keyed
+        // by the same identity -- the one `dictionary_tokenizer` names -- and in
+        // this phase both hold the same chain for it, so this is exactly as
+        // before the seam existed. Phase 2/4 register a real query-side chain for
+        // `text_en`/`text_und`, and this is where the asymmetry (query-side
+        // synonyms, index-side catenation) then lands, with no change here.
+        let tokenizer_name = schema::dictionary_tokenizer(dictionary);
+        let Some(mut phrase_tokenizer) = self.wf_schema.tokenizers.get(&tokenizer_name) else {
             // No analyzer registered for this dictionary -> nothing to match.
             // Should not happen: `dictionary_tokenizer` always names one that
             // `build_tokenizers` registers, but the index is the trust boundary.
             return Ok(Vec::new());
         };
-        let Some(mut query_tokenizer) = self.wf_schema.tokenizers.get(&query_tokenizer_name) else {
+        let Some(mut query_tokenizer) = self.wf_schema.query_tokenizers.get(&tokenizer_name) else {
             return Ok(Vec::new());
         };
         // Analyze the query into stems. The analyzer chain removes stopwords

@@ -307,15 +307,25 @@ pub struct WayfinderSchema {
     pub copy_fields: Vec<CopyFieldConfig>,
     pub field_types: Vec<FieldTypeConfig>,
     pub tokenizers: TokenizerManager,
-    /// Index-analyzer identity -> query-analyzer identity, for the field types
-    /// that declare a distinct query chain (issue #389 Phase 1). Both analyzers
-    /// live in `tokenizers`; only the *index* identity is ever written into the
-    /// Tantivy schema, so an entry here changes query-time analysis only and
-    /// never a term on disk (which is why `ANALYZER_CONTRACT` does not move).
-    /// A type absent from this map has one analyzer for both sides -- see
-    /// [`Self::query_tokenizer_name`], whose fallback is the whole reason
-    /// existing chains are unaffected.
-    query_tokenizer_names: HashMap<String, String>,
+    /// The **query**-side twin of `tokenizers` (issue #389 Phase 1): a second,
+    /// complete manager in which every chain is registered under the *same*
+    /// identity it has in `tokenizers` — its **index** identity. A chain that
+    /// declares a query analyzer registers that analyzer here; a chain that does
+    /// not registers its index analyzer here as well. So every identity resolves
+    /// in both managers, and the two differ only where a chain genuinely has two
+    /// analyzers.
+    ///
+    /// Keying by the index identity is what makes the seam reachable from
+    /// Tantivy's own `QueryParser`, which resolves a field's analyzer *inside*
+    /// Tantivy from the manager it was handed, keyed by the tokenizer name in the
+    /// schema — i.e. the index identity. `QueryParser::new(schema, fields,
+    /// query_tokenizers)` is the whole of that wiring; a separate query-identity
+    /// namespace would have been unreachable from there.
+    ///
+    /// Only the index identity is ever written into the Tantivy schema, so an
+    /// entry here changes query-time analysis only and never a term on disk
+    /// (which is why `ANALYZER_CONTRACT` does not move).
+    pub query_tokenizers: TokenizerManager,
     field_handles: HashMap<String, Field>,
     /// Static `location`/`location_rpt` fields' two synthetic f64 columns,
     /// keyed by the user-facing field name: `(lat_field, lon_field)`. Kept out
@@ -551,43 +561,38 @@ impl WayfinderSchema {
         Some(out)
     }
 
-    /// The analyzer identity a **query**-time path must resolve, given the
-    /// index-time identity it found on the field (issue #389 Phase 1).
+    /// The identity a **query**-time path looks up in [`Self::query_tokenizers`],
+    /// given the index-time identity it found on the field (issue #389 Phase 1) —
+    /// which is that same identity, unchanged. There is no query-side name
+    /// namespace: the query manager is keyed by index identity, precisely so
+    /// Tantivy's `QueryParser` can resolve a field's query analyzer itself from
+    /// the tokenizer name in the schema. This function exists to state that
+    /// invariant in one place and is what
+    /// `suggest_dictionary_tokenizer_query_lookup_is_unaffected` pins.
     ///
-    /// Solr's `text_en`/`text_und` genuinely differ between their index and
-    /// query analyzers -- query-side `SynonymGraph`, and `WordDelimiterGraph`
-    /// with `catenateWords`/`catenateNumbers` set on the index side only
-    /// (`an389_select_cat_joined_en` matches 2 docs where
-    /// `an389_select_cat_delim_en` matches 1). This is the seam that lets the
-    /// two chains be separate analyzers rather than one.
-    ///
-    /// **Fallback is the rule, not the exception**: a field type with no query
-    /// analyzer registered resolves its index analyzer, so every chain that
-    /// has only one analyzer -- which, in Phase 1, is every chain Wayfinder
-    /// ships, including `text_en`, `text_general`, the `boost_term_payload`
-    /// pair and the `wayfinder_suggest_*` identities -- behaves exactly as it
-    /// did before the seam existed. Only a `[[field_types]]` entry that
-    /// declares `query_tokenizer` gets a second identity here.
+    /// The reason the two sides need to be able to differ at all is search
+    /// quality, not symmetry: synonym expansion belongs on the query side, where
+    /// it costs nothing on disk and the table can change without a reindex, and
+    /// aggressive splitting/recombining of delimited tokens is worth more on the
+    /// index side, where it is paid for once. That difference lives in *which
+    /// analyzer* the two managers hold under this one name, never in the name.
     pub fn query_tokenizer_name(&self, index_tokenizer_name: &str) -> String {
-        self.query_tokenizer_names
-            .get(index_tokenizer_name)
-            .cloned()
-            .unwrap_or_else(|| index_tokenizer_name.to_string())
+        index_tokenizer_name.to_string()
     }
 
     /// Query-time counterpart to [`Self::tokenize`]: analyzes `text` with
-    /// `type_name`'s **query** analyzer, falling back to its index analyzer
-    /// when the type declares none (issue #389 Phase 1).
+    /// `type_name`'s **query** analyzer — the same identity resolved against
+    /// [`Self::query_tokenizers`] instead of `tokenizers` (issue #389 Phase 1).
+    /// A type that declares no query chain has its index analyzer registered in
+    /// both managers, so this equals [`Self::tokenize`] for it.
     pub fn tokenize_query(&self, type_name: &str, text: &str) -> Option<Vec<String>> {
         let tokenizer_name = match resolve_type(type_name, &self.field_types).ok()? {
             ResolvedType::Str => "raw".to_string(),
-            ResolvedType::Text { tokenizer } => self.query_tokenizer_name(&tokenizer),
-            ResolvedType::BoostTermPayload => {
-                self.query_tokenizer_name(BOOST_TERM_PAYLOAD_TOKENIZER)
-            }
+            ResolvedType::Text { tokenizer } => tokenizer,
+            ResolvedType::BoostTermPayload => BOOST_TERM_PAYLOAD_TOKENIZER.to_string(),
             _ => return None,
         };
-        let mut analyzer = self.tokenizers.get(&tokenizer_name)?;
+        let mut analyzer = self.query_tokenizers.get(&tokenizer_name)?;
         let mut stream = analyzer.token_stream(text);
         let mut out = Vec::new();
         while stream.advance() {
@@ -1117,37 +1122,50 @@ pub fn dictionary_tokenizer(dictionary: &str) -> String {
     }
 }
 
-/// The tokenizer identity a `[[field_types]]` entry's **query** analyzer is
-/// registered under, derived from its index identity (which is the field type
-/// name itself). Deliberately not derivable from any schema type name a
-/// `type = "..."` can reference: nothing resolves a field to this identity, so
-/// it is reachable only through
-/// [`WayfinderSchema::query_tokenizer_name`] (issue #389 Phase 1).
-fn query_analyzer_identity(index_tokenizer_name: &str) -> String {
-    format!("wayfinder_query_{index_tokenizer_name}_v1")
+/// Which of a `[[field_types]]` entry's two chains [`build_analyzer`] is
+/// building (issue #389 Phase 1). Also names the config key an error message has
+/// to point an operator at: `tokenizer` and `query_tokenizer` accept the same
+/// values, so an error that names neither leaves the operator guessing which of
+/// the two lines to fix.
+#[derive(Copy, Clone)]
+enum AnalyzerSide {
+    Index,
+    Query,
 }
 
-/// Builds the `TextAnalyzer` for a `[[field_types]]` chain: the index-side one
-/// (`tokenizer` + `filters`) when `query_side` is false, and the query-side one
-/// (`query_tokenizer` + `query_filters`) when it is true. The two share every
-/// tokenizer and filter kind; only which pair of config fields they read from
-/// differs (issue #389 Phase 1).
-fn build_analyzer(ft: &FieldTypeConfig, query_side: bool) -> Result<TextAnalyzer> {
-    let (tokenizer, filters) = if query_side {
-        let tokenizer = ft.query_tokenizer.as_deref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "field type `{}` has no `query_tokenizer` to build a query analyzer from",
-                ft.name
-            )
-        })?;
-        (tokenizer, &ft.query_filters)
-    } else {
-        (ft.tokenizer.as_str(), &ft.filters)
+impl AnalyzerSide {
+    /// The `[[field_types]]` key holding this side's tokenizer.
+    fn tokenizer_key(self) -> &'static str {
+        match self {
+            Self::Index => "tokenizer",
+            Self::Query => "query_tokenizer",
+        }
+    }
+}
+
+/// Builds the `TextAnalyzer` for one side of a `[[field_types]]` chain: the
+/// index-side one (`tokenizer` + `filters`) or the query-side one
+/// (`query_tokenizer` + `query_filters`). The two share every tokenizer and
+/// filter kind; only which pair of config fields they read from differs
+/// (issue #389 Phase 1).
+fn build_analyzer(ft: &FieldTypeConfig, side: AnalyzerSide) -> Result<TextAnalyzer> {
+    let (tokenizer, filters) = match side {
+        AnalyzerSide::Query => {
+            let tokenizer = ft.query_tokenizer.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "field type `{}` has no `query_tokenizer` to build a query analyzer from",
+                    ft.name
+                )
+            })?;
+            (tokenizer, &ft.query_filters)
+        }
+        AnalyzerSide::Index => (ft.tokenizer.as_str(), &ft.filters),
     };
     let mut builder = match tokenizer {
         "simple" => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
         other => bail!(
-            "unsupported tokenizer `{other}` on field type `{}` (supported: `simple`)",
+            "unsupported tokenizer `{other}` on `{}` of field type `{}` (supported: `simple`)",
+            side.tokenizer_key(),
             ft.name
         ),
     };
@@ -1205,19 +1223,39 @@ fn language_by_name(name: &str) -> Option<Language> {
 /// every custom chain into a tokenizer manager seeded with Tantivy's defaults
 /// (`raw`, `default`, `en_stem`).
 ///
-/// Returns the manager alongside the index-identity -> query-identity map that
-/// backs [`WayfinderSchema::query_tokenizer_name`]: a `[[field_types]]` entry
-/// declaring `query_tokenizer` gets a *second* analyzer registered in the same
-/// manager under [`query_analyzer_identity`], and one entry in that map. Every
-/// other chain is absent from the map and therefore analyzes identically on
-/// both sides (issue #389 Phase 1).
+/// Returns **two** complete managers, index-side and query-side (issue #389
+/// Phase 1). Every chain is registered in both, under the same identity — the
+/// index one — so any name resolves in either manager and the two differ only
+/// where a chain genuinely has two analyzers. A `[[field_types]]` entry
+/// declaring `query_tokenizer` puts its query analyzer into the query manager;
+/// every other chain puts its index analyzer there, which is what makes the
+/// "no query chain declared" case *a registration* rather than a lookup-time
+/// fallback.
+///
+/// Keying the query manager by the index identity is not cosmetic: it is what
+/// lets `QueryParser::new(schema, fields, query_manager)` reach the query
+/// analyzers at all. Tantivy resolves a field's analyzer internally from the
+/// manager it was handed, keyed by the tokenizer name recorded in the schema,
+/// which is always the index identity (`QueryParser::for_index` is exactly
+/// `QueryParser::new(index.schema(), fields, index.tokenizers().clone())`).
 fn build_tokenizers(
     field_types: &[FieldTypeConfig],
-) -> Result<(TokenizerManager, HashMap<String, String>)> {
+) -> Result<(TokenizerManager, TokenizerManager)> {
     let manager = TokenizerManager::default();
+    let query_manager = TokenizerManager::default();
+    // Registers one analyzer as *both* sides of a chain: the shipped chains all
+    // have a single analyzer, and Phase 1 is deliberately behaviour-free, so the
+    // query manager must be analyzer-for-analyzer identical to the index one for
+    // everything Wayfinder ships (pinned by
+    // `shipped_chains_analyze_identically_on_both_managers`). Phases 2 and 4
+    // replace the `text_en` / `text_und` / suggest calls here with two chains.
+    let register_both = |name: &str, analyzer: TextAnalyzer| {
+        manager.register(name, analyzer.clone());
+        query_manager.register(name, analyzer);
+    };
     let english_stopwords =
         || StopWordFilter::new(Language::English).expect("Tantivy ships an English stopword list");
-    manager.register(
+    register_both(
         DYNAMIC_TEXT_TOKENIZER,
         TextAnalyzer::builder(SimpleTokenizer::default())
             .filter(RemoveLongFilter::limit(40))
@@ -1226,7 +1264,7 @@ fn build_tokenizers(
             .filter(Stemmer::new(Language::English))
             .build(),
     );
-    manager.register(
+    register_both(
         TEXT_EN_TOKENIZER,
         TextAnalyzer::builder(SimpleTokenizer::default())
             .filter(RemoveLongFilter::limit(40))
@@ -1240,7 +1278,7 @@ fn build_tokenizers(
         if *code == "en" {
             continue; // registered above under Wayfinder's versioned identity.
         }
-        manager.register(
+        register_both(
             &format!("text_{code}"),
             TextAnalyzer::builder(SimpleTokenizer::default())
                 .filter(RemoveLongFilter::limit(40))
@@ -1263,13 +1301,13 @@ fn build_tokenizers(
             .filter_dynamic(LowerCaser)
             .filter_dynamic(RemoveDuplicatesFilter)
     };
-    manager.register(
+    register_both(
         BOOST_TERM_PAYLOAD_TOKENIZER,
         boost_term_payload_front()
             .filter_dynamic(DelimitedPayloadStripFilter)
             .build(),
     );
-    manager.register(
+    register_both(
         BOOST_TERM_PAYLOAD_VERBATIM_TOKENIZER,
         boost_term_payload_front().build(),
     );
@@ -1336,13 +1374,17 @@ fn build_tokenizers(
     // `catenateWords` are `1` on the index side and `0` on the query side
     // (`:51` vs `:62`, `:172` vs `:183`), which is observable
     // (`an389_select_cat_joined_en` matches 2 docs, `an389_select_cat_delim_en`
-    // 1). #389 Phase 1 built the *seam* for that: `suggest_lookup` now resolves
-    // the stored phrase through the index identity and `suggest.q` through
-    // `WayfinderSchema::query_tokenizer_name`, and a `[[field_types]]` entry can
-    // register a second chain under a query identity. The gap itself is still
-    // open, because none of the chains registered here declares a query variant:
-    // both lookups still land on the one analyzer below. Phases 2 and 4 register
-    // the real query-side chains; until they do, this is structure only.
+    // 1). #389 Phase 1 built the *seam* for that: there are now two complete
+    // tokenizer managers, index-side and query-side, keyed by the same
+    // identities, and `suggest_lookup` resolves the stored phrase from the index
+    // manager and `suggest.q` from the query one. The gap itself is still open,
+    // because `register_both` below puts the *same* analyzer into both managers
+    // for every chain here, so the two lookups still land on identical chains.
+    // Phases 2 and 4 split these calls into a per-side pair; because the query
+    // manager is keyed by the index identity, that is a change to what is
+    // registered here and nothing else -- no call site and no name has to move,
+    // including Tantivy's own `QueryParser`, which `parse_query`/edismax hand the
+    // query manager to.
     //
     // ponytail: this fixes the SUGGEST path only. Wayfinder's global `text_en` /
     // `text_general` presets still have no `LengthFilter` and still use Rust's
@@ -1359,7 +1401,7 @@ fn build_tokenizers(
     };
     // `stopwords_und.txt` is empty in the shipped configset, so the `und` chain
     // has no stopword filter at all -- unlike `text_en`'s 33-word list.
-    manager.register(
+    register_both(
         &suggest_tokenizer(SUGGEST_UNDEFINED_DICTIONARY),
         suggest_front()
             .filter_dynamic(RemoveDuplicatesFilter)
@@ -1375,7 +1417,7 @@ fn build_tokenizers(
                 .filter_dynamic(english_stopwords())
                 .filter_dynamic(PorterTerminalYFilter);
         }
-        manager.register(
+        register_both(
             &suggest_tokenizer(code),
             chain
                 .filter_dynamic(Stemmer::new(*lang))
@@ -1384,39 +1426,28 @@ fn build_tokenizers(
         );
     }
     for ft in field_types {
-        manager.register(&ft.name, build_analyzer(ft, false)?);
-    }
-    // The query-side analyzers, in a second pass so a query identity can be
-    // checked against every index identity -- built-in and custom alike --
-    // rather than only the ones registered so far.
-    let mut query_tokenizer_names = HashMap::new();
-    for ft in field_types {
-        if ft.query_tokenizer.is_none() {
-            if !ft.query_filters.is_empty() {
-                bail!(
-                    "field type `{}` sets `query_filters` without a `query_tokenizer`: the query \
-                     filters would never run, because the query path falls back to the index \
-                     analyzer whenever no query tokenizer is declared",
-                    ft.name
-                );
+        // The custom chains. Both managers get an entry under the field type's
+        // own name -- that name IS the index identity, and the query manager is
+        // keyed by it -- so the only question is which analyzer goes into the
+        // query manager.
+        manager.register(&ft.name, build_analyzer(ft, AnalyzerSide::Index)?);
+        let query_analyzer = match ft.query_tokenizer {
+            Some(_) => build_analyzer(ft, AnalyzerSide::Query)?,
+            None => {
+                if !ft.query_filters.is_empty() {
+                    bail!(
+                        "field type `{}` sets `query_filters` without a `query_tokenizer`: the \
+                         query filters would never run, because a type declaring no query \
+                         tokenizer gets its *index* analyzer registered as its query analyzer too",
+                        ft.name
+                    );
+                }
+                build_analyzer(ft, AnalyzerSide::Index)?
             }
-            continue;
-        }
-        let identity = query_analyzer_identity(&ft.name);
-        // A custom field type literally named `wayfinder_query_<other>_v1`
-        // would otherwise silently redefine `<other>`'s query analyzer (or have
-        // its own index analyzer redefined, depending on order). Fail closed.
-        if manager.get(&identity).is_some() {
-            bail!(
-                "field type `{}` needs the query-analyzer identity `{identity}`, which is already \
-                 registered -- rename the field type",
-                ft.name
-            );
-        }
-        manager.register(&identity, build_analyzer(ft, true)?);
-        query_tokenizer_names.insert(ft.name.clone(), identity);
+        };
+        query_manager.register(&ft.name, query_analyzer);
     }
-    Ok((manager, query_tokenizer_names))
+    Ok((manager, query_manager))
 }
 
 fn text_options(tokenizer: &str, stored: bool, fast: bool) -> TextOptions {
@@ -1576,7 +1607,7 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
             );
         }
     }
-    let (tokenizers, query_tokenizer_names) = build_tokenizers(&parsed.field_types)?;
+    let (tokenizers, query_tokenizers) = build_tokenizers(&parsed.field_types)?;
 
     let mut builder = Schema::builder();
     let mut field_handles = HashMap::new();
@@ -1895,7 +1926,7 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
         copy_fields: parsed.copy_fields,
         field_types: parsed.field_types,
         tokenizers,
-        query_tokenizer_names,
+        query_tokenizers,
         field_handles,
         location_fields,
         date_range_fields,

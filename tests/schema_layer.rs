@@ -777,6 +777,147 @@ fn suggest_dictionary_tokenizer_query_lookup_is_unaffected() {
     }
 }
 
+/// Runs `text` through the analyzer registered under `identity` in `manager`,
+/// or `None` if nothing is registered under that name. Deliberately at the
+/// *identity* level rather than the field-type level: the `wayfinder_suggest_*`
+/// and `boost_term_payload` chains are not reachable through a `type = "..."`
+/// name, and they are exactly the ones Phases 2 and 4 will split.
+fn analyze(
+    manager: &tantivy::tokenizer::TokenizerManager,
+    identity: &str,
+    text: &str,
+) -> Option<Vec<String>> {
+    let mut analyzer = manager.get(identity)?;
+    let mut stream = analyzer.token_stream(text);
+    let mut out = Vec::new();
+    while stream.advance() {
+        out.push(stream.token().text.clone());
+    }
+    Some(out)
+}
+
+/// Phase 1 is behaviour-free by construction, and this is the direct statement
+/// of it: the query-side `TokenizerManager` must be analyzer-for-analyzer
+/// identical to the index-side one for **every** chain Wayfinder ships. Both
+/// managers are keyed by the same (index) identities, so this compares like with
+/// like; a shipped chain that started analyzing differently on the two sides
+/// would be an unannounced behaviour change, and a shipped identity missing from
+/// the query manager would make its query path resolve nothing at all.
+///
+/// Phases 2 and 4 are what make the text presets and the suggest chains
+/// legitimately differ; when they land, this test must be narrowed to the chains
+/// that are still single-analyzer, with the reason for each split stated. Until
+/// then it is the guard that Phase 1 shipped no behaviour.
+#[test]
+fn shipped_chains_analyze_identically_on_both_managers() {
+    let (_dir, path) = write_schema(FULL_SCHEMA_TOML);
+    let wf = schema::load(&path).expect("schema loads");
+
+    // Inputs chosen to expose every filter the shipped chains carry: case,
+    // stopwords, stemming, accents, length bounds, and the delimiter/case-number
+    // boundaries Phase 4's WDGF is about.
+    let samples = [
+        "The Quick Runners",
+        "Café Central",
+        "don't",
+        "wifi_router",
+        "ABC123",
+        "a",
+        "",
+    ];
+
+    // Every identity `build_tokenizers` registers that is not one of Tantivy's
+    // own defaults: the two `text_en` chains, the `boost_term_payload` pair, the
+    // per-language `text_<code>` presets (via `builtin_type_names`), and the
+    // per-dictionary suggest chains.
+    let mut identities = vec![
+        "wayfinder_text_en_v1".to_string(),
+        "wayfinder_text_en_v2".to_string(),
+        "wayfinder_boost_term_payload_v1".to_string(),
+        "wayfinder_boost_term_payload_raw_v1".to_string(),
+    ];
+    // `text_<code>` is both the type name and the registered identity for every
+    // language except English: `text_en` and `text_general` resolve to the two
+    // `wayfinder_text_en_v*` identities above instead, so they are type names
+    // rather than identities and are excluded here (they are covered as type
+    // names by `builtin_text_presets_query_analyzer_is_unaffected`).
+    identities.extend(
+        schema::builtin_type_names().into_iter().filter(|name| {
+            name.starts_with("text_") && name != "text_en" && name != "text_general"
+        }),
+    );
+    // `dictionary_tokenizer` maps every language code plus the fallback onto its
+    // suggest identity, so this covers all of them without re-listing the table.
+    identities.extend(
+        ["en", "und", "fr", "ru", "ta", "nosuchcode"]
+            .into_iter()
+            .map(schema::dictionary_tokenizer),
+    );
+    // And the schema's own custom chains, whichever `FULL_SCHEMA_TOML` declares.
+    identities.extend(wf.field_types.iter().map(|ft| ft.name.clone()));
+
+    for identity in &identities {
+        for sample in samples {
+            let index_side = analyze(&wf.tokenizers, identity, sample);
+            let query_side = analyze(&wf.query_tokenizers, identity, sample);
+            assert!(
+                index_side.is_some(),
+                "`{identity}` must be registered in the index manager"
+            );
+            assert!(
+                query_side.is_some(),
+                "`{identity}` must be registered in the query manager too: the \
+                 query manager is keyed by index identity, so a missing entry \
+                 makes this chain's query path resolve no analyzer at all"
+            );
+            assert_eq!(
+                query_side, index_side,
+                "`{identity}` is a single-analyzer chain in Phase 1, so both \
+                 managers must hold the same analyzer for it -- input {sample:?}"
+            );
+        }
+    }
+}
+
+/// A `[[field_types]]` entry has two tokenizer keys accepting the same values,
+/// so an unsupported-tokenizer error that names neither leaves the operator
+/// guessing which line to fix. Each side's error must name its own key -- and
+/// the index-side one must NOT say `query_tokenizer`, which is the whole point.
+#[test]
+fn unsupported_tokenizer_error_names_the_side_it_came_from() {
+    for (index_tok, query_tok, expected_key, forbidden) in [
+        ("nosuchtokenizer", None, "`tokenizer`", "query_tokenizer"),
+        (
+            "simple",
+            Some("nosuchtokenizer"),
+            "`query_tokenizer`",
+            "on `tokenizer`",
+        ),
+    ] {
+        let query_line = query_tok
+            .map(|t| format!("query_tokenizer = \"{t}\"\n"))
+            .unwrap_or_default();
+        let toml = format!(
+            r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "an389_bad_tok"
+tokenizer = "{index_tok}"
+{query_line}"#
+        );
+        let (_dir, path) = write_schema(&toml);
+        let err = schema::load(&path).expect_err("an unsupported tokenizer must not load");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(expected_key),
+            "the error must name the key it came from ({expected_key}), got: {msg}"
+        );
+        assert!(
+            !msg.contains(forbidden),
+            "the error must not point at the other side ({forbidden}), got: {msg}"
+        );
+    }
+}
+
 /// `ANALYZER_CONTRACT` guards on-disk term compatibility: Phase 1 changes no
 /// index-side term, so it must not bump the contract. A later phase (Phase 2,
 /// accent folding) is the one expected to move this to a `_v3` identity,
@@ -2251,11 +2392,10 @@ type = "location_rpt"
     assert!(wf.location_fields("nope").is_none());
 }
 
-/// A `query_filters` chain with no `query_tokenizer` is silently dead config:
-/// [`schema::WayfinderSchema::query_tokenizer_name`]'s fallback sends the query
-/// path to the index analyzer whenever no query tokenizer is declared, so the
-/// declared query filters would never run. Fail closed instead (issue #389
-/// Phase 1).
+/// A `query_filters` chain with no `query_tokenizer` is silently dead config: a
+/// field type declaring no query tokenizer gets its *index* analyzer registered
+/// as its query analyzer too, so the declared query filters would never run.
+/// Fail closed instead (issue #389 Phase 1).
 #[test]
 fn query_filters_without_a_query_tokenizer_are_rejected() {
     let toml = format!(
@@ -2279,29 +2419,12 @@ language = "english"
     );
 }
 
-/// The query analyzer is registered under a derived identity
-/// (`wayfinder_query_<index identity>_v1`), so a custom field type *named* that
-/// identity would collide with another type's query chain -- one silently
-/// redefining the other in the shared `TokenizerManager`. Fail closed (issue
-/// #389 Phase 1).
-#[test]
-fn a_field_type_named_like_a_query_identity_is_rejected() {
-    let toml = format!(
-        r#"{FULL_SCHEMA_TOML}
-[[field_types]]
-name = "an389_collide"
-tokenizer = "simple"
-query_tokenizer = "simple"
-[[field_types]]
-name = "wayfinder_query_an389_collide_v1"
-tokenizer = "simple"
-"#
-    );
-    let (_dir, path) = write_schema(&toml);
-    let err = schema::load(&path).expect_err("a colliding query identity must not load");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("wayfinder_query_an389_collide_v1") && msg.contains("already registered"),
-        "the error must name the colliding identity, got: {msg}"
-    );
-}
+// Deleted with its guard: `a_field_type_named_like_a_query_identity_is_rejected`
+// covered a collision that no longer exists. The query analyzers used to be
+// registered under a *derived* name (`wayfinder_query_<identity>_v1`) in the one
+// shared manager, so a custom field type could be named that. There is now a
+// second, complete manager keyed by the index identity, so the two sides no
+// longer share a namespace and there is nothing to collide with. The remaining
+// name guards -- `custom_field_type_cannot_shadow_the_builtin_text_en_preset`
+// and `custom_field_type_cannot_use_an_internal_text_en_tokenizer_identity` --
+// still cover the shared *index* namespace, which does still exist.
