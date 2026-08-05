@@ -14,7 +14,13 @@ mod common;
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
-use tantivy::Index;
+use tantivy::{
+    Index, Term,
+    collector::Count,
+    query::TermQuery,
+    schema::IndexRecordOption,
+    tokenizer::{Language, LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer},
+};
 use tantivy::tokenizer::TokenStream;
 use tempfile::TempDir;
 use wayfinder::schema;
@@ -718,6 +724,91 @@ fn v1_text_en_analyzer_contract_refuses_startup_requiring_reindex() {
     assert!(
         msg.contains("text_en") && msg.to_lowercase().contains("reindex"),
         "v1 text_en refusal must identify the analyzer and require reindexing, got: {msg}"
+    );
+}
+
+#[test]
+fn v1_marker_with_old_dynamic_postings_hidden_by_raw_snapshot_refuses_reindex() {
+    let old_dynamic = DYNAMIC_ANALYZED_SCHEMA_TOML;
+    let raw_dynamic = old_dynamic.replace("type = \"text_general\"", "type = \"string\"");
+    assert_ne!(old_dynamic, raw_dynamic, "test setup: evolution must remove the analyzed rule");
+
+    let dir = TempDir::new().expect("temp dir");
+    let schema_path = dir.path().join("schema.toml");
+    std::fs::write(&schema_path, old_dynamic).expect("write old analyzed schema");
+    let old = schema::load(&schema_path).expect("old analyzed schema loads");
+    let legacy_schema_json = serde_json::to_string(&old.tantivy_schema)
+        .expect("serialize old Tantivy schema")
+        .replace("wayfinder_dynamic_text_v3", "wayfinder_text_en_v1");
+    assert!(
+        legacy_schema_json.contains("wayfinder_text_en_v1"),
+        "test setup: old catch-all must persist its v1 tokenizer identity"
+    );
+
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    let legacy_tokenizers = old.tokenizers.clone();
+    legacy_tokenizers.register(
+        "wayfinder_text_en_v1",
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(LowerCaser)
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    {
+        let legacy_index = Index::builder()
+            .schema(serde_json::from_str(&legacy_schema_json).expect("legacy schema parses"))
+            .tokenizers(legacy_tokenizers.clone())
+            .fast_field_tokenizers(legacy_tokenizers)
+            .create_in_dir(&data_dir)
+            .expect("create old index");
+        let dynamic_text = legacy_index
+            .schema()
+            .get_field("_dynamic_text")
+            .expect("old schema has the dynamic catch-all");
+        let mut writer = legacy_index.writer(15_000_000).expect("open old writer");
+        writer
+            .add_document(tantivy::doc!(dynamic_text => json!({"legacy_txt": "X"})))
+            .expect("write through old analyzed catch-all");
+        writer.commit().expect("commit old analyzed posting");
+
+        // v1 indexed a one-character token; v3's catch-all drops it at the
+        // new min=2 bound. A direct term query proves an actual old analyzed
+        // posting exists, rather than merely an analyzed rule in a snapshot.
+        let mut old_posting = Term::from_field_json_path(dynamic_text, "legacy_txt", false);
+        old_posting.append_type_and_str("x");
+        assert_eq!(
+            legacy_index
+                .reader()
+                .expect("open old reader")
+                .searcher()
+                .search(
+                    &TermQuery::new(old_posting, IndexRecordOption::Basic),
+                    &Count,
+                )
+                .expect("search old posting"),
+            1,
+            "test setup: `_dynamic_text` must hold an actual old-chain analyzed posting"
+        );
+    }
+
+    // This evolution was historically allowed: its latest persisted snapshot
+    // says every dynamic rule is raw, even though the physical index above
+    // already contains an old analyzed `_dynamic_text` posting.
+    std::fs::write(schema::snapshot_path(&data_dir), &raw_dynamic)
+        .expect("overwrite snapshot with evolved raw schema");
+    std::fs::write(
+        data_dir.join("wayfinder-analyzer-contract"),
+        "text_en_stopwords_v1",
+    )
+    .expect("write v1 analyzer contract marker");
+
+    let err = common::app_with_schema(dir.path(), &raw_dynamic).expect_err(
+        "a raw latest snapshot cannot prove the old catch-all was unused; startup must require reindexing",
+    );
+    assert!(
+        format!("{err:#}").to_lowercase().contains("reindex"),
+        "unsafe legacy adoption must require reindexing, got: {err:#}"
     );
 }
 
