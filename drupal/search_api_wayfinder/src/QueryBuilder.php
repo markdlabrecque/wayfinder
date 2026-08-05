@@ -991,10 +991,11 @@ class QueryBuilder {
     if (!$field) {
       throw new \InvalidArgumentException('Sort field is not part of the index.');
     }
-    // issue #342: a sort takes ONE field name, so a text field sorts on the
-    // first resolved language's sort_X3b_<lang>_<id> -- search_api_solr
-    // likewise passes a single $sort_language_id into the sort field name
-    // (SearchApiSolrBackend.php:1483). Non-text fields ignore the language.
+    // issue #362: a sort takes ONE field name, and the sort copy is a single
+    // language-agnostic `sort_<id>`, so the resolved language is passed only
+    // as the sort/index MODE flag (FieldMapper::sortFieldName); it does not
+    // appear in the name. search_api_solr likewise passes a single
+    // $sort_language_id into the sort field name (SearchApiSolrBackend.php:1483).
     return $this->fieldMapper->sortFieldName($fieldId, $field->getType(), $this->fieldMapper->isMultiValued($field), $this->languages[0]);
   }
 

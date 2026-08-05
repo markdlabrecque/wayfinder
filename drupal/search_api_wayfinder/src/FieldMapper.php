@@ -345,36 +345,39 @@ class FieldMapper {
   }
 
   /**
-   * Maps a Search API field to the field used by Wayfinder sorting.
+   * Maps a Search API field to the field used by Wayfinder sorting/grouping.
    *
-   * Text and string fields sort through their dedicated sort_* dynamic field;
-   * every other type sorts on the actual mapped field, preserving cardinality
-   * so Wayfinder can use its native multi-value min/max selection.
+   * Text and string fields sort through their dedicated `sort_<id>` copy;
+   * every other type sorts on its mapped field, preserving cardinality so
+   * Wayfinder can use its native multi-value min/max selection.
    *
-   * issue #342: the sort field is language-specific too --
-   * encodeSolrName('sort' . SEPARATOR . $sort_language_id . '_' . $name),
-   * SearchApiSolrBackend.php:1483 -- so 'title' in English sorts on
-   * 'sort_X3b_en_title'.
+   * issue #362: the sort copy is a SINGLE language-agnostic `sort_<id>`
+   * field, not `sort_X3b_<lang>_<id>` per language. search_api_solr fills a
+   * per-language copy so a query resolved to one collation can sort a
+   * document indexed under another (SearchApiSolrBackend.php:1469-1481);
+   * that is load-bearing only because real Solr types each copy as a
+   * language-specific `collated_<lang>`, producing different orderings.
+   * Wayfinder has no collation type -- every `sort_*` is plain `string`
+   * (presets/search-api.toml:21-25) -- so the copies are byte-identical with
+   * identical ordering, and one field serves every reader. Measured cost of
+   * the N+1 copies: ~30% index overhead on a monolingual site, ~3.5x on an
+   * 8-language site (docs/reports/2026-08-12-362-identical-sort-copies.md).
    *
    * issue #358: string fields use the same copy, because upstream gates it on
    * mapped names beginning with 't' OR 's' (SearchApiSolrBackend.php:1448-
    * 1454), not text alone.
    *
-   * `$language` is nullable to distinguish the two callers of this shared
-   * method. Sorting (QueryBuilder::buildSort) and indexing (DocumentBuilder)
-   * always pass a resolved language and WANT the sort copy for eligible types.
-   * Grouping (QueryBuilder/ResponseParser) has no resolved sort language and
-   * omits the argument; upstream groups on the mapped fast field
-   * (SearchApiSolrBackend.php:4600, `reset($field_names)`), never the sort
-   * copy, so a NULL language must resolve to the mapped name for every
-   * non-text type (text keeps its pre-#358 sort_* grouping field, which is
-   * moot because upstream rejects text grouping at :4593-4597). Put plainly:
-   * no language passed => grouping path => only the text family's sort copy is
-   * used; a language passed => sort/index path => every 't'/'s' field's copy.
+   * `$language` is now a MODE flag only, NOT part of the name: a non-null
+   * value means the sort/index path (DocumentBuilder write, QueryBuilder
+   * sort), where every eligible 't'/'s' field sorts on its `sort_<id>` copy;
+   * NULL means the grouping path, which mirrors upstream by grouping non-text
+   * fields on their mapped fast field and only the text family on its sort
+   * copy (SearchApiSolrBackend.php:4600). (The text grouping case is largely
+   * moot: QueryBuilder skips `text` and multi-valued fields before grouping,
+   * leaving only `solr_text_*` single-valued fields to reach it.)
    */
   public function sortFieldName(string $fieldId, string $type, bool $multiValued, ?string $language = NULL): string {
-    $resolvedLanguage = $language ?? self::LANGUAGE_UNSPECIFIED;
-    $mappedName = $this->fieldName($fieldId, $type, $multiValued, $resolvedLanguage);
+    $mappedName = $this->fieldName($fieldId, $type, $multiValued);
 
     // Eligible mapped name AND (caller passed a language [sort/index path] OR
     // the field is text [grouping path keeps text's pre-#358 sort copy]).
@@ -382,7 +385,7 @@ class FieldMapper {
       && ($language !== NULL || str_starts_with($mappedName, 't'));
 
     return $useSortCopy
-      ? $this->encodeSolrName('sort' . self::LANGUAGE_SEPARATOR . $resolvedLanguage . '_' . $fieldId)
+      ? $this->encodeSolrName('sort_' . $fieldId)
       : $mappedName;
   }
 
