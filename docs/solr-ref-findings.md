@@ -1249,9 +1249,16 @@ edismax-specific behaviour.
     observed), `select` (all fulltext/filter/facet/sort/spellcheck/highlight traffic — the module
     never uses a dedicated `/facet` or `/spellcheck` handler, everything rides on `select`'s
     components), `mlt` (a dedicated handler for "more like this", not a `select` component),
-    `terms` (a dedicated handler, used by the module's own autocomplete/suggester code path —
-    `search_api_autocomplete` was not installed for this capture, but `SolrConnector::getTermsQuery()`
-    is core to `search_api_solr` itself), `schema/fieldtypes` (a Schema API introspection call
+    *(correction, issue #351 — see finding 192: the `terms` entry below was a source-only
+    inference, and it was wrong about the PATH. The capture installed neither
+    `search_api_autocomplete` nor any autocomplete traffic, so nothing here was
+    observed; the source inference was that the module calls a `/terms` handler.
+    It does not — autocomplete rides the `/autocomplete` handler's terms
+    *component*, and `SolrConnector::getTermsQuery()` has zero callers in 4.4.0.
+    The terms *component* is real; the `/terms` *endpoint* is not requested by
+    stock `search_api_solr` — it is reached only by our `search_api_wayfinder`
+    connector module, which reimplements the Terms-plugin path as a direct
+    `/terms?terms.prefix=` GET.)* `schema/fieldtypes` (a Schema API introspection call
     issued mid-query, not just at config time), and the admin/handshake set: `admin/info/system`
     (server-level), `<core>/admin/system`, `<core>/admin/luke`, `<core>/admin/mbeans`. `/admin/ping`
     is also called (via `SolrConnector::pingCore()`) but landed in this capture's pre-trace setup
@@ -3451,3 +3458,55 @@ implementation it concerns already landed as #343 (`src/json_facet.rs`).
      `EXPECTED_DIVERGENCES`. Recorded here as a client behaviour; revisit only if a
      capture shows a client hitting the NPE (omitting `omitHeader` on this path
      against Solr 8.1+).
+
+## Findings from the #351 autocomplete-path correction
+
+The 2026-08-04 full-source sweep of `search_api_solr` 4.4.0 corrected a premise
+finding 76 and PRD §5 had been relying on: that the module calls the `/terms`
+handler. It does not. See `docs/reports/2026-08-04-351-autocomplete-clients-real-path.md`
+for the full write-up and the suggester read-path scope.
+
+192. **Stock `search_api_solr` autocomplete always hits `/autocomplete`, never
+      `/terms` or `/suggest`; `getTermsQuery()` and `getSuggesterQuery()` both
+      have zero callers in 4.4.0.** The Solarium query type
+      `src/Solarium/Autocomplete/Query.php:33` is a custom handler whose
+      `handler` is **`autocomplete`**, carrying three components (`:42-44`):
+      `COMPONENT_SPELLCHECK`, `COMPONENT_SUGGESTER`, `COMPONENT_TERMS`. The
+      `search_api_solr_autocomplete` submodule's three plugins each build that
+      query type and execute it via `$connector->autocomplete($solarium_query, …)`:
+      `Terms.php` extends `Server` and delegates to
+      `SearchApiSolrBackend::getAutocompleteSuggestions()` (`:3973-3995`), which
+      calls `setAutocompleteTermQuery()` (`:4033-4044`) — that sets
+      `terms.fl`/`terms.prefix`/`terms.limit` on the handler's **terms
+      component** (`$solarium_query->getTerms()`), not on a `/terms` request;
+      `Suggester.php::setAutocompleteSuggesterQuery` sets `suggest.q`/
+      `suggest.dictionary`/`suggest.cfq`/`suggest.count` on the suggest
+      component; `Spellcheck.php::setAutocompleteSpellCheckQuery` sets
+      `spellcheck.q`/`spellcheck.dictionary`/`spellcheck.count` on the spellcheck
+      component. The decisive negative: `SolrConnectorPluginBase::getTermsQuery()`
+      (a standalone `/terms` request) has **no caller** anywhere in the module —
+      its only reference is `StandardSolrCloudConnector.php:340` overriding itself
+      to add `distrib`; `getSuggesterQuery()` (a standalone `/suggest` request)
+      likewise has no caller (finding 154). The handler is shipped as the config
+      entity `request_handler_autocomplete_default_7_0_0.yml`: `name: /autocomplete`,
+      `class: solr.SearchHandler`, `components: [terms, spellcheck, suggest]`,
+      defaults `terms=false`, `spellcheck=false`, `spellcheck.count=1`,
+      `suggest=false`, `suggest.count=10`. The suggester dictionary is
+      `AnalyzingInfixLookupFactory` + `DocumentDictionaryFactory` over
+      `field=twm_suggest`, `suggestAnalyzerFieldType=text_<lang>`,
+      `contextField=sm_context_tags`, per-language dictionaries `en`/`und`
+      (`solrconfig_extra.xml:32-53`). Net: the `/terms` (#155/#308) and `/suggest`
+      (#352) **endpoints are not evidenced by stock `search_api_solr`** — they
+      are reached only by our `search_api_wayfinder` connector module (Terms
+      reimplemented as a direct `/terms?terms.prefix=` GET, #291; the
+      `/suggest?suggest.buildAll=true` cron accepted inertly, #352). This
+      amends finding 76 (the capture could not have observed autocomplete —
+      `search_api_autocomplete` was not installed — and the source inference to
+      `/terms` was wrong about the path). **Decision (#351): our-module reading,
+      extended** — `/autocomplete` is not built (stock clients still 404 on it,
+      accepted); the connector module reimplements all three plugins against
+      existing/planned endpoints (Terms→`/terms` done; Spellcheck→`/select`,
+      no server work — `fn spellcheck` already returns the handler's
+      `spellcheck.count=1` default; Suggester→`/suggest`, blocked on a real
+      `suggest.q` read path, which is the sole prerequisite and carries the
+      infix-matching and `cfq`/`sm_context_tags` design work).
