@@ -396,13 +396,13 @@ pub fn fetch_live(base_url: &str, path_and_query: &str) -> (u16, Value) {
     (status, value)
 }
 
-/// One line of `solr-ref/manifest-errors.tsv`'s 6-column format: `name,
-/// status, method, url-after-/solr/, body, [base-url]`. `body` and
-/// `base_url` may be empty/absent columns — `None` when so, never an empty
-/// `Some("")` — since a present-but-empty body (e.g. a GET) is different from
-/// no body column at all only in this format's intent, and callers
-/// (`common::request_full`, live `curl -X ... -d ...`) need to tell "send no
-/// body" apart from "send an empty body".
+/// One line of `solr-ref/manifest-errors.tsv`'s format: `name, status,
+/// method, url-after-/solr/, body, [base-url], [content-type]`. `body`,
+/// `base_url`, and `content_type` may be empty/absent columns — `None` when
+/// so, never an empty `Some("")` — since a present-but-empty body (e.g. a
+/// GET) is different from no body column at all only in this format's intent,
+/// and callers (`common::request_full`, live `curl -X ... -d ...`) need to
+/// tell "send no body" apart from "send an empty body".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestErrorEntry {
     pub name: String,
@@ -418,6 +418,11 @@ pub struct ManifestErrorEntry {
     /// column is absent — every row without one belongs to the reference
     /// container on the default port.
     pub base_url: Option<String>,
+    /// The request `Content-Type`. Absent (the default) means
+    /// `application/json`, the content-type every JSON-body `/update` row
+    /// sends; `application/x-www-form-urlencoded` is the one override, for
+    /// Solarium's `postbigrequest` form-POST rows (issue #350, finding 189).
+    pub content_type: Option<String>,
 }
 
 /// Loads `solr-ref/manifest-errors.tsv`'s 6-column format, skipping blank
@@ -452,6 +457,10 @@ pub fn load_manifest_errors(path: &Path) -> Vec<ManifestErrorEntry> {
                 .to_string();
             let body = cols.next().filter(|s| !s.is_empty()).map(str::to_string);
             let base_url = cols.next().filter(|s| !s.is_empty()).map(str::to_string);
+            // 7th, optional: the request `Content-Type`. Absent (or empty)
+            // means the JSON default; a form-POST row declares
+            // `application/x-www-form-urlencoded` (issue #350).
+            let content_type = cols.next().filter(|s| !s.is_empty()).map(str::to_string);
             ManifestErrorEntry {
                 name,
                 status,
@@ -459,6 +468,7 @@ pub fn load_manifest_errors(path: &Path) -> Vec<ManifestErrorEntry> {
                 url,
                 body,
                 base_url,
+                content_type,
             }
         })
         .collect()
