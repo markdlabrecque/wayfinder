@@ -57,6 +57,9 @@ use crate::synonyms::SynonymResource;
 /// own aggregation bucket limit is the binding constraint, so the request asks
 /// for exactly that many and no more.
 const MAX_FACET_TERMS: u32 = DEFAULT_BUCKET_LIMIT;
+/// A graph with N stacked alternatives has an exponential number of phrase
+/// paths. Refuse it before constructing an unbounded Cartesian product.
+const MAX_PHRASE_GRAPH_PATHS: usize = 1024;
 
 /// `highlight_field`'s sentinel `max_num_chars` meaning "do not fragment at
 /// all -- return the whole field as one snippet". Solr's `hl.fragsize=0`
@@ -2211,7 +2214,7 @@ impl CoreIndex {
                 tantivy::query_grammar::UserInputLeaf::Literal(lit) if lit.field_name.is_none() => {
                     literal_texts.push(lit.phrase.clone());
                     let quoted = lit.delimiter != tantivy::query_grammar::Delimiter::None;
-                    self.build_field_disjunction(&lit.phrase, quoted, &qf_fields, tie)
+                    self.build_field_disjunction(&lit.phrase, quoted, &qf_fields, tie)?
                 }
                 _ => self.build_ast(
                     tantivy::query_grammar::UserInputAst::Leaf(Box::new(leaf)),
@@ -2285,7 +2288,7 @@ impl CoreIndex {
 
         if let Some(pf_spec) = pf
             && let Some(pf_query) =
-                self.build_pf_query(pf_spec, default_field_name, &literal_texts, tie)
+                self.build_pf_query(pf_spec, default_field_name, &literal_texts, tie)?
         {
             outer_clauses.push((Occur::Should, pf_query));
         }
@@ -2492,7 +2495,7 @@ impl CoreIndex {
         quoted: bool,
         qf_fields: &[(FieldTarget, f32)],
         tie: f32,
-    ) -> Box<dyn Query> {
+    ) -> Result<Box<dyn Query>, QueryError> {
         let mut disjuncts: Vec<Box<dyn Query>> = Vec::with_capacity(qf_fields.len());
         for (target, field_boost) in qf_fields {
             // A field-LESS literal never reaches `build_leaf`, so #341's
@@ -2545,38 +2548,7 @@ impl CoreIndex {
                     self.term_for_target(target, &only[0]),
                     IndexRecordOption::WithFreqsAndPositions,
                 )),
-                _ if quoted => {
-                    // One phrase per same-position path preserves both phrase
-                    // adjacency and query-side synonym expansion. Flattening
-                    // alternatives would turn a synonym into an extra word.
-                    let mut paths: Vec<Vec<Term>> = vec![Vec::new()];
-                    for position in &alternatives {
-                        let mut next = Vec::with_capacity(paths.len() * position.len());
-                        for path in paths {
-                            for term in position {
-                                let mut expanded = path.clone();
-                                expanded.push(self.term_for_target(target, term));
-                                next.push(expanded);
-                            }
-                        }
-                        paths = next;
-                    }
-                    let clauses = paths
-                        .into_iter()
-                        .map(|terms| {
-                            let query: Box<dyn Query> = if terms.len() == 1 {
-                                Box::new(TermQuery::new(
-                                    terms.into_iter().next().expect("one-term phrase"),
-                                    IndexRecordOption::WithFreqsAndPositions,
-                                ))
-                            } else {
-                                Box::new(PhraseQuery::new(terms))
-                            };
-                            (Occur::Should, query)
-                        })
-                        .collect();
-                    Box::new(BooleanQuery::new(clauses))
-                }
+                _ if quoted => self.graph_phrase_query(target, phrase_text)?,
                 _ => {
                     let mut seen = BTreeSet::new();
                     let clauses: Vec<(Occur, Box<dyn Query>)> = alternatives
@@ -2597,9 +2569,11 @@ impl CoreIndex {
             disjuncts.push(Box::new(BoostQuery::new(base, *field_boost)));
         }
         if disjuncts.is_empty() {
-            Box::new(EmptyQuery)
+            Ok(Box::new(EmptyQuery))
         } else {
-            Box::new(DisjunctionMaxQuery::with_tie_breaker(disjuncts, tie))
+            Ok(Box::new(DisjunctionMaxQuery::with_tie_breaker(
+                disjuncts, tie,
+            )))
         }
     }
 
@@ -2619,31 +2593,29 @@ impl CoreIndex {
         default_field_name: &str,
         literal_texts: &[String],
         tie: f32,
-    ) -> Option<Box<dyn Query>> {
+    ) -> Result<Option<Box<dyn Query>>, QueryError> {
         let pf_fields = self.resolve_field_weights(pf_spec, default_field_name);
         let joined = literal_texts.join(" ");
         if pf_fields.is_empty() || joined.trim().is_empty() {
-            return None;
+            return Ok(None);
         }
         let mut disjuncts: Vec<Box<dyn Query>> = Vec::new();
         for (target, field_boost) in &pf_fields {
-            let tokens = self.tokenize_for_target(target, &joined);
-            if tokens.len() < 2 {
+            let paths = self.token_graph_paths_for_target(target, &joined)?;
+            if paths.iter().all(|path| path.len() < 2) {
                 continue;
             }
-            let terms: Vec<Term> = tokens
-                .iter()
-                .map(|t| self.term_for_target(target, t))
-                .collect();
-            let phrase: Box<dyn Query> = Box::new(PhraseQuery::new(terms));
+            // `pf` is a phrase boost too: it must see the same synonym and
+            // delimiter alternatives as qf, never pick an arbitrary first one.
+            let phrase = self.graph_phrase_query(target, &joined)?;
             disjuncts.push(Box::new(BoostQuery::new(phrase, *field_boost)));
         }
         if disjuncts.is_empty() {
-            None
+            Ok(None)
         } else {
-            Some(Box::new(DisjunctionMaxQuery::with_tie_breaker(
+            Ok(Some(Box::new(DisjunctionMaxQuery::with_tie_breaker(
                 disjuncts, tie,
-            )))
+            ))))
         }
     }
 
@@ -2754,59 +2726,147 @@ impl CoreIndex {
         }
     }
 
-    /// Builds a phrase query for every analyzed same-position path. A synonym
-    /// is an alternate term at one position, never another sequential word.
-    fn expanded_phrase_query(&self, target: &FieldTarget, text: &str) -> Box<dyn Query> {
-        let mut positions: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    /// Reads the query analyzer as graph edges: `(start position, span, term)`.
+    /// Word-delimiter parts are sequential edges while preserved/catenated forms
+    /// span the compound; synonyms are same-position, span-one alternatives.
+    fn token_graph_for_target(
+        &self,
+        target: &FieldTarget,
+        text: &str,
+    ) -> Vec<(usize, usize, String)> {
         let schema = self.index.schema();
         let tokenizer_name = match schema.get_field_entry(target.field()).field_type() {
-            tantivy::schema::FieldType::Str(options) => options
-                .get_indexing_options()
-                .map(|options| options.tokenizer()),
-            tantivy::schema::FieldType::JsonObject(options) => options
-                .get_text_indexing_options()
-                .map(|options| options.tokenizer()),
+            tantivy::schema::FieldType::Str(options) => {
+                options.get_indexing_options().map(|o| o.tokenizer())
+            }
+            tantivy::schema::FieldType::JsonObject(options) => {
+                options.get_text_indexing_options().map(|o| o.tokenizer())
+            }
             _ => None,
         };
-        if let Some(mut tokenizer) =
+        let Some(mut tokenizer) =
             tokenizer_name.and_then(|name| self.wf_schema.query_tokenizers.get(name))
-        {
-            let mut stream = tokenizer.token_stream(text);
-            stream.process(&mut |token| {
-                let alternatives = positions.entry(token.position).or_default();
-                if !alternatives.contains(&token.text) {
-                    alternatives.push(token.text.clone());
-                }
-            });
-        }
-        let mut paths: Vec<Vec<Term>> = vec![Vec::new()];
-        for alternatives in positions.into_values() {
-            let mut next = Vec::with_capacity(paths.len() * alternatives.len());
-            for path in paths {
-                for alternative in &alternatives {
-                    let mut expanded = path.clone();
-                    expanded.push(self.term_for_target(target, alternative));
-                    next.push(expanded);
-                }
+        else {
+            return vec![(0, 1, text.to_string())];
+        };
+        let mut edges = Vec::new();
+        let mut stream = tokenizer.token_stream(text);
+        stream.process(&mut |token| {
+            let edge = (
+                token.position,
+                token.position_length.max(1),
+                token.text.clone(),
+            );
+            if !edges.contains(&edge) {
+                edges.push(edge);
             }
-            paths = next;
+        });
+        edges
+    }
+
+    /// Enumerates complete paths through an analyzed token graph. The hard cap
+    /// is checked before each path allocation, turning adversarial synonym
+    /// input into a clear query error instead of an allocation blow-up.
+    fn token_graph_paths_for_target(
+        &self,
+        target: &FieldTarget,
+        text: &str,
+    ) -> Result<Vec<Vec<(usize, String)>>, QueryError> {
+        fn visit(
+            position: usize,
+            end: usize,
+            graph: &BTreeMap<usize, Vec<(usize, String)>>,
+            current: &mut Vec<(usize, String)>,
+            paths: &mut Vec<Vec<(usize, String)>>,
+        ) -> Result<(), QueryError> {
+            if position == end {
+                if paths.len() >= MAX_PHRASE_GRAPH_PATHS {
+                    return Err(QueryError::Syntax(format!(
+                        "phrase expansion exceeds {MAX_PHRASE_GRAPH_PATHS} graph paths"
+                    )));
+                }
+                paths.push(current.clone());
+                return Ok(());
+            }
+            for (span, term) in graph.get(&position).into_iter().flatten() {
+                current.push((position, term.clone()));
+                visit(position + span, end, graph, current, paths)?;
+                current.pop();
+            }
+            Ok(())
         }
+
+        let edges = self.token_graph_for_target(target, text);
+        let Some(start) = edges.iter().map(|(position, _, _)| *position).min() else {
+            return Ok(Vec::new());
+        };
+        let end = edges
+            .iter()
+            .map(|(position, span, _)| position + span)
+            .max()
+            .expect("edges is nonempty");
+        let mut graph: BTreeMap<usize, Vec<(usize, String)>> = BTreeMap::new();
+        for (position, span, term) in edges {
+            graph.entry(position).or_default().push((span, term));
+        }
+        let mut paths = Vec::new();
+        visit(start, end, &graph, &mut Vec::new(), &mut paths)?;
+        Ok(paths)
+    }
+
+    fn graph_phrase_query(
+        &self,
+        target: &FieldTarget,
+        text: &str,
+    ) -> Result<Box<dyn Query>, QueryError> {
+        let paths = self.token_graph_paths_for_target(target, text)?;
+        let start = paths
+            .iter()
+            .flat_map(|path| path.first().map(|(position, _)| *position))
+            .min()
+            .unwrap_or(0);
         let clauses = paths
             .into_iter()
-            .filter(|terms| !terms.is_empty())
-            .map(|terms| {
-                let query: Box<dyn Query> = if terms.len() == 1 {
+            .filter(|path| !path.is_empty())
+            .map(|path| {
+                let query: Box<dyn Query> = if path.len() == 1 {
                     Box::new(TermQuery::new(
-                        terms.into_iter().next().expect("one-term phrase"),
+                        self.term_for_target(target, &path[0].1),
                         IndexRecordOption::WithFreqsAndPositions,
                     ))
+                } else if path
+                    .iter()
+                    .enumerate()
+                    .all(|(offset, (position, _))| *position == start + offset)
+                {
+                    Box::new(PhraseQuery::new(
+                        path.into_iter()
+                            .map(|(_, term)| self.term_for_target(target, &term))
+                            .collect(),
+                    ))
                 } else {
-                    Box::new(PhraseQuery::new(terms))
+                    Box::new(PhraseQuery::new_with_offset(
+                        path.into_iter()
+                            .map(|(position, term)| {
+                                (position - start, self.term_for_target(target, &term))
+                            })
+                            .collect(),
+                    ))
                 };
                 (Occur::Should, query)
             })
             .collect();
-        Box::new(BooleanQuery::new(clauses))
+        Ok(Box::new(BooleanQuery::new(clauses)))
+    }
+
+    /// Builds a position-aware phrase disjunction instead of flattening graph
+    /// alternatives into a required sequence.
+    fn expanded_phrase_query(
+        &self,
+        target: &FieldTarget,
+        text: &str,
+    ) -> Result<Box<dyn Query>, QueryError> {
+        self.graph_phrase_query(target, text)
     }
 
     /// Analyzes free-standing query text into same-position alternatives.
@@ -2838,16 +2898,6 @@ impl CoreIndex {
             }
         });
         positions.into_values().collect()
-    }
-
-    /// The primary token at each position for phrase boosts. `pf` needs a
-    /// single linear term sequence; the main edismax `qf` path uses
-    /// [`Self::token_alternatives_for_target`] and keeps synonym alternatives.
-    fn tokenize_for_target(&self, target: &FieldTarget, text: &str) -> Vec<String> {
-        self.token_alternatives_for_target(target, text)
-            .into_iter()
-            .filter_map(|position| position.into_iter().next())
-            .collect()
     }
 
     /// Rewrites an embedded `*:*` sub-clause (e.g. `*:* AND lazy`) to a bare
@@ -3045,7 +3095,7 @@ impl CoreIndex {
             && let Some(target) = self
                 .phase4_literal_target(literal.field_name.as_deref().unwrap_or(default_field_name))
         {
-            return Ok(self.expanded_phrase_query(&target, &literal.phrase));
+            return self.expanded_phrase_query(&target, &literal.phrase);
         }
 
         if leaf_field_name(&leaf).is_some_and(is_dynamic_container_field) {
@@ -4560,8 +4610,15 @@ impl CoreIndex {
         if qtokens.is_empty() {
             return Ok(Vec::new());
         }
-        let last_is_prefix = qtokens.iter().any(|(_, _, end)| *end == query.len());
-        let query_tokens: Vec<String> = qtokens.into_iter().map(|(stem, _, _)| stem).collect();
+        let last_is_prefix = qtokens.iter().any(|(_, _, _, end)| *end == query.len());
+        let mut query_positions: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        for (stem, position, _, _) in qtokens {
+            let alternatives = query_positions.entry(position).or_default();
+            if !alternatives.contains(&stem) {
+                alternatives.push(stem);
+            }
+        }
+        let query_tokens: Vec<Vec<String>> = query_positions.into_values().collect();
         let cfq = parse_cfq(cfq);
 
         // No `twm_suggest` field at all -> the schema carries no suggestion
@@ -5264,7 +5321,7 @@ pub struct SuggestHit {
 /// change a token's byte length (in both directions -- see `suggest_match`), so
 /// `offset_from + stem.len()` is not a position in the original text and is not
 /// even guaranteed to be a char boundary.
-type Tok = (String, usize, usize);
+type Tok = (String, usize, usize, usize);
 
 /// Analyzes `text` with `tokenizer` into its surviving (post-stopword,
 /// post-stem) tokens with their original byte offsets. Empty for a stopword-only
@@ -5274,7 +5331,7 @@ fn analyzer_tokens(tokenizer: &mut TextAnalyzer, text: &str) -> Vec<Tok> {
     let mut out = Vec::new();
     while stream.advance() {
         let t = stream.token();
-        out.push((t.text.clone(), t.offset_from, t.offset_to));
+        out.push((t.text.clone(), t.position, t.offset_from, t.offset_to));
     }
     out
 }
@@ -5330,7 +5387,7 @@ fn analyzer_tokens(tokenizer: &mut TextAnalyzer, text: &str) -> Vec<Tok> {
 fn suggest_match(
     tokenizer: &mut TextAnalyzer,
     phrase: &str,
-    query_tokens: &[String],
+    query_tokens: &[Vec<String>],
     last_is_prefix: bool,
     highlight: bool,
 ) -> Option<String> {
@@ -5341,21 +5398,26 @@ fn suggest_match(
     // When the analyzed query did not reach the end of the query string, Lucene
     // adds the final token to `matchedTokens` and queries it as a `TermQuery`:
     // every token is exact and every hit highlights as a whole match.
-    let (exact, prefix): (&[String], Option<&str>) = if last_is_prefix {
+    let (exact, prefix): (&[Vec<String>], Option<&Vec<String>>) = if last_is_prefix {
         (init, Some(last))
     } else {
         (query_tokens, None)
     };
     // Exact tokens must equal a phrase-token stem; the prefix token (when there
     // is one) need only prefix one. Both are order-independent.
-    if exact
-        .iter()
-        .any(|qt| !ptokens.iter().any(|(ps, _, _)| ps == qt))
-    {
+    if exact.iter().any(|alternatives| {
+        !alternatives
+            .iter()
+            .any(|term| ptokens.iter().any(|(phrase, _, _, _)| phrase == term))
+    }) {
         return None;
     }
-    if let Some(prefix) = prefix
-        && !ptokens.iter().any(|(ps, _, _)| ps.starts_with(prefix))
+    if let Some(prefixes) = prefix
+        && !prefixes.iter().any(|prefix| {
+            ptokens
+                .iter()
+                .any(|(phrase, _, _, _)| phrase.starts_with(prefix))
+        })
     {
         return None;
     }
@@ -5366,7 +5428,7 @@ fn suggest_match(
     // covers gets bolded, so one query token can light up several phrase
     // tokens (`suggest_q_multihl_en`).
     let mut spans: Vec<(usize, usize)> = Vec::new();
-    for (stem, off_from, off_to) in &ptokens {
+    for (stem, _, off_from, off_to) in &ptokens {
         // Lucene's own order: `matchedTokens.contains(...)` first, the prefix
         // branch only as an `else if`.
         //
@@ -5376,10 +5438,17 @@ fn suggest_match(
         // queries that were captured (`suggest_q_overlap_en`,
         // `suggest_q_prefix_nonfinal_en`) are both misses, so the case is
         // unreachable from any pinned input.
-        let end = if exact.iter().any(|qt| qt == stem) {
+        let end = if exact
+            .iter()
+            .any(|alternatives| alternatives.iter().any(|term| term == stem))
+        {
             // addWholeMatch: the entire surface token.
             *off_to
-        } else if let Some(prefix) = prefix.filter(|p| stem.starts_with(*p)) {
+        } else if let Some(prefix) = prefix.and_then(|alternatives| {
+            alternatives
+                .iter()
+                .find(|term| stem.starts_with(String::as_str(term)))
+        }) {
             // addPrefixMatch: `prefix.length()` CHARACTERS of the surface token,
             // or the whole token when the surface is no longer than the prefix.
             // `char_indices().nth(n)` yields a real char boundary or nothing, so

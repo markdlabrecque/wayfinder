@@ -48,7 +48,7 @@ async fn delimiter_app() -> (axum::Router, TempDir) {
     let (status, body) = post_docs(
         &app,
         &json!([
-            {"id": "static-compound", "body": "SKU-42 WiFi2000"},
+            {"id": "static-compound", "body": "SKU-42 next WiFi2000"},
             {"id": "static-independent", "body": "day boy"},
             {"id": "dynamic-compound", "tm_X3b_en_code": ["SKU-42 wifi_router"]},
             {"id": "dynamic-independent", "tm_X3b_en_code": ["happy sky"]},
@@ -140,4 +140,36 @@ async fn suggest_keeps_mid_delimiter_input_as_a_prefix() {
         Some(1),
         "`foo_` must remain a useful prefix for `foo_bar`: {body}"
     );
+}
+
+#[tokio::test]
+async fn delimiter_compounds_are_real_position_graphs_for_sequential_and_catenated_phrases() {
+    let (app, _dir) = delimiter_app().await;
+
+    // `SKU-42` crosses UAX tokens. Its parts must occupy positions 0 and 1,
+    // while `sku42` spans both and leaves `next` at position 2. Flattening
+    // every form at one position either loses the parts phrase or places the
+    // following token one position too early.
+    assert_field_query_count(&app, "body", "%22day+boy%22", 1).await;
+    assert_field_query_count(&app, "body", "%22sku+42+next%22", 1).await;
+    assert_field_query_count(&app, "body", "%22sku42+next%22", 1).await;
+}
+
+#[tokio::test]
+async fn symbol_and_combining_only_queries_never_panic_or_hide_following_words() {
+    let (app, _dir) = delimiter_app().await;
+
+    // These inputs can reach the delimiter filter as zero-part UAX segments.
+    // They may legitimately have no lexical match, but must remain ordinary
+    // empty-result requests instead of panicking or consuming later tokens.
+    for query in [
+        "select?q=body%3A%F0%9F%98%80&rows=0",
+        "select?q=body%3A%CC%81&rows=0",
+        "suggest?suggest.dictionary=en&suggest.q=%F0%9F%98%80&wt=json",
+        "suggest?suggest.dictionary=en&suggest.q=%CC%81&wt=json",
+    ] {
+        let (status, body) = get(&app, query).await;
+        assert_eq!(status, StatusCode::OK, "/{query} must not panic: {body}");
+    }
+    assert_field_query_count(&app, "body", "next", 1).await;
 }

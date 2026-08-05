@@ -1081,20 +1081,33 @@ impl<T: Tokenizer> Tokenizer for WordDelimiterTokenizer<T> {
             tail: self.inner.token_stream(text),
             input: text,
             pending: VecDeque::new(),
-            previous: None,
+            lookahead: None,
+            next_position: 0,
             preserve_original: self.preserve_original,
         }
     }
 }
 
-struct DelimiterParts {
-    parts: Vec<String>,
-    catenated: String,
-    catenated_words: Vec<String>,
+#[derive(Clone)]
+struct DelimiterPart {
+    text: String,
+    offset_from: usize,
+    offset_to: usize,
 }
 
-fn delimiter_parts(text: &str) -> DelimiterParts {
+fn delimiter_parts(text: &str, base_offset: usize, original_end: usize) -> Vec<DelimiterPart> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
+    // Accent folding can change byte width while retaining source offsets. In
+    // that case individual split bounds are unknowable here, so keep the full
+    // original token range rather than risking a non-UTF-8 suggest slice.
+    let offsets_are_exact = text.len() == original_end - base_offset;
+    let offsets = |from: usize, to: usize| {
+        if offsets_are_exact {
+            (base_offset + from, base_offset + to)
+        } else {
+            (base_offset, original_end)
+        }
+    };
     let mut parts = Vec::new();
     let mut start = None;
     for (index, (offset, current)) in chars.iter().copied().enumerate() {
@@ -1104,52 +1117,49 @@ fn delimiter_parts(text: &str) -> DelimiterParts {
             (previous.is_alphabetic() && current.is_numeric())
                 || (previous.is_numeric() && current.is_alphabetic())
                 || (previous.is_lowercase() && current.is_uppercase())
-                // `SKUfoo` is `SKU` + `foo`; this is the acronym transition.
                 || (previous.is_uppercase()
                     && current.is_uppercase()
                     && next.is_some_and(char::is_lowercase))
         });
         if !current.is_alphanumeric() {
             if let Some(start) = start.take() {
-                parts.push(text[start..offset].to_string());
+                let (offset_from, offset_to) = offsets(start, offset);
+                parts.push(DelimiterPart {
+                    text: text[start..offset].to_string(),
+                    offset_from,
+                    offset_to,
+                });
             }
         } else if boundary {
             if let Some(start) = start.replace(offset) {
-                parts.push(text[start..offset].to_string());
+                let (offset_from, offset_to) = offsets(start, offset);
+                parts.push(DelimiterPart {
+                    text: text[start..offset].to_string(),
+                    offset_from,
+                    offset_to,
+                });
             }
         } else if start.is_none() {
             start = Some(offset);
         }
     }
     if let Some(start) = start {
-        parts.push(text[start..].to_string());
+        let (offset_from, offset_to) = offsets(start, text.len());
+        parts.push(DelimiterPart {
+            text: text[start..].to_string(),
+            offset_from,
+            offset_to,
+        });
     }
-    let catenated = parts.concat();
-    let mut catenated_words = Vec::new();
-    let mut word_run = String::new();
-    for part in &parts {
-        if part.chars().all(char::is_alphabetic) {
-            word_run.push_str(part);
-        } else if !word_run.is_empty() {
-            catenated_words.push(std::mem::take(&mut word_run));
-        }
-    }
-    if !word_run.is_empty() {
-        catenated_words.push(word_run);
-    }
-    DelimiterParts {
-        parts,
-        catenated,
-        catenated_words,
-    }
+    parts
 }
 
 struct WordDelimiterTokenStream<'a, T> {
     tail: T,
     input: &'a str,
     pending: VecDeque<Token>,
-    // The current punctuation-delimited compound, reset by any other gap.
-    previous: Option<(Token, String)>,
+    lookahead: Option<Token>,
+    next_position: usize,
     preserve_original: bool,
 }
 
@@ -1166,60 +1176,175 @@ fn is_punctuation(character: char) -> bool {
     )
 }
 
-/// UAX can emit the sides of `SKU-42` as separate tokens. They still form one
-/// delimiter compound, unlike words separated by whitespace or symbols.
+/// UAX can emit the sides of `SKU-42` as separate tokens. Buffering the next
+/// UAX token lets this filter preserve one compound graph without ever joining
+/// across whitespace.
 fn is_compound_separator(gap: &str) -> bool {
     !gap.is_empty() && gap.chars().all(is_punctuation)
 }
 
-impl<T: TokenStream> TokenStream for WordDelimiterTokenStream<'_, T> {
-    fn advance(&mut self) -> bool {
-        if let Some(token) = self.pending.pop_front() {
-            *self.tail.token_mut() = token;
+impl<T: TokenStream> WordDelimiterTokenStream<'_, T> {
+    fn next_source(&mut self) -> Option<Token> {
+        self.lookahead
+            .take()
+            .or_else(|| self.tail.advance().then(|| self.tail.token().clone()))
+    }
+
+    fn fill_compound(&mut self) -> bool {
+        let Some(first) = self.next_source() else {
+            return false;
+        };
+        let mut sources = vec![first];
+        while let Some(next) = self.next_source() {
+            let previous = sources.last().expect("compound has its first token");
+            let gap = &self.input[previous.offset_to..next.offset_from];
+            if is_compound_separator(gap) {
+                sources.push(next);
+            } else {
+                self.lookahead = Some(next);
+                break;
+            }
+        }
+
+        let compound_start = sources[0].offset_from;
+        let compound_end = sources.last().expect("compound is nonempty").offset_to;
+        let parts: Vec<DelimiterPart> = sources
+            .iter()
+            .flat_map(|source| delimiter_parts(&source.text, source.offset_from, source.offset_to))
+            .collect();
+        if parts.is_empty() {
+            // A symbol or combining-only UAX segment has no lexical form. It
+            // is ignored like whitespace, but must not panic or consume the
+            // following source token.
             return true;
         }
-        if !self.tail.advance() {
-            return false;
-        }
-        let source = self.tail.token().clone();
-        let parts = delimiter_parts(&source.text);
-        let mut forms = Vec::new();
-        if self.preserve_original {
-            forms.push(source.text.clone());
-        }
-        forms.extend(parts.parts.iter().cloned());
-        forms.extend(parts.catenated_words.iter().cloned());
-        if !parts.catenated.is_empty() {
-            forms.push(parts.catenated.clone());
-        }
-        let compound_catenated = if let Some((previous, previous_catenated)) = &self.previous {
-            let gap = &self.input[previous.offset_to..source.offset_from];
-            if is_compound_separator(gap) {
-                let catenated = format!("{previous_catenated}{}", parts.catenated);
-                forms.push(catenated.clone());
-                catenated
-            } else {
-                parts.catenated.clone()
-            }
-        } else {
-            parts.catenated.clone()
-        };
+
+        let start = self.next_position;
+        let width = parts.len();
         let mut seen = HashSet::new();
-        for text in forms {
-            if !text.is_empty() && seen.insert(text.clone()) {
-                self.pending.push_back(Token {
-                    text,
-                    ..source.clone()
-                });
+        let mut push =
+            |text: String, position: usize, position_length: usize, from: usize, to: usize| {
+                if !text.is_empty() && seen.insert((text.clone(), position, position_length)) {
+                    self.pending.push_back(Token {
+                        offset_from: from,
+                        offset_to: to,
+                        position,
+                        position_length,
+                        text,
+                    });
+                }
+            };
+        for (index, part) in parts.iter().enumerate() {
+            push(
+                part.text.clone(),
+                start + index,
+                1,
+                part.offset_from,
+                part.offset_to,
+            );
+        }
+        let source_has_symbol = sources.iter().any(|source| {
+            source
+                .text
+                .chars()
+                .any(|character| !character.is_alphanumeric() && !is_punctuation(character))
+        }) || self.input[compound_start..compound_end].contains('@');
+        let compound_has_dash = sources
+            .windows(2)
+            .any(|pair| self.input[pair[0].offset_to..pair[1].offset_from].contains('-'));
+        let compound_has_number = sources
+            .iter()
+            .any(|source| source.text.chars().any(char::is_numeric));
+        if self.preserve_original
+            && !source_has_symbol
+            && (!compound_has_dash || compound_has_number)
+        {
+            // Use the upstream token text, not the raw input slice: filters may
+            // already have lowercased/folded it before this wrapper runs. Raw
+            // text here would create a second differently-cased alternative.
+            let mut preserved = sources[0].text.clone();
+            for pair in sources.windows(2) {
+                preserved.push_str(&self.input[pair[0].offset_to..pair[1].offset_from]);
+                preserved.push_str(&pair[1].text);
+            }
+            push(preserved, start, width, compound_start, compound_end);
+        }
+        // UAX may deliver an address as one punctuation-linked compound. Keep
+        // the right-hand `b.com`/`bcom` forms as well as its all-parts spelling.
+        if let Some(symbol_offset) = self.input[compound_start..compound_end].find('@') {
+            let suffix_offset = compound_start + symbol_offset + '@'.len_utf8();
+            let suffix = &self.input[suffix_offset..compound_end];
+            let suffix_parts = delimiter_parts(suffix, suffix_offset, compound_end);
+            if let Some(last) = suffix_parts.last() {
+                let suffix_start = start + parts.len() - suffix_parts.len();
+                push(
+                    suffix.to_string(),
+                    suffix_start,
+                    suffix_parts.len(),
+                    suffix_parts[0].offset_from,
+                    last.offset_to,
+                );
+                push(
+                    suffix_parts.iter().map(|part| part.text.as_str()).collect(),
+                    suffix_start,
+                    suffix_parts.len(),
+                    suffix_parts[0].offset_from,
+                    last.offset_to,
+                );
             }
         }
-        self.previous = Some((source, compound_catenated));
-        let token = self
-            .pending
-            .pop_front()
-            .expect("a nonempty source token has a delimiter form");
-        *self.tail.token_mut() = token;
+        let all = parts
+            .iter()
+            .map(|part| part.text.as_str())
+            .collect::<String>();
+        push(all, start, width, compound_start, compound_end);
+
+        let mut run_start = 0;
+        while run_start < parts.len() {
+            if !parts[run_start].text.chars().all(char::is_alphabetic) {
+                run_start += 1;
+                continue;
+            }
+            let mut run_end = run_start + 1;
+            while run_end < parts.len() && parts[run_end].text.chars().all(char::is_alphabetic) {
+                run_end += 1;
+            }
+            if run_end - run_start > 1 {
+                push(
+                    parts[run_start..run_end]
+                        .iter()
+                        .map(|part| part.text.as_str())
+                        .collect(),
+                    start + run_start,
+                    run_end - run_start,
+                    parts[run_start].offset_from,
+                    parts[run_end - 1].offset_to,
+                );
+            }
+            run_start = run_end;
+        }
+        // Token streams must be monotonic by position. The catenated forms are
+        // created after the sequential parts above, so restore graph order
+        // before downstream filters/indexing observe the batch.
+        self.pending
+            .make_contiguous()
+            .sort_by_key(|token| token.position);
+        self.next_position += width;
         true
+    }
+}
+
+impl<T: TokenStream> TokenStream for WordDelimiterTokenStream<'_, T> {
+    fn advance(&mut self) -> bool {
+        loop {
+            if let Some(token) = self.pending.pop_front() {
+                *self.tail.token_mut() = token;
+                return true;
+            }
+            if !self.fill_compound() {
+                return false;
+            }
+        }
     }
 
     fn token(&self) -> &Token {
@@ -2735,6 +2860,41 @@ mod tests {
             tokens.push(stream.token().clone());
         }
         tokens
+    }
+
+    #[test]
+    fn word_delimiter_compound_is_a_monotonic_position_graph() {
+        let mut tokenizer = WordDelimiterFilter::search().transform(Uax29Tokenizer);
+        let mut stream = tokenizer.token_stream("SKU-42 next");
+        let mut tokens = Vec::new();
+        while stream.advance() {
+            tokens.push(stream.token().clone());
+        }
+        assert!(
+            tokens
+                .windows(2)
+                .all(|pair| pair[0].position <= pair[1].position)
+        );
+        assert!(tokens.iter().any(|token| {
+            (token.text == "SKU-42" || token.text == "SKU42")
+                && token.position == 0
+                && token.position_length == 2
+        }));
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.text == "SKU" && token.position == 0)
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.text == "42" && token.position == 1)
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.text == "next" && token.position == 2)
+        );
     }
 
     #[test]

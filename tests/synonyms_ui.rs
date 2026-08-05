@@ -19,7 +19,7 @@
 mod common;
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use common::{app_with_schema, get, post_docs};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -45,18 +45,33 @@ fast = true
 name = "body"
 type = "text_en"
 stored = true
+
+[[fields]]
+name = "twm_suggest"
+type = "text_en"
+stored = true
+multi_valued = true
 "#;
 
 async fn post_synonym_form(
     app: &axum::Router,
     form: &str,
 ) -> (StatusCode, axum::http::HeaderMap, String) {
-    let request = Request::builder()
+    post_synonym_form_with_headers(app, form, HeaderMap::new()).await
+}
+
+async fn post_synonym_form_with_headers(
+    app: &axum::Router,
+    form: &str,
+    headers: HeaderMap,
+) -> (StatusCode, axum::http::HeaderMap, String) {
+    let mut request = Request::builder()
         .method("POST")
         .uri(SYNONYMS_ROUTE)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(Body::from(form.to_owned()))
         .expect("build synonym form request");
+    request.headers_mut().extend(headers);
     let response = app
         .clone()
         .oneshot(request)
@@ -80,7 +95,11 @@ async fn post_synonym_form(
 async fn synonym_app() -> (axum::Router, TempDir) {
     let dir = TempDir::new().expect("create temp dir");
     let app = app_with_schema(dir.path(), SYNONYM_SCHEMA).expect("synonym schema must load");
-    let (status, body) = post_docs(&app, &json!([{"id": "cms", "body": "Drupal guide"}])).await;
+    let (status, body) = post_docs(
+        &app,
+        &json!([{"id": "cms", "body": "Drupal guide", "twm_suggest": ["Drupal guide"]}]),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "index synonym corpus: {body}");
     (app, dir)
 }
@@ -246,6 +265,84 @@ async fn invalid_group_rejects_without_replacing_live_or_durable_synonyms() {
         "a rejected duplicate must not replace the durable table"
     );
     assert_query_count(&app, "durpal", 1).await;
+}
+
+#[tokio::test]
+async fn hot_synonyms_are_same_position_suggest_alternatives() {
+    let (app, _dir) = synonym_app().await;
+    let (status, _headers, body) = post_synonym_form(&app, "groups=Drupal%2CDurpal").await;
+    assert_save_succeeded(status, &body);
+
+    let (status, body) = get(
+        &app,
+        "suggest?suggest.dictionary=en&suggest.q=durpal&wt=json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "/suggest must succeed: {body}");
+    assert_eq!(
+        body.pointer("/suggest/en/durpal/numFound")
+            .and_then(Value::as_u64),
+        Some(1),
+        "a same-position synonym is an alternative, not a second required suggestion word: {body}"
+    );
+}
+
+#[tokio::test]
+async fn configured_members_are_folded_and_reject_unsafe_analyzer_inputs() {
+    let (app, dir) = synonym_app().await;
+    let (status, _headers, body) = post_synonym_form(&app, "groups=Caf%C3%A9%2CCOFFEE").await;
+    assert_save_succeeded(status, &body);
+    assert_eq!(
+        std::fs::read(dir.path().join(SYNONYM_FILE)).expect("canonical synonym file"),
+        b"cafe,coffee\n"
+    );
+
+    for invalid in ["foo-bar%2Cbaz", "%F0%9F%98%80%2Cbaz", "%CC%81%2Cbaz"] {
+        let (status, _headers, body) = post_synonym_form(&app, &format!("groups={invalid}")).await;
+        assert!(
+            status.is_client_error(),
+            "{invalid:?} must be rejected: {status} {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn phrase_expansion_is_bounded_before_cartesian_allocation() {
+    let (app, _dir) = synonym_app().await;
+    let (status, _headers, body) = post_synonym_form(&app, "groups=Drupal%2CDurpal").await;
+    assert_save_succeeded(status, &body);
+
+    let query = std::iter::repeat_n("durpal", 11)
+        .collect::<Vec<_>>()
+        .join("+");
+    let (status, body) = get(&app, &format!("select?q=%22{query}%22&rows=0")).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "phrase graph must be rejected: {body}"
+    );
+    assert!(
+        body.to_string().contains("phrase expansion exceeds"),
+        "error must identify the bounded phrase expansion: {body}"
+    );
+}
+
+#[tokio::test]
+async fn cross_origin_synonym_post_is_rejected() {
+    let (app, _dir) = synonym_app().await;
+    let mut headers = HeaderMap::new();
+    headers.insert("host", HeaderValue::from_static("wayfinder.test"));
+    headers.insert(
+        "origin",
+        HeaderValue::from_static("https://attacker.invalid"),
+    );
+    let (status, _headers, body) =
+        post_synonym_form_with_headers(&app, "groups=Drupal%2CDurpal", headers).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "cross-origin form POST must fail: {body}"
+    );
 }
 
 #[tokio::test]

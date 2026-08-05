@@ -8,9 +8,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{Context, Result, bail};
+use unicode_normalization::UnicodeNormalization;
+use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 pub const FILE_NAME: &str = "synonyms.txt";
 
@@ -18,6 +20,31 @@ pub const FILE_NAME: &str = "synonyms.txt";
 struct SynonymTable {
     groups: Vec<Vec<String>>,
     expansions: HashMap<String, Vec<String>>,
+}
+
+/// Canonical form at the synonym filter insertion point: Unicode-folded and
+/// lowercased, before delimiter splitting and any stemming. A configured member
+/// must remain one lexical token here; accepting punctuation or symbols would
+/// make a saved group mean something different from its query-time expansion.
+fn canonical_member(member: &str) -> Result<String> {
+    let mut folded = String::new();
+    for character in member.nfkd() {
+        if matches!(character, '\u{00df}' | '\u{1e9e}') {
+            folded.push_str("ss");
+        } else if matches!(character, '\u{00e6}' | '\u{00c6}') {
+            folded.push_str("ae");
+        } else if matches!(character, '\u{0153}' | '\u{0152}') {
+            folded.push_str("oe");
+        } else if matches!(character, '\u{00fe}' | '\u{00de}') {
+            folded.push_str("th");
+        } else if character.general_category() != GeneralCategory::NonspacingMark {
+            folded.extend(character.to_lowercase());
+        }
+    }
+    if folded.is_empty() || !folded.chars().all(char::is_alphanumeric) {
+        bail!("synonym members must each be one nonempty safe token");
+    }
+    Ok(folded)
 }
 
 impl SynonymTable {
@@ -31,9 +58,6 @@ impl SynonymTable {
             }
             let mut seen = HashSet::new();
             for term in group {
-                if term.is_empty() || term.chars().any(char::is_whitespace) {
-                    bail!("synonym members must each be one non-whitespace token");
-                }
                 if !seen.insert(term) {
                     bail!("a synonym group cannot contain a duplicate member `{term}`");
                 }
@@ -60,17 +84,14 @@ impl SynonymTable {
     }
 
     fn parse(text: &str) -> Result<Self> {
-        let groups = text
-            .lines()
-            .filter_map(|line| {
-                let line = line.trim();
-                (!line.is_empty()).then(|| {
-                    line.split(',')
-                        .map(|member| member.trim().to_lowercase())
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
+        let mut groups = Vec::new();
+        for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let group = line
+                .split(',')
+                .map(|member| canonical_member(member.trim()))
+                .collect::<Result<Vec<_>>>()?;
+            groups.push(group);
+        }
         Self::from_groups(groups)
     }
 
@@ -91,6 +112,10 @@ impl SynonymTable {
 pub struct SynonymResource {
     path: PathBuf,
     table: Arc<RwLock<SynonymTable>>,
+    /// Serializes the durable rename and the in-memory swap as one operation.
+    /// Without it, two successful replacements can leave the file from one
+    /// request paired with the live table from the other.
+    replace_lock: Arc<Mutex<()>>,
 }
 
 impl SynonymResource {
@@ -113,6 +138,7 @@ impl SynonymResource {
         Ok(Self {
             path,
             table: Arc::new(RwLock::new(table)),
+            replace_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -136,12 +162,19 @@ impl SynonymResource {
     /// is a same-directory temp-file rename; only after it succeeds does the
     /// live Arc<RwLock> table swap, so a rejected or failed save preserves both.
     pub fn replace(&self, submitted: &str) -> Result<()> {
+        // Validate before acquiring the operation lock: rejected input is pure
+        // and never delays a valid save. Successful replace calls then hold it
+        // across both persistence and publication.
         let candidate = SynonymTable::parse(submitted)?;
+        let _operation = self
+            .replace_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let rendered = candidate.render();
         let parent = self
             .path
             .parent()
-            .expect("synonym path always has data parent");
+            .ok_or_else(|| anyhow::anyhow!("synonym path has no data parent"))?;
         let mut temporary = tempfile::NamedTempFile::new_in(parent)
             .with_context(|| format!("creating synonym temp file in {}", parent.display()))?;
         temporary

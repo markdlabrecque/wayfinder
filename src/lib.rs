@@ -921,6 +921,36 @@ async fn synonyms_ui(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
+/// A browser form POST must come from this host. API/non-browser clients often
+/// send neither Origin nor Referer, which is intentionally allowed; once either
+/// browser provenance header is present it must name the request Host exactly.
+fn same_origin_form_post(headers: &HeaderMap) -> bool {
+    let provenance = [header::ORIGIN, header::REFERER];
+    if provenance.iter().all(|name| !headers.contains_key(name)) {
+        return true;
+    }
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    provenance
+        .iter()
+        .filter_map(|name| headers.get(name))
+        .all(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|raw| raw.parse::<axum::http::Uri>().ok())
+                .and_then(|uri| {
+                    uri.authority()
+                        .map(|authority| authority.as_str().to_string())
+                })
+                .is_some_and(|authority| authority.eq_ignore_ascii_case(host))
+        })
+}
+
 /// `POST /ui/synonyms` validates the complete form before it writes. The
 /// `SynonymResource` persists to a same-directory temp file and then swaps its
 /// Arc<RwLock> table, so failed input can change neither live nor durable state.
@@ -941,6 +971,13 @@ async fn synonyms_ui_post(
         return (
             StatusCode::BAD_REQUEST,
             "synonym editor requires a form-encoded body",
+        )
+            .into_response();
+    }
+    if !same_origin_form_post(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            "cross-origin synonym form POST rejected",
         )
             .into_response();
     }
