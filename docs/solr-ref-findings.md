@@ -2355,6 +2355,12 @@ needs a real `solr:9` fixture for the response shape.
      admin diagnostics screen. Recommend rescoping #293 to that finding and
      deprioritising it accordingly.
 
+     **Amended by finding 191 (2026-08-04):** the *shape* above is backwards.
+     The primary request is nested `terms` facets; `max(_version_)` is the
+     exception fallback, not the read path. The never-via-`stats.field` /
+     never-written / never-`versions=true` claims stand. Full correction in
+     finding 191; the dependency it predicted landed as #343 (`src/json_facet.rs`).
+
 133. **The module does emit `facet.heatmap`, and consumes the `counts_ints2D`
      grid.** `setRpt()` (called from `1873-1874` for the `search_api_rpt` query
      option) sends `facet=on`, `facet.heatmap=<field>`,
@@ -3379,3 +3385,69 @@ finding's conclusion is that the path is out of Wayfinder's world.
      executed — not a second live path. And `modules/search_api_solr_legacy/...
      Solr36Connector.php:76-77` also adds `q.op`, but that is the Solr 3.6
      legacy connector, out of scope for a Solr 9.x backend. (Issue #356.)
+
+## Finding from issue #355 (amendment to finding 132)
+
+The `_version_` JSON-facet shape finding 132 describes is backwards; this is the
+correction. Same vendored 4.4.0 source basis as findings 129-135 and 190 above
+(`SearchApiSolrBackend.php`), read line-for-line. Scope evidence only -- the
+implementation it concerns already landed as #343 (`src/json_facet.rs`).
+
+191. **Amendment to finding 132: the client's `_version_` JSON facet is nested
+     `terms` facets first, `max(_version_)` is the exception fallback.** Finding
+     132 got the *existence* right (`search_api_solr` reads `_version_` only
+     through a JSON facet, never via `stats.field`, never writes it, never sends
+     `versions=true`) but the *shape* backwards — it presents `max(_version_)` as
+     the read path with `terms` nesting optional. Reading the two JSON-facet
+     callers in `SearchApiSolrBackend.php` 4.4.0 against the vendored source:
+
+     - **`doDocumentCounts()` (`:4895`) — the document-counts screen.** Base
+       query `+hash:* +index_id:*` as a `{!key=search_api}` filter query,
+       `rows=1`, `fl=id`. The **primary** request is nested `terms` facets with
+       **no `_version_` at all**: top-level `siteHashes` (`hash`, `limit: -1`,
+       `:4914`) carrying a nested `numDocsPerIndex` (`index_id`, `limit: -1`,
+       `:4920`, added via `addFacet` at `:4928`). Only the **`catch` fallback**
+       (`:4934-4940`, comment "For non drupal indexes we only use the implicit
+       'count' aggregation … the only field we can be 99% sure that it exists
+       in any index is `_version_`") sends `max(_version_)` — a deliberately
+       minimal facet over the one always-present field, picked because a facet
+       is needed, not because the version is wanted.
+     - **`doGetMaxDocumentVersions()` (`:5033`, reached from
+       `getMaxDocumentVersions()` `:4987` ← server-status caller `:1064`) — the
+       "max document version" screen.** Same base query. The **primary** request
+       is a top-level `max(_version_)` aggregation (`maxVersion`, `:5052-5054`)
+       **plus** a four-level nested topology: `siteHashes` (`hash`, `:5057`) →
+       `indexes` (`index_id`, `:5063`) → `dataSources` (`ss_search_api_datasource`,
+       `:5069`) → `maxVersionPerDataSource` (`max(_version_)`, `:5075-5077`), wired
+       by `addFacet` at `:5080-5082`. Its `catch` fallback (`:5088-5093`) is a
+       bare `max(_version_)`.
+
+     So the normal case is `type: terms` with `local_key` and arbitrary nesting
+     (`limit: -1` unbounded, not an edge case); `max()` is the fallback and the
+     per-datasource leaf, not the headline. The `local_key` strings
+     (`siteHashes`/`numDocsPerIndex`/`indexes`/`dataSources`/`maxVersion`) are what
+     the JSON-facet response keys off, so the response parser needs them from the
+     start. This is the shape #343 (`src/json_facet.rs`) built to: `type: terms`
+     over fast fields, `facet`-key nesting, `max()` aggregations, `local_key` as
+     the response key — fixtures `jf343_terms_nested`, `jf343_deep_max`,
+     `jf343_agg_max_version`; envelope in findings 175-178, the bare-string
+     aggregation wire form in finding 177.
+
+     **A wire detail, and why it is not a ratified divergence.** The
+     `doDocumentCounts()` fallback forces `setOmitHeader(FALSE)` for Solr >= 8.1.0
+     (`:4943-4949`): with headers omitted, that facet query triggers a
+     `NullPointerException` inside Solr itself (SOLR-13509; the comment is at
+     `:4944-4948`). So a real client sends `omitHeader=false` here against its own
+     `omitHeader=true` default. (Note: `doGetMaxDocumentVersions()` has no such
+     call — the issue text that placed this at `:5079-5085` pointed at its
+     `addFacet` nesting, not an `omitHeader` guard.) No existing fixture pairs
+     `json.facet` with an *omitted* header — `jf343_agg_max_version` sends
+     `omitHeader=false`, exactly the workaround — and no captured client request
+     ever omits the header on this path, so the upstream NPE is never reached.
+     That means there is **no live wire divergence to ratify**: Wayfinder has no
+     reason to reproduce the NPE (it is a Solr bug, and the client's unconditional
+     workaround means no differential-harness row exposes it), so unlike finding
+     128's `json.nl=garbage` truncated-JSON case this one does not belong in
+     `EXPECTED_DIVERGENCES`. Recorded here as a client behaviour; revisit only if a
+     capture shows a client hitting the NPE (omitting `omitHeader` on this path
+     against Solr 8.1+).
