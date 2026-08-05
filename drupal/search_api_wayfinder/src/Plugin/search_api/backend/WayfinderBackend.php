@@ -486,6 +486,184 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
   }
 
   /**
+   * Retrieves spellcheck-based autocomplete suggestions (#385).
+   *
+   * The transport half of this module's Spellcheck suggester plugin
+   * (src/Plugin/search_api_autocomplete/suggester/Spellcheck.php), which stays
+   * thin and delegates here -- the same split the Terms path uses above.
+   * Upstream's equivalent pair is
+   * search_api_solr_autocomplete's suggester/Spellcheck.php:106-168 plus
+   * SolrSpellcheckBackendTrait::extractSpellCheckSuggestions().
+   *
+   * Stock search_api_solr sends this to the /autocomplete request handler;
+   * Wayfinder has no such route (#351), so the spellcheck component is asked
+   * for on a plain /select with rows=0 and no q/fq -- see
+   * QueryBuilder::buildAutocompleteSpellcheck() for why that is legal and for
+   * the deliberately omitted spellcheck.count.
+   *
+   * The nesting matters and is upstream's: extractSpellCheckSuggestions()
+   * returns <original term> => [<suggested word>, ...], and
+   * getAutocompleteSpellCheckSuggestions() emits ONE
+   * createFromSuggestedKeys($keys) per ELEMENT of each term's list
+   * (Spellcheck.php:160-168) -- one suggestion per suggested word, not one per
+   * corrected token. The {word, freq} extendedResults member shape is
+   * normalised by ResponseParser::extractSpellcheckSuggestions(), shared with
+   * the search path so the two cannot disagree about the envelope.
+   *
+   * A transport failure degrades to an empty suggestion list rather than
+   * throwing out of the widget, as the Terms path does.
+   *
+   * @param \Drupal\search_api\Query\QueryInterface $query
+   *   A query representing the base search.
+   * @param string $user_input
+   *   The complete user input for the fulltext search keywords so far.
+   *
+   * @return \Drupal\search_api_autocomplete\Suggestion\SuggestionInterface[]
+   *   An array of autocomplete suggestions.
+   */
+  public function getSpellcheckAutocompleteSuggestions(QueryInterface $query, string $user_input): array {
+    try {
+      $params = (new QueryBuilder(new FieldMapper(), $this->languageManager))->buildAutocompleteSpellcheck($query, $user_input);
+      $response = $this->getClient()->select($params);
+    }
+    catch (SearchApiException $e) {
+      return [];
+    }
+
+    $factory = new SuggestionFactory($user_input);
+    $suggestions = [];
+    foreach (ResponseParser::extractSpellcheckSuggestions($response) as $words) {
+      foreach ($words as $keys) {
+        $suggestions[] = $factory->createFromSuggestedKeys($keys);
+      }
+    }
+
+    return $this->filterDuplicateAutocompleteSuggestions($suggestions);
+  }
+
+  /**
+   * Retrieves suggester-based autocomplete suggestions (#385).
+   *
+   * The transport half of this module's Suggester plugin
+   * (src/Plugin/search_api_autocomplete/suggester/Suggester.php). Upstream's
+   * equivalent is search_api_solr_autocomplete's suggester/Suggester.php:
+   * 204-224 (the query + dedupe) and :301-317 (the response walk).
+   *
+   * QueryBuilder::buildAutocompleteSuggester() emits the suggest.* params and
+   * WayfinderClient::suggest() GETs /suggest (server read path: #384). The
+   * response is nested dictionary -> query -> suggestions[], so every
+   * dictionary key and every query key present contributes, in response order
+   * -- upstream walks `$phrases_result->getAll()` across all dictionaries
+   * (:305-306), not just the first. Each entry's `term` is passed to
+   * createFromSuggestedKeys() VERBATIM (:308): the suggestions are phrases, and
+   * any <b> markup Solr put in them is Solr's own highlighting, which this
+   * layer must neither assume nor strip (ground truth #384's fixture
+   * solr-ref/responses/suggest_q_infix_en.json -- #384, unmerged: the fixture
+   * is on origin/markdlabrecque/issue-384-serve-suggest.q-read, not in this
+   * tree).
+   *
+   * Every dictionary in the response is walked, but note the builder's second
+   * ponytail (QueryBuilder::buildAutocompleteSuggester()): #384's server reads
+   * a single suggest.dictionary value, so today a multilingual query can only
+   * ever produce ONE dictionary key here. The multi-dictionary walk is written
+   * to upstream's contract, not to a shape this server currently emits.
+   *
+   * setDictionary() is called behind upstream's own method_exists() guard
+   * (:309-311): it exists only in newer search_api_autocomplete releases, and
+   * this module keeps that module a soft dependency.
+   *
+   * A transport failure degrades to an empty suggestion list, as above.
+   *
+   * @param \Drupal\search_api\Query\QueryInterface $query
+   *   A query representing the base search.
+   * @param string $user_input
+   *   The complete user input for the fulltext search keywords so far.
+   * @param array $contextFilterTags
+   *   Raw (unencoded) context filter tags from the plugin's configuration,
+   *   e.g. ['search_api/index:my_index', 'drupal/langcode:en'].
+   *
+   * @return \Drupal\search_api_autocomplete\Suggestion\SuggestionInterface[]
+   *   An array of autocomplete suggestions.
+   */
+  public function getSuggesterAutocompleteSuggestions(QueryInterface $query, string $user_input, array $contextFilterTags = []): array {
+    try {
+      $params = (new QueryBuilder(new FieldMapper(), $this->languageManager))
+        ->buildAutocompleteSuggester($query, $user_input, $contextFilterTags);
+      $response = $this->getClient()->suggest($params);
+    }
+    catch (SearchApiException $e) {
+      return [];
+    }
+
+    $factory = new SuggestionFactory($user_input);
+    $suggestions = [];
+    // The outer level gets the same is_array() guard as every inner level
+    // below and as the Terms walk above: `??` only substitutes for a MISSING
+    // or NULL key, so a response whose 'suggest' key is present but scalar
+    // would otherwise reach foreach() and raise a PHP warning. A real decoded
+    // Solr/Wayfinder envelope cannot carry a scalar there, which is exactly
+    // why the not-quite-the-expected-shape case must degrade to no
+    // suggestions rather than surface a warning in the widget.
+    $dictionaries = $response['suggest'] ?? NULL;
+    foreach (is_array($dictionaries) ? $dictionaries : [] as $dictionary => $queries) {
+      if (!is_array($queries)) {
+        continue;
+      }
+      foreach ($queries as $phrases) {
+        foreach ((is_array($phrases) ? $phrases['suggestions'] ?? [] : []) as $phrase) {
+          if (!is_array($phrase) || !is_string($phrase['term'] ?? NULL)) {
+            continue;
+          }
+          $suggestion = $factory->createFromSuggestedKeys($phrase['term']);
+          if (method_exists($suggestion, 'setDictionary')) {
+            $suggestion->setDictionary((string) $dictionary);
+          }
+          $suggestions[] = $suggestion;
+        }
+      }
+    }
+
+    return $this->filterDuplicateAutocompleteSuggestions($suggestions);
+  }
+
+  /**
+   * Removes duplicate suggestions, keyed on the suggested keys.
+   *
+   * Mirrors search_api_solr's SolrAutocompleteBackendTrait::
+   * filterDuplicateAutocompleteSuggestions() (:50-66), which both the
+   * Spellcheck and the Suggester plugin call on their result list. The one
+   * divergence is deliberate: upstream unsets in place and leaves holes in the
+   * array's keys, this returns a re-indexed list, because every consumer here
+   * treats the return value as an ordered list.
+   *
+   * Upstream's condition also ORs in getUrl() ("keep it if EITHER the keys or
+   * the url is new"), which is dropped here because neither of these two paths
+   * ever sets a url: both build their suggestions with
+   * createFromSuggestedKeys(), whose url is always NULL, so the url half of
+   * the test can never change the outcome. Restore it if a url-carrying
+   * suggestion source is ever added.
+   *
+   * @param \Drupal\search_api_autocomplete\Suggestion\SuggestionInterface[] $suggestions
+   *   The suggestions to filter.
+   *
+   * @return \Drupal\search_api_autocomplete\Suggestion\SuggestionInterface[]
+   *   The suggestions, first occurrence of each suggested-keys value only.
+   */
+  protected function filterDuplicateAutocompleteSuggestions(array $suggestions): array {
+    $seen = [];
+    $filtered = [];
+    foreach ($suggestions as $suggestion) {
+      $keys = $suggestion->getSuggestedKeys();
+      if (in_array($keys, $seen, TRUE)) {
+        continue;
+      }
+      $seen[] = $keys;
+      $filtered[] = $suggestion;
+    }
+    return $filtered;
+  }
+
+  /**
    * Extracts text from a file via Wayfinder's /update/extract endpoint.
    *
    * Mirrors search_api_solr's SearchApiSolrBackend::extractContentFromFile()

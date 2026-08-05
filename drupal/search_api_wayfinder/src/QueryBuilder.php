@@ -188,24 +188,46 @@ class QueryBuilder {
       $params['spellcheck.q'] = implode(' ', array_map('strval', $keys));
     }
 
-    // issue #342 (MF-2): the dictionary name is the INDEXED sink's language
-    // component, not the raw langcode -- FieldMapper::spellcheckDictionary()
-    // is the single shared transform, so this param and
-    // FieldMapper::fieldName()'s 'spellcheck_' . <dictionary> sink cannot
-    // drift apart again.
-    $dictionaries = array_map(
-      fn (string $language): string => $this->fieldMapper->spellcheckDictionary($language),
-      $this->languages
-    );
-    $params['spellcheck.dictionary'] = count($dictionaries) === 1
-      ? $dictionaries[0]
-      : $dictionaries;
+    $params['spellcheck.dictionary'] = $this->spellcheckDictionaryParam();
 
     if (!empty($options['collate'])) {
       $params['spellcheck.collate'] = 'true';
     }
 
     return $params;
+  }
+
+  /**
+   * The spellcheck.dictionary param value for the resolved language set.
+   *
+   * issue #342 (MF-2): the dictionary name is the INDEXED sink's language
+   * component, not the raw langcode -- FieldMapper::spellcheckDictionary() is
+   * the single shared transform, so this param and FieldMapper::fieldName()'s
+   * 'spellcheck_' . <dictionary> sink cannot drift apart again.
+   *
+   * issue #385: shared by the search path (buildSpellcheck()) and the
+   * Spellcheck autocomplete plugin's builder (buildAutocompleteSpellcheck()),
+   * which upstream also treats identically -- both go through
+   * SearchApiSolrBackend::setSpellcheck() (:4639-4670). One helper so the two
+   * cannot drift.
+   *
+   * Upstream falls back to LanguageInterface::LANGCODE_NOT_SPECIFIED when no
+   * dictionary resolves (:4655-4657); here LanguageResolver::resolve() already
+   * returns [FieldMapper::LANGUAGE_UNSPECIFIED] in that case
+   * (LanguageResolver.php:70), so the fallback happens one layer down and this
+   * method never sees an empty set.
+   *
+   * Emitted with the same "scalar when there is one, array when there are
+   * several" convention fq/facet.field/terms.fl already use here.
+   *
+   * @return string|array<int, string>
+   */
+  private function spellcheckDictionaryParam() {
+    $dictionaries = array_map(
+      fn (string $language): string => $this->fieldMapper->spellcheckDictionary($language),
+      $this->languages
+    );
+    return count($dictionaries) === 1 ? $dictionaries[0] : $dictionaries;
   }
 
   /**
@@ -289,6 +311,241 @@ class QueryBuilder {
       'terms.limit' => (int) ($query->getOption('limit') ?? 10),
       'omitHeader' => 'true',
     ];
+  }
+
+  /**
+   * Builds the /select param array for a Spellcheck autocomplete request
+   * (#385).
+   *
+   * Mirrors the Spellcheck suggester plugin's
+   * setAutocompleteSpellCheckQuery() (search_api_solr_autocomplete's
+   * suggester/Spellcheck.php:142-147), which is a thin call into
+   * SearchApiSolrBackend::setSpellcheck() (:4639-4670) with
+   * ['keys' => [$user_input], 'count' => $query->getOption('limit') ?? 1].
+   * So: spellcheck=true, spellcheck.q = the whole user input (upstream's
+   * implode(' ', ['<user input>'])), and one spellcheck.dictionary per
+   * resolved language -- identical treatment to the search path's
+   * buildSpellcheck(), via the shared spellcheckDictionaryParam().
+   *
+   * No `q` and no `fq`: unlike Solr's /autocomplete request handler this is a
+   * plain /select, and a /select with no `q` is legal on Wayfinder -- it
+   * matches nothing rather than defaulting to *:* (src/lib.rs:3320) -- while
+   * `fn spellcheck` reads spellcheck.q independently of the base query
+   * (src/lib.rs:3060-3070, called at :3893). The Spellcheck component does not
+   * run a search, so rows=0 and no query/filter at all is the honest request:
+   * the response is a spellcheck block beside an empty response block.
+   *
+   * ponytail: `spellcheck.count` is deliberately omitted, exactly as
+   * buildSpellcheck() omits the search path's own count. Wayfinder's
+   * SELECT_PARAMS (src/lib.rs:332-335) does not admit it and the server runs
+   * strict_params = true, so sending it would 400 the whole autocomplete query
+   * rather than be ignored. The ceiling: Wayfinder's `fn spellcheck` returns
+   * exactly one correction per token, which equals this plugin's own upstream
+   * `count` default of 1 -- but a widget configured with limit > 1 still gets
+   * at most one correction per token, until spellcheck.count joins the
+   * server-side allowlist (out of scope here).
+   *
+   * ponytail: a REPEATED spellcheck.dictionary is first-wins on the wire, so a
+   * site resolving several languages only ever gets corrections from the first
+   * of them. This is parity, not a Wayfinder gap: real Solr behaves the same
+   * way (finding 193 / issue #359 -- 'spellcheck.dictionary=en&...=und' returns
+   * only en's term and vice versa, captured as
+   * solr-ref/responses/spellcheck_dictionary_en_first.json / _und_first.json),
+   * and Wayfinder's `fn spellcheck` matches it by reading the param through
+   * `params.get("spellcheck.dictionary")` (src/lib.rs:3060). Every value after
+   * the first is therefore inert. It is still emitted, because sending the
+   * resolved set is what upstream's setSpellcheck() does (:4649-4657) and
+   * dropping the tail would be a divergence with no upside -- but the ceiling
+   * for a de+fr site is "corrections in de only". Closing it needs a Solr-side
+   * semantic that does not exist; #359 was closed as a wrong premise.
+   *
+   * omitHeader=true follows the envelope convention every other builder in
+   * this class uses.
+   *
+   * @return array<string, string|int|array<int, string>>
+   */
+  public function buildAutocompleteSpellcheck(QueryInterface $query, string $user_input): array {
+    $this->languages = $this->languageResolver->resolve($query);
+
+    return [
+      'spellcheck' => 'true',
+      'spellcheck.q' => $user_input,
+      'spellcheck.dictionary' => $this->spellcheckDictionaryParam(),
+      'rows' => 0,
+      'omitHeader' => 'true',
+    ];
+  }
+
+  /**
+   * Builds the /suggest param array for a Suggester autocomplete request
+   * (#385).
+   *
+   * Mirrors the Suggester plugin's setAutocompleteSuggesterQuery()
+   * (search_api_solr_autocomplete's suggester/Suggester.php:239-288):
+   * suggest.q is the user input (:279), suggest.dictionary is derived from the
+   * context filter tags (:242-280, ported below), suggest.cfq is the encoded
+   * tag query (:281-284), suggest.count is the query's limit or 10 (:285), and
+   * suggest.highlight is forced false because "the search_api_autocomplete
+   * module highlights by itself" (:286-287, upstream's own comment). The
+   * /suggest read path and its param allowlist are #384.
+   *
+   * The dictionary branch structure is upstream's, kept verbatim in shape:
+   * - 'drupal/langcode:multilingual' + exactly one resolved langcode collapses
+   *   to that langcode, rewriting the tag too (:244-248);
+   * - 'multilingual' + several emits one dictionary per langcode and rewrites
+   *   the tag into the '(<encoded>de <encoded>fr)' group form (:249-254) --
+   *   already-encoded, which is why buildSuggesterContextFilterQuery() leaves
+   *   it alone;
+   * - otherwise the first explicit 'drupal/langcode:<x>' tag decides it, with
+   *   'any' and the empty value skipped (:256-266);
+   * - and when nothing resolved a dictionary, the langcode tag is dropped
+   *   entirely (:268-275) and the dictionary falls back to
+   *   LanguageInterface::LANGCODE_NOT_SPECIFIED == FieldMapper::
+   *   LANGUAGE_UNSPECIFIED == 'und' (:280).
+   *
+   * ponytail: the multilingual-several branch emits a REPEATED
+   * suggest.dictionary (['de', 'fr']), and only the FIRST value is served.
+   * Wayfinder reads the param through `params.get("suggest.dictionary")`
+   * (src/lib.rs:4338 -- #384, unmerged: line numbers are on
+   * origin/markdlabrecque/issue-384-serve-suggest.q-read, not in this tree),
+   * i.e. a single value, so 'fr' is silently dropped and a de+fr site gets
+   * German phrases only. Unlike the spellcheck first-wins above this is a
+   * genuine divergence rather than parity -- Solr's SuggestComponent does
+   * accept several dictionaries and answers keyed per dictionary, which is why
+   * upstream sets an array here (Suggester.php:253) and why the response walk
+   * in WayfinderBackend::getSuggesterAutocompleteSuggestions() iterates every
+   * dictionary key. It is also UNCAPTURED: none of #384's 35 suggest_* fixtures
+   * repeats the param, so the Solr-side shape of a multi-dictionary response is
+   * not pinned here. The array is still emitted, because that is upstream's
+   * behaviour and because emitting only the first would bake the ceiling in;
+   * closing it is server-side work.
+   *
+   * ponytail: the dictionary NAME is only as good as the analyzer chain the
+   * server has for it. #384 answers an unshipped dictionary under the
+   * stemming-free 'und' chain rather than that language's own
+   * (src/schema.rs:1048-1054 `dictionary_tokenizer` -- #384, unmerged), with
+   * one registered suggest chain per language in its 18-entry LANGUAGES table
+   * (:1258-1273), so 'de'/'fr' do get their own stemmer while a
+   * region-qualified langcode like 'pt-br' falls back to 'und' and is stemmed
+   * not at all. Whether real Solr instead REJECTS an unconfigured dictionary
+   * with a 400 'No suggester named <x> was configured' -- the shipped configset
+   * defines only 'en' and 'und', which would make the 18-language fan-out an
+   * invention -- is #384's own open, uncaptured hypothesis (its report's
+   * "Follow-ups (a)"), not established behaviour. If a capture confirms the
+   * 400, this builder becomes silently dead on any non-en/und site, because
+   * WayfinderBackend::getSuggesterAutocompleteSuggestions() swallows the
+   * resulting SearchApiException into [] -- so that capture is a prerequisite
+   * for trusting this plugin on a multilingual site, and the fix would live
+   * either here (clamp the dictionary to what the server configures) or
+   * server-side.
+   *
+   * @param array<int, string> $contextFilterTags
+   *   Context filter tags in their raw (unencoded) 'search_api/index:<id>' /
+   *   'drupal/langcode:<x>' form, as the Suggester plugin's configuration
+   *   produces them (Suggester.php:164-174).
+   *
+   * @return array<string, string|int|array<int, string>>
+   */
+  public function buildAutocompleteSuggester(QueryInterface $query, string $user_input, array $contextFilterTags = []): array {
+    $this->languages = $this->languageResolver->resolve($query);
+    $langcodes = $this->languages;
+    $tags = $contextFilterTags;
+    $dictionary = NULL;
+
+    if (in_array('drupal/langcode:multilingual', $tags, TRUE)) {
+      if (count($langcodes) === 1) {
+        $langcode = reset($langcodes);
+        $tags = str_replace('drupal/langcode:multilingual', 'drupal/langcode:' . $langcode, $tags);
+        $dictionary = $langcode;
+      }
+      else {
+        // Use multiple dictionaries and langcodes (Suggester.php:249-254).
+        $tagName = $this->fieldMapper->encodeSolrName('drupal/langcode:');
+        $tags = str_replace(
+          'drupal/langcode:multilingual',
+          '(' . $tagName . implode(' ' . $tagName, $langcodes) . ')',
+          $tags
+        );
+        $dictionary = $langcodes;
+      }
+    }
+    else {
+      foreach ($tags as $tag) {
+        if (str_starts_with($tag, 'drupal/langcode:')) {
+          $parts = explode(':', $tag);
+          if (isset($parts[1]) && $parts[1] !== 'any') {
+            $dictionary = $parts[1] !== '' ? $parts[1] : FieldMapper::LANGUAGE_UNSPECIFIED;
+            break;
+          }
+        }
+      }
+    }
+
+    if (empty($dictionary)) {
+      // No dictionary resolved, so the langcode tag would only narrow the
+      // lookup to nothing useful: drop it (Suggester.php:268-275).
+      foreach ($tags as $key => $tag) {
+        if (str_starts_with($tag, 'drupal/langcode:')) {
+          unset($tags[$key]);
+          break;
+        }
+      }
+    }
+
+    $params = [
+      'suggest' => 'true',
+      'suggest.q' => $user_input,
+      'suggest.dictionary' => empty($dictionary) ? FieldMapper::LANGUAGE_UNSPECIFIED : $dictionary,
+    ];
+    if ($tags !== []) {
+      $params['suggest.cfq'] = $this->buildSuggesterContextFilterQuery($tags);
+    }
+    $params['suggest.count'] = (int) ($query->getOption('limit') ?? 10);
+    // The search_api_autocomplete module highlights by itself
+    // (Suggester.php:286-287).
+    $params['suggest.highlight'] = 'false';
+    $params['omitHeader'] = 'true';
+
+    return $params;
+  }
+
+  /**
+   * Builds the suggest.cfq value from context filter tags (#385).
+   *
+   * Ported from search_api_solr's Utility::buildSuggesterContextFilterQuery()
+   * (Utility.php:476-487): each tag is '+'-prefixed (every tag is mandatory)
+   * and encoded through the field-name encoder, because "suggester context
+   * boolean filter queries have issues with special characters like '/' or ':'
+   * if not properly quoted" (SearchApiSolrBackend.php:1339-1341) -- and the
+   * indexed sm_context_tags values are encoded the same way
+   * (DocumentBuilder::buildAddCommand()), so the two sides must agree.
+   *
+   * A tag that is ALREADY encoded is passed through unencoded, upstream's test
+   * being `decodeSolrName($tag) === $tag` (:479). The one tag that actually
+   * takes this branch is the multilingual group form
+   * '(drupal_X2f_langcode_X3a_de drupal_X2f_langcode_X3a_fr)' that
+   * buildAutocompleteSuggester() constructs pre-encoded; re-encoding it would
+   * escape the parentheses and the space and destroy the boolean group.
+   *
+   * ponytail: for a plain already-encoded tag this branch is near-unreachable
+   * as an *observable* difference, because FieldMapper::encodeSolrName() has no
+   * '_X' collision guard (see its docblock) and is therefore idempotent -- a
+   * string of only [a-zA-Z0-9_] re-encodes to itself. The check is kept
+   * because it is upstream's, because it is what makes the group form above
+   * correct, and because it would become load-bearing the day the encoder
+   * gains upstream's guard.
+   *
+   * @param array<int, string> $tags
+   *   Context filter tags.
+   */
+  private function buildSuggesterContextFilterQuery(array $tags): string {
+    $cfq = [];
+    foreach ($tags as $tag) {
+      $cfq[] = $this->fieldMapper->decodeSolrName($tag) === $tag
+        ? '+' . $this->fieldMapper->encodeSolrName($tag)
+        : '+' . $tag;
+    }
+    return implode(' ', $cfq);
   }
 
   /**

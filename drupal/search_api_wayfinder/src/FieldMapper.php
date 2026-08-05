@@ -257,11 +257,45 @@ class FieldMapper {
    *   'search_api_X2f_index_X3a_capture_index' there;
    * - '-' -> '_X2d_', the case SearchApiSolrBackend.php:2466-2468 spells out
    *   itself: 'de-AT' gives 'tm_X3b_de_X2d_AT_*'.
+   *
+   * Public since issue #385: the Suggester autocomplete plugin encodes context
+   * filter tags with the same transform (QueryBuilder::
+   * buildAutocompleteSuggester(), DocumentBuilder's sm_context_tags), and one
+   * implementation is the point -- see the field-name call sites below.
+   *
+   * KNOWN DIVERGENCE, deliberately left alone: upstream's regex is
+   * '/([^\da-zA-Z_]|_X)/u' (Utility.php:302-308), i.e. it also encodes a
+   * literal '_X' so that an already-encoded run cannot be confused with a
+   * source name that happened to contain '_X'. Ours has no such collision
+   * guard, which makes this encoder idempotent where upstream's is not.
+   * Changing it would rename every mapped field this module has ever indexed,
+   * so it is a separate concern from #385 -- recorded here so the difference
+   * is not mistaken for an oversight.
    */
-  private function encodeSolrName(string $name): string {
+  public function encodeSolrName(string $name): string {
     return (string) preg_replace_callback(
       '/[^a-zA-Z0-9_]/',
       static fn (array $match): string => '_X' . bin2hex($match[0]) . '_',
+      $name
+    );
+  }
+
+  /**
+   * Inverts encodeSolrName(), mirroring search_api_solr's
+   * Utility::decodeSolrName() (Utility.php:326-332): every '_X<hex>_' run
+   * becomes the byte it encodes, so 'tm_X3a_node_X2f_body' reads
+   * 'tm:node/body'.
+   *
+   * The only caller is QueryBuilder's port of
+   * Utility::buildSuggesterContextFilterQuery() (Utility.php:476-487), whose
+   * "is this tag already encoded?" test is literally
+   * `decodeSolrName($tag) === $tag`. Provided here rather than inline so the
+   * encode/decode pair stays in one place.
+   */
+  public function decodeSolrName(string $name): string {
+    return (string) preg_replace_callback(
+      '/_X([0-9a-f]+?)_/',
+      static fn (array $match): string => (string) hex2bin($match[1]),
       $name
     );
   }
