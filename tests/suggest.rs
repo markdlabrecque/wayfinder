@@ -269,18 +269,33 @@ stored = true
 multi_valued = true
 "#;
 
-/// The exact 4-doc corpus `solr-ref/capture.sh`'s #384 block indexes, so the
+/// The exact 5-doc corpus `solr-ref/capture.sh`'s #384 block indexes, so the
 /// `suggest_q_*.json` fixtures are ground truth for it. `twm_suggest` carries
 /// the suggestion phrases; `sm_context_tags` carries the per-doc context tags
 /// `suggest.cfq` filters against (`site_alpha`/`site_beta` vary by doc so cfq
 /// can include and exclude; `lang_en`/`lang_und` so a two-tag AND is
 /// satisfiable for some docs and not others).
+///
+/// `su5` carries MULTI-BYTE phrases on purpose: U+212A KELVIN SIGN (`\u{212A}`,
+/// 3 bytes, lowercases to the 1-byte `k`) and U+0130 LATIN CAPITAL I WITH DOT
+/// ABOVE (`\u{0130}`, 2 bytes, lowercases to a 3-byte `i` + combining dot).
+/// Every other phrase in this corpus is pure ASCII, where an analyzed token's
+/// byte length equals its surface's -- which lets a highlighter that adds the
+/// ANALYZED token's byte length to an offset into the ORIGINAL text look
+/// correct on all 25 pre-existing fixtures while actually being able to slice
+/// mid-codepoint. su5 is the case that tells the two apart. Its tags are
+/// `site_gamma`/`lang_tr`, used by no `cfq` fixture, and none of its tokens is
+/// touched by any pre-su5 query, so adding it must leave the other 25
+/// fixtures byte-identical outside `QTime` -- that invariance is itself the
+/// check that su5 is inert (`solr-ref/capture.sh`'s capture comment for this
+/// block makes the same claim against the real Solr capture).
 fn suggest_lookup_corpus() -> Value {
     json!([
         {"id":"su1","twm_suggest":["quick brown fox","lazy dog"],"sm_context_tags":["site_alpha","lang_en"]},
         {"id":"su2","twm_suggest":["quietly quacking quail","brown bear"],"sm_context_tags":["site_alpha","lang_und"]},
         {"id":"su3","twm_suggest":["the quick fox jumps over the lazy dog","case studies show progress"],"sm_context_tags":["site_beta","lang_en"]},
-        {"id":"su4","twm_suggest":["running rivers carve valleys"],"sm_context_tags":["site_beta","lang_und"]}
+        {"id":"su4","twm_suggest":["running rivers carve valleys"],"sm_context_tags":["site_beta","lang_und"]},
+        {"id":"su5","twm_suggest":["\u{212A}elvin degrees","\u{0130}stanbul airport"],"sm_context_tags":["site_gamma","lang_tr"]}
     ])
 }
 
@@ -761,6 +776,185 @@ async fn suggest_q_order_swap_en_matches_fixture() {
     assert_lookup_matches(
         "suggest_q_order_swap_en",
         "suggest?suggest.dictionary=en&suggest.q=fox%20quick&wt=json",
+    )
+    .await;
+}
+
+// --- round-3 review probes: nine fixtures settling four behaviours the first
+// 25 fixtures left open (highlight-span rule for non-final/final tokens,
+// trailing-separator handling, multi-byte highlight-span arithmetic, and the
+// cfq paren-group branch). See `solr-ref/capture.sh`'s "round-3 review
+// probes" comment block for the capture rationale.
+
+/// Highlight length for a NON-FINAL (exact) query token whose stem differs
+/// from its surface: `studies show` -> `case <b>studies</b> <b>show</b>
+/// progress`. Every non-final token in the pre-existing fixtures is
+/// stem-identical (`quick`/`fox`), so nothing before this pinned "bold the
+/// stem's length" against "bold the whole surface token" for an exact
+/// (non-prefix) match. Lucene's `AnalyzingInfixSuggester` splits the two cases
+/// (`addWholeMatch` for a matched term, `addPrefixMatch` for the final
+/// prefix); this fixture is the whole-surface-token reading. `show` (final,
+/// stem-identical) confirms the prefix branch is unaffected.
+#[tokio::test]
+async fn suggest_q_hl_wholetoken_en_matches_fixture() {
+    assert_lookup_matches(
+        "suggest_q_hl_wholetoken_en",
+        "suggest?suggest.dictionary=en&suggest.q=studies%20show&wt=json",
+    )
+    .await;
+}
+
+/// The same question with the FINAL token also stemmed, isolating the prefix
+/// branch's span length independently: `running rivers` -> `<b>running</b>
+/// <b>river</b>s carve valleys`. `running` (non-final, exact) bolds its whole
+/// surface token per `suggest_q_hl_wholetoken_en`'s rule; `rivers` (final,
+/// prefix) bolds only the analyzed/stemmed length (`river`), not the full
+/// surface `rivers`. This single fixture is the only one that isolates BOTH
+/// the non-final-whole-token rule and the final-prefix-stem-length rule at
+/// once, because `suggest_q_hl_wholetoken_en`'s final token (`show`) happens
+/// to be stem-identical and so cannot show the final-token span length
+/// diverging from the surface.
+#[tokio::test]
+async fn suggest_q_hl_stemspan_en_matches_fixture() {
+    assert_lookup_matches(
+        "suggest_q_hl_stemspan_en",
+        "suggest?suggest.dictionary=en&suggest.q=running%20rivers&wt=json",
+    )
+    .await;
+}
+
+/// A TRAILING SPACE on the query changes the last token from a PrefixQuery to
+/// a complete TermQuery: `suggest.q=qui%20` (`qui ` with a trailing space)
+/// returns `numFound:0`, where `suggest_q_prefix_en`'s bare `suggest.q=qui`
+/// (no trailing space) returns 3. Nothing before this fixture pins that a
+/// trailing separator is even observable -- `suggest_q_prefix_en` only shows
+/// that `qui` alone matches as a prefix; this is the fixture that shows the
+/// same three letters, with one more trailing byte, matching nothing. A
+/// user typing a space into an autocomplete box is an entirely ordinary
+/// event, not a corner case.
+#[tokio::test]
+async fn suggest_q_trailing_space_en_matches_fixture() {
+    assert_lookup_matches(
+        "suggest_q_trailing_space_en",
+        "suggest?suggest.dictionary=en&suggest.q=qui%20&wt=json",
+    )
+    .await;
+}
+
+/// Multi-byte prefix probe, SHRINK direction: `suggest.q=k` returns
+/// `numFound:0` against su5's `\u{212A}elvin degrees` (KELVIN SIGN, U+212A,
+/// which Rust's `to_lowercase` folds to the 1-byte `k`). Paired with
+/// `suggest_q_multibyte_full_en` (which DOES hit on `kelvin`), this
+/// disambiguates whether a miss on `k` alone means the fold to `k` never
+/// happens at all, or whether it is specifically the single-character query
+/// that misses (`suggest_q_multibyte_onechar_en` settles that further).
+/// Nothing in the pre-existing pure-ASCII corpus can distinguish "folds but
+/// doesn't match" from "doesn't fold" because every existing token's surface
+/// and analyzed byte lengths are equal.
+#[tokio::test]
+async fn suggest_q_multibyte_prefix_en_matches_fixture() {
+    assert_lookup_matches(
+        "suggest_q_multibyte_prefix_en",
+        "suggest?suggest.dictionary=en&suggest.q=k&wt=json",
+    )
+    .await;
+}
+
+/// The `LengthFilterFactory min="2"` floor, on the GROW-direction token:
+/// `suggest.q=i` returns `numFound:0` against su5's `\u{0130}stanbul airport`
+/// (U+0130 LATIN CAPITAL I WITH DOT ABOVE lowercases to a 3-byte `i` +
+/// combining dot). Nothing before this pins that a single surface character
+/// is dropped by the dictionary analyzer's minimum-length filter before it
+/// ever reaches the suggester, independent of any multi-byte fold.
+#[tokio::test]
+async fn suggest_q_multibyte_onechar_en_matches_fixture() {
+    assert_lookup_matches(
+        "suggest_q_multibyte_onechar_en",
+        "suggest?suggest.dictionary=en&suggest.q=i&wt=json",
+    )
+    .await;
+}
+
+/// THE panic case: `suggest.q=ke` -> `<b>\u{212A}e</b>lvin degrees`. The
+/// surface token `\u{212A}elvin` (KELVIN SIGN + "elvin") is 8 bytes; its
+/// analyzed/lowercased form `kelvin` is 6 bytes. A highlighter that slices the
+/// ORIGINAL (surface) text using the ANALYZED token's byte length computes a
+/// 2-byte bold span starting at byte 0 of the surface -- but the surface's
+/// first codepoint (`\u{212A}`, U+212A) is itself 3 bytes, so a 2-byte slice
+/// lands INSIDE that codepoint's UTF-8 encoding. In Wayfinder today this
+/// currently surfaces as `wayfinder::PanicError` (a 500), so a bare
+/// fixture-mismatch assertion here would be a confusing way to learn about a
+/// mid-codepoint slice panic -- the explicit status/message assertions below
+/// name it directly instead of leaving the panic to surface as an opaque
+/// assertion failure on the body.
+#[tokio::test]
+async fn suggest_q_multibyte_short_en_matches_fixture() {
+    let (app, _dir) = suggest_lookup_app().await;
+    let (status, body) = get(&app, "suggest?suggest.dictionary=en&suggest.q=ke&wt=json").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "suggest.q=ke must NOT panic slicing mid-codepoint through the \
+         multi-byte KELVIN SIGN (U+212A) -- got {status} instead of 200: {body}"
+    );
+    assert_lookup_matches(
+        "suggest_q_multibyte_short_en",
+        "suggest?suggest.dictionary=en&suggest.q=ke&wt=json",
+    )
+    .await;
+}
+
+/// The multi-byte SHRINK-direction control: `suggest.q=kelvin` (the WHOLE
+/// analyzed-length token, not a 2-byte prefix) -> `<b>\u{212A}elvin</b>
+/// degrees`, the entire 6-character surface token bolded. Paired with
+/// `suggest_q_multibyte_short_en`'s 2-byte prefix (which panics/garbles),
+/// this isolates that the byte-length mismatch is specifically a PARTIAL-span
+/// problem: bolding the FULL matched token never has to slice mid-codepoint,
+/// because the span boundary coincides with a codepoint boundary either way.
+#[tokio::test]
+async fn suggest_q_multibyte_full_en_matches_fixture() {
+    assert_lookup_matches(
+        "suggest_q_multibyte_full_en",
+        "suggest?suggest.dictionary=en&suggest.q=kelvin&wt=json",
+    )
+    .await;
+}
+
+/// The multi-byte GROW-direction control: `suggest.q=istanbul` ->
+/// `<b>\u{0130}stanbul</b> airport`, the whole token bolded. U+0130 lowercases
+/// to a 3-byte `i` + combining dot -- LONGER than its 2-byte surface encoding,
+/// the opposite direction of `ke`'s shrink. Together with
+/// `suggest_q_multibyte_full_en`, this shows the whole-token-bold case is safe
+/// in BOTH directions of the byte-length change; only a PARTIAL span (the `ke`
+/// 2-byte prefix case) can slice mid-codepoint.
+#[tokio::test]
+async fn suggest_q_multibyte_grow_en_matches_fixture() {
+    assert_lookup_matches(
+        "suggest_q_multibyte_grow_en",
+        "suggest?suggest.dictionary=en&suggest.q=istanbul&wt=json",
+    )
+    .await;
+}
+
+/// `cfq` PAREN GROUP: `suggest.cfq=+(site_alpha site_beta)` -> `numFound:2`,
+/// both `fox` hits (su1 site_alpha, su3 site_beta), unhighlighted (the cfq
+/// lookup path never highlights, per `suggest_q_hl_on_cfq_en_matches_fixture`).
+/// So Solr parses a parenthesized group as MUST(at least one of the group's
+/// tags) -- a nested SHOULD inside a MUST. No fixture before this one ever
+/// sent a paren group, so `parse_cfq`'s handling of it was entirely unpinned.
+/// `Utility::buildSuggesterContextFilterQuery`
+/// (`coverage/search_api_solr_4.4.0_source/src/Utility/Utility.php:476-487`)
+/// provably never emits this form -- it space-joins `'+' . $tag` per tag, with
+/// no grouping syntax -- so this branch is unreachable from the real
+/// `search_api_solr`/`search_api_solr_autocomplete` client. But an unreachable
+/// branch that answers the wrong question is worse than no branch at all: this
+/// fixture is what decides whether to implement the grouping correctly or
+/// delete the branch.
+#[tokio::test]
+async fn suggest_q_cfq_group_matches_fixture() {
+    assert_lookup_matches(
+        "suggest_q_cfq_group",
+        "suggest?suggest.dictionary=en&suggest.q=fox&suggest.cfq=%2B%28site_alpha%20site_beta%29&wt=json",
     )
     .await;
 }
