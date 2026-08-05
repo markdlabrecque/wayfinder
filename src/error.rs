@@ -56,6 +56,13 @@ struct ErrorExtra {
     /// alongside `error`. `None` everywhere else -- no other error path grows
     /// a `terms` key. Rendered immediately before `error`, like `response`.
     terms: Option<Value>,
+    /// Issue #384: `suggest.count=0` fails inside Lucene's
+    /// `TopFieldCollectorManager` *after* the SuggestComponent has emitted its
+    /// (empty) container, so Solr's fixture (`suggest_q_count_zero_en.json`)
+    /// carries an empty `suggest:{}` object alongside `error`. The `terms`
+    /// story exactly. `None` everywhere else. Rendered immediately before
+    /// `error`, like `response` and `terms`.
+    suggest: Option<Value>,
     /// Set only for the one captured 500 whose error object carries `msg,
     /// trace, code` with **no** `metadata` key at all (finding 59's
     /// `err_regex_bad_class.json`: a regex that parses as a query but fails
@@ -144,6 +151,14 @@ impl WfError {
         self.extra.terms = Some(terms);
         self
     }
+
+    /// Attaches a `suggest` block (issue #384's `suggest.count=0` 500), the
+    /// `ErrorExtra::suggest` analogue of [`Self::with_terms`]. Default absent,
+    /// so no other error path grows a `suggest` key.
+    pub fn with_suggest(mut self, suggest: Value) -> Self {
+        self.extra.suggest = Some(suggest);
+        self
+    }
 }
 
 /// Renders just `msg`, so a `WfError` raised deep inside an `anyhow`-based
@@ -223,6 +238,9 @@ impl IntoResponse for WfError {
         }
         if let Some(terms) = &self.extra.terms {
             body.insert("terms".to_string(), terms.clone());
+        }
+        if let Some(suggest) = &self.extra.suggest {
+            body.insert("suggest".to_string(), suggest.clone());
         }
         body.insert("error".to_string(), error);
         (self.status, Json(Value::Object(body))).into_response()

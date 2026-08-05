@@ -34,7 +34,7 @@ use tantivy::schema::{Field, IndexRecordOption, OwnedValue};
 use tantivy::snippet::SnippetGenerator;
 use tantivy::time::OffsetDateTime;
 use tantivy::time::format_description::well_known::Rfc3339;
-use tantivy::tokenizer::TokenStream;
+use tantivy::tokenizer::{TextAnalyzer, TokenStream};
 use tantivy::{
     DateTime, DocAddress, Index, IndexReader, IndexWriter, ReloadPolicy, Score, TantivyDocument,
     Term,
@@ -4108,6 +4108,159 @@ impl CoreIndex {
         dir_size_bytes(&self.data_dir)
     }
 
+    /// One `suggest.q` lookup hit, in the wire shape Solr's `solr.SuggestComponent`
+    /// emits per suggestion (issue #384): the (optionally highlighted) phrase,
+    /// its `weight` (always `0` -- the shipped config sets no `weightField`, so
+    /// `DocumentDictionaryFactory` defaults every phrase to `0`), and its
+    /// `payload` (always `""` -- no `payloadField` is configured either).
+    ///
+    /// ponytail: this is a brute-force scan, not a suggester index. Solr builds
+    /// a side FST (`AnalyzingInfixLookupFactory` over
+    /// `DocumentDictionaryFactory`); Wayfinder walks every live doc in every
+    /// segment, re-analysing each `twm_suggest` phrase per request, and stops
+    /// early only once `count` hits accumulate. Two named ceilings:
+    ///
+    /// 1. **Cost is O(live docs x phrases per doc) per request**, with a stored-
+    ///    doc fetch each. Autocomplete is the one read path that fires on every
+    ///    keystroke, so this is the ceiling that will actually bite; it is
+    ///    acceptable now because the alternative is a second persisted index
+    ///    with its own build/invalidate lifecycle (`suggest.buildAll` is inert
+    ///    per #352), which is a much larger change than serving the wire shape.
+    /// 2. **Result order is `(segment_ord, doc_id)`, which is not a stable
+    ///    global order.** It happens to match the captured fixtures because the
+    ///    capture corpus is four docs indexed in order into one segment. After a
+    ///    merge, or across segments, the same corpus can legitimately come back
+    ///    in a different order than Solr's (which ranks by the suggester's
+    ///    weight, then by its own tie-break). Nothing pins cross-segment order,
+    ///    so do not read the fixtures as evidence that it is right.
+    ///
+    /// Revisit both together: they are the same change (build a real suggester
+    /// structure with a defined ordering), not two independent fixes.
+    pub fn suggest_lookup(
+        &self,
+        dictionary: &str,
+        query: &str,
+        cfq: Option<&str>,
+        count: usize,
+        highlight: bool,
+    ) -> Result<Vec<SuggestHit>> {
+        let tokenizer_name = schema::dictionary_tokenizer(dictionary);
+        let Some(mut tokenizer) = self.wf_schema.tokenizers.get(&tokenizer_name) else {
+            // No analyzer registered for this dictionary -> nothing to match.
+            // Should not happen: `dictionary_tokenizer` always names one that
+            // `build_tokenizers` registers, but the index is the trust boundary.
+            return Ok(Vec::new());
+        };
+        // Analyze the query into stems. The analyzer chain removes stopwords
+        // (`text_en` carries an English `StopWordFilter`), so a stopword-only
+        // query yields no tokens and matches nothing -- matching the captured
+        // `the`-as-`suggest.q` behaviour (zero suggestions) exactly.
+        // Only the query's token stems matter; its offsets are into the query
+        // string, never into a phrase, so highlighting does not use them.
+        let query_tokens: Vec<String> = analyzer_tokens(&mut tokenizer, query)
+            .into_iter()
+            .map(|(stem, _, _)| stem)
+            .collect();
+        if query_tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (must, should, must_not, min_should) = parse_cfq(cfq);
+
+        // No `twm_suggest` field at all -> the schema carries no suggestion
+        // phrases, so every lookup is empty (an empty `suggest` block is still
+        // a valid, fixture-shaped answer).
+        let has_phrases = self.wf_schema.field(PHRASE_FIELD).is_some()
+            || self.dynamic_stored_field_exists(PHRASE_FIELD);
+        if !has_phrases {
+            return Ok(Vec::new());
+        }
+
+        let searcher = self.reader.searcher();
+        let mut hits: Vec<SuggestHit> = Vec::new();
+        for (seg_ord, segment_reader) in searcher.segment_readers().iter().enumerate() {
+            for doc_id in 0..segment_reader.max_doc() {
+                if segment_reader.is_deleted(doc_id) {
+                    continue;
+                }
+                let addr = DocAddress {
+                    segment_ord: seg_ord as u32,
+                    doc_id,
+                };
+                let Ok(doc) = searcher.doc(addr) else {
+                    continue;
+                };
+                let contexts = self.stored_string_values(&doc, CONTEXT_FIELD);
+                // `cfq` is a per-document gate: a phrase inherits its source
+                // document's `sm_context_tags`, so the whole document is in or
+                // out before any of its phrases are considered.
+                if !cfq_passes(&contexts, &must, &should, &must_not, min_should) {
+                    continue;
+                }
+                for phrase in self.stored_string_values(&doc, PHRASE_FIELD) {
+                    if let Some(term) =
+                        suggest_match(&mut tokenizer, &phrase, &query_tokens, highlight)
+                    {
+                        hits.push(SuggestHit {
+                            term,
+                            weight: 0,
+                            payload: String::new(),
+                        });
+                        if hits.len() >= count {
+                            return Ok(hits);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(hits)
+    }
+
+    /// Every stored string value of `name` on `doc`, whether `name` is a
+    /// declared static stored field or a stored dynamic field living in the
+    /// `_dynamic` / `_dynamic_text` JSON catch-alls -- the same two loops
+    /// `render_doc` walks. The suggest read path uses this to gather a
+    /// document's `twm_suggest` phrases and `sm_context_tags` contexts (issue
+    /// #384).
+    fn stored_string_values(&self, doc: &TantivyDocument, name: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(field) = self.wf_schema.field(name) {
+            for v in doc.get_all(field) {
+                if let Some(s) = v.as_str() {
+                    out.push(s.to_string());
+                }
+            }
+            if !out.is_empty() {
+                return out;
+            }
+        }
+        for container in [schema::DYNAMIC_FIELD, schema::DYNAMIC_TEXT_FIELD] {
+            let Some(field) = self.wf_schema.field(container) else {
+                continue;
+            };
+            for value in doc.get_all(field) {
+                let OwnedValue::Object(entries) = OwnedValue::from(value) else {
+                    continue;
+                };
+                for (key, v) in entries {
+                    if key == name {
+                        collect_owned_strings(&v, &mut out);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// True iff a stored dynamic field named `name` exists in the schema (any
+    /// matching `[[dynamic_fields]]` rule that is `stored`). Used to short-circuit
+    /// the suggest path when neither a static nor a dynamic `twm_suggest` is
+    /// present.
+    fn dynamic_stored_field_exists(&self, name: &str) -> bool {
+        self.wf_schema
+            .match_dynamic(name)
+            .is_some_and(|rule| rule.stored)
+    }
+
     /// Every term in a **string** field's term dictionary, with how many of
     /// `query`'s matches carry it — Solr's `facet.field`.
     ///
@@ -4679,6 +4832,211 @@ impl FacetOrderKey {
             // `cmp`'s `Nanos` arm) — kept total rather than panicking.
             FacetOrderKey::Nanos(v) => *v as f64,
         }
+    }
+}
+
+/// The field the shipped `solr.SuggestComponent` reads suggestion phrases from
+/// (`field=twm_suggest` in `solrconfig_extra.xml`).
+const PHRASE_FIELD: &str = "twm_suggest";
+/// The suggester's `contextField` (`sm_context_tags`): the stored per-document
+/// tags `suggest.cfq` filters against.
+const CONTEXT_FIELD: &str = "sm_context_tags";
+
+/// One `suggest.q` lookup hit, in the wire shape Solr's `solr.SuggestComponent`
+/// emits per suggestion (issue #384).
+pub struct SuggestHit {
+    /// The (optionally `<b>`-highlighted) suggestion phrase.
+    pub term: String,
+    /// Always `0`: the shipped config sets no `weightField`, so
+    /// `DocumentDictionaryFactory` defaults every phrase to weight 0.
+    pub weight: i64,
+    /// Always `""`: no `payloadField` is configured.
+    pub payload: String,
+}
+
+/// `(stem, offset_from, offset_to)` for one analyzed token. `offset_*` are byte
+/// offsets into the ORIGINAL text -- Tantivy's stemmer preserves them, which is
+/// what lets the suggest highlight wrap the right span of the verbatim phrase.
+type Tok = (String, usize, usize);
+
+/// Analyzes `text` with `tokenizer` into its surviving (post-stopword,
+/// post-stem) tokens with their original byte offsets. Empty for a stopword-only
+/// input. Used for both the `suggest.q` query and each stored phrase.
+fn analyzer_tokens(tokenizer: &mut TextAnalyzer, text: &str) -> Vec<Tok> {
+    let mut stream = tokenizer.token_stream(text);
+    let mut out = Vec::new();
+    while stream.advance() {
+        let t = stream.token();
+        out.push((t.text.clone(), t.offset_from, t.offset_to));
+    }
+    out
+}
+
+/// `AnalyzingInfixSuggester` matching + highlighting for one phrase (issue
+/// #384). Returns the wire `term` (the phrase, highlighted when `highlight`)
+/// when the phrase matches, else `None`.
+///
+/// Matching (pinned by `suggest_q_*.json` fixtures): `AnalyzingInfixSuggester`
+/// analyzes every query token EXCEPT THE LAST as an exact term, and only the
+/// last as a prefix -- the last token is the one the user is still typing.
+/// So each non-final query token must EQUAL some phrase-token stem, and the
+/// final one need only PREFIX some phrase-token stem.
+///
+/// This is deliberately not the bag-of-token-PREFIXES rule it looks like from
+/// the single-token fixtures, which cannot tell the two apart. Two captures
+/// falsify that reading, both empty where bag-of-prefixes predicts a hit:
+/// `suggest_q_prefix_nonfinal_en` (`qui fox` -- "qui" prefixes "quick" but is
+/// not a token) and `suggest_q_overlap_en` (`qu quick`). Within that rule the
+/// match is order-independent (`suggest_q_order_swap_en`: "fox quick" hits the
+/// same two phrases as "quick fox") and allows gaps ("quick fox" hits "quick
+/// brown fox"). It is never a character-substring test ("row" misses "brown":
+/// `suggest_q_substr_miss_en`).
+///
+/// Highlighting: `AnalyzingInfixSuggester` wraps EVERY matched phrase token,
+/// not one per query token. `suggest_q_multihl_en` pins this -- `qu` against
+/// "quietly quacking quail" bolds all three (`<b>qu</b>ietly <b>qu</b>acking
+/// <b>qu</b>ail`). (`suggest_q_prefix_en` looks like a counterexample and is
+/// not: `qui` bolds only "quietly" because "quacking"/"quail" begin "qua", so
+/// `qui` is not their prefix at all.)
+///
+/// The wrapped span is `[offset_from, offset_from + query_token.len())`, where
+/// the length is that of the ANALYZED query token -- its stem, not the surface
+/// text the user typed. `suggest_q_stem_en` pins the consequence: `study`
+/// stems to `studi`, so "studies" comes back cut mid-word as
+/// `case <b>studi</b>es show progress`. Tantivy's preserved original offsets
+/// make this byte-exact against the captured fixtures.
+fn suggest_match(
+    tokenizer: &mut TextAnalyzer,
+    phrase: &str,
+    query_tokens: &[String],
+    highlight: bool,
+) -> Option<String> {
+    let ptokens = analyzer_tokens(tokenizer, phrase);
+    // `query_tokens` is never empty -- `suggest_lookup` returns early on an
+    // all-stopword query -- so `split_last` always yields a final token.
+    let (last, init) = query_tokens.split_last()?;
+    let last: &str = last;
+    // Non-final tokens must match a phrase-token stem EXACTLY; the final token
+    // may match as a prefix. Both are order-independent.
+    if init
+        .iter()
+        .any(|qt| !ptokens.iter().any(|(ps, _, _)| ps == qt))
+    {
+        return None;
+    }
+    if !ptokens.iter().any(|(ps, _, _)| ps.starts_with(last)) {
+        return None;
+    }
+    if !highlight {
+        return Some(phrase.to_string());
+    }
+    // Walk PHRASE tokens, not query tokens: every phrase token a query token
+    // covers gets bolded, so one query token can light up several phrase
+    // tokens (`suggest_q_multihl_en`).
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (stem, off_from, off_to) in &ptokens {
+        // An exact (non-final) hit bolds the whole token; otherwise the final
+        // token bolds just its prefix.
+        //
+        // ponytail: when BOTH apply to one phrase token (`q=quick qu` -- "quick"
+        // exact and "qu" a prefix of the same token) the exact hit wins here.
+        // No fixture pins that overlap; the discriminating queries that were
+        // captured (`suggest_q_overlap_en`, `suggest_q_prefix_nonfinal_en`) are
+        // both misses, so the case is unreachable from any pinned input.
+        let qlen = if init.iter().any(|qt| qt == stem) {
+            stem.len()
+        } else if stem.starts_with(last) {
+            last.len()
+        } else {
+            continue;
+        };
+        spans.push((*off_from, (off_from + qlen).min(*off_to)));
+    }
+    Some(highlight_spans(phrase, &mut spans))
+}
+
+/// Inserts `<b>`/`</b>` around each `(start, end)` byte span of `phrase`, in
+/// order, non-overlapping. Byte offsets come straight from the analyzer, which
+/// never splits a UTF-8 code point, so the slices are always on boundaries.
+fn highlight_spans(phrase: &str, spans: &mut Vec<(usize, usize)>) -> String {
+    spans.sort();
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    for (s, e) in spans.drain(..) {
+        if s < cursor || s >= e {
+            continue;
+        }
+        if s > cursor {
+            out.push_str(&phrase[cursor..s]);
+        }
+        out.push_str("<b>");
+        out.push_str(&phrase[s..e]);
+        out.push_str("</b>");
+        cursor = e;
+    }
+    out.push_str(&phrase[cursor..]);
+    out
+}
+
+/// Parses `suggest.cfq` into the four parts of a Lucene BooleanQuery against
+/// the context field: `+tag` (MUST), bare `tag` (SHOULD), `-tag` (MUST_NOT), and
+/// `min_should` (1 when there are SHOULD clauses but no MUST, else 0 -- the
+/// BooleanQuery default). `Utility::buildSuggesterContextFilterQuery` emits
+/// only `+tag` MUST terms, so the MUST path is the fixture-covered one; SHOULD
+/// and MUST_NOT are admitted for parser parity. The multilingual `(<t> <t>)`
+/// group the plugin can emit is a ponytail (skipped, not fixture-covered).
+fn parse_cfq(cfq: Option<&str>) -> (Vec<String>, Vec<String>, Vec<String>, usize) {
+    let Some(cfq) = cfq else {
+        return (Vec::new(), Vec::new(), Vec::new(), 0);
+    };
+    let mut must = Vec::new();
+    let mut should = Vec::new();
+    let mut must_not = Vec::new();
+    for term in cfq.split_whitespace() {
+        match term.chars().next() {
+            Some('+') if term.len() > 1 => must.push(term[1..].to_string()),
+            Some('-') if term.len() > 1 => must_not.push(term[1..].to_string()),
+            Some('(') | Some(')') => { /* ponytail: boolean group */ }
+            _ => should.push(term.to_string()),
+        }
+    }
+    let min_should = if must.is_empty() && !should.is_empty() {
+        1
+    } else {
+        0
+    };
+    (must, should, must_not, min_should)
+}
+
+/// Does a document's `sm_context_tags` satisfy the parsed `cfq` BooleanQuery?
+/// MUST: all present; MUST_NOT: none present; SHOULD: at least `min_should`
+/// present. Mirrors Lucene's BooleanQuery semantics, which is what Solr's
+/// SuggestComponent runs `cfq` as against the context field.
+fn cfq_passes(
+    contexts: &[String],
+    must: &[String],
+    should: &[String],
+    must_not: &[String],
+    min_should: usize,
+) -> bool {
+    let has = |t: &str| contexts.iter().any(|c| c == t);
+    must.iter().all(|t| has(t))
+        && must_not.iter().all(|t| !has(t))
+        && should.iter().filter(|t| has(t)).count() >= min_should
+}
+
+/// Collects every string held by an `OwnedValue` -- a leaf `Str` or every
+/// element of an `Array` (multi-valued dynamic fields store their values as an
+/// array). Used by `stored_string_values`'s dynamic-field path.
+fn collect_owned_strings(v: &OwnedValue, out: &mut Vec<String>) {
+    match v {
+        OwnedValue::Str(s) => out.push(s.clone()),
+        OwnedValue::Array(items) => {
+            for item in items {
+                collect_owned_strings(item, out);
+            }
+        }
+        _ => {}
     }
 }
 

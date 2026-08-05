@@ -930,6 +930,36 @@ pub fn split_delimited_payload(token: &str) -> Option<(&str, f32)> {
     value.is_finite().then_some((term, value))
 }
 
+/// The analyzer (Tantivy tokenizer name) a `suggest.dictionary` value
+/// selects, mirroring the shipped `solr.SuggestComponent`'s
+/// `suggestAnalyzerFieldType` per-dictionary analyzer: `text_en` for `en`,
+/// `text_und` for `und`. The dictionary name IS the ISO language code the
+/// Suggester plugin passes (`Suggester.php` derives it from the langcode tag);
+/// `en` maps to Wayfinder's Solr-compatible English preset, any other code in
+/// [`LANGUAGES`] to its `text_<code>` stemmer, and `und`/anything-else to the
+/// stemming-free `text_general` default (Solr's `text_und` is the "undefined
+/// language" analyzer). Used by the `/suggest?suggest.q=` read path
+/// (issue #384).
+///
+/// `und` falling back to `text_general` rather than an exact `text_und` is a
+/// ponytail: Solr's `text_und` adds a `WordDelimiterGraphFilter` Wayfinder's
+/// `text_general` lacks, so the two diverge on inputs with internal
+/// case/number/punctuation boundaries. For the lowercase-word autocomplete
+/// corpus the suggester reads they agree (no boundaries to split on), which is
+/// what the `suggest_q_*.json` fixtures exercise.
+pub fn dictionary_tokenizer(dictionary: &str) -> String {
+    if dictionary == "en" {
+        TEXT_EN_TOKENIZER.to_string()
+    } else if LANGUAGES
+        .iter()
+        .any(|(code, _)| *code == dictionary && *code != "en")
+    {
+        format!("text_{dictionary}")
+    } else {
+        TEXT_GENERAL_TOKENIZER.to_string()
+    }
+}
+
 /// Builds the `TextAnalyzer` for a `[[field_types]]` chain.
 fn build_analyzer(ft: &FieldTypeConfig) -> Result<TextAnalyzer> {
     let mut builder = match ft.tokenizer.as_str() {

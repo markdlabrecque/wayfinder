@@ -4865,7 +4865,7 @@ cap_form_post "form_post_merge_rows" \
 # difference from spellcheck_flat.json: the `suggestion` members become
 # {word, freq} objects and Solr adds `origFreq`/`correctlySpelled`. Run the
 # whole script, or `--only '^spellcheck_360_'`.
-want_any '^spellcheck_360_' && {
+if want_any '^spellcheck_360_'; then
 SPELL360_CONTAINER=wayfinder-solr-360
 SPELL360_PORT=9013
 SPELL360_CORE=spellcheck_360
@@ -4920,5 +4920,178 @@ capspell360 spellcheck_360_extended 200 \
 
 echo "captured issue #360 spellcheck.extendedResults fixture from '$SPELL360_CONTAINER' (port $SPELL360_PORT)"
 release "$SPELL360_CONTAINER" "spellcheck #360 core '$SPELL360_CORE'"
+fi
 
+# --- /suggest?suggest.q= lookup path (issue #384) ---------------------------
+# Appended block. One edit above was unavoidable: the #360 block guarded itself
+# with `want_any '^spellcheck_360_' && { ... }`, and under `set -euo pipefail` a
+# false guard makes that whole && list the failing command, so ANY filtered run
+# that is not `^spellcheck_360_` aborted the script silently (exit 1) right
+# there -- before every block below it. It is now `if want_any ...; then ... fi`.
+# The stray `}` that used to end the file was that group's close; this block had
+# been appended INSIDE it, which is the second reason it never ran.
+# Own container/port/core per the
+# wayfinder-solr-352 precedent: the `/suggest` requestHandler and its
+# `solr.SuggestComponent` (two AnalyzingInfix suggesters `en`/`und`, both over
+# `field=twm_suggest` with `contextField=sm_context_tags`) live in
+# solr-ref/search-api/configset/solrconfig_extra.xml, which the tracer-bullet
+# `content` core does not carry. Same search-api configset mount as the #352
+# block; this block additionally populates `sm_context_tags` (the suggester's
+# contextField) and exercises the `suggest.q` read path the Suggester plugin
+# needs, which #352 deliberately left unserved (SUGGEST_PARAMS omitted
+# `suggest.q`).
+#
+# `search_api_autocomplete` was not installed in the v1.5 capture, so there is
+# zero prior wire evidence for `suggest.q` / `suggest.cfq`; this block is that
+# evidence. Cover: infix (token-position) hit, multi-token contiguous match,
+# prefix-of-token, empty result, `suggest.cfq` context filtering (match /
+# exclude / AND / AND-no-match / unknown-tag), per-language dictionaries (`en`
+# vs `und`, including the en-stemmer divergence `study`/`studies`), and
+# `suggest.count`.
+#
+# The Suggester is `buildOnCommit=false`/`buildOnStartup=false`, so the
+# dictionary is built explicitly with `suggest.buildAll=true` before any
+# lookup (the same command #352 exercises, here for its side effect).
+#
+# No manifest-errors.tsv rows: the differential harness GETs those against the
+# single `content` core, which has neither the SuggestComponent nor a
+# `twm_suggest` corpus, so these rows could only ever be expected divergences
+# with no comparison value. The wire-shape evidence is the fixture comparison
+# in tests/suggest.rs (the heatmap precedent -- fixtures + a direct comparison
+# integration test, no differential routing). The capture helper writes only
+# the fixture JSON, not a manifest line.
+#
+# Not runnable standalone: `$OUT`/`$HERE` come from the top of the script, so
+# run the whole script or `--only '^suggest_q_'`.
+SUGGESTQ384_CONTAINER=wayfinder-solr-384
+SUGGESTQ384_SOLR=http://localhost:9014/solr
+SUGGESTQ384_CORE=suggest
+if want_any '^suggest_q_'; then
+  docker rm -f "$SUGGESTQ384_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$SUGGESTQ384_CONTAINER" -p 9014:8983 \
+    -e SOLR_MODULES=analysis-extras \
+    -v "$HERE/search-api/configset:/opt/solr/server/solr/configsets/search-api:ro" \
+    solr:9 solr-precreate "$SUGGESTQ384_CORE" /opt/solr/server/solr/configsets/search-api >/dev/null
+  echo -n "waiting for issue #384 Solr"
+  for _ in $(seq 90); do
+    if curl -sf "$SUGGESTQ384_SOLR/$SUGGESTQ384_CORE/admin/ping?wt=json" >/dev/null 2>&1; then echo " ok"; break; fi
+    echo -n "."; sleep 1
+  done
+  # Corpus: `twm_suggest` phrases + `sm_context_tags` contexts (the suggester's
+  # contextField). Tags are plain ascii so the `strings` (StrField) context
+  # match is exact and analyzer-free; `site_alpha`/`site_beta` vary by doc so
+  # `cfq` can include and exclude, `lang_en`/`lang_und` vary so a two-tag AND
+  # is satisfiable for some docs and not others.
+  curl -sf "$SUGGESTQ384_SOLR/$SUGGESTQ384_CORE/update?commit=true" -H 'Content-Type: application/json' -d '[
+    {"id":"su1","twm_suggest":["quick brown fox","lazy dog"],"sm_context_tags":["site_alpha","lang_en"]},
+    {"id":"su2","twm_suggest":["quietly quacking quail","brown bear"],"sm_context_tags":["site_alpha","lang_und"]},
+    {"id":"su3","twm_suggest":["the quick fox jumps over the lazy dog","case studies show progress"],"sm_context_tags":["site_beta","lang_en"]},
+    {"id":"su4","twm_suggest":["running rivers carve valleys"],"sm_context_tags":["site_beta","lang_und"]}
+  ]' >/dev/null
+  # Build both dictionaries (buildOn* are false). The response is the #352
+  # build envelope; discarded -- only the build side effect is wanted here.
+  curl -sf "$SUGGESTQ384_SOLR/$SUGGESTQ384_CORE/suggest?suggest.buildAll=true&wt=json" >/dev/null
+fi
+
+# Fixture-only capture (no manifest row -- see the block comment above).
+capsuggestq() {  # capsuggestq <name> <url-after-/solr/>
+  local name=$1 suffix=$2
+  want "$name" || return 0
+  curl -sg "$SUGGESTQ384_SOLR/$suffix" -o "$OUT/$name.json"
 }
+
+D384='suggest.dictionary'
+# infix (token-position) hit: "fox" is the LAST token of "quick brown fox" and
+# a MIDDLE token of "the quick fox jumps over the lazy dog" -- a prefix-only
+# suggester would still find it, but the point is the phrase-position infix.
+capsuggestq suggest_q_infix_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=fox&wt=json"
+# multi-token: the hypothesis behind this capture was that AnalyzingInfix
+# requires CONTIGUOUS tokens, so "quick fox" would match only "the quick fox
+# jumps ..." and not "quick brown fox". The capture disproves it -- both
+# phrases come back (numFound 2). The match is bag-of-tokens: every query token
+# must prefix SOME phrase token, in any position and any order.
+capsuggestq suggest_q_multitoken_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=quick+fox&wt=json"
+# prefix-of-last-token: "qui" is a token prefix of quick/quietly.
+capsuggestq suggest_q_prefix_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=qui&wt=json"
+# empty result: no phrase contains a token touching "zzzzz".
+capsuggestq suggest_q_empty_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=zzzzz&wt=json"
+# cfq single-tag match: only su1/su3 carry "fox"; su1 is site_alpha, su3
+# site_beta, so +site_alpha keeps only su1's "quick brown fox".
+capsuggestq suggest_q_cfq_match "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=fox&suggest.cfq=%2Bsite_alpha&wt=json"
+# cfq single-tag exclude: the mirror -- +site_beta keeps only su3.
+capsuggestq suggest_q_cfq_exclude "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=fox&suggest.cfq=%2Bsite_beta&wt=json"
+# cfq AND: +site_alpha +lang_en -- su1 has both -> kept; su2 is site_alpha but
+# lang_und, su3 is site_beta -> both dropped.
+capsuggestq suggest_q_cfq_and "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=fox&suggest.cfq=%2Bsite_alpha%20%2Blang_en&wt=json"
+# cfq AND no doc satisfies: +site_alpha +site_beta -> no doc carries both.
+capsuggestq suggest_q_cfq_nomatch "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=fox&suggest.cfq=%2Bsite_alpha%20%2Bsite_beta&wt=json"
+# cfq unknown tag: +nosuchtag -> empty.
+capsuggestq suggest_q_cfq_unknown "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=fox&suggest.cfq=%2Bnosuchtag&wt=json"
+# multi-dictionary routing: dict=und over the same corpus. "fox" has no stem,
+# so und and en agree on the hit set -- the fixture pair (this + infix_en)
+# pins that suggest.dictionary selects the dictionary, not the result set here.
+capsuggestq suggest_q_und "$SUGGESTQ384_CORE/suggest?$D384=und&suggest.q=fox&wt=json"
+# en stemmer match: text_en stems "studies" -> "studi" and the query "study"
+# -> "studi", so dict=en matches "case studies show progress".
+capsuggestq suggest_q_stem_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=study&wt=json"
+# und no-match (the multi-dictionary divergence): text_und does not stem, so
+# "study" is not a token-prefix of "studies" (study vs studie-) -> empty under
+# und where en matched above.
+capsuggestq suggest_q_stem_und "$SUGGESTQ384_CORE/suggest?$D384=und&suggest.q=study&wt=json"
+# count limit: "qui" matches three phrases; suggest.count=1 keeps only one --
+# pins the top-N cut and Solr's tie-break order.
+capsuggestq suggest_q_count "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=qui&suggest.count=1&wt=json"
+# true-substring miss: "row" is a substring of "brown" but not a token PREFIX
+# of any token. AnalyzingInfixSuggester is infix at the TOKEN-POSITION level
+# (any token may match), not at the character level within a token, so this is
+# empty. This is the fixture that distinguishes the two readings of "infix".
+capsuggestq suggest_q_substr_miss_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=row&wt=json"
+# suggest.highlight=false, no cfq: does the param actually suppress the <b>
+# wrapping? The Suggester plugin always sends highlight=false, so this is the
+# shape the real client sees; nothing else pins it.
+capsuggestq suggest_q_hl_off_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=fox&suggest.highlight=false&wt=json"
+# suggest.highlight=true WITH cfq: isolates whether the context-filtered lookup
+# path highlights at all, independent of the highlight param.
+capsuggestq suggest_q_hl_on_cfq_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=fox&suggest.cfq=%2Bsite_alpha&suggest.highlight=true&wt=json"
+# multi-token highlight within ONE phrase: "qu" is a token prefix of BOTH
+# "quietly" and "quacking" (and "quail") in su2's phrase. Pins whether the
+# highlighter bolds every matching token or only the first.
+capsuggestq suggest_q_multihl_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=qu&wt=json"
+# suggest.count=0: the degenerate limit -- zero suggestions, or ignored?
+capsuggestq suggest_q_count_zero_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=qui&suggest.count=0&wt=json"
+# overlapping query tokens of DIFFERENT lengths over the SAME phrase token:
+# both "qu" and "quick" prefix the token "quick". The highlighter has to pick
+# one bold length, and nothing else pins which -- `<b>qu</b>ick` (shortest /
+# first-seen) or `<b>quick</b>` (longest). Without this fixture that choice is
+# an unpinned coin-flip in suggest_match.
+capsuggestq suggest_q_overlap_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=qu%20quick&wt=json"
+# The overlap capture came back EMPTY, which falsifies the bag-of-token-
+# PREFIXES reading (both "qu" and "quick" prefix the token "quick", so that
+# reading predicts a hit). AnalyzingInfixSuggester analyzes all but the LAST
+# query token as exact terms and only the last as a prefix. These two pin that:
+#   prefix_nonfinal: "qui fox" -- "qui" is a prefix of "quick" but not an exact
+#   token, so exact-except-last predicts 0 where bag-of-prefixes predicts a hit.
+capsuggestq suggest_q_prefix_nonfinal_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=qui%20fox&wt=json"
+#   order_swap: "fox quick" -- both are exact tokens, reversed relative to the
+#   phrase. Pins whether the non-final terms are order-sensitive.
+capsuggestq suggest_q_order_swap_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=fox%20quick&wt=json"
+# suggest.count=-1: negative rather than zero. Does it 500 like count=0, or is
+# it coerced? Wayfinder parses count as usize, so a negative silently became the
+# handler default (10) -- pinning this decides whether that is a divergence.
+capsuggestq suggest_q_count_neg_en "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=qui&suggest.count=-1&wt=json"
+# cfq bare tag (SHOULD, not +MUST): `Utility::buildSuggesterContextFilterQuery`
+# only ever emits `+tag`, but parse_cfq admits bare/negative terms for parser
+# parity, and unpinned parity code is indistinguishable from a bug. q=fox is
+# su1 (site_alpha) + su3 (site_beta); a lone SHOULD should keep su1.
+capsuggestq suggest_q_cfq_should "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=fox&suggest.cfq=site_alpha&wt=json"
+# cfq two bare tags: two SHOULDs, min_should=1 -> both su1 and su3.
+capsuggestq suggest_q_cfq_should_two "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=fox&suggest.cfq=site_alpha%20site_beta&wt=json"
+# cfq pure-negative (-tag with no positive clause): Lucene's BooleanQuery has no
+# matching clause here, so the expected answer is empty rather than "everything
+# except su1". Pins which of the two readings the MUST_NOT branch must have.
+capsuggestq suggest_q_cfq_negative "$SUGGESTQ384_CORE/suggest?$D384=en&suggest.q=fox&suggest.cfq=-site_alpha&wt=json"
+
+if want_any '^suggest_q_'; then
+  release "$SUGGESTQ384_CONTAINER" "suggest #384 core '$SUGGESTQ384_CORE'"
+fi
+
