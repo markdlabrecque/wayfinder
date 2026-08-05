@@ -48,10 +48,10 @@ async fn delimiter_app() -> (axum::Router, TempDir) {
     let (status, body) = post_docs(
         &app,
         &json!([
-            {"id": "static-joined", "body": "WiFi2000"},
-            {"id": "static-parts", "body": "WiFi 2000"},
-            {"id": "dynamic-joined", "tm_X3b_en_code": ["wifi_router"]},
-            {"id": "dynamic-parts", "tm_X3b_en_code": ["wifi router"]},
+            {"id": "static-compound", "body": "SKU-42 WiFi2000"},
+            {"id": "static-independent", "body": "day boy"},
+            {"id": "dynamic-compound", "tm_X3b_en_code": ["SKU-42 wifi_router"]},
+            {"id": "dynamic-independent", "tm_X3b_en_code": ["happy sky"]},
             {"id": "suggest-delimiter", "twm_suggest": ["foo_bar"]}
         ]),
     )
@@ -73,18 +73,56 @@ async fn assert_field_query_count(app: &axum::Router, field: &str, term: &str, e
     assert_eq!(num_found(&body), expected, "/{query}: {body}");
 }
 
+async fn field_terms(app: &axum::Router, field: &str) -> Vec<String> {
+    let (status, body) = get(
+        app,
+        &format!("terms?terms=true&terms.fl={field}&terms.limit=100"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "/terms for {field}: {body}");
+    body.pointer(&format!("/terms/{field}"))
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("terms for {field} must be a flat array: {body}"))
+        .iter()
+        .step_by(2)
+        .map(|value| value.as_str().expect("term must be a string").to_owned())
+        .collect()
+}
+
 #[tokio::test]
 async fn word_delimiter_parts_and_catenations_match_symmetrically_for_static_and_dynamic_text() {
     let (app, _dir) = delimiter_app().await;
 
-    // Part lookup proves index-side splitting: the joined spelling must be
-    // found. Catenated lookup against the whitespace-separated spelling proves
-    // query-side splitting/catenation. Together, each pair rules out solving
-    // this only on one side of the index/query boundary.
-    assert_field_query_count(&app, "body", "wifi", 2).await;
-    assert_field_query_count(&app, "body", "wifi2000", 2).await;
-    assert_field_query_count(&app, "tm_X3b_en_code", "wifi", 2).await;
-    assert_field_query_count(&app, "tm_X3b_en_code", "wifirouter", 2).await;
+    // Both static and dynamic text must retain each compound's parts and its
+    // catenation. The explicit term-dictionary checks are mutation-sensitive:
+    // a query-only workaround can otherwise make these lookups pass while
+    // failing to index the symmetric forms.
+    for field in ["body", "tm_X3b_en_code"] {
+        let terms = field_terms(&app, field).await;
+        for expected in ["sku", "42", "sku42"] {
+            assert!(
+                terms.contains(&expected.to_owned()),
+                "{field} is missing {expected:?}: {terms:?}"
+            );
+        }
+    }
+    let static_terms = field_terms(&app, "body").await;
+    let dynamic_terms = field_terms(&app, "tm_X3b_en_code").await;
+    assert!(
+        !static_terms.contains(&"dayboy".to_owned())
+            && !dynamic_terms.contains(&"happyski".to_owned()),
+        "whitespace-separated words must never be catenated: static={static_terms:?}, dynamic={dynamic_terms:?}"
+    );
+
+    // The same forms must be usable from the query side. `SKU-42` crosses two
+    // UAX tokens, whereas `WiFi2000`/`wifi_router` split inside one token.
+    assert_field_query_count(&app, "body", "sku", 1).await;
+    assert_field_query_count(&app, "body", "sku42", 1).await;
+    assert_field_query_count(&app, "body", "wifi", 1).await;
+    assert_field_query_count(&app, "body", "wifi2000", 1).await;
+    assert_field_query_count(&app, "tm_X3b_en_code", "sku42", 1).await;
+    assert_field_query_count(&app, "tm_X3b_en_code", "wifi", 1).await;
+    assert_field_query_count(&app, "tm_X3b_en_code", "wifirouter", 1).await;
 }
 
 /// A delimiter typed after a word is still an in-progress token, not a reason

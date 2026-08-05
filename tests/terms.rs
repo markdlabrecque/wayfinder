@@ -757,8 +757,6 @@ async fn terms_resolves_dynamic_field_name_via_dynamic_fields_rule() {
          does, got {body}"
     );
 
-    // Phase 4 word-delimiter catenation adds index terms; retain the direct
-    // expected list rather than editing the Solr reference fixture.
     let expected = json!([
         "dog",
         2,
@@ -768,23 +766,25 @@ async fn terms_resolves_dynamic_field_name_via_dynamic_fields_rule() {
         2,
         "about",
         1,
-        "aboutarchiv",
-        1,
         "afternoon",
-        1,
-        "afternoonabout",
         1,
         "archiv",
         1,
-        "archiveddocu",
-        1,
         "brown",
+        1,
+        "cat",
+        1,
+        "day",
+        1,
+        "document",
         1,
     ]);
     assert_eq!(
         body.pointer("/terms/tm_X3b_en_title"),
         Some(&expected),
-        "the dynamically resolved field must include its Phase 4 word-delimiter terms, got {body}"
+        "the same corpus/analyzer chain as the static-field trace test above \
+         must produce the same ten analyzed terms, counts, and count-desc/\
+         term-asc order under a dynamically-resolved name, got {body}"
     );
 }
 
@@ -843,17 +843,13 @@ async fn terms_dynamic_fields_do_not_leak_across_the_shared_catch_all_container(
 
     assert_eq!(
         body.pointer("/terms/tm_X3b_en_title"),
-        Some(&json!([
-            "quick", 2, "cat", 1, "fox", 1, "quickcat", 1, "quickfox", 1
-        ])),
-        "Phase 4 catenations remain scoped to tm_X3b_en_title, got {body}"
+        Some(&json!(["quick", 2, "cat", 1, "fox", 1])),
+        "tm_X3b_en_title's own vocabulary only, got {body}"
     );
     assert_eq!(
         body.pointer("/terms/tm_X3b_en_body"),
-        Some(&json!([
-            "lazi", 2, "cat", 1, "dog", 1, "lazycat", 1, "lazydog", 1
-        ])),
-        "Phase 4 catenations remain scoped to tm_X3b_en_body, got {body}"
+        Some(&json!(["lazi", 2, "cat", 1, "dog", 1])),
+        "tm_X3b_en_body's own vocabulary only, got {body}"
     );
 
     let title_flat = flat_terms(&body, "tm_X3b_en_title");
@@ -1008,20 +1004,20 @@ async fn terms_resolves_the_shipped_drupal_preset_tm_x3b_en_title_field() {
             2,
             "about",
             1,
-            "aboutarchiv",
-            1,
             "afternoon",
-            1,
-            "afternoonabout",
             1,
             "archiv",
             1,
-            "archiveddocu",
-            1,
             "brown",
             1,
+            "cat",
+            1,
+            "day",
+            1,
+            "document",
+            1,
         ])),
-        "Phase 4 word-delimiter terms are included, got {body}"
+        "got {body}"
     );
 }
 

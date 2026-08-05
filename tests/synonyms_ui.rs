@@ -80,7 +80,7 @@ async fn post_synonym_form(
 async fn synonym_app() -> (axum::Router, TempDir) {
     let dir = TempDir::new().expect("create temp dir");
     let app = app_with_schema(dir.path(), SYNONYM_SCHEMA).expect("synonym schema must load");
-    let (status, body) = post_docs(&app, &json!([{"id": "cms", "body": "Drupal"}])).await;
+    let (status, body) = post_docs(&app, &json!([{"id": "cms", "body": "Drupal guide"}])).await;
     assert_eq!(status, StatusCode::OK, "index synonym corpus: {body}");
     (app, dir)
 }
@@ -160,6 +160,15 @@ async fn saved_synonyms_expand_immediately_on_queries_but_never_enter_index_term
     // running core immediately; no index write/reopen is permitted for it.
     assert_query_count(&app, "durpal", 1).await;
     assert_query_count(&app, "DRUPAL", 1).await;
+    // `fq` and both edismax entry points call the same query analyzer; a
+    // synonym that works only for the default parser is a hidden query-path
+    // split, not query-side synonym support.
+    assert_query_count(&app, "*:*&fq=durpal", 1).await;
+    assert_query_count(&app, "%22durpal%22", 1).await;
+    assert_query_count(&app, "%22durpal+guide%22", 1).await;
+    assert_query_count(&app, "durpal&defType=edismax&qf=body", 1).await;
+    assert_query_count(&app, "%22durpal%22&defType=edismax&qf=body", 1).await;
+    assert_query_count(&app, "%22durpal+guide%22&defType=edismax&qf=body", 1).await;
 
     // Query-side-only is the reason synonym edits do not require reindexing:
     // the synonym spelling must not be materialized into the term dictionary.
@@ -222,4 +231,36 @@ async fn invalid_group_rejects_without_replacing_live_or_durable_synonyms() {
     );
     assert_query_count(&app, "durpal", 1).await;
     assert_query_count(&app, "nyc", 0).await;
+
+    // A member in two groups would make expansion order-dependent (`durpal`
+    // could expand differently after a reorder), so it is malformed too.
+    let (status, _headers, body) =
+        post_synonym_form(&app, "groups=drupal%2Cdurpal%0Adurpal%2Cdrpl").await;
+    assert!(
+        status.is_client_error() && body.contains("multiple groups"),
+        "an overlapping duplicate must be rejected: status={status}, body: {body}"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("synonym file after duplicate rejection"),
+        before,
+        "a rejected duplicate must not replace the durable table"
+    );
+    assert_query_count(&app, "durpal", 1).await;
+}
+
+#[tokio::test]
+async fn malformed_durable_synonyms_fail_startup_before_the_first_query() {
+    let dir = TempDir::new().expect("create temp dir");
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data).expect("create data directory");
+    std::fs::write(data.join("synonyms.txt"), "drupal,durpal\ndurpal,drpl\n")
+        .expect("write malformed durable table");
+
+    let error = app_with_schema(dir.path(), SYNONYM_SCHEMA)
+        .expect_err("an ambiguous durable synonym table must fail startup");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("synonym table") && message.contains("multiple groups"),
+        "startup error must identify the malformed durable synonym table: {message}"
+    );
 }

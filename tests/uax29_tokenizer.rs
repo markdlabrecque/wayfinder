@@ -105,9 +105,9 @@ fn term_set<'a>(body: &'a Value, field: &str) -> BTreeSet<&'a str> {
 async fn text_presets_use_uax29_word_boundaries_without_discarding_meaningful_singletons() {
     let (app, _dir) = uax29_app().await;
 
-    // UAX #29 supplies the source words; Phase 4 additionally retains their
-    // delimiter parts and catenations. Punctuation/whitespace alone is still
-    // never a term.
+    // UAX #29 keeps apostrophes, dots, and underscores inside their applicable
+    // word classes; it breaks at hyphen and `@`. Phase 4 catenates parts of
+    // those delimiter compounds, never independent whitespace-separated words.
     let (status, body) = get(&app, "terms?terms=true&terms.fl=general&terms.limit=100").await;
     assert_eq!(status, StatusCode::OK, "/terms must answer 200: {body}");
     assert_eq!(
@@ -117,42 +117,34 @@ async fn text_presets_use_uax29_word_boundaries_without_discarding_meaningful_si
             "3",
             "3.14",
             "314",
-            "3143",
-            "3foobar",
             "a",
             "abcom",
             "b",
             "b.com",
             "bar",
             "bcom",
-            "bcom東",
             "com",
             "don",
             "don't",
             "dont",
-            "dontwwwexamplecom",
             "e",
             "email",
             "example",
             "foo",
             "foo_bar",
             "foobar",
-            "foobare",
             "mail",
-            "maila",
             "material",
             "t",
             "unrelated",
-            "unrelatedmaterial",
             "www",
             "www.example.com",
             "wwwexamplecom",
-            "wwwexamplecom314",
             "京",
             "東",
             "都",
         ]),
-        "the indexed vocabulary must include Phase 4 delimiter parts and catenations: {body}"
+        "the indexed vocabulary must retain compounds without joining independent words: {body}"
     );
 
     // Search must use the same analyzer as indexing for both built-in text

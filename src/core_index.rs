@@ -2538,26 +2538,54 @@ impl CoreIndex {
                 }
                 continue;
             }
-            let tokens = self.tokenize_for_target(target, phrase_text);
-            let base: Box<dyn Query> = match tokens.as_slice() {
+            let alternatives = self.token_alternatives_for_target(target, phrase_text);
+            let base: Box<dyn Query> = match alternatives.as_slice() {
                 [] => continue,
-                [only] => Box::new(TermQuery::new(
-                    self.term_for_target(target, only),
+                [only] if only.len() == 1 => Box::new(TermQuery::new(
+                    self.term_for_target(target, &only[0]),
                     IndexRecordOption::WithFreqsAndPositions,
                 )),
                 _ if quoted => {
-                    let terms: Vec<Term> = tokens
-                        .iter()
-                        .map(|t| self.term_for_target(target, t))
+                    // One phrase per same-position path preserves both phrase
+                    // adjacency and query-side synonym expansion. Flattening
+                    // alternatives would turn a synonym into an extra word.
+                    let mut paths: Vec<Vec<Term>> = vec![Vec::new()];
+                    for position in &alternatives {
+                        let mut next = Vec::with_capacity(paths.len() * position.len());
+                        for path in paths {
+                            for term in position {
+                                let mut expanded = path.clone();
+                                expanded.push(self.term_for_target(target, term));
+                                next.push(expanded);
+                            }
+                        }
+                        paths = next;
+                    }
+                    let clauses = paths
+                        .into_iter()
+                        .map(|terms| {
+                            let query: Box<dyn Query> = if terms.len() == 1 {
+                                Box::new(TermQuery::new(
+                                    terms.into_iter().next().expect("one-term phrase"),
+                                    IndexRecordOption::WithFreqsAndPositions,
+                                ))
+                            } else {
+                                Box::new(PhraseQuery::new(terms))
+                            };
+                            (Occur::Should, query)
+                        })
                         .collect();
-                    Box::new(PhraseQuery::new(terms))
+                    Box::new(BooleanQuery::new(clauses))
                 }
                 _ => {
-                    let clauses: Vec<(Occur, Box<dyn Query>)> = tokens
+                    let mut seen = BTreeSet::new();
+                    let clauses: Vec<(Occur, Box<dyn Query>)> = alternatives
                         .iter()
-                        .map(|t| {
+                        .flatten()
+                        .filter(|term| seen.insert((*term).clone()))
+                        .map(|term| {
                             let q: Box<dyn Query> = Box::new(TermQuery::new(
-                                self.term_for_target(target, t),
+                                self.term_for_target(target, term),
                                 IndexRecordOption::WithFreqsAndPositions,
                             ));
                             (Occur::Should, q)
@@ -2726,59 +2754,100 @@ impl CoreIndex {
         }
     }
 
-    /// Tokenizes free-standing `text` (not a stored doc value — a `q`/`pf`
-    /// clause's own literal text) with `target`'s own **query** analyzer
-    /// (issue #389 Phase 1): the field's index identity, resolved against the
-    /// query-side tokenizer manager. For a
-    /// dynamic target that analyzer is the catch-all container's, not a
-    /// declared field's (see the `JsonObject` arm below). A non-text target
-    /// (or one with no configured tokenizer) falls back to the raw text as a
-    /// single "token" — edismax's `qf`/`pf` are only ever pointed at text
-    /// fields per this issue's scope, so this is a defensive fallback, not a
-    /// path any fixture exercises.
-    fn tokenize_for_target(&self, target: &FieldTarget, text: &str) -> Vec<String> {
+    /// Builds a phrase query for every analyzed same-position path. A synonym
+    /// is an alternate term at one position, never another sequential word.
+    fn expanded_phrase_query(&self, target: &FieldTarget, text: &str) -> Box<dyn Query> {
+        let mut positions: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        let schema = self.index.schema();
+        let tokenizer_name = match schema.get_field_entry(target.field()).field_type() {
+            tantivy::schema::FieldType::Str(options) => options
+                .get_indexing_options()
+                .map(|options| options.tokenizer()),
+            tantivy::schema::FieldType::JsonObject(options) => options
+                .get_text_indexing_options()
+                .map(|options| options.tokenizer()),
+            _ => None,
+        };
+        if let Some(mut tokenizer) =
+            tokenizer_name.and_then(|name| self.wf_schema.query_tokenizers.get(name))
+        {
+            let mut stream = tokenizer.token_stream(text);
+            stream.process(&mut |token| {
+                let alternatives = positions.entry(token.position).or_default();
+                if !alternatives.contains(&token.text) {
+                    alternatives.push(token.text.clone());
+                }
+            });
+        }
+        let mut paths: Vec<Vec<Term>> = vec![Vec::new()];
+        for alternatives in positions.into_values() {
+            let mut next = Vec::with_capacity(paths.len() * alternatives.len());
+            for path in paths {
+                for alternative in &alternatives {
+                    let mut expanded = path.clone();
+                    expanded.push(self.term_for_target(target, alternative));
+                    next.push(expanded);
+                }
+            }
+            paths = next;
+        }
+        let clauses = paths
+            .into_iter()
+            .filter(|terms| !terms.is_empty())
+            .map(|terms| {
+                let query: Box<dyn Query> = if terms.len() == 1 {
+                    Box::new(TermQuery::new(
+                        terms.into_iter().next().expect("one-term phrase"),
+                        IndexRecordOption::WithFreqsAndPositions,
+                    ))
+                } else {
+                    Box::new(PhraseQuery::new(terms))
+                };
+                (Occur::Should, query)
+            })
+            .collect();
+        Box::new(BooleanQuery::new(clauses))
+    }
+
+    /// Analyzes free-standing query text into same-position alternatives.
+    /// Query-side synonyms and word-delimiter forms must survive edismax's
+    /// `qf` path just as they do the default `q`/`fq` parser.
+    fn token_alternatives_for_target(&self, target: &FieldTarget, text: &str) -> Vec<Vec<String>> {
         let schema = self.index.schema();
         let field_entry = schema.get_field_entry(target.field());
         let tokenizer_name = match field_entry.field_type() {
             tantivy::schema::FieldType::Str(text_options) => {
                 text_options.get_indexing_options().map(|o| o.tokenizer())
             }
-            // A dynamic `qf`/`pf` name lives inside a catch-all JSON
-            // container, whose analyzer is declared on the container's own
-            // `JsonObjectOptions` (`_dynamic_text` = `text_en`, `_dynamic` =
-            // `raw`) — the same chain `generate_literals_for_json_object`
-            // uses when a dynamic name reaches Tantivy's parser via the
-            // query-text path.
             tantivy::schema::FieldType::JsonObject(json_options) => json_options
                 .get_text_indexing_options()
                 .map(|o| o.tokenizer()),
             _ => None,
         };
-        // Query text, so the field's index identity is looked up in the
-        // *query*-side manager (#389 Phase 1). Every chain Wayfinder ships today
-        // has the same analyzer registered in both managers, so this resolves
-        // exactly the analyzer it did before the seam existed.
         let Some(mut tokenizer) =
             tokenizer_name.and_then(|name| self.wf_schema.query_tokenizers.get(name))
         else {
-            return vec![text.to_string()];
+            return vec![vec![text.to_string()]];
         };
-        // `qf`/`pf` construct boolean and phrase queries from a flat term
-        // list, while Phase 4 filters can stack alternatives at one position.
-        // Keep one primary term per position here: flattening alternatives
-        // turns them into extra sequential terms, corrupting phrase boosts and
-        // scores for otherwise ordinary edismax queries. The normal `/select`
-        // literal path retains every alternative through `expanded_literal_query`.
-        let mut tokens = Vec::new();
-        let mut position = None;
+        let mut positions: BTreeMap<usize, Vec<String>> = BTreeMap::new();
         let mut token_stream = tokenizer.token_stream(text);
         token_stream.process(&mut |token: &tantivy::tokenizer::Token| {
-            if position != Some(token.position) {
-                tokens.push(token.text.clone());
-                position = Some(token.position);
+            let alternatives = positions.entry(token.position).or_default();
+            if !alternatives.contains(&token.text) {
+                alternatives.push(token.text.clone());
             }
         });
-        tokens
+        positions.into_values().collect()
+    }
+
+    /// The primary token at each position for phrase boosts. `pf` needs a
+    /// single linear term sequence; the main edismax `qf` path uses
+    /// [`Self::token_alternatives_for_target`] and keeps synonym alternatives.
+    fn tokenize_for_target(&self, target: &FieldTarget, text: &str) -> Vec<String> {
+        self.token_alternatives_for_target(target, text)
+            .into_iter()
+            .filter_map(|position| position.into_iter().next())
+            .collect()
     }
 
     /// Rewrites an embedded `*:*` sub-clause (e.g. `*:* AND lazy`) to a bare
@@ -2949,7 +3018,8 @@ impl CoreIndex {
         // word-delimiter and synonym filters deliberately emit alternatives,
         // so build a Must-of-Shoulds query instead: each analyzed position is
         // required, and any part/catenation/synonym at that position may match.
-        // Quoted/prefix literals retain Tantivy's dedicated phrase/prefix path.
+        // Quoted literals expand to one PhraseQuery per alternative path;
+        // prefixes retain Tantivy's dedicated prefix path.
         if let UserInputLeaf::Literal(literal) = &leaf
             && literal.delimiter == tantivy::query_grammar::Delimiter::None
             && !literal.prefix
@@ -2962,6 +3032,20 @@ impl CoreIndex {
                 .phase4_literal_target(literal.field_name.as_deref().unwrap_or(default_field_name))
         {
             return Ok(self.expanded_literal_query(&target, &literal.phrase));
+        }
+
+        if let UserInputLeaf::Literal(literal) = &leaf
+            && literal.delimiter != tantivy::query_grammar::Delimiter::None
+            && !literal.prefix
+            && literal.slop == 0
+            && matches!(
+                query::classify_literal(&literal.phrase),
+                query::LiteralKind::Plain
+            )
+            && let Some(target) = self
+                .phase4_literal_target(literal.field_name.as_deref().unwrap_or(default_field_name))
+        {
+            return Ok(self.expanded_phrase_query(&target, &literal.phrase));
         }
 
         if leaf_field_name(&leaf).is_some_and(is_dynamic_container_field) {

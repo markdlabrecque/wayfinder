@@ -180,26 +180,24 @@ fn text_presets_tokenize_as_expected() {
     assert_eq!(
         wf.tokenize("text_en", "The Quick Runners")
             .expect("text_en preset"),
-        vec!["quick", "runner", "quickrunn"],
-        "Phase 4 word-delimiter catenation retains the joined non-stopword form"
+        vec!["quick", "runner"],
+        "text_en must drop English stopwords before stemming remaining tokens"
     );
     // Solr 9.10.1 `_default` text_en: its English Porter stemmer maps `day`
     // to `dai`; Tantivy's English stemmer leaves it unchanged.
     assert_eq!(
         wf.tokenize("text_en", "day boy happy sky")
             .expect("text_en preset"),
-        vec![
-            "dai", "boi", "dayboi", "happi", "boyhappi", "sky", "happyski"
-        ],
-        "Phase 4 preserves stemmed word parts and their adjacent catenations"
+        vec!["dai", "boi", "happi", "sky"],
+        "text_en must apply Porter's terminal-y rule only when the stem contains a vowel"
     );
 
     // text_general: lowercased, NOT stemmed.
     assert_eq!(
         wf.tokenize("text_general", "The Quick Runners")
             .expect("text_general preset"),
-        vec!["the", "quick", "thequick", "runners", "quickrunners"],
-        "Phase 4 catenates adjacent lowercased words without stemming"
+        vec!["the", "quick", "runners"],
+        "text_general must lowercase without stemming"
     );
 
     // string / keyword: one untokenized, unlowercased term.
@@ -593,11 +591,7 @@ fn a_language_preset_ships_for_every_tantivy_stemmer_language() {
     let de = wf
         .tokenize("text_de", "Häuser Bücher")
         .expect("text_de preset");
-    assert_eq!(
-        de.len(),
-        3,
-        "Phase 4 word-delimiter catenation adds a joined term: {de:?}"
-    );
+    assert_eq!(de.len(), 2, "text_de must tokenize into two terms: {de:?}");
     assert!(
         de.iter().all(|t| t.chars().all(|c| !c.is_uppercase())),
         "text_de must lowercase: {de:?}"

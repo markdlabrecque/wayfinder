@@ -23,6 +23,7 @@ struct SynonymTable {
 impl SynonymTable {
     fn from_groups(groups: Vec<Vec<String>>) -> Result<Self> {
         let mut canonical_groups = HashSet::new();
+        let mut members = HashSet::new();
         let mut expansions = HashMap::new();
         for group in &groups {
             if group.len() < 2 {
@@ -35,6 +36,9 @@ impl SynonymTable {
                 }
                 if !seen.insert(term) {
                     bail!("a synonym group cannot contain a duplicate member `{term}`");
+                }
+                if !members.insert(term) {
+                    bail!("a synonym member cannot belong to multiple groups: `{term}`");
                 }
             }
             let canonical: BTreeSet<&str> = group.iter().map(String::as_str).collect();

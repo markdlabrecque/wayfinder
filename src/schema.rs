@@ -1032,30 +1032,25 @@ impl TokenStream for Uax29TokenStream<'_> {
 /// Symmetric search-quality word delimiter expansion (#389 Phase 4).
 ///
 /// Every original UAX word is retained, alongside its case/number/delimiter
-/// parts and their catenation. Adjacent words separated only by delimiters also
-/// gain a catenation, so both `wifi_router` and `wifi router` answer a
-/// `wifirouter` query. All alternatives share a position; this is a graph in
-/// the token-stream sense, but query and index chains intentionally emit the
-/// same forms.
+/// parts and their catenation. A punctuation-separated UAX run, such as
+/// `SKU-42`, is one compound too, so it gains `sku42`; whitespace always ends
+/// that run. All alternatives share a position; this is a graph in the
+/// token-stream sense, but query and index chains intentionally emit the same
+/// forms.
 #[derive(Clone)]
 struct WordDelimiterFilter {
-    catenate_across_tokens: bool,
     preserve_original: bool,
 }
 
 impl WordDelimiterFilter {
     fn search() -> Self {
         Self {
-            catenate_across_tokens: true,
             preserve_original: true,
         }
     }
 
     fn suggest() -> Self {
-        // Phrase suggestions need delimiter-aware parts, but concatenating
-        // arbitrary neighbouring words changes their matching/highlight model.
         Self {
-            catenate_across_tokens: false,
             preserve_original: false,
         }
     }
@@ -1067,7 +1062,6 @@ impl TokenFilter for WordDelimiterFilter {
     fn transform<T: Tokenizer>(self, tokenizer: T) -> Self::Tokenizer<T> {
         WordDelimiterTokenizer {
             inner: tokenizer,
-            catenate_across_tokens: self.catenate_across_tokens,
             preserve_original: self.preserve_original,
         }
     }
@@ -1076,7 +1070,6 @@ impl TokenFilter for WordDelimiterFilter {
 #[derive(Clone)]
 struct WordDelimiterTokenizer<T> {
     inner: T,
-    catenate_across_tokens: bool,
     preserve_original: bool,
 }
 
@@ -1089,7 +1082,6 @@ impl<T: Tokenizer> Tokenizer for WordDelimiterTokenizer<T> {
             input: text,
             pending: VecDeque::new(),
             previous: None,
-            catenate_across_tokens: self.catenate_across_tokens,
             preserve_original: self.preserve_original,
         }
     }
@@ -1156,9 +1148,28 @@ struct WordDelimiterTokenStream<'a, T> {
     tail: T,
     input: &'a str,
     pending: VecDeque<Token>,
+    // The current punctuation-delimited compound, reset by any other gap.
     previous: Option<(Token, String)>,
-    catenate_across_tokens: bool,
     preserve_original: bool,
+}
+
+fn is_punctuation(character: char) -> bool {
+    matches!(
+        character.general_category(),
+        GeneralCategory::ConnectorPunctuation
+            | GeneralCategory::DashPunctuation
+            | GeneralCategory::ClosePunctuation
+            | GeneralCategory::FinalPunctuation
+            | GeneralCategory::InitialPunctuation
+            | GeneralCategory::OtherPunctuation
+            | GeneralCategory::OpenPunctuation
+    )
+}
+
+/// UAX can emit the sides of `SKU-42` as separate tokens. They still form one
+/// delimiter compound, unlike words separated by whitespace or symbols.
+fn is_compound_separator(gap: &str) -> bool {
+    !gap.is_empty() && gap.chars().all(is_punctuation)
 }
 
 impl<T: TokenStream> TokenStream for WordDelimiterTokenStream<'_, T> {
@@ -1181,17 +1192,18 @@ impl<T: TokenStream> TokenStream for WordDelimiterTokenStream<'_, T> {
         if !parts.catenated.is_empty() {
             forms.push(parts.catenated.clone());
         }
-        if let Some((previous, previous_catenated)) = &self.previous {
-            let delimiter = &self.input[previous.offset_to..source.offset_from];
-            if self.catenate_across_tokens
-                && !delimiter.is_empty()
-                && delimiter
-                    .chars()
-                    .all(|character| !character.is_alphanumeric())
-            {
-                forms.push(format!("{previous_catenated}{}", parts.catenated));
+        let compound_catenated = if let Some((previous, previous_catenated)) = &self.previous {
+            let gap = &self.input[previous.offset_to..source.offset_from];
+            if is_compound_separator(gap) {
+                let catenated = format!("{previous_catenated}{}", parts.catenated);
+                forms.push(catenated.clone());
+                catenated
+            } else {
+                parts.catenated.clone()
             }
-        }
+        } else {
+            parts.catenated.clone()
+        };
         let mut seen = HashSet::new();
         for text in forms {
             if !text.is_empty() && seen.insert(text.clone()) {
@@ -1201,7 +1213,7 @@ impl<T: TokenStream> TokenStream for WordDelimiterTokenStream<'_, T> {
                 });
             }
         }
-        self.previous = Some((source, parts.catenated));
+        self.previous = Some((source, compound_catenated));
         let token = self
             .pending
             .pop_front()

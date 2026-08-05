@@ -245,9 +245,9 @@ async fn wildcard_infix_star_hits() {
     assert_matches_fixture(body, "wildcard_infix");
 }
 
-/// Wildcard terms are lowercased but never stemmed. Phase 4 additionally
-/// preserves an unstemmed original alongside word-delimiter parts, so `lazy*`
-/// now finds that deliberate index form as well as `laz*` finding `lazi`.
+/// Wildcard terms are lowercased but never stemmed — the same rule as fuzzy
+/// (finding 56/57): `laz*` hits the stemmed `lazi`, `lazy*` misses it, `LAZ*`
+/// hits (lowercased).
 #[tokio::test]
 async fn wildcard_terms_are_lowercased_but_never_stemmed() {
     let (app, _dir) = indexed_app().await;
@@ -258,11 +258,7 @@ async fn wildcard_terms_are_lowercased_but_never_stemmed() {
 
     let (status, body) = get(&app, "select?q=body:lazy*&wt=json").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        ids(&body),
-        vec!["doc1".to_string(), "doc2".to_string()],
-        "Phase 4 word-delimiter preserve-original terms make `lazy*` useful without changing the Solr fixture"
-    );
+    assert_matches_fixture(body, "wildcard_analyzed_stem");
 
     let (status, body) = get(&app, "select?q=body:LAZ*&wt=json").await;
     assert_eq!(status, StatusCode::OK);
