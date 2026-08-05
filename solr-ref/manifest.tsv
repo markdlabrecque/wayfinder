@@ -248,3 +248,6 @@ facet_perfield_ex_lp_limit_rank	200	select?q=*:*&rows=0&fq=%7B%21tag%3Dcat%7Dcat
 facet_perfield_prec_lp_vs_field	200	select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dcat%20facet.limit%3D1%7Dcategory&f.category.facet.limit=3&wt=json
 facet_perfield_prec_lp_vs_global	200	select?q=*:*&rows=0&facet=true&facet.field=%7B%21key%3Dcat%20facet.limit%3D1%7Dcategory&facet.limit=3&wt=json
 facet_perfield_prec_field_vs_global	200	select?q=*:*&rows=0&facet=true&facet.field=category&f.category.facet.limit=1&facet.limit=3&wt=json
+hl353_preserve_multi_off	200	select?q=category:animals&hl=true&hl.fl=category&hl.method=original&wt=json
+hl353_preserve_multi_on	200	select?q=category:animals&hl=true&hl.fl=category&hl.method=original&hl.preserveMulti=true&wt=json
+hl353_fragmenter_gap	200	select?q=body:lazy&hl=true&hl.fl=body&hl.method=original&hl.fragsize=20&hl.fragmenter=gap&wt=json

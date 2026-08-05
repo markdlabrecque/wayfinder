@@ -291,6 +291,41 @@ const SELECT_PARAMS: &[&str] = &[
     // (findings 113-114).
     "hl.mergeContiguous",
     "hl.requireFieldMatch",
+    // Issue #353: five more `hl.*` params `SearchApiSolrBackend::setHighlighting`
+    // (coverage/.../SearchApiSolrBackend.php:4230-4275) emits, each only when
+    // non-default. Under `strict_params = true` every one 400'd a request the
+    // client legitimately sends; admitting them is the minimum bar the issue
+    // exists to lift. Behaviour is implemented per-param:
+    //
+    // `hl.preserveMulti` -- real semantics, the one with a wire-visible effect.
+    // Under `hl.method=original` it returns one snippet PER VALUE of a
+    // multi-valued field, in indexed order, for EVERY value (matching
+    // highlighted, non-matching plain); the default merges the values into one
+    // stream. Implemented in `src/highlight.rs`; fixture-backed by
+    // `hl353_preserve_multi_on`/`_off`. A no-op under the default
+    // (hl.method=unified) highlighter, which Wayfinder does not truly implement
+    // (finding 55) -- so it is consulted only on the original path.
+    "hl.preserveMulti",
+    // `hl.fragmenter` -- `gap` is Solr's default original-method fragmenter
+    // (`LuceneGapFragmenter`), so admitting it changes nothing: it is the same
+    // gap fragmenting Tantivy already does, fixture-backed by
+    // `hl353_fragmenter_gap` (byte-identical to omitting it). `regex` needs the
+    // regex fragmenter, which the client never reaches because of the inverted
+    // inner guard at SearchApiSolrBackend.php:4250 -- see
+    // `tests/hl353_regex_descope_guard.rs`. Until that lands upstream,
+    // `hl.fragmenter=regex` is admitted and falls back to gap behaviour.
+    "hl.fragmenter",
+    // The remaining three are admitted and currently inert -- a `ponytail:` in
+    // `src/highlight.rs` names each ceiling rather than letting an accepted
+    // param change behaviour silently:
+    //   hl.maxAnalyzedChars    -- char budget on the analysis window; Tantivy's
+    //                            SnippetGenerator analyses the whole field.
+    //   hl.usePhraseHighlighter-- phrase-query term correlation in snippets.
+    //   hl.highlightMultiTerm  -- expand wildcard/fuzzy/prefix terms to
+    //                            highlight their expansions.
+    "hl.maxAnalyzedChars",
+    "hl.usePhraseHighlighter",
+    "hl.highlightMultiTerm",
     // Issue #222: Search API sends these spellcheck component params.
     // `spellcheck.dictionary` is intentionally repeatable, as in trace 00021;
     // the suggestion path uses its first value, matching Solr's capture.
