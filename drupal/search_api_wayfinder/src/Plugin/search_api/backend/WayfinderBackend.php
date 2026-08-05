@@ -558,9 +558,7 @@ class WayfinderBackend extends BackendPluginBase implements PluginFormInterface 
    * createFromSuggestedKeys() VERBATIM (:308): the suggestions are phrases, and
    * any <b> markup Solr put in them is Solr's own highlighting, which this
    * layer must neither assume nor strip (ground truth #384's fixture
-   * solr-ref/responses/suggest_q_infix_en.json -- #384, unmerged: the fixture
-   * is on origin/markdlabrecque/issue-384-serve-suggest.q-read, not in this
-   * tree).
+   * solr-ref/responses/suggest_q_infix_en.json).
    *
    * Every dictionary in the response is walked, but note the builder's second
    * ponytail (QueryBuilder::buildAutocompleteSuggester()): #384's server reads

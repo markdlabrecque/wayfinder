@@ -47,9 +47,7 @@ class DocumentBuilder {
       'ss_search_api_datasource' => $item->getDatasourceId(),
       // issue #385: the Suggester autocomplete plugin narrows a /suggest
       // lookup with suggest.cfq, which Wayfinder evaluates against the
-      // document's sm_context_tags (src/core_index.rs:4859 -- #384, unmerged:
-      // that line is on origin/markdlabrecque/issue-384-serve-suggest.q-read
-      // and does not resolve in this tree yet) -- without these
+      // document's sm_context_tags (src/core_index.rs:4859) -- without these
       // tags any context-filtered lookup returns nothing. Mirrors
       // SearchApiSolrBackend.php:1343-1347, including the reason the values
       // are field-name-encoded rather than raw: "Suggester context boolean
@@ -152,9 +150,13 @@ class DocumentBuilder {
       // field's own values are appended in item-field iteration order.
       // Guarded on the EXISTING value being an array rather than on the name
       // being 'sm_context_tags', so any future generated multi-valued literal
-      // is covered by construction. Two user fields cannot collide with each
-      // other here (distinct Search API ids give distinct mapped names), so
-      // this branch only ever merges a user field into a generated literal.
+      // is covered by construction. No two user fields collide in practice, so
+      // this branch normally only merges a user field into a generated literal
+      // -- but a pair like 'a-b' / 'a_X2d_b' would collide with each other,
+      // via the same missing _X guard the KNOWN DIVERGENCE note on
+      // FieldMapper::encodeSolrName() names. In that corner this appends where
+      // the old plain assign silently replaced, which is the less lossy of the
+      // two; properly fixing it means closing that encoder divergence.
       $doc[$name] = is_array($doc[$name] ?? NULL)
         ? array_merge($doc[$name], (array) $value)
         : $value;

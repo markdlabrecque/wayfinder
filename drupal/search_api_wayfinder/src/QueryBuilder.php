@@ -406,8 +406,7 @@ class QueryBuilder {
    * ponytail: the multilingual-several branch emits a REPEATED
    * suggest.dictionary (['de', 'fr']), and only the FIRST value is served.
    * Wayfinder reads the param through `params.get("suggest.dictionary")`
-   * (src/lib.rs:4338 -- #384, unmerged: line numbers are on
-   * origin/markdlabrecque/issue-384-serve-suggest.q-read, not in this tree),
+   * (src/lib.rs:4338),
    * i.e. a single value, so 'fr' is silently dropped and a de+fr site gets
    * German phrases only. Unlike the spellcheck first-wins above this is a
    * genuine divergence rather than parity -- Solr's SuggestComponent does
@@ -423,7 +422,7 @@ class QueryBuilder {
    * ponytail: the dictionary NAME is only as good as the analyzer chain the
    * server has for it. #384 answers an unshipped dictionary under the
    * stemming-free 'und' chain rather than that language's own
-   * (src/schema.rs:1048-1054 `dictionary_tokenizer` -- #384, unmerged), with
+   * (src/schema.rs:1048-1054 `dictionary_tokenizer`), with
    * one registered suggest chain per language in its 18-entry LANGUAGES table
    * (:1258-1273), so 'de'/'fr' do get their own stemmer while a
    * region-qualified langcode like 'pt-br' falls back to 'und' and is stemmed

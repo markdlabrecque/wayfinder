@@ -97,9 +97,7 @@ class WayfinderClient {
    * {"suggest":{"en":{"fox":{"numFound":2,"suggestions":[
    *   {"term":"quick brown <b>fox</b>","weight":0,"payload":""}, ...]}}}}
    * -- ground truth #384's captured fixture
-   * solr-ref/responses/suggest_q_infix_en.json (#384, unmerged: that fixture
-   * lives on origin/markdlabrecque/issue-384-serve-suggest.q-read and does not
-   * resolve in this tree yet). The <b> markup is Solr's own
+   * solr-ref/responses/suggest_q_infix_en.json. The <b> markup is Solr's own
    * highlighting and is passed through verbatim; the builder sends
    * suggest.highlight=false because search_api_autocomplete highlights itself.
    *
