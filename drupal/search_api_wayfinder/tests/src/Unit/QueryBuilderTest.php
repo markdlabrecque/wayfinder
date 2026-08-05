@@ -472,9 +472,9 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    // issue #342: a text sort field now carries the resolved language
-    // (default 'und' here) -- non-text sorts (its_weight) are unaffected.
-    $this->assertSame('score desc,id asc,sort_X3b_und_title asc,its_weight desc', $params['sort']);
+    // issue #362: a text sort field sorts on the single language-agnostic
+    // sort_title -- non-text sorts (its_weight) are unaffected.
+    $this->assertSame('score desc,id asc,sort_title asc,its_weight desc', $params['sort']);
     $this->assertSame(20, $params['start']);
     $this->assertSame(10, $params['rows']);
   }
@@ -505,11 +505,11 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    // Issue #358: a string sort resolves to the language-specific sort_*/
-    // copy (default 'und' here), not the mapped sm_* field -- the index now
+    // Issue #358 + #362: a string sort resolves to the single
+    // language-agnostic sort_* copy, not the mapped sm_* field -- the index
     // writes that copy from the first value. Reserved Search API pseudo-fields
     // keep their columns.
-    $this->assertSame('sort_X3b_und_tags asc,ss_search_api_datasource desc,ss_search_api_language asc', $params['sort']);
+    $this->assertSame('sort_tags asc,ss_search_api_datasource desc,ss_search_api_language asc', $params['sort']);
   }
 
   /**
@@ -1934,12 +1934,14 @@ class QueryBuilderTest extends TestCase {
   }
 
   /**
-   * issue #342: sorting on a text field uses only the FIRST language of the
-   * resolved set, never every variant -- unlike qf/fl/hl.fl.
+   * issue #362: sorting on a text field uses the single language-agnostic
+   * `sort_<id>` field regardless of the resolved language set (pre-#362 it
+   * used sort_X3b_<languages[0]>_<id>). Sorting never expands to every
+   * language variant the way qf/fl/hl.fl do.
    *
    * @covers ::build
    */
-  public function testSortOnATextFieldUsesOnlyTheFirstResolvedLanguage(): void {
+  public function testSortOnATextFieldIsLanguageAgnostic(): void {
     $index = $this->mockIndex([], [
       'title' => $this->mockIndexField('title', 'text', FALSE),
       'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
@@ -1949,7 +1951,7 @@ class QueryBuilderTest extends TestCase {
 
     $params = (new QueryBuilder())->build($query);
 
-    $this->assertSame('sort_X3b_de_title asc', $params['sort']);
+    $this->assertSame('sort_title asc', $params['sort']);
   }
 
   /**

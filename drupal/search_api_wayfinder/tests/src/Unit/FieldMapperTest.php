@@ -223,13 +223,21 @@ class FieldMapperTest extends TestCase {
   }
 
   /**
-   * issue #342 / #358: sortFieldName() gains the same optional `$language`
-   * argument as fieldName(). A text- OR string-type field sorts through
-   * `sort_X3b_<enc-lang>_<id>` (encodeSolrName('sort' . SEPARATOR
-   * . $sort_language_id . '_' . $name), :1483), because upstream gates the sort
-   * copy on mapped names beginning with 't' or 's'
-   * (SearchApiSolrBackend.php:1448-1454). Every other type is unaffected and
-   * keeps sorting on its ordinary mapped field name.
+   * issue #362: the sort copy is a SINGLE language-agnostic `sort_<id>`
+   * field, not `sort_X3b_<lang>_<id>` per language. search_api_solr fills a
+   * per-language copy so a query resolved to one collation can sort a
+   * document indexed under another (SearchApiSolrBackend.php:1469-1481);
+   * that is load-bearing only because real Solr types each copy as a
+   * language-specific `collated_<lang>`, producing different orderings.
+   * Wayfinder has no collation type -- every `sort_*` is plain `string`
+   * (presets/search-api.toml:21-25) -- so the copies are byte-identical with
+   * identical ordering, and one field serves every reader. The `$language`
+   * argument is now a MODE flag only (non-null = sort/index path, NULL =
+   * grouping path): it no longer appears in the name. A text- OR string-type
+   * field still sorts through its dedicated sort copy because upstream gates
+   * the copy on mapped names beginning with 't' or 's'
+   * (SearchApiSolrBackend.php:1448-1454); every other type keeps sorting on
+   * its ordinary mapped field name.
    *
    * @covers ::sortFieldName
    * @dataProvider sortFieldNameProvider
@@ -241,14 +249,17 @@ class FieldMapperTest extends TestCase {
 
   public static function sortFieldNameProvider(): array {
     return [
-      'text sort field carries the language, en' => ['title', 'text', FALSE, 'sort_X3b_en_title', 'en'],
-      'text sort field defaults to und' => ['title', 'text', FALSE, 'sort_X3b_und_title'],
-      // issue #358: string fields sort through the same language-specific
-      // sort_* copy as text -- upstream gates on mapped names beginning with
-      // 't' or 's' (SearchApiSolrBackend.php:1448-1454), for single- and
-      // multi-valued alike.
-      'single string sort field carries the language' => ['field_sku', 'string', FALSE, 'sort_X3b_en_field_sku', 'en'],
-      'multi string sort field carries explicit und' => ['field_keywords', 'string', TRUE, 'sort_X3b_und_field_keywords', 'und'],
+      // issue #362: the name is language-AGNOSTIC -- the same `sort_title`
+      // regardless of the language a caller passes.
+      'text sort field is language-agnostic, en' => ['title', 'text', FALSE, 'sort_title', 'en'],
+      'text sort field is language-agnostic, und' => ['title', 'text', FALSE, 'sort_title'],
+      'text sort field ignores a different language' => ['title', 'text', FALSE, 'sort_title', 'de'],
+      // issue #358: string fields sort through the same sort_* copy as text
+      // -- upstream gates on mapped names beginning with 't' or 's'
+      // (SearchApiSolrBackend.php:1448-1454), for single- and multi-valued
+      // alike. issue #362 makes that copy language-agnostic too.
+      'single string sort field is language-agnostic' => ['field_sku', 'string', FALSE, 'sort_field_sku', 'en'],
+      'multi string sort field is language-agnostic' => ['field_keywords', 'string', TRUE, 'sort_field_keywords', 'und'],
       // Other types sort on their mapped field name, unaffected by language.
       'numeric sort field is the mapped field name, unaffected by language' => ['weight', 'integer', FALSE, 'its_weight', 'en'],
     ];

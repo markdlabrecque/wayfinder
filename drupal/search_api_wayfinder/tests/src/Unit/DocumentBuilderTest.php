@@ -6,8 +6,6 @@ namespace Drupal\Tests\search_api_wayfinder\Unit;
 
 use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\Field\FieldStorageDefinitionInterface;
-use Drupal\Core\Language\LanguageInterface;
-use Drupal\Core\Language\LanguageManagerInterface;
 use Drupal\search_api\IndexInterface;
 use Drupal\search_api\Item\FieldInterface;
 use Drupal\search_api\Item\ItemInterface;
@@ -72,24 +70,6 @@ class DocumentBuilderTest extends TestCase {
     $item->method('getLanguage')->willReturn($language);
     $item->method('getFields')->willReturn($fields);
     return $item;
-  }
-
-  /**
-   * issue #342, MF-3 (round-2 review bounce): same shape as
-   * QueryBuilderTest::mockLanguageManager() -- a LanguageManagerInterface
-   * mock whose getLanguages() returns one LanguageInterface per given
-   * langcode, in order.
-   */
-  private function mockLanguageManager(array $langcodes): LanguageManagerInterface {
-    $languages = [];
-    foreach ($langcodes as $langcode) {
-      $language = $this->createMock(LanguageInterface::class);
-      $language->method('getId')->willReturn($langcode);
-      $languages[$langcode] = $language;
-    }
-    $manager = $this->createMock(LanguageManagerInterface::class);
-    $manager->method('getLanguages')->willReturn($languages);
-    return $manager;
   }
 
   /**
@@ -177,6 +157,11 @@ class DocumentBuilderTest extends TestCase {
   /**
    * search_api_solr 4.3.13 indexes a deterministic scalar sort copy for text.
    *
+   * issue #362: the copy is a SINGLE language-agnostic `sort_<id>` field, not
+   * one per language -- Wayfinder has no collation type, so the per-language
+   * copies search_api_solr fills would be byte-identical here (see
+   * docs/reports/2026-08-12-362-identical-sort-copies.md).
+   *
    * @covers ::buildAddCommand
    */
   public function testBuildAddCommandAddsDeterministicTextSortCopies(): void {
@@ -192,22 +177,12 @@ class DocumentBuilderTest extends TestCase {
 
     $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
 
-    // issue #342, MF-3 correction (round-2 review bounce): with no
-    // LanguageManagerInterface injected (this constructor call's second,
-    // optional argument), the resolved sort-language set is just ['und'] --
-    // mirroring QueryBuilder's own no-manager fallback
-    // (QueryBuilderTest::testLanguageFallsBackToUndWithNoConditionAndNoLanguageManager()).
-    // The item's own language ('en') is deliberately NOT used as a
-    // sort-field key on its own: writing sort_X3b_en_title here (the
-    // pre-fix behaviour this test used to assert) while QueryBuilder sorts
-    // on sort_X3b_und_title in the no-manager case is exactly MF-3's bug --
-    // the two sides disagreeing on which key holds the value. See
-    // testBuildAddCommandWritesSortCopyForEveryEnabledLanguagePlusUnd below
-    // for the case where a language manager IS injected.
-    $this->assertSame('Single title', $doc['sort_X3b_und_title']);
-    $this->assertSame('First paragraph', $doc['sort_X3b_und_field_body']);
+    // One language-agnostic sort copy per sortable field, carrying the FIRST
+    // value -- no sort_X3b_<lang>_* variants exist.
+    $this->assertSame('Single title', $doc['sort_title']);
+    $this->assertSame('First paragraph', $doc['sort_field_body']);
     $this->assertArrayNotHasKey('sort_X3b_en_title', $doc);
-    $this->assertArrayNotHasKey('sort_X3b_en_field_body', $doc);
+    $this->assertArrayNotHasKey('sort_X3b_und_title', $doc);
   }
 
   /**
@@ -249,9 +224,8 @@ class DocumentBuilderTest extends TestCase {
 
     $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
 
-    // issue #342, MF-3 correction: no language manager injected -> 'und'
-    // only, per testBuildAddCommandAddsDeterministicTextSortCopies above.
-    $this->assertSame('mango', $doc['sort_X3b_und_field_pick']);
+    // issue #362: one language-agnostic sort copy, carrying the FIRST value.
+    $this->assertSame('mango', $doc['sort_field_pick']);
   }
 
   /**
@@ -324,9 +298,8 @@ class DocumentBuilderTest extends TestCase {
 
     // The populated field is present ...
     $this->assertSame(['Has a value'], $doc['tm_X3b_en_title']);
-    // issue #342, MF-3 correction: no language manager injected -> 'und'
-    // only.
-    $this->assertArrayHasKey('sort_X3b_und_title', $doc);
+    // issue #362: one language-agnostic sort copy.
+    $this->assertArrayHasKey('sort_title', $doc);
     // ... and the empty optional field is omitted entirely, not null/[], so
     // it can never be rejected as a null for a typed field.
     $this->assertArrayNotHasKey('ss_field_optional', $doc);
@@ -457,9 +430,8 @@ class DocumentBuilderTest extends TestCase {
 
     // Other fields keep their current shape exactly.
     $this->assertSame(['Plain title'], $doc['tm_X3b_en_title']);
-    // issue #342, MF-3 correction: no language manager injected -> 'und'
-    // only.
-    $this->assertSame('Plain title', $doc['sort_X3b_und_title']);
+    // issue #362: one language-agnostic sort copy.
+    $this->assertSame('Plain title', $doc['sort_title']);
     $this->assertSame(9.99, $doc['fts_field_price']);
 
     // The sink field accumulates both suggester fields.
@@ -582,48 +554,45 @@ class DocumentBuilderTest extends TestCase {
   }
 
   /**
-   * issue #342, MF-3 (round-2 review bounce): with a LanguageManagerInterface
-   * injected, a text field's sort copy must be written for EVERY enabled
-   * site language PLUS 'und', not just the item's own language -- mirroring
-   * upstream's exact fill loop (SearchApiSolrBackend.php:1469-1481,
-   * "To allow sorted multilingual searches we need to fill *all*
-   * language-specific sort fields!"). Before this fix, an item indexed in
-   * 'en' on a site with enabled languages [en, de] wrote ONLY
-   * sort_X3b_en_title; QueryBuilder sorts on sort_X3b_<languages[0]>_<id>,
-   * so a query resolving to [en, de] (languages[0] = 'en') worked by
-   * accident here, but any German-only-content page (item language 'de')
-   * would carry no sort_X3b_en_title at all and sort as missing.
+   * issue #362: a text field carries a SINGLE language-agnostic sort copy,
+   * `sort_<id>`, regardless of how many languages the site has enabled.
+   * Pre-#362 (the #342 MF-3 behaviour) DocumentBuilder wrote N+1 identical
+   * copies -- one per enabled language plus 'und' -- mirroring
+   * search_api_solr's fill loop (SearchApiSolrBackend.php:1469-1481). That
+   * fill is load-bearing in real Solr only because each copy is typed
+   * `collated_<lang>` (different orderings); Wayfinder maps every `sort_*`
+   * to plain `string`, so the copies were byte-identical with no ordering
+   * benefit. Measured cost: ~30% index overhead on a monolingual site,
+   * ~3.5x on an 8-language site (docs/reports/2026-08-12-362-...).
    *
    * @covers ::buildAddCommand
    */
-  public function testBuildAddCommandWritesSortCopyForEveryEnabledLanguagePlusUnd(): void {
-    $languageManager = $this->mockLanguageManager(['en', 'de']);
-    $item = $this->mockItem('node/342-mf3-1:de', 'entity:node', 'de', [
+  public function testBuildAddCommandWritesASingleLanguageAgnosticSortCopy(): void {
+    $item = $this->mockItem('node/362-1:de', 'entity:node', 'de', [
       'title' => $this->mockField('title', 'text', [new TextValue('Deutscher Titel')]),
     ]);
 
-    $doc = (new DocumentBuilder(new FieldMapper(), $languageManager))->buildAddCommand($item, 'my_index')['add']['doc'];
+    $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
 
-    // Every site language gets the copy, regardless of the item's own
-    // language, plus the language-unspecific 'und' copy -- all carrying the
-    // SAME (first) value.
-    $this->assertSame('Deutscher Titel', $doc['sort_X3b_en_title']);
-    $this->assertSame('Deutscher Titel', $doc['sort_X3b_de_title']);
-    $this->assertSame('Deutscher Titel', $doc['sort_X3b_und_title']);
+    // Exactly one sort copy, carrying the first value. No per-language
+    // sort_X3b_<lang>_* variants exist any more -- not the item's own 'de',
+    // not 'und', not any other site language.
+    $this->assertSame('Deutscher Titel', $doc['sort_title']);
+    $this->assertArrayNotHasKey('sort_X3b_de_title', $doc);
+    $this->assertArrayNotHasKey('sort_X3b_und_title', $doc);
+    $this->assertArrayNotHasKey('sort_X3b_en_title', $doc);
   }
 
   /**
-   * issue #342, MF-3 (round-2 review bounce): upstream's fill loop guards
-   * each write with `if (!$doc->{$key})` -- first write wins, a later field
-   * must not overwrite an earlier sort copy for the same key
-   * (SearchApiSolrBackend.php:1479). Wayfinder's sort keys are scoped by
-   * field id (`sort_X3b_<lang>_<field-id>`), so two DIFFERENT Search API
-   * fields never naturally collide on one sort key the way upstream's
-   * generic `$name`-keyed loop can; this test uses a synthetic double --
-   * two mock fields that both report the SAME field identifier ('title')
-   * via getFieldIdentifier(), simulating the only way such a collision can
-   * occur -- to exercise the guard directly, mirroring the guard's own
-   * generality rather than a single concrete real-world trigger.
+   * First write wins: upstream's fill loop guards each write with
+   * `if (!$doc->{$key})` (SearchApiSolrBackend.php:1479), so a later field
+   * must not overwrite an earlier sort copy for the same key. Wayfinder's
+   * sort key is the field id (`sort_<field-id>`, issue #362), so two
+   * DIFFERENT Search API fields never naturally collide on one sort key the
+   * way upstream's generic `$name`-keyed loop can; this test uses a
+   * synthetic double -- two mock fields that both report the SAME field
+   * identifier ('title') via getFieldIdentifier(), simulating the only way
+   * such a collision can occur -- to exercise the guard directly.
    *
    * @covers ::buildAddCommand
    */
@@ -635,50 +604,22 @@ class DocumentBuilderTest extends TestCase {
 
     $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
 
-    // Both fields map to the same sort_X3b_und_title key (no language
-    // manager injected -> 'und' only); the FIRST field's value must win,
-    // not be silently overwritten by the second.
-    $this->assertSame('First', $doc['sort_X3b_und_title']);
+    // Both fields map to the same sort_title key; the FIRST field's value
+    // must win, not be silently overwritten by the second.
+    $this->assertSame('First', $doc['sort_title']);
   }
 
   /**
-   * issue #342, MF-3 (round-2 review bounce): the default (no
-   * LanguageManagerInterface injected) constructor argument must keep every
-   * existing `new DocumentBuilder($fieldMapper)` call site compiling and
-   * producing a sensible result -- resolving to just `['und']`, matching
-   * QueryBuilder's own no-manager/no-condition fallback. Pinned as its own
-   * explicit regression case (the existing tests updated above cover the
-   * same fact incidentally; this one names it directly).
-   *
-   * @covers ::buildAddCommand
-   */
-  public function testBuildAddCommandWithNoLanguageManagerWritesOnlyTheUndSortCopy(): void {
-    $item = $this->mockItem('node/342-mf3-3:en', 'entity:node', 'en', [
-      'title' => $this->mockField('title', 'text', [new TextValue('Title')]),
-    ]);
-
-    $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
-
-    $this->assertSame('Title', $doc['sort_X3b_und_title']);
-    $this->assertArrayNotHasKey('sort_X3b_en_title', $doc);
-  }
-
-  /**
-   * Issue #358: a SINGLE-valued string field gets a language-specific sort_*
-   * copy, matching captured search_api_solr / solr:9. The live trace
-   * (solr-ref/search-api/trace/00001.json) indexes `ss_field_sku = "ART-001"`
-   * with BOTH `sort_X3b_en_field_sku = "ART-001"` and
-   * `sort_X3b_und_field_sku = "ART-001"` -- a string field whose mapped name
-   * begins with 's' gets the same first-value sort copy a text field does,
-   * because upstream's gate is a first-character test on the mapped name
-   * ('t' or 's'), not a text-only check (SearchApiSolrBackend.php:1448-1454).
-   * Before this fix, DocumentBuilder wrote sort copies only for `$type ===
-   * 'text'`, so a string field sorted on `ss_*` instead of the `sort_*` copy
-   * Solr uses -- a divergence.
-   *
-   * The language manager is injected with the capture site's single enabled
-   * language ('en') so the sort-language set is ['en', 'und'], exactly the two
-   * copies the trace shows.
+   * Issue #358: a SINGLE-valued string field gets a sort_* copy -- a string
+   * field whose mapped name begins with 's' gets the same first-value sort
+   * copy a text field does, because upstream's gate is a first-character
+   * test on the mapped name ('t' or 's'), not a text-only check
+   * (SearchApiSolrBackend.php:1448-1454). The live trace
+   * (solr-ref/search-api/trace/00001.json) indexes `ss_field_sku =
+   * "ART-001"` with `sort_X3b_en_field_sku = "ART-001"`; issue #362 keeps
+   * the copy but makes it a single language-agnostic `sort_field_sku` (a
+   * deliberate divergence from the trace's per-language naming -- Wayfinder
+   * has no collation type, so the per-language copies are redundant).
    *
    * @covers ::buildAddCommand
    */
@@ -687,15 +628,14 @@ class DocumentBuilderTest extends TestCase {
       'field_sku' => $this->mockField('field_sku', 'string', ['ART-001']),
     ]);
 
-    $doc = (new DocumentBuilder(new FieldMapper(), $this->mockLanguageManager(['en'])))
+    $doc = (new DocumentBuilder(new FieldMapper()))
       ->buildAddCommand($item, 'capture_index')['add']['doc'];
 
     // The mapped field keeps its ordinary single-valued scalar shape ...
     $this->assertSame('ART-001', $doc['ss_field_sku']);
-    // ... and gets a scalar sort copy in every sort language, exactly as the
-    // trace shows.
-    $this->assertSame('ART-001', $doc['sort_X3b_en_field_sku']);
-    $this->assertSame('ART-001', $doc['sort_X3b_und_field_sku']);
+    // ... and gets a single language-agnostic sort copy (issue #362).
+    $this->assertSame('ART-001', $doc['sort_field_sku']);
+    $this->assertArrayNotHasKey('sort_X3b_en_field_sku', $doc);
   }
 
   /**
@@ -727,14 +667,14 @@ class DocumentBuilderTest extends TestCase {
       ),
     ]);
 
-    $doc = (new DocumentBuilder(new FieldMapper(), $this->mockLanguageManager(['en'])))
+    $doc = (new DocumentBuilder(new FieldMapper()))
       ->buildAddCommand($item, 'capture_index')['add']['doc'];
 
     // The mapped multi-valued field stays an array ...
     $this->assertSame(['mango', 'apple', 'zebra'], $doc['sm_field_pick']);
-    // ... and its scalar sort copy in every sort language is the FIRST value.
-    $this->assertSame('mango', $doc['sort_X3b_en_field_pick']);
-    $this->assertSame('mango', $doc['sort_X3b_und_field_pick']);
+    // ... and its single language-agnostic sort copy is the FIRST value
+    // (issue #362).
+    $this->assertSame('mango', $doc['sort_field_pick']);
   }
 
   /**
@@ -752,12 +692,11 @@ class DocumentBuilderTest extends TestCase {
       'field_rating' => $this->mockField('field_rating', 'integer', [5]),
     ]);
 
-    $doc = (new DocumentBuilder(new FieldMapper(), $this->mockLanguageManager(['en'])))
+    $doc = (new DocumentBuilder(new FieldMapper()))
       ->buildAddCommand($item, 'capture_index')['add']['doc'];
 
     $this->assertSame(5, $doc['its_field_rating']);
-    $this->assertArrayNotHasKey('sort_X3b_en_field_rating', $doc);
-    $this->assertArrayNotHasKey('sort_X3b_und_field_rating', $doc);
+    $this->assertArrayNotHasKey('sort_field_rating', $doc);
   }
 
   /**
@@ -775,17 +714,16 @@ class DocumentBuilderTest extends TestCase {
       'field_sku' => $this->mockField('field_sku', 'string', ['SKU-1']),
     ]);
 
-    $doc = (new DocumentBuilder(new FieldMapper(), $this->mockLanguageManager(['en'])))
+    $doc = (new DocumentBuilder(new FieldMapper()))
       ->buildAddCommand($item, 'capture_index')['add']['doc'];
 
-    // Text: unchanged -- array value, scalar sort copy in every sort language.
+    // Text: unchanged -- array value, single language-agnostic sort copy
+    // (issue #362).
     $this->assertSame(['Hello'], $doc['tm_X3b_en_title']);
-    $this->assertSame('Hello', $doc['sort_X3b_en_title']);
-    $this->assertSame('Hello', $doc['sort_X3b_und_title']);
+    $this->assertSame('Hello', $doc['sort_title']);
     // String: newly gets the same shape of sort copy.
     $this->assertSame('SKU-1', $doc['ss_field_sku']);
-    $this->assertSame('SKU-1', $doc['sort_X3b_en_field_sku']);
-    $this->assertSame('SKU-1', $doc['sort_X3b_und_field_sku']);
+    $this->assertSame('SKU-1', $doc['sort_field_sku']);
   }
 
 }
