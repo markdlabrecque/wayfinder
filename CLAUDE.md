@@ -53,14 +53,18 @@ produce errors, and schema-layer work lands before features that need new field 
 
 ## Compatibility contract
 
-- **Fixtures in `solr-ref/responses/` are ground truth.** Expected values in tests come from
-  them, never from what the implementation happens to produce.
-- **Divergence from captured Solr behaviour is a bug**, unless the PRD documents it as
-  deliberate. Do not widen a normaliser or relax an assertion to hide one — fix it, or escalate
-  it with the diff.
-- **A feature with no fixtures needs new ones**: extend `solr-ref/capture.sh` (real `solr:9` in
-  Docker), commit the fixtures and manifest, derive the tests from them. **Append your block at
-  the end of `capture.sh`** so concurrent branches merge mechanically.
+- **Fixtures in `solr-ref/responses/` are immutable factual evidence.** Expected values in tests
+  come from them, never from what the implementation happens to produce. Fixture existence is
+  **not automatic product scope**: scope comes from the PRD and the issue/PR's client evidence,
+  product merit, and cost.
+- For a request/response path Wayfinder supports and a real client exercises, match Solr exactly
+  unless a deliberate departure is ratified in PRD §2. A captured but unexercised path is optional;
+  its mismatch is not automatically a bug or an implementation obligation. Do not widen a
+  normaliser or relax an assertion to hide an unintended supported-path difference — fix it or
+  escalate it with the diff.
+- **A scoped supported path needing fixtures needs new ones**: extend `solr-ref/capture.sh` (real
+  `solr:9` in Docker), commit the fixtures and manifest, derive the tests from them. **Append your
+  block at the end of `capture.sh`** so concurrent branches merge mechanically.
 - **Never re-capture existing fixtures as a side effect.** Re-running `capture.sh` rewrites all
   of them, and `QTime`/`_version_`/`rid` churn dirties every branch's diff. If you must re-run
   it, restore the fixtures afterwards — but note `git checkout -- solr-ref/` restores **tracked**
@@ -73,9 +77,15 @@ produce errors, and schema-layer work lands before features that need new field 
   `manifest-errors.tsv`.
 - **Wire format only.** Match Solr's param names, semantics, and JSON envelope. Never Solr's
   config format.
-- The differential harness (`cargo test --test differential`) is the evidence for the
-  compatibility claim. `EXPECTED_DIVERGENCES` in `tests/differential.rs` fails if a listed entry
-  starts matching: when your feature lands, **delete its entry** rather than leaving it.
+- `docs/solr-ref-findings.md` records **factual evidence** from Solr and clients; it is not a
+  divergence-policy ledger. Record a deliberate departure on any supported path in PRD §2's
+  ratified-divergence list with fixture or client evidence, a reason, and the
+  issue/report. Record unsupported or out-of-scope behaviour in PRD §5 and its issue/report,
+  never in the ratified-divergence list.
+- While #392 remains pending, the differential harness (`cargo test --test differential`) is
+  regression evidence and inventory evidence, not scope authority. `EXPECTED_DIVERGENCES` in
+  `tests/differential.rs` remains mechanically self-expiring when a listed entry starts matching,
+  but does not create a product commitment; delete its entry when the scoped feature lands.
 - Implementing a new request param? Add it to `SELECT_PARAMS`/`UPDATE_PARAMS` in `src/lib.rs`,
   or `strict_params = true` will 400 a param Wayfinder actually supports.
 

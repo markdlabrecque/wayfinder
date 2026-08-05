@@ -87,20 +87,27 @@ The distinction matters because two different things get called "Solr compatibil
   than it appears — `facet_fields` as a flat alternating name/count array is a 2006 decision
   nobody could undo, not an insight. Reproducing it buys client compatibility and nothing else.
 
+Fixtures and captures are immutable factual evidence: they supply expected test values and are
+never derived from Wayfinder. They do **not** automatically define product scope. Scope decisions
+belong in this PRD and in the issue/PR, based on client evidence, product merit, and cost.
+
 Consequences, and they are the point of this section:
 
-1. **Fidelity is weighted by what clients exercise.** A response path a real client generates
-   is held exactly. A path no client reaches is worth matching only if it is cheap. The
-   differential harness (§7) is evidence that the exercised paths work — not a claim of
-   byte-identity across Solr's whole surface.
-2. **Divergence on the merits is policy, not apology.** Where Solr's captured behaviour is
-   actively worse for clients, Wayfinder may depart from it — recorded in the ratified list
-   below, with its fixture and its reason. That list is a design record, not a confession.
+1. **Fidelity is weighted by what clients exercise.** A request/response path Wayfinder supports
+   and a real client exercises is held exactly. A captured path no client reaches is optional: a
+   mismatch there is not automatically a bug or an implementation obligation. The differential
+   harness (§8) is evidence about regressions and inventory — not a claim of byte-identity across
+   Solr's whole surface or scope authority.
+2. **Divergence on the merits is policy, not apology.** A deliberate departure on a supported
+   path is recorded in the ratified list below with fixture or client evidence, its reason, and
+   its issue/report. Unsupported or out-of-scope behaviour is identified as such, not presented
+   as a supported-path divergence. That list is a design record, not a confession.
 3. **Coverage has to be measurable or it will drift.** "75-80%" is not an assertion, it is a
    number to compute; the instrument is in §5's Phases notes.
 
-None of this loosens the rule that an *unintended* difference from a captured fixture is a bug.
-Divergence is a decision someone makes and writes down, never something a normaliser absorbs.
+An unintended difference from fixture evidence is a bug when it is on the scoped,
+supported client-exercised contract. Divergence is a decision someone makes and writes down,
+never something a normaliser absorbs.
 
 ### What must match exactly
 
@@ -156,9 +163,11 @@ gitignored — regenerate rather than trust this list if it ages):
 
 #### Ratified divergences from captured Solr behaviour
 
-The rule elsewhere is that any difference from a captured fixture is a bug. These are the
-exceptions — knowing mismatches, each with the fixture that documents it and the reason it was
-chosen. Nothing may be added here without the same two things.
+These are knowing mismatches on supported paths, whether client-exercised or not. Each records
+fixture or client evidence, the reason chosen, and its issue or report; an unsupported or out-of-scope path belongs
+in §5 instead. Nothing may be added here without those records. Number 6 moved to §5 when issue
+#399 distinguished unsupported parser types from supported-path divergences; later numbers stay
+stable for existing citations.
 
 1. **An unknown core returns a JSON error envelope, not Solr's 404 HTML page.**
    `err_missing_core.json` shows real Solr answering with its "Searching for Solr? You must type
@@ -239,26 +248,6 @@ chosen. Nothing may be added here without the same two things.
      client that pins the whole literal string instead of parsing it owns that risk.
 
    (issue #59; issue #325)
-
-6. **A local-params block in `q` naming any query parser other than `edismax`, `func`, or
-   `boost` is a hard 400, where Solr parses it.** Real Solr registers a parser per type, so
-   `{!lucene}quick`, `{!term f=id}doc1` and `{!func}...` all parse; Wayfinder recognises
-   `{!edismax ...}`, `{!func <expr>}`, and `{!boost b=<func>}` (issue #289 added the latter two)
-   and answers everything else with a `SyntaxError` 400 in the Solr error envelope. The evidence
-   is the v1.5 capture rather than a per-shape fixture, and that is stated plainly here because
-   the rule above demands it: the only local-params types the captured client ever sends are
-   `{!edismax qf='...'}` in `q` (7 traces) and `{!key=...}` in `facet.field` (2 traces) across
-   the 28 committed traces in `solr-ref/search-api/trace/`, so no fixture exercises
-   `{!lucene}`/`{!term}` and real Solr's answers for them are documented, not captured. Two
-   reasons this is the right call anyway. First, **it is not a regression and this PR did not
-   introduce it**: before issue #137, `q={!lucene}quick` already 400d, because
-   `tantivy::query_grammar::parse_query` rejects the raw `{!` string outright (`{` opens an
-   exclusive range in Tantivy's grammar) — issue #137 changed the error *message*, not the
-   status. Second, `{!func}` and `{!boost}` now have a real evaluator (issue #289, the `fnq_*`
-   fixtures), so they parse and score rather than 400; `{!lucene}`/`{!term}` still have no
-   parser, and accept-and-ignore would silently half-work — indefensible for the query itself.
-   A 400 is the honest answer until the parser it names exists. (issue #137's open question 5;
-   findings 90-92)
 
 7. **Colliding `facet.field` response labels are a hard 400, where Solr returns 200 with duplicate
    JSON object members.** `facet_collision_field_flat.json` and
@@ -375,17 +364,19 @@ chosen. Nothing may be added here without the same two things.
     answers 400, so the entry cannot rot into an excuse. (finding 170; issue #340)
 
 Note that divergence 3 is a difference from the *configset* the reference fixtures were captured
-against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, 4, 6, 7,
-8, 10, and 11 are differences from Solr proper. Divergence 5 is a deliberate config choice plus
+against, not from Solr itself — a strict Solr agrees with Wayfinder. Divergences 1, 2, 4, 7, 8,
+10, and 11 are differences from Solr proper. Divergence 5 is a deliberate config choice plus
 inherent host non-reproducibility, not a Solr-behaviour disagreement. Divergence 9 is a
 difference from Solr's auth-filter/container error body, while retaining its 401 and Basic
 challenge realm.
 
 ### How this is verified
 
-Differential testing against a real Solr, which needs no client and no trace — just a corpus
-and a query set. Run both, diff the JSON, fail on any difference outside a normaliser for
-legitimately variable fields (`QTime`, timestamps, float tolerance on scores). Details in §7.
+The differential harness compares a corpus and query set against captured Solr responses. It is
+regression and inventory evidence only: client evidence and the scope decisions in this PRD decide
+which differences must be fixed. On those scoped paths, fail on any unintended difference outside
+a normaliser for legitimately variable fields (`QTime`, timestamps, float tolerance on scores).
+Details in §8.
 
 ### The Search API contract, next
 
@@ -591,6 +582,12 @@ Tantivy's aggregation API is Elasticsearch-shaped, which is a good sign for this
 bucket/metric model is a superset of what Solr's facet component needs, so the work is
 parameter translation rather than building an aggregation engine.
 
+**Unsupported classic-facet methods.** Wayfinder supports its fast-field aggregation path, not
+Solr's alternative `facet.method` implementations. In particular, `facet.method=enum` is out of
+scope: captured Solr can enumerate a non-docValues field's term dictionary, while Wayfinder
+returns 400 for that request. The fixture remains inventory evidence, not a PRD §2-ratified
+supported-path divergence or an implementation commitment. (finding 106; issues #3, #399)
+
 **Correction from issue #2 (`sort`).** This table originally paired `sort` with
 `TopDocs::order_by_fast_field`. That primitive cannot implement the feature: it orders by exactly
 one fast field, so it cannot express multi-clause sort, cannot mix `score` into a clause list, and
@@ -622,6 +619,17 @@ the composed query, and `bf` an additive one — both via the function-query eva
   `includeSpanScore=true` (Lucene's span-plus-payload blend) and a multi-term `v` (Solr's ordered
   `SpanNearQuery`), both named descopes with self-expiring entries in
   `EXPECTED_DIVERGENCES_MANIFEST_ERRORS` (findings 165, 171).
+
+**Unsupported local-params parser types (issue #137).** A local-params block in `q` naming any
+query parser other than `edismax`, `func`, or `boost` is unsupported and gets a `SyntaxError` 400
+in the Solr error envelope, although real Solr parses registered types such as `{!lucene}quick`
+and `{!term f=id}doc1`. The committed client evidence sends only `{!edismax qf='...'}` in `q`
+and `{!key=...}` in `facet.field`, so fixture existence creates no scope for the other parser
+types. This is **not a regression**: before issue #137, Tantivy's query
+grammar already rejected the raw `{!` string; that issue changed the error message, not the
+status. `{!func}` and `{!boost}` became supported through the real evaluator in issue #289. This
+unsupported boundary and its evidence belong in §5 and the issue/report, not §2's ratified
+divergence list. (findings 90-92)
 
 **`boost` and `bf` apply function queries (issue #289).** Real Solr's `boost` is a
 *function-query* parameter (finding 83), not a plain float — a constant like `boost=2.5` is just
@@ -659,11 +667,12 @@ document `entity:node/1` contains both terms, because `+"fox"` never reaches edi
 91 and 92 and the per-trace `numFound` table in finding 90 carry the evidence; all seven captured
 Shape-B traces fit this model and only this model.
 
-That is **deliberate fidelity, not a defect.** Matching captured Solr is the contract (§2), and the
-"obviously more useful" high-recall reading — hand the whole remainder to edismax — would be a
-**divergence**, so it could only ship after being ratified in §2's list with a fixture behind it.
-Issue #137's own title ("so keyword search works") is wrong-premised on this point and is recorded
-as such: keyword search does not start working for a Shape-B client, it starts failing the way real
+That is **deliberate fidelity for a supported client-exercised Shape-B path, not a rule that every
+captured local-params shape creates scope.** The "obviously more useful" high-recall reading — hand
+the whole remainder to edismax — would be a supported-path **divergence**, so it could ship only
+after PRD §2 ratification with fixture or client evidence, a reason, and an issue/report. Issue
+#137's own title ("so keyword search works") is wrong-premised on this point and is recorded as
+such: keyword search does not start working for a Shape-B client, it starts failing the way real
 Solr fails, and the fix belongs upstream in `search_api_solr`. The two `numFound == 0` assertions in
 `tests/local_params.rs` are the guard against a later well-meaning rewrite to high recall.
 
@@ -1272,7 +1281,11 @@ composition on a pipeline the slice already proves.
 
 **Differential harness.** Same corpus, same query set, real Solr vs Wayfinder, diff the JSON.
 Normalise `QTime`, timestamps, and float tolerance on scores — and log every field the
-normaliser touched, because an over-eager normaliser turns a green suite into a lie.
+normaliser touched, because an over-eager normaliser turns a green suite into a lie. While #392
+remains pending, this is regression and inventory evidence, not scope authority or a product
+commitment: a fixture or `EXPECTED_DIVERGENCES` entry cannot itself require implementation.
+`EXPECTED_DIVERGENCES` remains mechanically self-expiring when behaviour starts matching, but
+that mechanism does not decide which paths Wayfinder supports.
 
 **Known limit, learned the hard way (issues #2, #11).** The harness proves *envelope*
 equivalence, not *semantic* equivalence. `error.msg` is deliberately normalised away — it is free
