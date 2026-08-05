@@ -7,24 +7,30 @@ non-trivial work; it is the source of scope decisions.
 
 **Every change goes through a PR. No direct commits to `main`.**
 
-1. **Claim the issue before starting.** Assign it to yourself
+1. **Update local `main` from the remote before branching off it.** A branch cut from a
+   stale local `main` is not built on the latest base — a green branch plus a stale base does
+   not prove a green merge. Sync first (`git fetch origin` then `git pull --ff-only` on
+   `main`); in a secondary worktree where `main` is checked out elsewhere, branch directly
+   off `origin/main` (`git checkout -b <branch> origin/main`) and sync `main` in its own
+   worktree.
+2. **Claim the issue before starting.** Assign it to yourself
    (`gh issue edit <n> --add-assignee @me`) and say in a comment that you are picking it up.
    An unassigned issue is fair game for someone else; claiming it is what makes parallel work
-   safe. Do this *first*, before writing code — not when opening the PR.
-2. **Branch name starts with the issue number**: `<issue>-<short-slug>`, e.g. `10-schema-layer`,
+   safe. Do this before writing code — not when opening the PR.
+3. **Branch name starts with the issue number**: `<issue>-<short-slug>`, e.g. `10-schema-layer`,
    `2-sort-parameter`. Off `main`, worktree-friendly. Work with no issue behind it (a chore,
    a doc fix) uses a plain descriptive slug and says in the PR why there is no issue.
-3. **Open a PR** with `Closes #<issue>` in the body, so the merge closes the issue
+4. **Open a PR** with `Closes #<issue>` in the body, so the merge closes the issue
    automatically. Do not close issues by hand — the PR does it, and a hand-closed issue loses
    the link to the change.
-4. **CI is the gate, not a notification.** `.github/workflows` runs fmt, clippy, and tests.
+5. **CI is the gate, not a notification.** `.github/workflows` runs fmt, clippy, and tests.
    Wait for green before merging; do not merge a PR with checks pending or failing.
    Self-approval is not required — merge your own PR as soon as checks pass.
-5. **Rebase onto `main` before merging** when other branches have landed in the meantime, and
+6. **Rebase onto `main` before merging** when other branches have landed in the meantime, and
    re-run the gates locally afterwards. Concurrent branches here routinely conflict in
    `src/lib.rs`, `tests/common/mod.rs`, and `solr-ref/capture.sh`; a green branch plus a green
    `main` does not imply a green merge.
-6. **Link the report, don't retype it.** Substantive work leaves a report in
+7. **Link the report, don't retype it.** Substantive work leaves a report in
    `docs/reports/YYYY-MM-DD-<slug>.md`; the PR body summarises and points at it.
 
 ## Hot files, for parallel work
