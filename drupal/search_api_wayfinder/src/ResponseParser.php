@@ -117,6 +117,13 @@ class ResponseParser {
    * sends json.nl (the same reasoning as the Terms response in
    * WayfinderBackend::getAutocompleteSuggestions(), finding 142).
    *
+   * Each suggestion member is normally a bare string, but under
+   * spellcheck.extendedResults=true Solr returns each as a {word, freq}
+   * object. The parser detects the member shape from the data and reduces an
+   * object to its 'word' (object-form ground truth:
+   * solr-ref/responses/spellcheck_360_extended.json); see the in-body comment
+   * for why 'freq' is dropped.
+   *
    * @return array{suggestions: array<string, array<int, string>>,
    *   collation?: string}|null
    *   NULL when the response carries no spellcheck block at all, so no extra
@@ -137,18 +144,27 @@ class ResponseParser {
       if (!is_string($term) || !is_array($info)) {
         continue;
       }
-      // ponytail: only SCALAR suggestion members survive. With
-      // spellcheck.extendedResults=true Solr returns each suggestion as a
-      // {word, freq} object instead, and those are silently dropped here
-      // rather than reduced to their 'word' -- so the ceiling is
-      // "extendedResults yields an empty suggestion list". Nothing in this
-      // module sets that param today (it is not in the server's SELECT_PARAMS
-      // either, src/lib.rs:286-292), so the case is unreachable from here;
-      // handling it is a follow-up, deliberately out of scope for #342.
-      $words = array_values(array_map('strval', array_filter(
-        (array) ($info['suggestion'] ?? []),
-        static fn ($word): bool => is_scalar($word)
-      )));
+      // Each suggestion member is either a bare string (the default) or, with
+      // spellcheck.extendedResults=true, a {word, freq} object. The shape is
+      // detected from the DATA, not from a request param: a member that is a
+      // string stays as-is, an object is reduced to its 'word', and anything
+      // else (a malformed object with no 'word', a number, NULL) is skipped
+      // rather than thrown on -- the parser sees a response, and must parse
+      // whatever shape it carries. Object-form ground truth:
+      // solr-ref/responses/spellcheck_360_extended.json.
+      // ponytail: the object's `freq` is dropped here -- it has no consumer.
+      // SolrSpellcheckBackendTrait.php:34-36 (the trait whose structure this
+      // extra data mirrors) reads only `$word['word']` and discards
+      // frequency, so preserving `freq` would be carried for nothing.
+      $words = [];
+      foreach ((array) ($info['suggestion'] ?? []) as $suggestion) {
+        if (is_string($suggestion)) {
+          $words[] = $suggestion;
+        }
+        elseif (is_array($suggestion) && is_string($suggestion['word'] ?? NULL)) {
+          $words[] = $suggestion['word'];
+        }
+      }
       // The trait drops a term it has no correction for rather than passing
       // an empty list on to the client.
       if ($words === []) {
