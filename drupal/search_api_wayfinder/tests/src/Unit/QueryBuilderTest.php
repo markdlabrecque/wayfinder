@@ -2143,4 +2143,290 @@ class QueryBuilderTest extends TestCase {
     $this->assertSame('de_AT', $params['spellcheck.dictionary']);
   }
 
+  /**
+   * SPEC-385 deliverable A / test 1: `buildAutocompleteSpellcheck()` is the
+   * Spellcheck suggester plugin's `/select` builder -- mirrors
+   * Spellcheck.php::setAutocompleteSpellCheckQuery ->
+   * SearchApiSolrBackend::setSpellcheck (coverage/search_api_solr_4.4.0_source
+   * .../suggester/Spellcheck.php). Premise 2: no `q` is legal on `/select`
+   * (it does not default to `*:*`), so a spellcheck-only lookup sends
+   * `rows=0` and no `q`/`fq` at all -- absence is asserted in the next test.
+   *
+   * @covers ::buildAutocompleteSpellcheck
+   */
+  public function testBuildAutocompleteSpellcheckSendsSpellcheckQRowsZeroAndOmitHeader(): void {
+    $index = $this->mockIndex([], []);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], []);
+
+    $params = (new QueryBuilder())->buildAutocompleteSpellcheck($query, 'roc');
+
+    $this->assertSame('true', $params['spellcheck']);
+    $this->assertSame('roc', $params['spellcheck.q']);
+    $this->assertSame(0, $params['rows']);
+    $this->assertSame('true', $params['omitHeader']);
+  }
+
+  /**
+   * SPEC-385 deliverable A / test 2: `spellcheck.dictionary` follows the
+   * SAME per-language derivation as the search-path `buildSpellcheck()`
+   * (one value per language resolved by LanguageResolver::resolve(), mapped
+   * through FieldMapper::spellcheckDictionary(), in resolved order) -- the
+   * spec requires this be factored into one shared helper so the two builders
+   * cannot drift; this test pins the resolved-order, mapped-value contract on
+   * the autocomplete builder specifically.
+   *
+   * @covers ::buildAutocompleteSpellcheck
+   */
+  public function testBuildAutocompleteSpellcheckDictionaryRepeatsOnePerResolvedLanguage(): void {
+    $index = $this->mockIndex([], [
+      'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
+    ]);
+    $conditions = (new ConditionGroup())->addCondition('search_api_language', ['de', 'fr'], 'IN');
+    $query = $this->mockQuery(NULL, NULL, $index, $conditions, [], []);
+
+    $params = (new QueryBuilder())->buildAutocompleteSpellcheck($query, 'roc');
+
+    $this->assertSame(['de', 'fr'], $params['spellcheck.dictionary']);
+  }
+
+  /**
+   * SPEC-385 premise 1 (the guard this whole test exists for): Wayfinder's
+   * SELECT_PARAMS (src/lib.rs:332-335) does NOT admit `spellcheck.count`, and
+   * the server runs strict_params=true, so sending it 400s the entire query.
+   * ponytail: the builder therefore omits `spellcheck.count` entirely --
+   * Wayfinder's `fn spellcheck` returns exactly one correction per token
+   * regardless, so a widget configured with `limit > 1` still gets at most
+   * one correction per token, until spellcheck.count joins the server
+   * allowlist (out of scope here). Premise 2: no `q`/`fq` either -- the
+   * Spellcheck component does not run a search, it only inspects
+   * `spellcheck.q`. This is the test that stops someone "fixing" the missing
+   * count and 400ing production.
+   *
+   * @covers ::buildAutocompleteSpellcheck
+   */
+  public function testBuildAutocompleteSpellcheckOmitsCountQAndFq(): void {
+    $index = $this->mockIndex([], []);
+    // A 'limit' option is set deliberately: if a naive implementation ever
+    // starts deriving spellcheck.count from it (as buildAutocompleteTerms
+    // does for terms.limit), this test catches the regression immediately.
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], ['limit' => 5]);
+
+    $params = (new QueryBuilder())->buildAutocompleteSpellcheck($query, 'roc');
+
+    $this->assertArrayNotHasKey('spellcheck.count', $params);
+    $this->assertArrayNotHasKey('q', $params);
+    $this->assertArrayNotHasKey('fq', $params);
+  }
+
+  /**
+   * SPEC-385 deliverable B / test 4: `buildAutocompleteSuggester()` is the
+   * Suggester plugin's `/suggest` builder -- mirrors
+   * Suggester.php::setAutocompleteSuggesterQuery (:239-288). `suggest.count`
+   * defaults to 10 (upstream `$query->getOption('limit') ?? 10`, :285), and
+   * `suggest.highlight` is forced 'false' because search_api_autocomplete
+   * highlights suggestions itself (upstream's own comment, :286-287).
+   *
+   * @covers ::buildAutocompleteSuggester
+   */
+  public function testBuildAutocompleteSuggesterSendsSuggestQCountHighlightAndOmitHeader(): void {
+    $index = $this->mockIndex([], []);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], ['limit' => 7]);
+
+    $params = (new QueryBuilder())->buildAutocompleteSuggester($query, 'fox');
+
+    $this->assertSame('true', $params['suggest']);
+    $this->assertSame('fox', $params['suggest.q']);
+    $this->assertSame(7, $params['suggest.count']);
+    $this->assertSame('false', $params['suggest.highlight']);
+    $this->assertSame('true', $params['omitHeader']);
+  }
+
+  /**
+   * SPEC-385 test 4 (continued): `suggest.count` defaults to 10 when the
+   * query carries no 'limit' option, exactly like upstream's
+   * `$query->getOption('limit') ?? 10` (Suggester.php:285).
+   *
+   * @covers ::buildAutocompleteSuggester
+   */
+  public function testBuildAutocompleteSuggesterCountDefaultsToTenWhenLimitIsUnset(): void {
+    $index = $this->mockIndex([], []);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], []);
+
+    $params = (new QueryBuilder())->buildAutocompleteSuggester($query, 'fox');
+
+    $this->assertSame(10, $params['suggest.count']);
+  }
+
+  /**
+   * SPEC-385 test 5: `suggest.cfq` is ported from
+   * Utility::buildSuggesterContextFilterQuery (:476-487) -- each tag gets a
+   * '+' prefix and is FieldMapper::encodeSolrName()'d, space-joined. Two
+   * unrelated tags (neither is a 'drupal/langcode:' tag, so dictionary
+   * derivation -- test 6 -- does not interfere here) pin the encode+prefix+
+   * join contract in isolation.
+   *
+   * @covers ::buildAutocompleteSuggester
+   */
+  public function testSuggestCfqIsPlusPrefixedEncodedAndSpaceJoined(): void {
+    $index = $this->mockIndex([], []);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], []);
+
+    $params = (new QueryBuilder())->buildAutocompleteSuggester(
+      $query,
+      'fox',
+      ['search_api/index:my_index', 'custom/tag:val']
+    );
+
+    $this->assertSame(
+      '+search_api_X2f_index_X3a_my_index +custom_X2f_tag_X3a_val',
+      $params['suggest.cfq']
+    );
+  }
+
+  /**
+   * SPEC-385 test 5 (continued): a tag that is already `encodeSolrName`d is
+   * not re-encoded -- upstream's own guard is `decodeSolrName($tag) === $tag`
+   * (Utility.php:479); this pins the observable output for an already-safe
+   * tag. Note (test-writer interpretation): with FieldMapper's existing
+   * single-character `encodeSolrName` regex (no `_X` collision guard, unlike
+   * upstream's), re-applying it to an already-encoded string -- which by
+   * construction contains only [a-zA-Z0-9_] -- is a no-op either way, so this
+   * test cannot by itself distinguish "checked and skipped" from "encoded
+   * again with the same, harmless, result". It is still the correct
+   * regression per the spec's explicit ask; flagged in the handoff.
+   *
+   * @covers ::buildAutocompleteSuggester
+   */
+  public function testSuggestCfqDoesNotDoubleEncodeAnAlreadyEncodedTag(): void {
+    $index = $this->mockIndex([], []);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], []);
+
+    $params = (new QueryBuilder())->buildAutocompleteSuggester(
+      $query,
+      'fox',
+      ['search_api_X2f_index_X3a_my_index']
+    );
+
+    $this->assertSame('+search_api_X2f_index_X3a_my_index', $params['suggest.cfq']);
+  }
+
+  /**
+   * SPEC-385 test 5 (continued): no `suggest.cfq` key at all when the tag
+   * list is empty -- not an empty string.
+   *
+   * @covers ::buildAutocompleteSuggester
+   */
+  public function testSuggestCfqIsOmittedWhenTagListIsEmpty(): void {
+    $index = $this->mockIndex([], []);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], []);
+
+    $params = (new QueryBuilder())->buildAutocompleteSuggester($query, 'fox', []);
+
+    $this->assertArrayNotHasKey('suggest.cfq', $params);
+  }
+
+  /**
+   * SPEC-385 test 6a: an explicit `drupal/langcode:<x>` tag (not 'any' or
+   * 'multilingual') decides the dictionary directly, and the tag itself is
+   * left unchanged in `suggest.cfq` (Suggester.php:256-266: the `else`
+   * branch never touches `context_filter_tags`).
+   *
+   * @covers ::buildAutocompleteSuggester
+   */
+  public function testSuggestDictionaryFromExplicitLangcodeTagLeavesTagUnchanged(): void {
+    $index = $this->mockIndex([], []);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], []);
+
+    $params = (new QueryBuilder())->buildAutocompleteSuggester(
+      $query,
+      'fox',
+      ['drupal/langcode:fr']
+    );
+
+    $this->assertSame('fr', $params['suggest.dictionary']);
+    $this->assertSame('+drupal_X2f_langcode_X3a_fr', $params['suggest.cfq']);
+  }
+
+  /**
+   * SPEC-385 test 6b: 'multilingual' + exactly one resolved langcode
+   * collapses to that langcode -- both as the dictionary AND as the rewritten
+   * tag (Suggester.php:244-248: `str_replace('drupal/langcode:multilingual',
+   * 'drupal/langcode:' . $langcode, ...)`).
+   *
+   * @covers ::buildAutocompleteSuggester
+   */
+  public function testSuggestDictionaryFromMultilingualWithOneResolvedLanguage(): void {
+    $index = $this->mockIndex([], [
+      'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
+    ]);
+    $conditions = (new ConditionGroup())->addCondition('search_api_language', 'de', '=');
+    $query = $this->mockQuery(NULL, NULL, $index, $conditions, [], []);
+
+    $params = (new QueryBuilder())->buildAutocompleteSuggester(
+      $query,
+      'fox',
+      ['drupal/langcode:multilingual']
+    );
+
+    $this->assertSame('de', $params['suggest.dictionary']);
+    $this->assertSame('+drupal_X2f_langcode_X3a_de', $params['suggest.cfq']);
+  }
+
+  /**
+   * SPEC-385 test 6c: 'multilingual' + several resolved langcodes emits one
+   * dictionary per langcode AND rewrites the tag into the grouped form
+   * (Suggester.php:249-254: `'(' . $tag_name . implode(' ' . $tag_name,
+   * $langcodes) . ')'`, where `$tag_name = encodeSolrName('drupal/langcode:')`
+   * = 'drupal_X2f_langcode_X3a_'). The grouped tag already contains encoded
+   * sequences, so buildSuggesterContextFilterQuery's own
+   * `decodeSolrName($tag) === $tag` check is false for it and it is only
+   * '+'-prefixed, not re-encoded (Utility.php:479-484) -- this is what makes
+   * the parenthesised group readable rather than doubly escaped.
+   *
+   * @covers ::buildAutocompleteSuggester
+   */
+  public function testSuggestDictionaryFromMultilingualWithSeveralResolvedLanguages(): void {
+    $index = $this->mockIndex([], [
+      'search_api_language' => $this->mockIndexField('search_api_language', 'string', FALSE),
+    ]);
+    $conditions = (new ConditionGroup())->addCondition('search_api_language', ['de', 'fr'], 'IN');
+    $query = $this->mockQuery(NULL, NULL, $index, $conditions, [], []);
+
+    $params = (new QueryBuilder())->buildAutocompleteSuggester(
+      $query,
+      'fox',
+      ['drupal/langcode:multilingual']
+    );
+
+    $this->assertSame(['de', 'fr'], $params['suggest.dictionary']);
+    $this->assertSame(
+      '+(drupal_X2f_langcode_X3a_de drupal_X2f_langcode_X3a_fr)',
+      $params['suggest.cfq']
+    );
+  }
+
+  /**
+   * SPEC-385 test 6d: 'any' means the caller never added a
+   * 'drupal/langcode:' tag at all (Suggester.php:172-174: the tag is only
+   * appended when `'any' !== $config['drupal/langcode']`) -- so with an empty
+   * tag list the dictionary stays at the upstream fallback
+   * `LanguageInterface::LANGCODE_NOT_SPECIFIED` == FieldMapper::
+   * LANGUAGE_UNSPECIFIED == 'und' (Suggester.php:280), and there is no
+   * `suggest.cfq` key (already covered by
+   * testSuggestCfqIsOmittedWhenTagListIsEmpty; asserted again here alongside
+   * the dictionary fallback so the "any" behaviour is pinned as one
+   * complete case).
+   *
+   * @covers ::buildAutocompleteSuggester
+   */
+  public function testSuggestDictionaryFallsBackToUndWhenNoLangcodeTagIsPresent(): void {
+    $index = $this->mockIndex([], []);
+    $query = $this->mockQuery(NULL, NULL, $index, NULL, [], []);
+
+    $params = (new QueryBuilder())->buildAutocompleteSuggester($query, 'fox', []);
+
+    $this->assertSame('und', $params['suggest.dictionary']);
+    $this->assertArrayNotHasKey('suggest.cfq', $params);
+  }
+
 }

@@ -726,4 +726,86 @@ class DocumentBuilderTest extends TestCase {
     $this->assertSame('SKU-1', $doc['sort_field_sku']);
   }
 
+  /**
+   * SPEC-385 deliverable E / test 16: `suggest.cfq` on a Suggester lookup
+   * filters on the document's `sm_context_tags` (src/core_index.rs:4859), and
+   * this module currently indexes no such field -- so without this, any
+   * context-filtered Suggester lookup returns nothing. Mirrors
+   * SearchApiSolrBackend.php:1343-1347 minus the site-hash tag (premise 6:
+   * this module has no site hash, DocumentBuilder.php:15). `sm_*` is a
+   * multi-valued dynamic field (presets/search-api.toml:115-116), so this
+   * asserts an array of exactly two tags. Values are hand-computed from
+   * FieldMapper's own documented `encodeSolrName()` transform (`;` ->
+   * `_X3b_`, `/` -> `_X2f_`, `:` -> `_X3a_`) -- the real output, not a
+   * substring match, per the spec's explicit instruction.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandIndexesContextTagsForIndexAndLanguage(): void {
+    $item = $this->mockItem('node/1:en', 'entity:node', 'en', [
+      'title' => $this->mockField('title', 'text', [new TextValue('Hello world')]),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper()))
+      ->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    $this->assertSame(
+      ['search_api_X2f_index_X3a_my_index', 'drupal_X2f_langcode_X3a_en'],
+      $doc['sm_context_tags']
+    );
+  }
+
+  /**
+   * Review-flagged defect (issue #385, not in the spec's own required cases):
+   * a user field with Search API id `context_tags`, type `string`,
+   * multi-valued, maps through `FieldMapper::fieldName()` to the SAME dynamic
+   * field the `sm_context_tags` literal above already writes -- 'string'
+   * takes the plain `TYPE_PREFIXES['string'] = 's'` prefix (not the text-family
+   * branch, since 's' does not start with 't'), so `$multiValued` selects the
+   * 'm' infix and `encodeSolrName('sm_context_tags')` is the identity
+   * transform (no encodable characters), giving exactly `sm_context_tags`.
+   *
+   * DocumentBuilder.php:132's field loop is a plain `$doc[$name] = ...`
+   * assign, which -- unlike the `solr_text_suggester`/`solr_text_spellcheck`
+   * sink branch a few lines above it (issue #339's `array_merge`, chosen for
+   * this exact hazard: search_api_solr never hits it because Solarium's
+   * `Document::addField()` appends where this module's plain array-assign
+   * does not) -- silently REPLACES the generated context tags with the user
+   * field's own values. That kills every `suggest.cfq` lookup for the index,
+   * because `sm_context_tags` would carry no `search_api/index:...` or
+   * `drupal/langcode:...` tag for Wayfinder's server (src/core_index.rs:4859)
+   * to filter on.
+   *
+   * The fix (not written here -- tests only) is for `sm_context_tags` to
+   * accumulate with the same `array_merge` shape as the suggester/spellcheck
+   * sinks, so this asserts the MERGED outcome: both generated tags AND the
+   * user field's values are present.
+   *
+   * @covers ::buildAddCommand
+   */
+  public function testBuildAddCommandUserContextTagsFieldMergesRatherThanReplacesGeneratedTags(): void {
+    $item = $this->mockItem('node/385:en', 'entity:node', 'en', [
+      'context_tags' => $this->mockField('context_tags', 'string', ['custom_tag_one', 'custom_tag_two'], TRUE),
+    ]);
+
+    $doc = (new DocumentBuilder(new FieldMapper()))->buildAddCommand($item, 'my_index')['add']['doc'];
+
+    // Confirms the collision is real: the user field maps to the exact same
+    // dynamic field name the literal at the top of buildAddCommand() writes.
+    $this->assertArrayHasKey('sm_context_tags', $doc);
+
+    $this->assertSame(
+      [
+        'search_api_X2f_index_X3a_my_index',
+        'drupal_X2f_langcode_X3a_en',
+        'custom_tag_one',
+        'custom_tag_two',
+      ],
+      $doc['sm_context_tags'],
+      'sm_context_tags must accumulate the generated context tags AND the '
+      . "user field's values -- a plain assign silently drops the generated "
+      . 'tags, breaking every suggest.cfq lookup for this index.'
+    );
+  }
+
 }

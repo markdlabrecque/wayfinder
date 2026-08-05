@@ -11,7 +11,7 @@ use GuzzleHttp\Exception\RequestException;
 
 /**
  * Thin Guzzle wrapper for Wayfinder's Solr-wire-compatible core endpoints:
- * select, mlt, update, admin/system, and admin/ping.
+ * select, mlt, terms, suggest, update, admin/system, and admin/ping.
  *
  * Converts non-200 Solr error envelopes ({"error":{"msg":..., "code":...}})
  * into SearchApiException using the envelope's error.msg, per plan doc
@@ -78,6 +78,37 @@ class WayfinderClient {
   public function terms(array $params): array {
     $params['wt'] = 'json';
     return $this->request('GET', 'terms', ['query' => $this->encodeQuery($params)]);
+  }
+
+  /**
+   * GET {core}/suggest with the given params.
+   *
+   * The Suggester autocomplete transport (#385): search_api_solr's Suggester
+   * plugin drives Solr's SuggestComponent, which Wayfinder serves on its own
+   * /suggest endpoint rather than through the /autocomplete request handler
+   * (no such route here, #351). The lookup read path -- suggest.q, plus
+   * suggest.dictionary / suggest.cfq / suggest.count / suggest.highlight -- is
+   * server issue #384; QueryBuilder::buildAutocompleteSuggester() emits those
+   * params and WayfinderBackend::getSuggesterAutocompleteSuggestions() consumes
+   * the response. Same transport and error handling as select()/terms()/mlt();
+   * only the endpoint differs.
+   *
+   * The success envelope is nested dictionary -> query -> suggestions:
+   * {"suggest":{"en":{"fox":{"numFound":2,"suggestions":[
+   *   {"term":"quick brown <b>fox</b>","weight":0,"payload":""}, ...]}}}}
+   * -- ground truth #384's captured fixture
+   * solr-ref/responses/suggest_q_infix_en.json. The <b> markup is Solr's own
+   * highlighting and is passed through verbatim; the builder sends
+   * suggest.highlight=false because search_api_autocomplete highlights itself.
+   *
+   * @return array
+   *   The decoded JSON response body.
+   *
+   * @throws \Drupal\search_api\SearchApiException
+   */
+  public function suggest(array $params): array {
+    $params['wt'] = 'json';
+    return $this->request('GET', 'suggest', ['query' => $this->encodeQuery($params)]);
   }
 
   /**

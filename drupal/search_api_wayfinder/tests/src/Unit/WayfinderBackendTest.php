@@ -899,4 +899,282 @@ class WayfinderBackendTest extends TestCase {
     $this->assertSame('tm_X3b_en_title tm_X3b_de_title', $sentParams['qf'] ?? NULL);
   }
 
+  /**
+   * SPEC-385 deliverable D1 / test 9: `getSpellcheckAutocompleteSuggestions()`
+   * builds a `/select` request through `QueryBuilder::
+   * buildAutocompleteSpellcheck`, sends it via `WayfinderClient::select()`,
+   * and decodes the flat `spellcheck.suggestions` envelope into
+   * `SuggestionInterface[]` -- mirroring `Spellcheck.php::
+   * getAutocompleteSpellCheckSuggestions` + `SolrSpellcheckBackendTrait::
+   * extractSpellCheckSuggestions` (coverage/search_api_solr_4.4.0_source):
+   * per corrected token, ONE suggestion per suggested WORD, via
+   * `SuggestionFactory::createFromSuggestedKeys($word)` -- not one per token.
+   * Wire shape ground truth: ResponseParser::parseSpellcheck()'s doc comment
+   * (src/ResponseParser.php:99-131) and solr-ref/responses/spellcheck_flat.json.
+   *
+   * @covers ::getSpellcheckAutocompleteSuggestions
+   */
+  public function testGetSpellcheckAutocompleteSuggestionsBuildsSelectQueryAndParsesSuggestions(): void {
+    $index = $this->mockIndex();
+    $query = $this->mockQuery($index);
+
+    $client = $this->createMock(WayfinderClient::class);
+    $client->expects($this->once())->method('select')->willReturn([
+      'spellcheck' => [
+        'suggestions' => [
+          'qwick', ['numFound' => 1, 'suggestion' => ['quick']],
+          'roket', ['numFound' => 2, 'suggestion' => ['rocket', 'rocker']],
+        ],
+      ],
+    ]);
+
+    $backend = $this->backendWithClient($client);
+    $suggestions = $backend->getSpellcheckAutocompleteSuggestions($query, 'qwick roket');
+
+    $this->assertCount(3, $suggestions);
+    $this->assertContainsOnlyInstancesOf(SuggestionInterface::class, $suggestions);
+    $keys = array_map(fn (SuggestionInterface $s) => $s->getSuggestedKeys(), $suggestions);
+    $this->assertSame(['quick', 'rocket', 'rocker'], $keys);
+  }
+
+  /**
+   * SPEC-385 test 10: under `spellcheck.extendedResults=true` Solr returns
+   * each suggested member as a `{word, freq}` object instead of a bare
+   * string; the decoded suggestion keys must be identical either way --
+   * ResponseParser::parseSpellcheck() already normalises this same shape for
+   * the search path (src/ResponseParser.php:147-166,
+   * solr-ref/responses/spellcheck_360_extended.json), and the autocomplete
+   * decode must agree.
+   *
+   * @covers ::getSpellcheckAutocompleteSuggestions
+   */
+  public function testGetSpellcheckAutocompleteSuggestionsDecodesExtendedResultsSameAsPlainStrings(): void {
+    $index = $this->mockIndex();
+    $query = $this->mockQuery($index);
+
+    $client = $this->createMock(WayfinderClient::class);
+    $client->method('select')->willReturn([
+      'spellcheck' => [
+        'suggestions' => [
+          'qwick', ['numFound' => 1, 'suggestion' => [['word' => 'quick', 'freq' => 3]]],
+        ],
+      ],
+    ]);
+
+    $backend = $this->backendWithClient($client);
+    $suggestions = $backend->getSpellcheckAutocompleteSuggestions($query, 'qwick');
+
+    $this->assertCount(1, $suggestions);
+    $this->assertSame('quick', $suggestions[0]->getSuggestedKeys());
+  }
+
+  /**
+   * SPEC-385 test 11: a failing `/select` request (transport error, non-200
+   * error envelope) degrades to an empty suggestion list rather than
+   * throwing out of the autocomplete widget -- same acceptance guard as the
+   * Terms plugin's `getAutocompleteSuggestions()`. Mutation-tested: remove
+   * the catch and this test fails because the exception propagates.
+   *
+   * @covers ::getSpellcheckAutocompleteSuggestions
+   */
+  public function testGetSpellcheckAutocompleteSuggestionsReturnsEmptyArrayOnTransportError(): void {
+    $index = $this->mockIndex();
+    $query = $this->mockQuery($index);
+
+    $client = $this->createMock(WayfinderClient::class);
+    $client->method('select')->willThrowException(new SearchApiException('connection refused'));
+
+    $backend = $this->backendWithClient($client);
+    $this->assertSame([], $backend->getSpellcheckAutocompleteSuggestions($query, 'qwick'));
+  }
+
+  /**
+   * SPEC-385 test 15 (spellcheck half): duplicate suggested keys across
+   * different original tokens are filtered -- mirroring upstream's
+   * `filterDuplicateAutocompleteSuggestions` (SolrAutocompleteBackendTrait.php
+   * :50-66), which dedupes on `getSuggestedKeys()`.
+   *
+   * @covers ::getSpellcheckAutocompleteSuggestions
+   */
+  public function testGetSpellcheckAutocompleteSuggestionsDedupesSuggestedKeys(): void {
+    $index = $this->mockIndex();
+    $query = $this->mockQuery($index);
+
+    $client = $this->createMock(WayfinderClient::class);
+    $client->method('select')->willReturn([
+      'spellcheck' => [
+        'suggestions' => [
+          'qwick', ['suggestion' => ['quick']],
+          'kwik', ['suggestion' => ['quick']],
+        ],
+      ],
+    ]);
+
+    $backend = $this->backendWithClient($client);
+    $suggestions = $backend->getSpellcheckAutocompleteSuggestions($query, 'qwick kwik');
+
+    $this->assertCount(1, $suggestions);
+    $this->assertSame('quick', $suggestions[0]->getSuggestedKeys());
+  }
+
+  /**
+   * SPEC-385 deliverable D2 / test 12: `getSuggesterAutocompleteSuggestions()`
+   * builds a `/suggest` request through `QueryBuilder::
+   * buildAutocompleteSuggester`, sends it via the new `WayfinderClient::
+   * suggest()`, and walks `suggest.<dictionary>.<query>.suggestions[]` into
+   * `SuggestionInterface[]` via `createFromSuggestedKeys($entry['term'])`, in
+   * response order -- mirroring `Suggester.php::
+   * getAutocompleteSuggesterSuggestions` (:301-317). The response body below
+   * is #384's captured fixture `suggest_q_infix_en.json` (extracted via
+   * `git show 6773c6f:solr-ref/responses/suggest_q_infix_en.json` -- this
+   * branch has not rebased onto #384's fixture commits yet, see the handoff
+   * note), decoded to the PHP array `WayfinderClient::suggest()` would
+   * return. `<b>` markup passes through verbatim because `suggest.highlight`
+   * is sent 'false' by the builder but Solr's own highlighting on `/suggest`
+   * lookups is independent -- premise 4: the parser must not assume or strip
+   * markup.
+   *
+   * @covers ::getSuggesterAutocompleteSuggestions
+   */
+  public function testGetSuggesterAutocompleteSuggestionsBuildsSuggestQueryAndParsesFixtureSuggestions(): void {
+    $index = $this->mockIndex();
+    $query = $this->mockQuery($index);
+
+    $client = $this->createMock(WayfinderClient::class);
+    $client->expects($this->once())->method('suggest')->willReturn([
+      'responseHeader' => ['status' => 0, 'QTime' => 12],
+      'suggest' => [
+        'en' => [
+          'fox' => [
+            'numFound' => 2,
+            'suggestions' => [
+              ['term' => 'quick brown <b>fox</b>', 'weight' => 0, 'payload' => ''],
+              ['term' => 'the quick <b>fox</b> jumps over the lazy dog', 'weight' => 0, 'payload' => ''],
+            ],
+          ],
+        ],
+      ],
+    ]);
+
+    $backend = $this->backendWithClient($client);
+    $suggestions = $backend->getSuggesterAutocompleteSuggestions($query, 'fox', []);
+
+    $this->assertCount(2, $suggestions);
+    $this->assertContainsOnlyInstancesOf(SuggestionInterface::class, $suggestions);
+    $this->assertSame('quick brown <b>fox</b>', $suggestions[0]->getSuggestedKeys());
+    $this->assertSame('the quick <b>fox</b> jumps over the lazy dog', $suggestions[1]->getSuggestedKeys());
+  }
+
+  /**
+   * SPEC-385 test 13: multiple dictionaries in one `/suggest` response each
+   * contribute their suggestions -- upstream walks
+   * `$phrases_result->getAll()` across every dictionary key present
+   * (Suggester.php:305-306), not just the first.
+   *
+   * @covers ::getSuggesterAutocompleteSuggestions
+   */
+  public function testGetSuggesterAutocompleteSuggestionsCollectsAcrossMultipleDictionaries(): void {
+    $index = $this->mockIndex();
+    $query = $this->mockQuery($index);
+
+    $client = $this->createMock(WayfinderClient::class);
+    $client->method('suggest')->willReturn([
+      'suggest' => [
+        'en' => ['fox' => ['numFound' => 1, 'suggestions' => [['term' => 'quick fox', 'weight' => 0, 'payload' => '']]]],
+        'fr' => ['renard' => ['numFound' => 1, 'suggestions' => [['term' => 'renard rapide', 'weight' => 0, 'payload' => '']]]],
+      ],
+    ]);
+
+    $backend = $this->backendWithClient($client);
+    $suggestions = $backend->getSuggesterAutocompleteSuggestions($query, 'fox', []);
+
+    $keys = array_map(fn (SuggestionInterface $s) => $s->getSuggestedKeys(), $suggestions);
+    sort($keys);
+    $this->assertSame(['quick fox', 'renard rapide'], $keys);
+  }
+
+  /**
+   * SPEC-385 test 14: a failing `/suggest` request degrades to an empty
+   * suggestion list, same acceptance guard as D1 and the Terms plugin.
+   *
+   * @covers ::getSuggesterAutocompleteSuggestions
+   */
+  public function testGetSuggesterAutocompleteSuggestionsReturnsEmptyArrayOnTransportError(): void {
+    $index = $this->mockIndex();
+    $query = $this->mockQuery($index);
+
+    $client = $this->createMock(WayfinderClient::class);
+    $client->method('suggest')->willThrowException(new SearchApiException('connection refused'));
+
+    $backend = $this->backendWithClient($client);
+    $this->assertSame([], $backend->getSuggesterAutocompleteSuggestions($query, 'fox', []));
+  }
+
+  /**
+   * SPEC-385 test 15 (suggester half): duplicate suggested keys across
+   * different dictionaries are filtered, same dedupe contract as D1's
+   * spellcheck path.
+   *
+   * @covers ::getSuggesterAutocompleteSuggestions
+   */
+  public function testGetSuggesterAutocompleteSuggestionsDedupesSuggestedKeys(): void {
+    $index = $this->mockIndex();
+    $query = $this->mockQuery($index);
+
+    $client = $this->createMock(WayfinderClient::class);
+    $client->method('suggest')->willReturn([
+      'suggest' => [
+        'en' => ['fox' => ['suggestions' => [['term' => 'quick fox', 'weight' => 0, 'payload' => '']]]],
+        'fr' => ['fox' => ['suggestions' => [['term' => 'quick fox', 'weight' => 0, 'payload' => '']]]],
+      ],
+    ]);
+
+    $backend = $this->backendWithClient($client);
+    $suggestions = $backend->getSuggesterAutocompleteSuggestions($query, 'fox', []);
+
+    $this->assertCount(1, $suggestions);
+    $this->assertSame('quick fox', $suggestions[0]->getSuggestedKeys());
+  }
+
+  /**
+   * Review-flagged defect (issue #385, not in the spec's own required cases):
+   * `getSuggesterAutocompleteSuggestions()`'s response walk is
+   * `foreach ($response['suggest'] ?? [] as $dictionary => $queries)`
+   * (WayfinderBackend.php:592) -- unlike every INNER level of the same walk
+   * (`:593`'s `is_array($queries)` guard, `:597`'s `is_array($phrases)`
+   * ternary, `:598`'s `is_array($phrase)` check) and unlike the sibling
+   * Terms walk (`:465-466`'s `is_array($list)` guard before iterating), there
+   * is no outer `is_array()` guard on `$response['suggest']` itself.
+   *
+   * `??` only substitutes when the key is missing or NULL -- a malformed or
+   * unexpected transport response whose `suggest` key is present but a
+   * scalar (e.g. a string) reaches `foreach` unguarded. PHP 8's `foreach`
+   * over a non-iterable raises "Warning: foreach() argument must be of type
+   * array|object, string given", which this suite's `failOnWarning="true"`
+   * (phpunit.xml.dist) promotes to a test failure -- so this must fail on the
+   * warning, not merely produce a wrong (but silent) result.
+   *
+   * The transport layer (`WayfinderClient::suggest()`) always JSON-decodes a
+   * real HTTP body, so a top-level `suggest` scalar cannot come from a
+   * well-formed Solr/Wayfinder response; the point of this guard, matching
+   * the Terms path and every inner level of this same method, is defence
+   * against exactly this kind of not-quite-the-expected-shape response
+   * degrading gracefully to no suggestions instead of a warning reaching the
+   * widget.
+   *
+   * @covers ::getSuggesterAutocompleteSuggestions
+   */
+  public function testGetSuggesterAutocompleteSuggestionsReturnsEmptyArrayWhenSuggestKeyIsNotAnArray(): void {
+    $index = $this->mockIndex();
+    $query = $this->mockQuery($index);
+
+    $client = $this->createMock(WayfinderClient::class);
+    // A malformed response: 'suggest' present but not an array/object, unlike
+    // every real Solr/Wayfinder envelope this client ever decodes.
+    $client->method('suggest')->willReturn(['suggest' => 'not-an-array']);
+
+    $backend = $this->backendWithClient($client);
+    $this->assertSame([], $backend->getSuggesterAutocompleteSuggestions($query, 'fox', []));
+  }
+
 }

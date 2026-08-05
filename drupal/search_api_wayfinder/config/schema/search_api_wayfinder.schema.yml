@@ -85,3 +85,38 @@ plugin.plugin_configuration.search_api_processor.wayfinder_linked_file_extractio
     number_first_bytes:
       type: string
       label: 'Maximum extracted-text byte string (0 for no limit)'
+
+# Suggester-plugin configuration for the two search_api_autocomplete suggesters
+# this module ships (issue #385). Same rule as the processors above: an
+# unschemad plugin config breaks config export/import validation, and here the
+# only schema that would otherwise resolve is search_api_autocomplete's own
+# untyped wildcard (`plugin.plugin_configuration.
+# search_api_autocomplete_suggester.*: type: mapping`, in that module's
+# search_api_autocomplete.schema.yml), which leaves every key inside it
+# undeclared -- so `strict_config_schema` (on by default in Drupal kernel and
+# functional tests) fails when the autocomplete search entity is saved, and
+# config_inspector flags it. search_api_solr ships exactly this file for its own
+# two plugins: coverage/search_api_solr_4.4.0_source/modules/
+# search_api_solr_autocomplete/config/schema/
+# search_api_solr_autocomplete.suggester.schema.yml, including the bare mapping
+# for the config-less Spellcheck. The keys mirror
+# Suggester::defaultConfiguration() one for one; upstream's third key
+# (`search_api_solr/site_hash`) is absent here for the same reason it is absent
+# from that method -- this module indexes no site hash.
+plugin.plugin_configuration.search_api_autocomplete_suggester.search_api_wayfinder_suggester:
+  type: mapping
+  label: 'Wayfinder Suggester'
+  mapping:
+    search_api/index:
+      type: string
+      label: 'Index ID'
+    drupal/langcode:
+      type: string
+      label: 'Language'
+
+# Bare mapping, no keys: the Spellcheck plugin's defaultConfiguration() is
+# deliberately empty (upstream's is too), but the entry still has to exist or
+# the untyped wildcard is what resolves.
+plugin.plugin_configuration.search_api_autocomplete_suggester.search_api_wayfinder_spellcheck:
+  type: mapping
+  label: 'Wayfinder Spellcheck'

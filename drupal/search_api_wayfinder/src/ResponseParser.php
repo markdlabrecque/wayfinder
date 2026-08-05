@@ -136,6 +136,55 @@ class ResponseParser {
       return NULL;
     }
 
+    $data = ['suggestions' => self::extractSpellcheckSuggestions($response)];
+
+    // collations is the same interleaved form: ['collation', <string>, ...],
+    // one pair per collation when spellcheck.maxCollations > 1. Only the
+    // first surfaces, because the client contract is a single string.
+    $collations = array_values(is_array($spellcheck['collations'] ?? NULL) ? $spellcheck['collations'] : []);
+    for ($i = 0, $n = count($collations); $i + 1 < $n; $i += 2) {
+      if ($collations[$i] === 'collation' && is_scalar($collations[$i + 1])) {
+        $data['collation'] = (string) $collations[$i + 1];
+        break;
+      }
+    }
+
+    return $data;
+  }
+
+  /**
+   * Decodes the response's flat `spellcheck.suggestions` list into a
+   * <original term> => [<suggested word>, ...] map.
+   *
+   * Mirrors search_api_solr's SolrSpellcheckBackendTrait::
+   * extractSpellCheckSuggestions() (SolrSpellcheckBackendTrait.php:24-42),
+   * which keys the map by `$correction->getOriginalTerm()` and collects each
+   * `$word['word']`, dropping a term with no corrections (its own `if ($keys)`
+   * guard).
+   *
+   * Static and public since issue #385: it has two consumers that MUST agree
+   * on the wire shape -- the search path's parseSpellcheck() above (which wraps
+   * this in 'search_api_spellcheck' extra data) and the Spellcheck
+   * autocomplete plugin's read path (WayfinderBackend::
+   * getSpellcheckAutocompleteSuggestions(), which turns each suggested word
+   * into a SuggestionInterface). Upstream shares this exact method between the
+   * same two paths, via the trait.
+   *
+   * Wire shape: `suggestions` is the interleaved [term, {...}, term, {...}]
+   * FLAT named-list form -- ground truth solr-ref/responses/spellcheck_flat.json;
+   * only json.nl=map produces the object form (spellcheck_map.json) and nothing
+   * here ever sends json.nl.
+   *
+   * @return array<string, array<int, string>>
+   *   The corrected-term map; empty when the response carries no usable
+   *   spellcheck suggestions.
+   */
+  public static function extractSpellcheckSuggestions(array $response): array {
+    $spellcheck = $response['spellcheck'] ?? NULL;
+    if (!is_array($spellcheck)) {
+      return [];
+    }
+
     $suggestions = [];
     $flat = array_values(is_array($spellcheck['suggestions'] ?? NULL) ? $spellcheck['suggestions'] : []);
     for ($i = 0, $n = count($flat); $i + 1 < $n; $i += 2) {
@@ -173,20 +222,7 @@ class ResponseParser {
       $suggestions[$term] = $words;
     }
 
-    $data = ['suggestions' => $suggestions];
-
-    // collations is the same interleaved form: ['collation', <string>, ...],
-    // one pair per collation when spellcheck.maxCollations > 1. Only the
-    // first surfaces, because the client contract is a single string.
-    $collations = array_values(is_array($spellcheck['collations'] ?? NULL) ? $spellcheck['collations'] : []);
-    for ($i = 0, $n = count($collations); $i + 1 < $n; $i += 2) {
-      if ($collations[$i] === 'collation' && is_scalar($collations[$i + 1])) {
-        $data['collation'] = (string) $collations[$i + 1];
-        break;
-      }
-    }
-
-    return $data;
+    return $suggestions;
   }
 
   /**

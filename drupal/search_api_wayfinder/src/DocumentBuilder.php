@@ -45,6 +45,30 @@ class DocumentBuilder {
       'index_id' => $indexId,
       'ss_search_api_language' => $item->getLanguage(),
       'ss_search_api_datasource' => $item->getDatasourceId(),
+      // issue #385: the Suggester autocomplete plugin narrows a /suggest
+      // lookup with suggest.cfq, which Wayfinder evaluates against the
+      // document's sm_context_tags (src/core_index.rs:4859) -- without these
+      // tags any context-filtered lookup returns nothing. Mirrors
+      // SearchApiSolrBackend.php:1343-1347, including the reason the values
+      // are field-name-encoded rather than raw: "Suggester context boolean
+      // filter queries have issues with special characters like '/' or ':' if
+      // not properly quoted (by solarium). We avoid that by reusing our field
+      // name encoding." (:1339-1341). QueryBuilder's
+      // buildSuggesterContextFilterQuery() encodes the query side with the
+      // same FieldMapper::encodeSolrName(), so the two agree by construction.
+      // Written as an array because sm_* is a multi-valued dynamic field
+      // (presets/search-api.toml:115-116).
+      //
+      // ponytail: upstream's third tag, 'search_api_solr/site_hash:<hash>'
+      // (:1345), is absent -- this module indexes no site hash at all (see the
+      // class docblock above and DocumentBuilder.php's #301 note: one core per
+      // site is the supported topology). The cost is that the Suggester
+      // plugin can offer no "from this site only" restriction; there is
+      // nothing to restrict on.
+      'sm_context_tags' => [
+        $this->fieldMapper->encodeSolrName('search_api/index:' . $indexId),
+        $this->fieldMapper->encodeSolrName('drupal/langcode:' . $item->getLanguage()),
+      ],
     ];
 
     foreach ($item->getFields() as $field) {
@@ -105,9 +129,37 @@ class DocumentBuilder {
       // for every text-family prefix (SearchApiSolrBackend.php:2450-2473) --
       // so its value must always be written as an array, or a single-valued
       // text field would send a scalar to a multi_valued dynamic field.
-      $doc[$name] = $multiValued || $this->fieldMapper->isLanguageSpecificTextType($type)
+      $value = $multiValued || $this->fieldMapper->isLanguageSpecificTextType($type)
         ? array_values($formatted)
         : $formatted[0];
+
+      // issue #385: ACCUMULATE when this field's mapped name collides with a
+      // multi-valued value the document already carries, rather than replacing
+      // it. The collision that makes this necessary is sm_context_tags: a user
+      // field with the Search API id 'context_tags', type 'string',
+      // multi-valued maps to exactly that name ('s' prefix + 'm' infix, and
+      // encodeSolrName() is the identity on a name with no encodable
+      // characters), so a plain assign would silently drop the generated
+      // 'search_api/index:' and 'drupal/langcode:' tags written at the top of
+      // this method -- and with them every suggest.cfq lookup for the index.
+      // Same array_merge shape, and the same reasoning, as the
+      // twm_suggest/spellcheck_* sink branch above (issue #339):
+      // search_api_solr never hits any of these because Solarium's
+      // Document::addField() appends where a PHP array-assign does not.
+      // Generated values come first because they are written first; the user
+      // field's own values are appended in item-field iteration order.
+      // Guarded on the EXISTING value being an array rather than on the name
+      // being 'sm_context_tags', so any future generated multi-valued literal
+      // is covered by construction. No two user fields collide in practice, so
+      // this branch normally only merges a user field into a generated literal
+      // -- but a pair like 'a-b' / 'a_X2d_b' would collide with each other,
+      // via the same missing _X guard the KNOWN DIVERGENCE note on
+      // FieldMapper::encodeSolrName() names. In that corner this appends where
+      // the old plain assign silently replaced, which is the less lossy of the
+      // two; properly fixing it means closing that encoder divergence.
+      $doc[$name] = is_array($doc[$name] ?? NULL)
+        ? array_merge($doc[$name], (array) $value)
+        : $value;
 
       if ($this->fieldMapper->usesLanguageSpecificSortCopy($name)) {
         // Confirmed-correct, not a descope: a multi-valued text field's
