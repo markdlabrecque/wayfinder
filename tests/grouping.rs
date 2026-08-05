@@ -6,7 +6,7 @@
 //!
 //! Every expected value here comes from a committed fixture in
 //! `solr-ref/responses/group_*.json`, captured against a dedicated `grouping`
-//! Solr core (`solr-ref/capture.sh`'s issue-#290 block, container
+//! Solr core (the dedicated Solr capture's issue-#290 block, container
 //! `wayfinder-solr-290`, port 8997) -- never from what Wayfinder happens to
 //! produce. Finding 130 (`docs/solr-ref-findings.md`) is the source sweep that
 //! narrowed the param surface: `search_api_solr`'s `setGrouping()` sends
@@ -101,7 +101,7 @@ stored = true
 fast = true
 "#;
 
-/// The exact 6-doc corpus `solr-ref/capture.sh`'s issue-#290 block indexes:
+/// The exact 6-doc corpus the dedicated Solr capture's issue-#290 block indexes:
 /// `type` article on g1/g3/g4, page on g2/g5, missing on g6 (the null group).
 fn grouping_corpus() -> Value {
     json!([
@@ -566,7 +566,7 @@ async fn grouping_orders_groups_by_top_doc_relevance() {
 // --- error shapes ----------------------------------------------------------
 
 /// `group=true` with no `group.field` is a 400 (Solr: "Specify at least one
-/// field, function or query to group by."). The differential harness
+/// field, function or query to group by."). The fixture comparison suite
 /// normalises error.msg/metadata away, so this dedicated test pins the message.
 #[tokio::test]
 async fn grouping_no_group_field_is_a_400() {
@@ -1816,7 +1816,7 @@ stored = true
 fast = true
 "#;
 
-/// The exact 5-doc corpus `solr-ref/capture.sh`'s `g338n_` block indexes:
+/// The exact 5-doc corpus the dedicated Solr capture's `g338n_` block indexes:
 /// `type` article on h1/h2, page on h3, missing on h4/h5 (the null group),
 /// while `category=news` sits on h1, h3, h4 and h5.
 fn g338null_corpus() -> Value {

@@ -3,7 +3,7 @@
 //!
 //! Every expected value here comes from a committed fixture in
 //! `solr-ref/responses/edismax_*.json`, captured against a dedicated 10-doc
-//! corpus (`solr-ref/capture.sh`'s edismax block, container
+//! corpus (the dedicated Solr capture's edismax block, container
 //! `wayfinder-solr-7`, port 8994) — the canonical 5-doc tracer-bullet corpus
 //! has only one text field (`body`) and an unanalyzed `category`, so it
 //! cannot exercise `qf`'s per-field weighting or `pf`'s phrase boost at all.
@@ -23,7 +23,7 @@
 //!
 //! ## Why score-bearing fixtures are compared structurally, not by exact float
 //!
-//! PRD ratified-divergence 4 (`tests/differential.rs`'s
+//! PRD ratified-divergence 4 (the retained fixture tests'
 //! `RANKED_SCORE_VALUE_RATIFIED`, `tests/mlt.rs`'s
 //! `blank_bm25_score_magnitudes`): Tantivy's BM25 and Solr/Lucene's
 //! BM25Similarity numerically disagree on the same corpus by a real,
@@ -46,7 +46,7 @@ mod common;
 
 use axum::Router;
 use axum::http::StatusCode;
-use common::diff::{diff, load_manifest, score_tolerance};
+use common::diff::{diff, score_tolerance};
 use common::{app_with_schema, assert_matches_fixture, fixture, get};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -54,7 +54,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 /// Two text_en fields (`title`, `body`) over the same `id` shape as the
-/// canonical tracer-bullet schema — matches `solr-ref/capture.sh`'s edismax
+/// canonical tracer-bullet schema — matches the dedicated Solr capture's edismax
 /// block schema exactly (`docs/solr-ref-findings.md`, "Findings from issue
 /// #7"), so the captured fixtures are ground truth here too. Core named
 /// `content` per the same convention `tests/mlt.rs`'s `MLT_SCHEMA_TOML`
@@ -84,7 +84,7 @@ type = "text_en"
 stored = true
 "#;
 
-/// The exact 10-doc corpus `solr-ref/capture.sh`'s edismax block indexes,
+/// The exact 10-doc corpus the dedicated Solr capture's edismax block indexes,
 /// purpose-built per knob (see the block's own comments and findings 68-75):
 /// `eA`/`eB` swap which field carries the query terms (for `qf` boost
 /// reordering), `eC`/`eD` isolate `tie`'s effect to a doc matching in both
@@ -1015,7 +1015,7 @@ async fn empty_mm_alongside_a_single_clause_q_does_not_400() {
     // 400s above (`q=alpha beta gamma`, three clauses) 200s when `q` yields
     // fewer than two clauses. Captured one-off against real Solr on the same
     // schema/corpus as this file's other `mm_*` tests (not re-run through
-    // `capture.sh`; no fixture committed, same as finding 82's confirming
+    // the dedicated Solr capture; no fixture committed, same as finding 82's confirming
     // capture): `q=*:*` -> 200/numFound 10, `q=alpha` -> 200/numFound 3,
     // `q=-mission` -> 200/numFound 8, `q="alpha beta"` and `q=title:rocket`
     // -> 200. Multi-clause 400s regardless of occur kind: `q=alpha beta`,
@@ -1056,20 +1056,17 @@ async fn empty_mm_alongside_star_all_matches_committed_fixture() {
     // `numFound` against prose (finding 89 / this file's own comments), not a
     // committed fixture -- the same class of gap that let round 1's bad
     // placement (guard before the `*:*` short-circuit) hide from a green
-    // suite. `edismax_mm_empty_star` is a genuine `manifest.tsv` row (see
-    // `hermetic_edismax_manifest_entries_match_committed_fixtures` below,
-    // which sweeps it too), so this is redundant with that sweep by design --
-    // it exists as an explicit, named assertion for this specific boundary
-    // point rather than relying solely on the generic manifest loop.
+    // suite. `edismax_mm_empty_star` is also covered by
+    // `hermetic_edismax_fixture_requests_match_committed_fixtures` below, so
+    // this is redundant with that sweep by design -- it exists as an explicit,
+    // named assertion for this specific boundary point.
     //
     // Caveat, stated here rather than left implicit: this fixture's
     // `numFound` (10) is corroborated by the real one-off Solr capture this
     // test's sibling above cites; the doc order/id list was reconstructed
-    // from Wayfinder's own hermetic output (see `solr-ref/capture.sh`'s
-    // comment on this `cape` line) because no live Solr container was
-    // available to re-capture it independently. It is not yet fully
-    // real-Solr-verified evidence -- re-running `capture.sh`'s edismax block
-    // against a live container would close that gap.
+    // from Wayfinder's own hermetic output because no live Solr container was
+    // available to verify it independently. It is not fully real-Solr-verified
+    // evidence.
     let (app, _dir) = edismax_app().await;
     let (status, body) = get(
         &app,
@@ -1120,7 +1117,7 @@ async fn whitespace_only_mm_400s_like_an_empty_one() {
 // `boost` used to be silently dropped because there was no function-query
 // evaluator. #289 built one, so both params now affect the score. Exact
 // score behaviour (additive `bf`, multiplicative `boost`, every function the
-// client emits) is fixture-backed in `tests/differential.rs`'s `fnq` rows
+// client emits) is fixture-backed in the retained fixture tests' `fnq` rows
 // against real `solr:9`; what remains here is a hermetic regression guard that
 // the params move the score at all, using field-independent constant
 // functions so it depends on no schema field beyond `qf`'s.
@@ -1324,7 +1321,7 @@ async fn star_query_with_partially_invalid_qf_still_400s() {
 // --- a captured Solr fact this file assumes, made explicit -----------------
 
 #[tokio::test]
-async fn fixture_names_referenced_by_this_file_all_exist_in_the_manifest() {
+async fn fixture_names_referenced_by_this_file_all_exist() {
     // Guards against a rename/typo silently turning a real assertion above
     // into a fixture-not-found panic that reads like a missing-feature
     // failure instead of a test-authoring bug.
@@ -1353,17 +1350,101 @@ async fn fixture_names_referenced_by_this_file_all_exist_in_the_manifest() {
     }
 }
 
-// --- differential-harness-style coverage over the edismax_* manifest rows --
+// --- fixture-backed coverage over the dedicated edismax requests ------------
 
-/// The subset of `solr-ref/manifest.tsv` this file owns: every row whose
-/// name starts with `edismax_`. `tests/differential.rs`'s generic hermetic
-/// loop skips these (its `indexed_app()` seeds the unrelated 5-doc
-/// tracer-bullet corpus, which has no `title` field and none of `eA`-`eD`/
-/// `pA`/`pB`/`mmA`-`mmD`) — same pattern as that file's `mlt_*` skip and
-/// `tests/mlt.rs`'s own manifest-driven test (issue #6 precedent).
-fn manifest_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("solr-ref/manifest.tsv")
-}
+/// Every dedicated-corpus request whose response fixture this suite verifies.
+/// Keeping each request beside its fixture preserves the retained coverage
+/// without an external dispatch manifest.
+const EDISMAX_FIXTURE_REQUESTS: &[(&str, &str)] = &[
+    (
+        "edismax_basic",
+        "select?q=rocket&defType=edismax&qf=title+body&fl=id&wt=json",
+    ),
+    (
+        "edismax_qf_equal",
+        "select?q=rocket+launch+success&defType=edismax&qf=title+body&fl=id&wt=json",
+    ),
+    (
+        "edismax_qf_boost_title",
+        "select?q=rocket+launch+success&defType=edismax&qf=title^10+body&fl=id&wt=json",
+    ),
+    (
+        "edismax_qf_boost_body",
+        "select?q=rocket+launch+success&defType=edismax&qf=title+body^10&fl=id&wt=json",
+    ),
+    (
+        "edismax_pf_off",
+        "select?q=quick+fox&defType=edismax&qf=body&fl=id,score&fq=id:(pA+OR+pB)&wt=json",
+    ),
+    (
+        "edismax_pf_on",
+        "select?q=quick+fox&defType=edismax&qf=body&pf=body&fl=id,score&fq=id:(pA+OR+pB)&wt=json",
+    ),
+    (
+        "edismax_tie_0",
+        "select?q=rocket&defType=edismax&qf=title+body&tie=0&fl=id,score&fq=id:(eC+OR+eD)&wt=json",
+    ),
+    (
+        "edismax_tie_1",
+        "select?q=rocket&defType=edismax&qf=title+body&tie=1&fl=id,score&fq=id:(eC+OR+eD)&wt=json",
+    ),
+    (
+        "edismax_score_baseline",
+        "select?q=rocket&defType=edismax&qf=title+body&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json",
+    ),
+    (
+        "edismax_boost_multiplicative",
+        "select?q=rocket&defType=edismax&qf=title+body&boost=2&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json",
+    ),
+    (
+        "edismax_bq_additive",
+        "select?q=rocket&defType=edismax&qf=title+body&bq=title:mission^5&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json",
+    ),
+    (
+        "edismax_term_boost",
+        "select?q=rocket^5&defType=edismax&qf=title+body&fl=id,score&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json",
+    ),
+    (
+        "edismax_quoted_phrase",
+        "select?q=%22quick+fox%22&defType=edismax&qf=body&fl=id&fq=id:(pA+OR+pB)&wt=json",
+    ),
+    (
+        "edismax_operators_exclude",
+        "select?q=rocket+-mission&defType=edismax&qf=title+body&fl=id&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json",
+    ),
+    (
+        "edismax_operators_required",
+        "select?q=%2Brocket+%2Blaunch&defType=edismax&qf=title+body&fl=id&fq=id:(eA+OR+eB+OR+eC+OR+eD)&wt=json",
+    ),
+    (
+        "edismax_mm_1",
+        "select?q=alpha+beta+gamma&defType=edismax&qf=body&mm=1&fl=id&fq=id:(mmA+OR+mmB+OR+mmC+OR+mmD)&wt=json",
+    ),
+    (
+        "edismax_mm_2",
+        "select?q=alpha+beta+gamma&defType=edismax&qf=body&mm=2&fl=id&fq=id:(mmA+OR+mmB+OR+mmC+OR+mmD)&wt=json",
+    ),
+    (
+        "edismax_mm_3",
+        "select?q=alpha+beta+gamma&defType=edismax&qf=body&mm=3&fl=id&fq=id:(mmA+OR+mmB+OR+mmC+OR+mmD)&wt=json",
+    ),
+    (
+        "edismax_mm_conditional",
+        "select?q=alpha+beta+gamma&defType=edismax&qf=body&mm=2%3C-1+3%3C80%25&fl=id&fq=id:(mmA+OR+mmB+OR+mmC+OR+mmD)&wt=json",
+    ),
+    (
+        "edismax_mm_absent",
+        "select?q=alpha+beta+gamma&defType=edismax&qf=body&fl=id&wt=json",
+    ),
+    (
+        "edismax_mm_empty_star",
+        "select?q=*:*&defType=edismax&qf=body&mm=&fl=id&wt=json",
+    ),
+    (
+        "edismax_unquoted_multitoken",
+        "select?q=quick%2Brocket&defType=edismax&qf=title+body&fl=id&sort=id+asc&wt=json",
+    ),
+];
 
 /// Recursively nulls every `score`/`maxScore` value so two envelopes can be
 /// compared for everything BUT BM25 magnitude — same rationale and shape as
@@ -1394,48 +1475,27 @@ fn blank_bm25_score_magnitudes(mut value: Value) -> Value {
 }
 
 #[tokio::test]
-async fn hermetic_edismax_manifest_entries_match_committed_fixtures() {
+async fn hermetic_edismax_fixture_requests_match_committed_fixtures() {
     let (app, _dir) = edismax_app().await;
-    let entries: Vec<_> = load_manifest(&manifest_path())
-        .into_iter()
-        .filter(|e| e.name.starts_with("edismax_"))
-        .collect();
-    assert!(
-        !entries.is_empty(),
-        "expected at least the edismax_* rows capture.sh's edismax block appends to manifest.tsv"
-    );
-
     let mut failures = Vec::new();
-    for entry in &entries {
-        let (status, actual) = get(&app, &entry.path).await;
-        if status.as_u16() != entry.status {
-            failures.push(format!(
-                "{}: HTTP status {} vs expected {}",
-                entry.name, status, entry.status
-            ));
+    for &(name, path) in EDISMAX_FIXTURE_REQUESTS {
+        let (status, actual) = get(&app, path).await;
+        if status != StatusCode::OK {
+            failures.push(format!("{name}: HTTP status {status} vs expected 200"));
             continue;
         }
 
-        let expected = common::normalize_envelope(fixture(&entry.name));
-        let actual = common::normalize_envelope(actual);
-        // Score-bearing rows are ground truth for which docs match, rank
-        // order, and structural score relationships, never for the raw
-        // BM25 float value transplanted from Solr (see this file's module
-        // doc, PRD ratified-divergence 4) — blank both sides' magnitudes
-        // before comparing. Rows with no `score` in `fl` are unaffected by
-        // this blanking and still compare doc order exactly.
-        let expected = blank_bm25_score_magnitudes(expected);
-        let actual = blank_bm25_score_magnitudes(actual);
+        let expected = blank_bm25_score_magnitudes(common::normalize_envelope(fixture(name)));
+        let actual = blank_bm25_score_magnitudes(common::normalize_envelope(actual));
         let report = diff(&expected, &actual);
-
         if !report.diffs.is_empty() {
-            failures.push(format!("{}: {:?}", entry.name, report.diffs));
+            failures.push(format!("{name}: {:?}", report.diffs));
         }
     }
 
     assert!(
         failures.is_empty(),
-        "hermetic edismax differential failures against solr-ref fixtures:\n{}",
+        "hermetic edismax fixture failures:\n{}",
         failures.join("\n")
     );
 }
@@ -1469,9 +1529,8 @@ const UNQUOTED_MULTITOKEN_FIXTURE: &str = "edismax_unquoted_multitoken";
 /// `sort=id+asc`: without it the response order is BM25 order, which diverges
 /// between Tantivy and Solr by a permanently-ratified margin (PRD
 /// ratified-divergence 4), and this fixture is about *which* documents match,
-/// not their ranking. Also what keeps it safe as a `manifest.tsv` row for
-/// `hermetic_edismax_manifest_entries_match_committed_fixtures`, which compares
-/// document order exactly for a row carrying no `score`.
+/// not their ranking. The explicit sort also makes exact document-order
+/// comparison safe for this score-free fixture.
 const UNQUOTED_MULTITOKEN_PATH: &str =
     "select?q=quick%2Brocket&defType=edismax&qf=title+body&fl=id&sort=id+asc&wt=json";
 
@@ -1487,11 +1546,9 @@ const UNQUOTED_MULTITOKEN_PATH: &str =
 /// never touches `df`.
 const SHAPE_B_DEBUG_FIXTURE: &str = "edismax_shape_b_debug_parsedquery";
 
-/// The request `SHAPE_B_DEBUG_FIXTURE` must be captured from. Not a
-/// `manifest.tsv` row: Wayfinder implements no `debug` section, so the
-/// whole-body sweep would compare a `debug` key that cannot exist. Same
-/// deliberate exclusion as `edismax_qf_partial_invalid` (issue #111) -- the
-/// exact command belongs in `capture.sh` as a comment instead.
+/// The request recorded by `SHAPE_B_DEBUG_FIXTURE`. Wayfinder implements no
+/// `debug` section, so only the captured parse tree is asserted. Same deliberate
+/// exclusion from whole-body comparison as `edismax_qf_partial_invalid` (#111).
 const SHAPE_B_DEBUG_PATH: &str = "select?q=(%7B!edismax+qf%3D%27title+body%27%7D%2B%22quick%22+%2B%22rocket%22)&df=id&debugQuery=true&fl=id&sort=id+asc&wt=json";
 
 /// The decoded `q` of `SHAPE_B_DEBUG_PATH`, i.e. what `debug.rawquerystring`
@@ -1512,8 +1569,8 @@ const SHAPE_B_DEBUG_Q: &str = "({!edismax qf='title body'}+\"quick\" +\"rocket\"
 /// `numFound` alone, which is the thing issue #147 exists to stop.
 const SHAPE_B_DEBUG_PAREN_FIXTURE: &str = "edismax_shape_b_debug_parsedquery_paren_terminated";
 
-/// The request `SHAPE_B_DEBUG_PAREN_FIXTURE` must be captured from. Excluded
-/// from `manifest.tsv` for the same reason as `SHAPE_B_DEBUG_PATH`.
+/// The request recorded by `SHAPE_B_DEBUG_PAREN_FIXTURE`, asserted narrowly
+/// for the same reason as `SHAPE_B_DEBUG_PATH`.
 const SHAPE_B_DEBUG_PAREN_PATH: &str = "select?q=(%7B!edismax+qf%3D%27title+body%27%7D%2B%22quick%22)&df=id&debugQuery=true&fl=id&sort=id+asc&wt=json";
 
 /// The decoded `q` of `SHAPE_B_DEBUG_PAREN_PATH`.
@@ -1532,10 +1589,9 @@ const SHAPE_B_DEBUG_PAREN_Q: &str = "({!edismax qf='title body'}+\"quick\")";
 /// `unquoted_multitoken_debug_parsedquery_shows_one_clause_over_both_tokens`.
 const UNQUOTED_MULTITOKEN_DEBUG_FIXTURE: &str = "edismax_unquoted_multitoken_debug";
 
-/// The request `UNQUOTED_MULTITOKEN_DEBUG_FIXTURE` must be captured from:
-/// `UNQUOTED_MULTITOKEN_PATH` plus `debugQuery=true`. Not a `manifest.tsv` row,
-/// for the same reason as `SHAPE_B_DEBUG_PATH` -- Wayfinder implements no
-/// `debug` section.
+/// The request recorded by `UNQUOTED_MULTITOKEN_DEBUG_FIXTURE`:
+/// `UNQUOTED_MULTITOKEN_PATH` plus `debugQuery=true`. Only its captured parse
+/// tree is asserted because Wayfinder implements no `debug` section.
 const UNQUOTED_MULTITOKEN_DEBUG_PATH: &str = "select?q=quick%2Brocket&defType=edismax&qf=title+body&debugQuery=true&fl=id&sort=id+asc&wt=json";
 
 /// Issue #197's direct evidence that `-`, like #147's captured `+`, is an
@@ -1556,21 +1612,14 @@ fn fixture_file(name: &str) -> PathBuf {
         .join(format!("{name}.json"))
 }
 
-/// Loads a fixture that issue #147 must capture, failing with the exact
-/// command to run rather than a bare "No such file".
+/// Loads a frozen fixture, naming the request it records if the baseline is
+/// incomplete.
 fn require_capture(name: &str, path_and_query: &str) -> Value {
     let file = fixture_file(name);
     let raw = std::fs::read_to_string(&file).unwrap_or_else(|e| {
         panic!(
-            "issue #147's capture is missing: {file} ({e}).\n\
-             Capture it against a real `solr:9` running `solr-ref/capture.sh`'s edismax block \
-             schema and 10-doc corpus (container `wayfinder-solr-7`, port 8994, core `content`, \
-             fields `title`/`body`), append the block at the END of capture.sh per CLAUDE.md, and \
-             do NOT re-run capture.sh wholesale:\n\
-             \n  \
-             curl -sg 'http://localhost:8994/solr/content/{path_and_query}' \\\n    \
-             -o solr-ref/responses/{name}.json\n",
-            file = file.display(),
+            "frozen fixture {} for `{path_and_query}` is missing: {e}",
+            file.display()
         )
     });
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse fixture {}: {e}", file.display()))
@@ -1634,31 +1683,9 @@ async fn unquoted_multitoken_clause_matches_committed_capture() {
          {with_quick} field(s), rocket in {with_rocket}"
     );
 
-    // The request replayed against Wayfinder is the one `manifest.tsv` records
-    // as captured, not a string retyped here -- if the two disagree the
-    // fixture is not evidence about this request at all.
-    let row = load_manifest(&manifest_path())
-        .into_iter()
-        .find(|e| e.name == UNQUOTED_MULTITOKEN_FIXTURE)
-        .unwrap_or_else(|| {
-            panic!(
-                "solr-ref/manifest.tsv has no `{UNQUOTED_MULTITOKEN_FIXTURE}` row. Issue #147 owns \
-                 capture.sh/manifest.tsv: append\n  \
-                 cape {UNQUOTED_MULTITOKEN_FIXTURE} '{UNQUOTED_MULTITOKEN_PATH}'\n\
-                 at the END of capture.sh's edismax section so the capture is reproducible and \
-                 swept by hermetic_edismax_manifest_entries_match_committed_fixtures."
-            )
-        });
-    assert_eq!(
-        row.path, UNQUOTED_MULTITOKEN_PATH,
-        "the captured request must be the unquoted-multi-token one this test reasons about \
-         (a literal `+` mid-token, `%2B`, not `+`-as-space)"
-    );
-    assert_eq!(row.status, 200, "real Solr answers this request 200");
-
-    let expected = require_capture(UNQUOTED_MULTITOKEN_FIXTURE, &row.path);
+    let expected = require_capture(UNQUOTED_MULTITOKEN_FIXTURE, UNQUOTED_MULTITOKEN_PATH);
     let (app, _dir) = edismax_app().await;
-    let (status, actual) = get(&app, &row.path).await;
+    let (status, actual) = get(&app, UNQUOTED_MULTITOKEN_PATH).await;
     assert_eq!(status, StatusCode::OK);
 
     assert_eq!(
@@ -1669,7 +1696,7 @@ async fn unquoted_multitoken_clause_matches_committed_capture() {
          for the unquoted multi-token clause and `build_field_disjunction`'s boolean-OR reading \
          (finding 92, documentation-derived) is wrong -- fix the implementation and escalate, do \
          not relax this assertion.\nSolr: {expected}\nWayfinder: {actual}",
-        path = row.path,
+        path = UNQUOTED_MULTITOKEN_PATH,
         solr = num_found(&expected),
         wf = num_found(&actual),
     );

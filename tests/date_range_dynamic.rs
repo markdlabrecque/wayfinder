@@ -5,7 +5,7 @@
 //! that file's schema-swapped twin.
 //!
 //! Why the fixtures apply verbatim to the dynamic schema: in the captured Solr
-//! core, `drs_x`/`drm_x` are THEMSELVES dynamic. `solr-ref/capture.sh`'s `#341`
+//! core, `drs_x`/`drm_x` are THEMSELVES dynamic. the dedicated Solr capture's `#341`
 //! block declares them with `add-dynamic-field` for `drs_*`/`drm_*`
 //! (`{"add-dynamic-field": {"name":"drs_*", "type":"date_range", ...}}`), never
 //! as static fields, exactly as the captured Drupal configset does
@@ -70,7 +70,7 @@ multi_valued = true
 stored = true
 "#;
 
-/// The exact 9-doc corpus `solr-ref/capture.sh`'s `#341` block indexes --
+/// The exact 9-doc corpus the dedicated Solr capture's `#341` block indexes --
 /// copied from `tests/date_range.rs::date_range_corpus` so the two schemas are
 /// compared over identical input. d1/d2 are bare literals at year/month
 /// precision; d3 an explicit closed interval; d4 a full-instant literal (whole
@@ -654,7 +654,7 @@ async fn dynamic_multivalued_contains_merges_adjacent_members_into_one_run() {
 // `[[fields]]` entry does.
 //
 // The `error.msg` in `dr341_err_sort`/`dr341_err_stats` names `drs_x` -- and in
-// the captured Solr core `drs_x` IS a dynamic field (`capture.sh`'s `#341` block
+// the captured Solr core `drs_x` IS a dynamic field (the dedicated Solr capture's `#341` block
 // declares it with `add-dynamic-field`), so those messages were produced ON this
 // path and apply here verbatim. That is exactly why the pair belongs in this
 // file and not only in `tests/date_range.rs`.

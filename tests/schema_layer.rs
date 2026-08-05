@@ -302,7 +302,7 @@ fn text_en_preset_enforces_the_configsets_length_bounds_and_simple_case_folding(
     let wf = schema::load(&path).expect("schema loads");
 
     // AMENDMENT 1 (issue #388): static text_en/text_general stand in for
-    // Solr's `_default` configset (capture.sh:1686 boots the edismax
+    // Solr's `_default` configset (the dedicated Solr capture:1686 boots the edismax
     // reference core with `solr-precreate content`, no configset argument),
     // whose text_en has NO LengthFilterFactory at all. Five edismax fixtures
     // pin this: the one-character `b`/`c`/`d` tokens in the pA/pB/mmA-mmD

@@ -11,8 +11,8 @@
 //!
 //! Two things here are NOT fixture comparisons:
 //! - The numeric/date range + numeric-field error tests reuse the `facets`
-//!   schema/corpus that `tests/differential.rs::FACETS_SCHEMA_TOML`/
-//!   `facets_corpus` already builds for `manifest-errors.tsv`'s `facets/...`
+//!   schema/corpus that `feature tests' FACETS_SCHEMA_TOML`/
+//!   `facets_corpus` already builds for the captured fixture request set's `facets/...`
 //!   rows — duplicated here (not shared, `tests/common/` cannot be shared
 //!   across integration-test binaries; same precedent as that file's own
 //!   comment) since `tests/common/mod.rs` stays append-only-if-needed and this
@@ -359,9 +359,9 @@ async fn regex_bad_char_class_is_a_500_with_no_metadata_key() {
         "a regex-compile 500 must have no error.metadata key at all, unlike a 400 \
          SyntaxError — got {body}"
     );
-    // The differential harness's normaliser drops `error.trace` on both
+    // The fixture comparison suite's normaliser drops `error.trace` on both
     // sides before comparing (finding 10/59's rationale — free text no
-    // other engine can reproduce), so the hermetic differential suite
+    // other engine can reproduce), so the hermetic fixture suite
     // cannot by itself prove Wayfinder ever actually emits the key at all;
     // this test is the one place that shape is pinned directly.
     assert!(
@@ -454,7 +454,7 @@ async fn range_str_unclosed_and_lowercase_to_are_syntax_errors() {
 // (issue #33/#31's mirror schema; duplicated here per the task spec since
 // `tests/common/` cannot be shared across integration-test binaries) --------
 
-/// Mirrors `tests/differential.rs::FACETS_SCHEMA_TOML` exactly: `views` (pint)
+/// Mirrors `feature tests' FACETS_SCHEMA_TOML` exactly: `views` (pint)
 /// and `created` (pdate) are the fields these tests range/fuzzy/wildcard over.
 const NUMERIC_SCHEMA_TOML: &str = r#"
 [core]
@@ -492,7 +492,7 @@ type = "string"
 stored = true
 "#;
 
-/// Mirrors `tests/differential.rs::facets_corpus` exactly: `views` r1=5,
+/// Mirrors `feature tests' facets_corpus` exactly: `views` r1=5,
 /// r2=15, r3=25, r4=35; `created` r1=01-02, r2/r3=01-03 (two ties), r4=01-05.
 fn numeric_corpus() -> Value {
     json!([

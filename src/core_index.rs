@@ -1992,8 +1992,8 @@ impl CoreIndex {
             // (spec section D) with a self-expiring divergence entry rather
             // than a half-working implementation. The descope answers 200 with
             // no hits — the same wire *shape* as the upstream row, differing
-            // only in the match set, so the differential harness compares it
-            // through the real differ instead of short-circuiting on a status
+            // only in the match set, so feature tests compare it through the
+            // real differ instead of short-circuiting on a status
             // mismatch. Solr never 400s a multi-term `v`, so a 400 here would
             // be Wayfinder inventing an error class of its own.
             return Ok(Box::new(EmptyQuery));
@@ -2381,7 +2381,7 @@ impl CoreIndex {
     /// #147). `solr-ref/responses/edismax_unquoted_multitoken.json` — manifest
     /// row `edismax_unquoted_multitoken`,
     /// `q=quick%2Brocket&defType=edismax&qf=title+body&sort=id+asc`, taken
-    /// against a real `solr:9` with `capture.sh`'s edismax block schema and
+    /// against a real `solr:9` with the dedicated edismax schema and
     /// 10-doc corpus — answers `numFound=6` (`eA eB eC eD pA pB`): every
     /// document carrying *either* token, and no document in that corpus
     /// carries the two adjacent. A `PhraseQuery` reading would have matched 0,
@@ -5853,8 +5853,7 @@ fast = true
     /// A `*:*` sub-clause of a larger boolean query (e.g. `*:* AND lazy`)
     /// must parse without panicking or erroring — issue #39. Correctness of
     /// the resulting doc set/order is covered end-to-end against real Solr
-    /// fixtures by `tests/differential.rs`'s
-    /// `hermetic_whole_query_set_matches_committed_fixtures`; this test only
+    /// fixtures by the feature suites; this test only
     /// pins that `parse_query` itself succeeds for the three shapes the
     /// panic was originally reported against.
     #[test]

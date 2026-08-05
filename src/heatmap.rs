@@ -436,7 +436,7 @@ fn one_heatmap(
 ) -> Result<Value> {
     // The field must exist and be a location field. Solr's two messages diverge
     // in Java class names; Wayfinder emits functional equivalents (the
-    // differential normaliser strips `error.msg`, so only the 400 status is
+    // fixture normaliser strips `error.msg`, so only the 400 status is
     // compared there -- finding 159).
     let kind = index
         .wf_schema

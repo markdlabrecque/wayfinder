@@ -57,7 +57,7 @@
 //! Ground truth: every shape decision here is pinned by a fixture in
 //! `solr-ref/responses/group_*.json` (issue #290) or
 //! `solr-ref/responses/g338_*.json` (issue #338), captured against a dedicated
-//! `grouping` Solr core (`solr-ref/capture.sh`).
+//! `grouping` Solr core (the dedicated Solr capture).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

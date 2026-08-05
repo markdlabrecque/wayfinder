@@ -7,10 +7,8 @@
 //! that interop is withdrawn by this issue and the key is now
 //! `lucene.wayfinder-spec-version`. `responseHeader`,
 //! `mode`, `wayfinder_home`/`core_root`, `lucene-spec-version`, and `core.schema`
-//! are also pinned to exact literal values below — `tests/differential.rs`'s
-//! `EXPECTED_DIVERGENCES`/`EXPECTED_DIVERGENCES_MANIFEST_ERRORS` reason
-//! strings claim those are "compared exactly and do match", so something
-//! here has to make that true. Only `jvm`/`system`/`security` (volatile host
+//! are also pinned to exact literal values below so those stable values stay
+//! covered directly. Only `jvm`/`system`/`security` (volatile host
 //! stats with no Wayfinder equivalent) are checked for *shape* alone, per
 //! the task spec ("matched if cheap").
 //!
@@ -31,7 +29,7 @@ use common::{CORE, get, request_full};
 /// config TOML — mirrors `tests/server_config.rs::build_app_with_config`,
 /// duplicated here rather than shared (that helper lives in a different
 /// integration-test binary; `tests/common/` cannot be shared across them,
-/// same precedent `tests/differential.rs`'s per-file schema duplication
+/// same precedent the retained fixture tests' per-file schema duplication
 /// documents).
 fn build_app_with_config(config: Option<&str>) -> anyhow::Result<(Router, TempDir)> {
     let dir = TempDir::new().expect("create temp dir");
@@ -188,15 +186,14 @@ async fn admin_info_system_top_level_key_shape_matches_the_captured_envelope() {
     );
 }
 
-/// Pins the fields the `EXPECTED_DIVERGENCES_MANIFEST_ERRORS` reason string
-/// in `tests/differential.rs` claims are "compared exactly and do match":
+/// Pins the stable fields that match their captured values exactly:
 /// `responseHeader`, `mode`, `wayfinder_home`, `core_root`, and
 /// `lucene-spec-version` (the one hardcoded lucene value, as opposed to
 /// `wayfinder-spec-version` which is the deliberately-configured one under test
 /// above). Round-2 review flagged that nothing previously pinned these
 /// literal values — a regression here would stay green everywhere else.
 #[tokio::test]
-async fn admin_info_system_pins_the_fields_the_differential_reason_string_claims_match() {
+async fn admin_info_system_pins_the_stable_captured_fields() {
     let (app, _dir) = build_app_with_config(None).expect("app must build");
     let (status, body) =
         request_full(&app, "GET", "admin/info/system?wt=json&json.nl=flat", None).await;

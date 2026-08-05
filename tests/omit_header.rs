@@ -27,20 +27,15 @@
 //!    `omit_header_error_true.json` and `omit_header_update_error_true.json`
 //!    show `omitHeader=true` suppressing `responseHeader` on both `/select`'s
 //!    params-echoing error and `/update`'s no-params error. The corresponding
-//!    rows in `manifest-errors.tsv` keep both paths in the differential gate.
-//! 3. **No `EXPECTED_DIVERGENCES` entry masks the implemented behavior.** The
-//!    JSON error fixtures are ordinary differential rows. The one deliberate
-//!    exception is invalid boolean syntax: Solr fails before its JSON writer
-//!    and returns Jetty HTML, while Wayfinder keeps its JSON-only contract;
-//!    PRD ratified divergence 8 records that choice and the dedicated test
-//!    below guards the status, JSON content type, and headerless shape.
-//!    `src/coverage.rs`'s
-//!    `"request.omitHeader"`/`"request.timezone.utc"` runtime probes
-//!    (exercised under `strict_params = true`) already exist and already
-//!    check exactly this, and were carried on `tests/search_api_coverage.rs`'s
-//!    self-expiring uncovered list — removed there as part of this change
-//!    (see that file's diff), which is the sharper, executable form of "no
-//!    `EXPECTED_DIVERGENCES` entry to delete because none exists".
+//!    rows in the captured fixture request set keep both paths in the fixture gate.
+//! 3. **The implemented behavior is checked directly.** The JSON error
+//!    fixtures cover both success and error paths. The one deliberate exception
+//!    is invalid boolean syntax: Solr fails before its JSON writer and returns
+//!    Jetty HTML, while Wayfinder keeps its JSON-only contract; PRD ratified
+//!    divergence 8 records that choice and the dedicated test below guards the
+//!    status, JSON content type, and headerless shape. `src/coverage.rs`'s
+//!    `"request.omitHeader"`/`"request.timezone.utc"` runtime probes also
+//!    exercise this under `strict_params = true`.
 //! 4. **Which endpoints get `omitHeader`/`TZ` from the module, read off all
 //!    28 traces' request paths**: `/select` and `/mlt` get both
 //!    `omitHeader=true` and `TZ=UTC`. `/update` gets `omitHeader=false`

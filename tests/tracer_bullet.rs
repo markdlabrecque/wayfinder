@@ -2,7 +2,7 @@
 //!
 //! End to end, in-process (tower `oneshot`, no network, no spawned binary):
 //! build `wayfinder::app` from the three-field TOML schema, index the same
-//! 5-doc corpus `solr-ref/capture.sh` used against real Solr, then assert the
+//! 5-doc corpus the dedicated Solr capture used against real Solr, then assert the
 //! JSON responses against the captured fixtures in `solr-ref/responses/`.
 //!
 //! Fixtures are compared modulo `QTime` and `_version_`/`_root_` (Wayfinder's

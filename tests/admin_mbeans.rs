@@ -16,9 +16,9 @@
 //!   - `solr-mbeans.CORE.core.stats["CORE.coreName"]`
 //!   - `solr-mbeans.CORE.core.stats["INDEX.size"]`
 //!
-//! No `solr-ref/manifest.tsv` row exists for this endpoint (deliberate, per
+//! No the captured fixture request set row exists for this endpoint (deliberate, per
 //! issue #169 and PRD section 5 v2.75: "48 KB of Java internals cannot be
-//! matched honestly"). The differential manifest guard pins that exclusion so
+//! matched honestly"). The fixture request list guard pins that exclusion so
 //! this endpoint cannot acquire a permanently waived whole-response row.
 //! Everything BUT the six leaves above ("bean list" shape, `CONTAINER`,
 //! `ADMIN`, `QUERY`, `CACHE`, per-handler timers, Java class names) is a

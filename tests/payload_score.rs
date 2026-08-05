@@ -6,7 +6,7 @@
 //! `v` normalization (quotes, case). The wire-compatibility evidence for
 //! every score value below is the same committed fixture
 //! (`solr-ref/responses/pls_*.json`) that backs the `pls_*` rows replayed by
-//! `tests/differential.rs`'s dedicated `pls_app` — this file duplicates a
+//! the retained fixture tests' dedicated `pls_app` — this file duplicates a
 //! handful of those numbers deliberately, as direct assertions rather than a
 //! fixture diff, because a differential-only red gives no useful signal about
 //! *why* a query 400s before the feature exists (see the module doc's
@@ -66,8 +66,8 @@ stored = false
 multi_valued = true
 "#;
 
-/// The same 5-doc corpus `solr-ref/capture.sh`'s pls block indexes (and
-/// `tests/differential.rs::pls_corpus` mirrors byte-for-byte): d3 carries
+/// The same 5-doc corpus the dedicated Solr capture's pls block indexes (and
+/// `feature tests' pls_corpus` mirrors byte-for-byte): d3 carries
 /// `dog` twice with different payloads (1.5, 4.5) -- the only way
 /// min/max/average/sum are distinguishable from each other -- and d4 has no
 /// `boost_term` at all.
@@ -277,12 +277,11 @@ async fn payload_score_inline_after_boost_sums_the_clauses() {
 // --- C. error mapping: all 400, `error.code: 400` --------------------------
 
 /// One assertion per named error condition in the spec's table. `func`'s
-/// exact wording is asserted (not just status) because the differential
-/// harness drops `error.msg` — this file is the only place those exact wire
-/// messages are pinned. `f` naming a real, non-payload field is intentionally
-/// excluded here: it is a *permanent* documented divergence from Solr's own
-/// 500 (spec section D), asserted in `tests/differential.rs`'s manifest-errors
-/// run via `ACCEPTED_DIVERGENCES`, not here.
+/// exact wording is asserted (not just status) because fixture normalization
+/// drops `error.msg` — this file is the only place those exact wire messages
+/// are pinned. `f` naming a real, non-payload field is intentionally excluded
+/// here: it is a *permanent* documented divergence from Solr's own 500 (spec
+/// section D).
 #[tokio::test]
 async fn payload_score_error_messages_match_the_spec_table() {
     let (app, _dir) = pls_app().await;
@@ -333,7 +332,7 @@ async fn payload_score_error_messages_match_the_spec_table() {
         // asserted here (see `pls_err_no_func.json` etc.); this checks the
         // sentence is present as a substring rather than pinning the prefix,
         // since the prefix is a Java exception class name, not part of the
-        // wire contract the differential harness itself compares (it drops
+        // wire contract the fixture comparison suite itself compares (it drops
         // `error.msg` entirely).
         let got_msg = body["error"]["msg"].as_str().unwrap_or_default();
         assert!(
@@ -415,7 +414,7 @@ async fn payload_score_on_a_non_payload_field_is_400_not_500() {
 
 // --- payload-free occurrences and the block boost ---------------------------
 
-/// A three-doc corpus over the same schema, mirroring `capture.sh`'s `plsz`
+/// A three-doc corpus over the same schema, mirroring the dedicated Solr capture's `plsz`
 /// core (finding 172): z1's only `dog` occurrence is a *bare* token, z2 is the
 /// payloaded control, and z3 carries both forms of `cat`.
 /// Fixture name, `v`, `func`, expected `(id, score)` order — the same shape as

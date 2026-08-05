@@ -6,12 +6,9 @@
 //! request/response helpers plus fixture-comparison normalisation.
 //!
 //! Each integration test file is its own crate that pulls this module in via
-//! `mod common;`, and no single test file calls every helper here —
-//! `differential.rs` never calls `normalize_envelope`/`assert_matches_fixture`,
-//! `tracer_bullet.rs` never calls anything in `diff`, and neither of those calls
-//! `app_with_schema`/`post_docs`. `dead_code` is suppressed at the module root
-//! rather than per-item because which helpers are "unused" depends on which
-//! binary is compiling this module, not on the code itself.
+//! `mod common;`, and no single test file calls every helper here. `dead_code`
+//! is suppressed at the module root because which helpers are "unused" depends
+//! on which binary is compiling this module, not on the code itself.
 #![allow(dead_code)]
 
 use std::path::Path;
@@ -85,7 +82,7 @@ type = "text_en"
 multi_valued = true
 "#;
 
-/// The exact 5-doc corpus indexed by `solr-ref/capture.sh`, so fixture JSON
+/// The exact 5-doc corpus indexed by the dedicated Solr capture, so fixture JSON
 /// under `solr-ref/responses/` is ground truth for the same corpus here.
 pub fn corpus() -> Value {
     json!([
@@ -204,9 +201,8 @@ pub async fn get(app: &Router, path_and_query: &str) -> (StatusCode, Value) {
 /// the HTTP status plus parsed JSON body (or `Value::Null` for an empty
 /// body). "Full-path" means `path_and_query` is everything after `/wayfinder/`,
 /// including the core segment — e.g. `content/update?commit=true&wt=json`
-/// or `nosuchcore/select?q=*:*&wt=json`. This is the variant the
-/// `manifest-errors.tsv` runner (`tests/differential.rs`) needs, since its
-/// rows name their own core, sometimes one Wayfinder does not have at all.
+/// or `nosuchcore/select?q=*:*&wt=json`. Use it for tests that address a
+/// specific core, including a core Wayfinder does not have at all.
 ///
 /// Consolidated from `tests/error_shapes.rs`'s local `request()` (issue #31
 /// follow-up — deferred there only to avoid colliding with the
@@ -224,8 +220,8 @@ pub async fn request_full(
     request_full_with_content_type(app, method, path_and_query, body, "application/json").await
 }
 
-/// [`request_full`] with an explicit `Content-Type`, for the manifest-errors
-/// rows whose body is not JSON — today, only Solarium's
+/// [`request_full`] with an explicit `Content-Type`, for fixture requests whose
+/// body is not JSON — today, only Solarium's
 /// `application/x-www-form-urlencoded` `postbigrequest` form POSTs (issue
 /// #350, finding 189). The body is sent verbatim under that content-type;
 /// callers rely on Wayfinder's `params_with_form_body` to decide whether the
@@ -290,7 +286,7 @@ pub const MULTIPART_BOUNDARY: &str = "WayfinderTestBoundary7f3a9c2e";
 /// itself has nothing to do with how this function builds bytes.
 ///
 /// `part_name` becomes the form-data field name (`file` for every capture in
-/// `solr-ref/capture.sh`'s #171/#258 blocks); `filename` is the part's
+/// the dedicated Solr capture's #171/#258 blocks); `filename` is the part's
 /// declared filename; `mime` is its declared `Content-Type`, and may be
 /// empty to omit the header entirely (mirrors a client that sends no
 /// `Content-Type` on the part).

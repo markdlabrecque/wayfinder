@@ -18,15 +18,12 @@
 //! under `strict_params = true`) without dictating a parsing strategy.
 //!
 //! Four fixtures captured against a one-off `solr:9` (port 8992, same schema
-//! and 5-doc corpus as the reference `content` core), documented at the end of
-//! `solr-ref/capture.sh` and in `docs/solr-ref-findings.md` finding 97, settle
+//! and 5-doc corpus as the reference `content` core), documented in
+//! `docs/solr-ref-findings.md` finding 97, settle
 //! the open precedence question: **`f.<field>.facet.missing` always wins over
 //! the global `facet.missing`, unconditionally** — not merely when the global
-//! is unset. Deliberately *not* `solr-ref/manifest.tsv` rows, same reasoning
-//! as issue #138's `facet_local_params_key_f_field.json` / `_f_key.json`:
-//! Wayfinder does not implement `f.<field>.facet.*` yet, so a row would only
-//! buy a mandatory `EXPECTED_DIVERGENCES` entry in a file this issue is about
-//! to touch.
+//! is unset. The feature suite reads these fixtures directly; Wayfinder does
+//! not implement `f.<field>.facet.*`.
 //!
 //! The fourth open question — does `f.<field>.` key off the field or the
 //! `{!key=...}` response label? — was already settled by issue #138's own

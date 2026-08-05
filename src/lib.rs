@@ -1728,9 +1728,8 @@ async fn core_admin_system(
 /// figures -- has no consumer, so this handler emits only the two categories
 /// the six leaves live in, with static plausible `class`/`description`
 /// strings, following the `admin_info_jvm_system_security()` precedent. There
-/// is deliberately no `solr-ref/manifest.tsv` row: 48 KB of Java internals
-/// cannot be matched honestly, and PRD section 5's v2.75 block is the record
-/// of that (so the differential harness does not enforce byte fidelity here).
+/// has no byte-for-byte fixture assertion: 48 KB of Java internals cannot be
+/// matched honestly, and PRD section 5's v2.75 block records that boundary.
 ///
 /// `cat`/`key` are accepted and ignored.
 /// ponytail: real Solr uses them to filter the dump down to one category or
@@ -2031,7 +2030,7 @@ fn admin_luke_index_placeholders() -> Vec<(&'static str, Value)> {
 /// genuinely applies to it, read off the live `[[fields]]` config.
 ///
 /// Deliberately absent — and this is the reason the endpoint carries no
-/// `manifest.tsv` row (PRD section 5, v2.75) — are the Lucene-internal keys the
+/// byte-for-byte fixture assertion (PRD section 5, v2.75) — are the Lucene-internal keys the
 /// trace shows: the `schema`/`index` flag strings (`ITS-----OF-----`, whose
 /// letters are Lucene `FieldInfo` bits), `topTerms` and `histogram`. Wayfinder
 /// has no Lucene index internals to read them from, nobody reads them (see
@@ -4273,9 +4272,9 @@ async fn mlt(
 /// `{"responseHeader":{status,QTime},"command":"buildAll"}` -- no `suggest`
 /// block (that is a `suggest.q` lookup) and no `params` under `responseHeader`
 /// (the component does not echo them, unlike `/select`). The fixture is
-/// `solr-ref/responses/suggest_build_all.json`; the differential harness row is
-/// in `solr-ref/manifest-errors.tsv` (own core, since `/suggest`'s handler
-/// lives in the search-api configset, not the tracer-bullet `content` core).
+/// `solr-ref/responses/suggest_build_all.json`; the feature test replays its
+/// dedicated request because `/suggest` lives in the search-api configset,
+/// not the tracer-bullet `content` core).
 ///
 /// ponytail: Tantivy's term dictionary is already an FST, so Wayfinder has no
 /// separate suggester dictionary to build. `suggest.buildAll` (and the
@@ -4397,7 +4396,7 @@ async fn suggest(
                 .with_suggest(json!({}))
                 // The fixture's `trace` is Solr's Java stack. Wayfinder states
                 // the equivalent in its own terms rather than forging JVM
-                // frames -- `trace` is free text the differential normaliser
+                // frames -- `trace` is free text the fixture normaliser
                 // drops (finding 10/59); only its presence is contract.
                 .with_trace(
                     "wayfinder::SuggestError: suggest.count must be > 0 \
@@ -4452,8 +4451,8 @@ async fn suggest(
     Ok(axum::Json(Value::Object(body)).into_response())
 }
 
-/// `terms_body.json` and its `solr-ref/manifest.tsv` row cover this endpoint
-/// in the differential harness. The one captured analyzer difference is
+/// `terms_body.json` covers this endpoint in its feature test. The one captured
+/// analyzer difference is
 /// explicit and narrowly guarded under issue #205: Solr's `text_en` emits
 /// `dai` where Tantivy emits `day` (finding 103).
 async fn terms(

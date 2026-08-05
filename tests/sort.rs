@@ -3,7 +3,7 @@
 //! Every expected value here is derived from a committed fixture in
 //! `solr-ref/responses/` (CLAUDE.md: fixtures are ground truth). The fixtures
 //! for this suite were captured by the issue-#2 block at the end of
-//! `solr-ref/capture.sh` against the same `solr:9` container and the same 5-doc
+//! the dedicated Solr capture against the same `solr:9` container and the same 5-doc
 //! corpus as everything else, so no expected ordering below is invented.
 //!
 //! Two captured facts are worth reading before the tests, because they
@@ -596,7 +596,7 @@ async fn an_empty_sort_param_behaves_as_no_sort() {
 // =============================================================================
 
 /// Mirrors the real `sortdebt` core's schema (issue-#32 block of
-/// `solr-ref/capture.sh`): `id` (string, unique key), `category` (string),
+/// the dedicated Solr capture): `id` (string, unique key), `category` (string),
 /// `views` (int), `weight` (float), `created` (date), `nums` (int,
 /// multi_valued). All fast + stored, per the task spec.
 const SORTDEBT_SCHEMA_TOML: &str = r#"

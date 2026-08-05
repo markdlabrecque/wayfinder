@@ -10,7 +10,7 @@
 //! (`isset()` check plus the value itself). Nothing else in the response is
 //! consumed by `search_api_solr`.
 //!
-//! No `solr-ref/manifest.tsv` row for this endpoint (ticket's explicit
+//! No the captured fixture request set row for this endpoint (ticket's explicit
 //! scope note: Lucene-identity fields — directory class names, per-field
 //! flag strings, heap accounting — cannot be reproduced honestly), so there
 //! is no fixture to diff against. These tests instead independently

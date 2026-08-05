@@ -5,7 +5,7 @@
 //! module traces alone cannot distinguish "uses the key as the response label"
 //! from "strips the prefix and uses the field name". Five fixtures captured
 //! against a one-off `solr:9` (commit `b4cf4b0`, documented in the block at the
-//! end of `solr-ref/capture.sh`) settle it: **the key is the response label.**
+//! end of the dedicated Solr capture) settle it: **the key is the response label.**
 //!
 //! Three further shapes were captured the same way in commit `1a7e47d`, so
 //! nothing in this file rests on generalising the module's own shape:
@@ -14,9 +14,9 @@
 //!
 //! Expected values here come from those fixtures and from the pre-existing
 //! `facet_basic` / `facet_multi_field` captures, never from what Wayfinder
-//! happens to produce. Six of the eight have `solr-ref/manifest.tsv` rows, so
-//! the differential harness replays them too — but the differential's error
-//! tolerance already lets `facet_local_params_key_unknown` "match" while
+//! happens to produce. Six of the eight are replayed by the fixture comparison
+//! suite too, but its error-message normalization lets
+//! `facet_local_params_key_unknown` "match" while
 //! Wayfinder names the *raw value* in the message rather than the remainder, so
 //! the message contract is pinned here directly (see
 //! `unknown_field_behind_a_prefix_400s_naming_the_remainder` and
@@ -24,7 +24,7 @@
 //!
 //! Deliberately out of scope, per the issue: `f.<field>.facet.*` per-field
 //! overrides (#140 — the `facet_local_params_key_f_field` / `_f_key` fixtures
-//! are its evidence and carry no manifest row), local-params prefixes on
+//! are its evidence), local-params prefixes on
 //! `facet.query` / `facet.pivot` / `fq`, and inline facet params inside the
 //! block (`{!key=x facet.mincount=2}`). Nothing here asserts anything about
 //! them.
@@ -124,7 +124,7 @@ async fn indexed_app_with_config(config_toml: &str) -> (Router, TempDir) {
 
 // --- 1. the key labels the bucket ------------------------------------------
 
-/// `solr-ref/manifest.tsv` row `facet_local_params_key`, replayed verbatim: the
+/// the captured fixture request set row `facet_local_params_key`, replayed verbatim: the
 /// counts are `category`'s, and the label is `mylabel`.
 #[tokio::test]
 async fn differing_key_labels_the_bucket_matching_the_fixture() {
@@ -156,7 +156,7 @@ async fn differing_key_labels_the_bucket_matching_the_fixture() {
 
 // --- 2. the module's own shape: key == field name --------------------------
 
-/// `solr-ref/manifest.tsv` row `facet_local_params_key_same`. This is what
+/// the captured fixture request set row `facet_local_params_key_same`. This is what
 /// every captured `search_api_solr` request looks like, and it is a visual
 /// no-op against the un-prefixed form — which is exactly why it cannot be the
 /// only test.
@@ -223,7 +223,7 @@ async fn a_prefix_changes_only_the_label_not_the_counts() {
 
 // --- 4. unknown field behind a prefix -------------------------------------
 
-/// `solr-ref/manifest.tsv` row `facet_local_params_key_unknown`: real Solr 400s
+/// the captured fixture request set row `facet_local_params_key_unknown`: real Solr 400s
 /// with `msg` `undefined field: "nosuchfield"` — the **remainder** is named,
 /// not the key (`k`) and not the raw value (`{!key=k}nosuchfield`).
 ///
@@ -232,7 +232,7 @@ async fn a_prefix_changes_only_the_label_not_the_counts() {
 /// - `error.msg` is free text under `tests/error_shapes.rs`'s contract, so the
 ///   wording is not frozen; what is frozen is *which token* it names, which is
 ///   the observable part of Solr's behaviour here.
-/// - the differential harness cannot cover this: it already reports 0 diffs for
+/// - the fixture comparison suite cannot cover this: it already reports 0 diffs for
 ///   this row, because its error tolerance ignores `error.msg` while Wayfinder
 ///   names the whole raw value. Without the "does not leak the block" half
 ///   below, this test would pass on a substring match against the unparsed
@@ -285,8 +285,8 @@ async fn unknown_field_behind_a_prefix_400s_naming_the_remainder() {
 /// by stripping the prefix and using the field name.
 ///
 /// Proved by `solr-ref/responses/facet_local_params_key_as_other_field.json`
-/// (`solr-ref/manifest.tsv` row `facet_local_params_key_as_other_field`, so the
-/// differential harness replays it too): `{!key=body}category` is a 200 whose
+/// (the captured fixture request set row `facet_local_params_key_as_other_field`, so the
+/// fixture comparison suite replays it too): `{!key=body}category` is a 200 whose
 /// single bucket is labelled `body` and carries `category`'s counts.
 ///
 /// `body` is the decisive choice of key because it is a real field in the
@@ -392,12 +392,12 @@ async fn mixed_prefixed_and_bare_values_each_get_their_own_label() {
 
 // --- 8. malformed and degenerate blocks -----------------------------------
 //
-// Both shapes below are now captured (`solr-ref/manifest.tsv` rows
+// Both shapes below are now captured (the captured fixture request set rows
 // `facet_local_params_key_unterminated` and
 // `facet_local_params_key_empty_remainder`), so the expectations are ground
 // truth rather than self-consistency. Both are 400s in Solr and 400s in
 // Wayfinder today; `error.msg` is free text under `tests/error_shapes.rs`'s
-// contract and the differential harness tolerates it, so what each test can
+// contract and the fixture comparison suite tolerates it, so what each test can
 // pin beyond the status is called out individually.
 
 /// **Status pin, green before the implementation as well as after.**
@@ -412,7 +412,7 @@ async fn mixed_prefixed_and_bare_values_each_get_their_own_label() {
 /// unterminated `{!...` as "not a local-params block at all", so the whole value
 /// stays a field name and no such field exists. The wording therefore diverges,
 /// which is tolerated — `error.msg` is never compared verbatim
-/// (`tests/error_shapes.rs`'s contract) and the differential harness applies the
+/// (`tests/error_shapes.rs`'s contract) and the fixture comparison suite applies the
 /// same tolerance, so the fixture pins the status and the no-facet-block shape
 /// only. Nothing here can distinguish the two routes, and the issue does not ask
 /// it to.

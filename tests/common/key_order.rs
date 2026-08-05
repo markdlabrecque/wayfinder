@@ -245,7 +245,7 @@ const IGNORED_KEYS: [&str; 2] = ["_version_", "_root_"];
 /// `facet_range_json_nl_map.json`, whose params come back as `facet.range, q,
 /// facet.range.gap, json.nl, rows, facet, wt, facet.range.start,
 /// facet.range.end`. No implementation can reproduce that, so it is not a
-/// contract; this mirrors findings fact 6 ("the differential normaliser must be
+/// contract; this mirrors findings fact 6 ("the fixture normaliser must be
 /// order-insensitive on this object"). Every *other* object in the envelope is
 /// ordered on purpose and is compared.
 const EXEMPT_PATHS: [&str; 1] = ["responseHeader.params"];

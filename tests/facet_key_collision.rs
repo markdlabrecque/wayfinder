@@ -12,25 +12,15 @@
 
 mod common;
 
-use std::path::Path;
-
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 
-use common::diff::{load_manifest, load_manifest_errors};
 use common::key_order::KeyOrder;
 use common::{assert_matches_fixture, get, indexed_app};
 
 const PRD: &str = include_str!("../docs/PRD.md");
 const FIELD_FLAT: &str = include_str!("../solr-ref/responses/facet_collision_field_flat.json");
 const FIELD_MAP: &str = include_str!("../solr-ref/responses/facet_collision_field_map.json");
-const COLLISION_FIXTURES: [&str; 4] = [
-    "facet_collision_field_flat",
-    "facet_collision_field_map",
-    "facet_collision_query_flat",
-    "facet_collision_query_map",
-];
-
 /// Finding 102's ground truth must stay raw: each field fixture has two
 /// literal outer `"x"` members, with category values first and id values
 /// second. `serde_json::Value` keeps only the latter, demonstrating why a
@@ -75,33 +65,28 @@ fn field_collision_fixtures_preserve_duplicate_outer_members_in_raw_text() {
     }
 }
 
-/// The four issue-149 captures intentionally stay outside the parsed-JSON
-/// differential manifest. Its normaliser would discard the field fixture's
-/// first duplicate member and falsely accept the current last-write-wins path.
+/// The field-collision fixtures and the PRD must continue to record why the
+/// server rejects duplicate response labels: a JSON object model cannot retain
+/// Solr's two same-named members without silently choosing one.
 #[test]
-fn collision_fixtures_are_excluded_from_the_parsed_json_manifest() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let manifest = load_manifest(&root.join("solr-ref/manifest.tsv"));
-    let error_manifest = load_manifest_errors(&root.join("solr-ref/manifest-errors.tsv"));
-    assert!(
-        manifest.iter().any(|entry| entry.name == "facet_basic"),
-        "manifest sanity: a known ordinary facet row must remain so this exclusion check cannot \
-         pass against an emptied manifest"
-    );
-    for fixture in COLLISION_FIXTURES {
-        assert!(
-            !manifest.iter().any(|entry| entry.name == fixture)
-                && !error_manifest.iter().any(|entry| entry.name == fixture),
-            "{fixture} must not enter a parsed JSON manifest until its parsed-Value \
-             false-positive hazard is removed"
-        );
-    }
+fn collision_fixture_documentation_records_the_deliberate_400_divergence() {
     assert!(
         PRD.contains("Colliding `facet.field` response labels are a hard 400")
             && PRD.contains("facet_collision_field_flat.json")
             && PRD.contains("facet_collision_field_map.json"),
-        "the deliberate 400 divergence must remain ratified with both field fixtures"
+        "the deliberate 400 divergence must remain documented with both raw field fixtures"
     );
+    for raw in [FIELD_FLAT, FIELD_MAP] {
+        assert!(
+            KeyOrder::parse(raw)
+                .keys_at("facet_counts.facet_fields", "collision fixture")
+                .iter()
+                .filter(|key| key.as_str() == "x")
+                .count()
+                == 2,
+            "the documentation must remain anchored to a fixture with both colliding labels"
+        );
+    }
 }
 
 async fn assert_field_label_collision_is_rejected(path: &str) {

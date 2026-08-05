@@ -23,14 +23,14 @@
 //!   one, the opposite of "local params shadow the request".
 //!
 //! Fixtures: `solr-ref/responses/facet_perfield_*.json` (23 rows,
-//! `manifest.tsv`, `content` core/corpus -- same schema as
+//! the captured fixture request set, `content` core/corpus -- same schema as
 //! `tests/common::indexed_app`) and `solr-ref/responses/pf296_sort_*.json` (8
-//! rows, `manifest-errors.tsv`, dedicated `pf296` core/corpus). The `content`
+//! rows, the captured fixture request set, dedicated `pf296` core/corpus). The `content`
 //! corpus's `category` counts (animals 2, classic 2, garden 1, misc 1) tie
 //! count order and index order together, so it cannot pin `facet.sort` on its
 //! own -- the `pf296` corpus (`topic`: zebra 3, mango 2, apple 1) exists
 //! specifically to break that tie; its schema/corpus are duplicated here from
-//! `tests/differential.rs`'s `PF296_SCHEMA_TOML`/`pf296_corpus`, same
+//! the retained fixture tests' `PF296_SCHEMA_TOML`/`pf296_corpus`, same
 //! duplication precedent as `sortdebt`/`facets33` in that file.
 
 // The `dead_code` allow for partially-used shared helpers is an inner attribute
@@ -85,8 +85,8 @@ async fn indexed_app_with_config(config_toml: &str) -> (Router, TempDir) {
 
 // --- pf296 corpus: the only one on this branch that can pin `facet.sort` ---
 // (finding: `content`'s `category` counts tie count order and index order
-// together). Duplicated byte-for-byte from `tests/differential.rs`'s
-// `PF296_SCHEMA_TOML`/`pf296_corpus` -- same schema `capture.sh`'s pf296
+// together). Duplicated byte-for-byte from the retained fixture tests'
+// `PF296_SCHEMA_TOML`/`pf296_corpus` -- same schema the dedicated Solr capture's pf296
 // block indexed into the live `solr:9` container the fixtures came from.
 
 const PF296_SCHEMA_TOML: &str = r#"

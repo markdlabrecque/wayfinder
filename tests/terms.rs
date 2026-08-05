@@ -60,7 +60,7 @@
 //!    `LengthFilterFactory min="2"`, `WordDelimiterGraphFilterFactory`,
 //!    `MappingCharFilterFactory`'s `accents_en.txt`, and those two extra
 //!    stopwords); none of them has been verified against a capture, so this
-//!    file claims none of them. The deferred `solr-ref/manifest.tsv` row is
+//!    file claims none of them. The deferred the captured fixture request set row is
 //!    what settles them.
 //! 3. **Doc-frequency-includes-deletes is a genuine, currently-unenforced
 //!    property.** Nothing in `src/core_index.rs` today reads
@@ -1154,9 +1154,8 @@ async fn terms_doc_frequency_includes_deleted_docs_without_a_merge() {
 // These assert behaviour on corpora whose analyzed terms are already pinned by
 // the trace-shaped tests above; they do NOT assert against
 // `solr-ref/responses/` values that depend on Solr's `text_en` stemming
-// (`dai` vs Tantivy's `day`, finding 103 / issue #205). The differential
-// harness (`tests/differential.rs`) compares against the captured fixtures;
-// the `terms_*` rows there are the compatibility evidence.
+// (`dai` vs Tantivy's `day`, finding 103 / issue #205). The retained feature
+// tests compare against the captured `terms_*` fixtures.
 
 /// Several matches, count-descending then term-ascending. `prefix=d` on the
 /// trace's `title` keeps `dog`(2), `day`(1), `document`(1) -- `dog` first by
@@ -1457,7 +1456,7 @@ async fn terms_limit_without_prefix_truncates_the_whole_dictionary() {
 /// when the integer parse fails, so Wayfinder's error envelope must reproduce
 /// that sibling rather than a bare error. The *shape* -- status 400,
 /// `error.code` 400, `metadata` present, `terms` present and empty -- is what
-/// must match; `error.msg` is normalised away by the differential harness
+/// must match; `error.msg` is normalised away by the fixture comparison suite
 /// (finding 10), so its wording is not pinned here.
 #[tokio::test]
 async fn terms_limit_invalid_returns_400_with_empty_terms_sibling() {

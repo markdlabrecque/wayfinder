@@ -38,7 +38,7 @@
 //! A field that does **not exist** is *not* part of that divergence: real Solr
 //! 400s on it too (`facet_unknown_field.json`), so Wayfinder matches. The
 //! original fixture said 200 because it was captured against a container whose
-//! schema had been polluted by `capture.sh`'s own schemaless probe, which
+//! schema had been polluted by the dedicated Solr capture's own schemaless probe, which
 //! auto-created `nosuchfield` — see issue #26.
 
 use std::fmt;

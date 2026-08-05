@@ -10,7 +10,7 @@
 //! params first, body params appended, exactly like repeated query params --
 //! so a single-valued read takes the FIRST value and `echo` renders both.
 //!
-//! The differential harness exercises the captured `form_post_*` fixtures
+//! The fixture comparison suite exercises the captured `form_post_*` fixtures
 //! (`solr-ref/manifest(-errors).tsv`); these tests pin the behaviour directly
 //! and cover the edges the fixtures do not (strict_params validation of body
 //! params, the content-type gate, `/mlt` and `/terms` intake).

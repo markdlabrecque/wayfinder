@@ -39,7 +39,7 @@ use common::{fixture, request, request_multipart};
 /// `id` (unique key), `body` (the extracted text via `fmap.content=body`),
 /// `links` (captured `<a>` attributes via `fmap.a=links`), and `category`
 /// (an extra multi-valued field for the `literal.*` test). Mirrors the
-/// `add-field` calls in `solr-ref/capture.sh`'s #258 block, plus `category`.
+/// `add-field` calls in the dedicated Solr capture's #258 block, plus `category`.
 const INDEX_SCHEMA_TOML: &str = r#"
 [core]
 name = "content"
