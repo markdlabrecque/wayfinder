@@ -73,6 +73,27 @@ pub fn render_core_page(
     .render()
 }
 
+#[derive(Template)]
+#[template(path = "synonyms.html")]
+struct SynonymPage<'a> {
+    core_name: &'a str,
+    groups: Vec<String>,
+}
+
+/// Renders the per-core synonym editor from the live table, never by rereading
+/// the file. POST swaps that same table atomically, so a following GET cannot
+/// show a stale durable snapshot.
+pub fn render_synonym_page(
+    core_name: &str,
+    groups: &[Vec<String>],
+) -> Result<String, askama::Error> {
+    SynonymPage {
+        core_name,
+        groups: groups.iter().map(|group| group.join(",")).collect(),
+    }
+    .render()
+}
+
 /// `1536` -> `"1.5 KB"`, `0` -> `"0 B"`.
 ///
 /// ponytail: one decimal place, binary steps, no locale awareness. Ceiling:

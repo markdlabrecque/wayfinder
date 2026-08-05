@@ -180,24 +180,26 @@ fn text_presets_tokenize_as_expected() {
     assert_eq!(
         wf.tokenize("text_en", "The Quick Runners")
             .expect("text_en preset"),
-        vec!["quick", "runner"],
-        "text_en must drop English stopwords before stemming remaining tokens"
+        vec!["quick", "runner", "quickrunn"],
+        "Phase 4 word-delimiter catenation retains the joined non-stopword form"
     );
     // Solr 9.10.1 `_default` text_en: its English Porter stemmer maps `day`
     // to `dai`; Tantivy's English stemmer leaves it unchanged.
     assert_eq!(
         wf.tokenize("text_en", "day boy happy sky")
             .expect("text_en preset"),
-        vec!["dai", "boi", "happi", "sky"],
-        "text_en must apply Porter's terminal-y rule only when the stem contains a vowel"
+        vec![
+            "dai", "boi", "dayboi", "happi", "boyhappi", "sky", "happyski"
+        ],
+        "Phase 4 preserves stemmed word parts and their adjacent catenations"
     );
 
     // text_general: lowercased, NOT stemmed.
     assert_eq!(
         wf.tokenize("text_general", "The Quick Runners")
             .expect("text_general preset"),
-        vec!["the", "quick", "runners"],
-        "text_general must lowercase without stemming"
+        vec!["the", "quick", "thequick", "runners", "quickrunners"],
+        "Phase 4 catenates adjacent lowercased words without stemming"
     );
 
     // string / keyword: one untokenized, unlowercased term.
@@ -464,11 +466,11 @@ stored = true
     let current = schema::load(&schema_path).expect("raw-only dynamic schema loads");
     let legacy_schema_json = serde_json::to_string(&current.tantivy_schema)
         .expect("serialize current Tantivy schema")
-        .replace("wayfinder_dynamic_text_v5", "en_stem");
+        .replace("wayfinder_dynamic_text_v6", "en_stem");
     assert!(
         legacy_schema_json.contains("_dynamic_text")
             && legacy_schema_json.contains("en_stem")
-            && !legacy_schema_json.contains("wayfinder_dynamic_text_v5"),
+            && !legacy_schema_json.contains("wayfinder_dynamic_text_v6"),
         "test setup: materialize the pre-UAX #29 `_dynamic_text` tokenizer identity"
     );
     let materialize_legacy = |root: &std::path::Path| {
@@ -591,7 +593,11 @@ fn a_language_preset_ships_for_every_tantivy_stemmer_language() {
     let de = wf
         .tokenize("text_de", "Häuser Bücher")
         .expect("text_de preset");
-    assert_eq!(de.len(), 2, "text_de must tokenize into two terms: {de:?}");
+    assert_eq!(
+        de.len(),
+        3,
+        "Phase 4 word-delimiter catenation adds a joined term: {de:?}"
+    );
     assert!(
         de.iter().all(|t| t.chars().all(|c| !c.is_uppercase())),
         "text_de must lowercase: {de:?}"
@@ -923,16 +929,16 @@ tokenizer = "{index_tok}"
     }
 }
 
-/// `ANALYZER_CONTRACT` guards on-disk term compatibility. The Phase 2
-/// pre-folding marker must still be refused, while Phase 3's UAX #29 change
-/// advances the current contract to v5.
+/// `ANALYZER_CONTRACT` guards on-disk term compatibility. Phase 4 adds index
+/// terms for word parts and catenations, so its contract must advance past the
+/// UAX #29-only v5 marker.
 #[test]
-fn analyzer_contract_is_v5_after_phase_3_uax29_segmentation() {
+fn analyzer_contract_is_v6_after_phase_4_word_delimiter_terms() {
     assert_eq!(
         schema::ANALYZER_CONTRACT,
-        "text_presets_uax29_v5",
-        "Phase 3 (issue #389) changes indexed text segmentation, so the analyzer \
-         contract must identify UAX #29 v5"
+        "text_presets_uax29_word_delimiter_v6",
+        "Phase 4 (issue #389) changes indexed word-delimiter terms, so the analyzer \
+         contract must identify v6"
     );
 }
 
@@ -960,12 +966,15 @@ fn custom_field_type_cannot_use_an_internal_analyzer_identity() {
         "default".to_string(),
         "wayfinder_text_general_v3".to_string(),
         "wayfinder_text_general_v4".to_string(),
+        "wayfinder_text_general_v5".to_string(),
         "wayfinder_text_en_v1".to_string(),
         "wayfinder_text_en_v2".to_string(),
         "wayfinder_text_en_v3".to_string(),
         "wayfinder_text_en_v4".to_string(),
+        "wayfinder_text_en_v5".to_string(),
         "wayfinder_dynamic_text_v4".to_string(),
         "wayfinder_dynamic_text_v5".to_string(),
+        "wayfinder_dynamic_text_v6".to_string(),
     ];
     // Current and legacy non-English identities are both derived from
     // LANGUAGES in production. Deriving the assertions from the exported
@@ -979,6 +988,7 @@ fn custom_field_type_cannot_use_an_internal_analyzer_identity() {
                     name.clone(),
                     format!("wayfinder_{name}_v3"),
                     format!("wayfinder_{name}_v4"),
+                    format!("wayfinder_{name}_v5"),
                 ]
             }),
     );

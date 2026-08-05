@@ -1,4 +1,5 @@
-//! Search-quality contract for issue #389 Phase 3's UAX #29 tokenizer.
+//! Search-quality contract for issue #389's UAX #29 tokenizer and Phase 4
+//! word-delimiter expansion.
 //!
 //! These assertions deliberately do not use the `an389_*` responses: the
 //! premise change makes their Solr token stream reference material, not the
@@ -104,30 +105,54 @@ fn term_set<'a>(body: &'a Value, field: &str) -> BTreeSet<&'a str> {
 async fn text_presets_use_uax29_word_boundaries_without_discarding_meaningful_singletons() {
     let (app, _dir) = uax29_app().await;
 
-    // UAX #29 keeps apostrophes, dots, and underscores inside their applicable
-    // word classes; it breaks at hyphen and `@`. The expected vocabulary also
-    // proves punctuation/whitespace alone never becomes a term.
+    // UAX #29 supplies the source words; Phase 4 additionally retains their
+    // delimiter parts and catenations. Punctuation/whitespace alone is still
+    // never a term.
     let (status, body) = get(&app, "terms?terms=true&terms.fl=general&terms.limit=100").await;
     assert_eq!(status, StatusCode::OK, "/terms must answer 200: {body}");
     assert_eq!(
         term_set(&body, "general"),
         BTreeSet::from([
+            "14",
             "3",
             "3.14",
+            "314",
+            "3143",
+            "3foobar",
             "a",
+            "abcom",
+            "b",
             "b.com",
+            "bar",
+            "bcom",
+            "bcom東",
+            "com",
+            "don",
             "don't",
+            "dont",
+            "dontwwwexamplecom",
             "e",
+            "email",
+            "example",
+            "foo",
             "foo_bar",
+            "foobar",
+            "foobare",
             "mail",
+            "maila",
             "material",
+            "t",
             "unrelated",
+            "unrelatedmaterial",
+            "www",
             "www.example.com",
-            "東",
+            "wwwexamplecom",
+            "wwwexamplecom314",
             "京",
+            "東",
             "都",
         ]),
-        "the indexed text_general vocabulary must be the UAX #29 word stream: {body}"
+        "the indexed vocabulary must include Phase 4 delimiter parts and catenations: {body}"
     );
 
     // Search must use the same analyzer as indexing for both built-in text
@@ -164,12 +189,10 @@ async fn text_presets_use_uax29_word_boundaries_without_discarding_meaningful_si
     }
     assert_field_term(&app, "english", "a", 0).await;
 
-    // These are only independently searchable under the old
-    // non-alphanumeric splitter. They must not match a UAX #29 token that
-    // contains the corresponding apostrophe, dot, or underscore.
+    // Phase 4 deliberately makes delimiter parts independently searchable.
     for field in ["general", "english"] {
         for fragment in ["don", "example", "14", "foo", "com"] {
-            assert_field_term(&app, field, fragment, 0).await;
+            assert_field_term(&app, field, fragment, 1).await;
         }
     }
 }
@@ -209,7 +232,7 @@ async fn search_api_dynamic_text_and_suggest_use_the_uax29_chain() {
     }
     assert_field_term(&app, "tm_X3b_en_body", "a", 0).await;
     for fragment in ["don", "example", "14", "foo"] {
-        assert_field_term(&app, "tm_X3b_en_body", fragment, 0).await;
+        assert_field_term(&app, "tm_X3b_en_body", fragment, 1).await;
     }
 
     let (status, body) = get(

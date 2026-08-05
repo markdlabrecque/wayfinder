@@ -86,3 +86,20 @@ async fn word_delimiter_parts_and_catenations_match_symmetrically_for_static_and
     assert_field_query_count(&app, "tm_X3b_en_code", "wifi", 2).await;
     assert_field_query_count(&app, "tm_X3b_en_code", "wifirouter", 2).await;
 }
+
+/// A delimiter typed after a word is still an in-progress token, not a reason
+/// to turn autocomplete into an exact lookup. This is mutation-sensitive: the
+/// deliberately broken `last_is_prefix = false` rule makes this return zero,
+/// even if a pre-Phase-4 `foo_` happened to pass through a tokenizer unchanged.
+#[tokio::test]
+async fn suggest_keeps_mid_delimiter_input_as_a_prefix() {
+    let (app, _dir) = delimiter_app().await;
+    let (status, body) = get(&app, "suggest?suggest.dictionary=en&suggest.q=foo_&wt=json").await;
+    assert_eq!(status, StatusCode::OK, "/suggest must succeed: {body}");
+    assert_eq!(
+        body.pointer("/suggest/en/foo_/numFound")
+            .and_then(Value::as_u64),
+        Some(1),
+        "`foo_` must remain a useful prefix for `foo_bar`: {body}"
+    );
+}
