@@ -910,37 +910,44 @@ struct AccentFoldingTokenStream<'a, T> {
     buffer: &'a mut String,
 }
 
+/// The shared folding primitive for search analyzers and persisted synonym
+/// members. It intentionally preserves case; `LowerCaser` runs after this
+/// filter in the production chain.
+pub(crate) fn fold_accents(text: &str, output: &mut String) {
+    output.clear();
+    for character in text.nfkd() {
+        if character.general_category() == GeneralCategory::NonspacingMark {
+            continue;
+        }
+        match character {
+            'ß' => output.push_str("ss"),
+            'ẞ' => output.push_str("SS"),
+            'æ' => output.push_str("ae"),
+            'Æ' => output.push_str("AE"),
+            'œ' => output.push_str("oe"),
+            'Œ' => output.push_str("OE"),
+            'þ' => output.push_str("th"),
+            'Þ' => output.push_str("TH"),
+            'ð' => output.push('d'),
+            'Ð' => output.push('D'),
+            'ø' => output.push('o'),
+            'Ø' => output.push('O'),
+            'đ' => output.push('d'),
+            'Đ' => output.push('D'),
+            'ł' => output.push('l'),
+            'Ł' => output.push('L'),
+            character => output.push(character),
+        }
+    }
+}
+
 impl<T: TokenStream> TokenStream for AccentFoldingTokenStream<'_, T> {
     fn advance(&mut self) -> bool {
         if !self.tail.advance() {
             return false;
         }
 
-        self.buffer.clear();
-        for character in self.tail.token().text.nfkd() {
-            if character.general_category() == GeneralCategory::NonspacingMark {
-                continue;
-            }
-            match character {
-                'ß' => self.buffer.push_str("ss"),
-                'ẞ' => self.buffer.push_str("SS"),
-                'æ' => self.buffer.push_str("ae"),
-                'Æ' => self.buffer.push_str("AE"),
-                'œ' => self.buffer.push_str("oe"),
-                'Œ' => self.buffer.push_str("OE"),
-                'þ' => self.buffer.push_str("th"),
-                'Þ' => self.buffer.push_str("TH"),
-                'ð' => self.buffer.push('d'),
-                'Ð' => self.buffer.push('D'),
-                'ø' => self.buffer.push('o'),
-                'Ø' => self.buffer.push('O'),
-                'đ' => self.buffer.push('d'),
-                'Đ' => self.buffer.push('D'),
-                'ł' => self.buffer.push('l'),
-                'Ł' => self.buffer.push('L'),
-                character => self.buffer.push(character),
-            }
-        }
+        fold_accents(&self.tail.token().text, self.buffer);
         let text = &mut self.tail.token_mut().text;
         text.clear();
         text.push_str(self.buffer);
@@ -1154,6 +1161,12 @@ fn delimiter_parts(text: &str, base_offset: usize, original_end: usize) -> Vec<D
     parts
 }
 
+/// Whether the pre-lowercase delimiter analysis emits exactly one position.
+/// Synonym expansion only supports same-position single-token alternatives.
+pub(crate) fn is_single_delimiter_position(text: &str) -> bool {
+    delimiter_parts(text, 0, text.len()).len() == 1
+}
+
 struct WordDelimiterTokenStream<'a, T> {
     tail: T,
     input: &'a str,
@@ -1219,7 +1232,9 @@ impl<T: TokenStream> WordDelimiterTokenStream<'_, T> {
             return true;
         }
 
-        let start = self.next_position;
+        // Filters before us (notably stopwords) can leave position gaps. Keep
+        // those gaps while still reserving extra positions for split compounds.
+        let start = self.next_position.max(sources[0].position);
         let width = parts.len();
         let mut seen = HashSet::new();
         let mut push =
@@ -1329,7 +1344,7 @@ impl<T: TokenStream> WordDelimiterTokenStream<'_, T> {
         self.pending
             .make_contiguous()
             .sort_by_key(|token| token.position);
-        self.next_position += width;
+        self.next_position = start + width;
         true
     }
 }

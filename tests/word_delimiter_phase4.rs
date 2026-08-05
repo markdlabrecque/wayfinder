@@ -50,6 +50,7 @@ async fn delimiter_app() -> (axum::Router, TempDir) {
         &json!([
             {"id": "static-compound", "body": "SKU-42 next WiFi2000"},
             {"id": "static-independent", "body": "day boy"},
+            {"id": "stopword-gap", "body": "quick the fox"},
             {"id": "dynamic-compound", "tm_X3b_en_code": ["SKU-42 wifi_router"]},
             {"id": "dynamic-independent", "tm_X3b_en_code": ["happy sky"]},
             {"id": "suggest-delimiter", "twm_suggest": ["foo_bar"]}
@@ -153,6 +154,10 @@ async fn delimiter_compounds_are_real_position_graphs_for_sequential_and_catenat
     assert_field_query_count(&app, "body", "%22day+boy%22", 1).await;
     assert_field_query_count(&app, "body", "%22sku+42+next%22", 1).await;
     assert_field_query_count(&app, "body", "%22sku42+next%22", 1).await;
+
+    // Stopword removal leaves a real incoming position gap. The delimiter
+    // graph must preserve it, so a compact quoted phrase cannot bridge `the`.
+    assert_field_query_count(&app, "body", "%22quick+fox%22", 0).await;
 }
 
 #[tokio::test]

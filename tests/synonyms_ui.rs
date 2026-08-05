@@ -251,6 +251,21 @@ async fn invalid_group_rejects_without_replacing_live_or_durable_synonyms() {
     assert_query_count(&app, "durpal", 1).await;
     assert_query_count(&app, "nyc", 0).await;
 
+    // A delimiter graph member such as `sku42` spans `sku` and `42`, so it
+    // cannot be a same-position synonym alternative. Its rejection has the
+    // same atomicity guarantee as every other malformed edit.
+    let (status, _headers, body) = post_synonym_form(&app, "groups=sku42%2Cbaz").await;
+    assert!(
+        status.is_client_error(),
+        "split synonym member must fail: status={status}, body: {body}"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("synonym file after split-member rejection"),
+        before,
+        "a split member must not replace the durable table"
+    );
+    assert_query_count(&app, "durpal", 1).await;
+
     // A member in two groups would make expansion order-dependent (`durpal`
     // could expand differently after a reorder), so it is malformed too.
     let (status, _headers, body) =
@@ -290,11 +305,15 @@ async fn hot_synonyms_are_same_position_suggest_alternatives() {
 #[tokio::test]
 async fn configured_members_are_folded_and_reject_unsafe_analyzer_inputs() {
     let (app, dir) = synonym_app().await;
-    let (status, _headers, body) = post_synonym_form(&app, "groups=Caf%C3%A9%2CCOFFEE").await;
+    let (status, _headers, body) = post_synonym_form(
+        &app,
+        "groups=Sm%C3%B8rrebr%C3%B8d%2CStra%C3%9Fe%2CEncyclop%C3%A6dia",
+    )
+    .await;
     assert_save_succeeded(status, &body);
     assert_eq!(
         std::fs::read(dir.path().join(SYNONYM_FILE)).expect("canonical synonym file"),
-        b"cafe,coffee\n"
+        b"smorrebrod,strasse,encyclopaedia\n"
     );
 
     for invalid in ["foo-bar%2Cbaz", "%F0%9F%98%80%2Cbaz", "%CC%81%2Cbaz"] {

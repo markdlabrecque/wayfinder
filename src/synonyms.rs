@@ -11,8 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{Context, Result, bail};
-use unicode_normalization::UnicodeNormalization;
-use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 pub const FILE_NAME: &str = "synonyms.txt";
 
@@ -22,27 +20,20 @@ struct SynonymTable {
     expansions: HashMap<String, Vec<String>>,
 }
 
-/// Canonical form at the synonym filter insertion point: Unicode-folded and
-/// lowercased, before delimiter splitting and any stemming. A configured member
-/// must remain one lexical token here; accepting punctuation or symbols would
-/// make a saved group mean something different from its query-time expansion.
+/// Canonical form at the synonym filter insertion point: it shares the
+/// production accent fold and lowercase step, then validates the delimiter
+/// graph. A configured member must remain one lexical token here; accepting a
+/// member which splits or spans positions would make a saved group mean
+/// something different from its same-position query-time expansion.
 fn canonical_member(member: &str) -> Result<String> {
     let mut folded = String::new();
-    for character in member.nfkd() {
-        if matches!(character, '\u{00df}' | '\u{1e9e}') {
-            folded.push_str("ss");
-        } else if matches!(character, '\u{00e6}' | '\u{00c6}') {
-            folded.push_str("ae");
-        } else if matches!(character, '\u{0153}' | '\u{0152}') {
-            folded.push_str("oe");
-        } else if matches!(character, '\u{00fe}' | '\u{00de}') {
-            folded.push_str("th");
-        } else if character.general_category() != GeneralCategory::NonspacingMark {
-            folded.extend(character.to_lowercase());
-        }
-    }
+    crate::schema::fold_accents(member, &mut folded);
+    let folded = folded.to_lowercase();
     if folded.is_empty() || !folded.chars().all(char::is_alphanumeric) {
         bail!("synonym members must each be one nonempty safe token");
+    }
+    if !crate::schema::is_single_delimiter_position(&folded) {
+        bail!("synonym members must not split across delimiter positions");
     }
     Ok(folded)
 }
