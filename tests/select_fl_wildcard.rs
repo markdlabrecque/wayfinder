@@ -39,10 +39,8 @@
 //!    doc key order) plus finding 24 (Solr appends its pseudo-fields last), not
 //!    a capture.
 //!
-//! Sibling coverage: the `/mlt` half of the same `render_doc` gap, and the
-//! fixture assertion for `mlt_fl_wildcard_score`, live in `tests/mlt.rs`. The
-//! false-positive-green coverage probe lives in `src/coverage.rs`'s own test
-//! module.
+//! Sibling coverage: the `/mlt` half of the same `render_doc` gap and the
+//! fixture assertion for `mlt_fl_wildcard_score` live in `tests/mlt.rs`.
 
 mod common;
 

@@ -33,9 +33,7 @@
 //!    is invalid boolean syntax: Solr fails before its JSON writer and returns
 //!    Jetty HTML, while Wayfinder keeps its JSON-only contract; PRD ratified
 //!    divergence 8 records that choice and the dedicated test below guards the
-//!    status, JSON content type, and headerless shape. `src/coverage.rs`'s
-//!    `"request.omitHeader"`/`"request.timezone.utc"` runtime probes also
-//!    exercise this under `strict_params = true`.
+//!    status, JSON content type, and headerless shape under `strict_params = true`.
 //! 4. **Which endpoints get `omitHeader`/`TZ` from the module, read off all
 //!    28 traces' request paths**: `/select` and `/mlt` get both
 //!    `omitHeader=true` and `TZ=UTC`. `/update` gets `omitHeader=false`

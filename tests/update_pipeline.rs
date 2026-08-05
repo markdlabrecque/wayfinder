@@ -910,16 +910,13 @@ async fn repeated_add_command_keys_index_every_doc_not_just_one() {
     );
 }
 
-/// The exact shape `src/coverage.rs`'s `update.json-command-add-batch` probe
-/// sends: two duplicate `add` keys followed by a trailing `commit` command
-/// key in the same object, with no `?commit=true` query param — the probe's
-/// own two `numFound == 1` assertions are the discriminating check (a
-/// last-add-wins or first-add-wins parser satisfies at most one of them).
-/// This body's combination of repeated `add` with a `commit` key is not
-/// itself backed by a `solr-ref/responses/` fixture or by trace 00001 (which
-/// has no command-body `commit` key at all) — see handoff.
+/// Two duplicate `add` keys followed by a trailing `commit` command in the
+/// same object, with no `?commit=true` query param. The two `numFound == 1`
+/// assertions discriminate this from last-add-wins or first-add-wins parsing.
+/// This combination is not backed by a `solr-ref/responses/` fixture or trace
+/// 00001, which has no command-body `commit` key.
 #[tokio::test]
-async fn repeated_add_with_trailing_commit_key_matches_the_coverage_probe() {
+async fn repeated_add_with_trailing_commit_key_indexes_both_docs() {
     let (app, _dir) = update9_app().await;
 
     let duplicate = r#"{"add":{"doc":{"id":"u9","body":"first"}},"add":{"doc":{"id":"u10","body":"second"}},"commit":{}}"#;

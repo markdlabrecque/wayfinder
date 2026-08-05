@@ -28,7 +28,6 @@ mod admin_ui;
 mod collector;
 mod config;
 mod core_index;
-mod coverage;
 /// `solr.DateRangeField` — interval-valued dates and their set predicates (#341).
 mod date_range;
 pub mod edismax;
@@ -50,7 +49,6 @@ pub mod snapshot;
 mod stats;
 
 pub use config::ServerConfig;
-pub use coverage::report as coverage_report;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -479,23 +477,7 @@ const MBEANS_PARAMS: &[&str] = &["stats", "wt", "json.nl", "cat", "key"];
 /// similar-docs result set exactly as `/select` does. Out of scope, per the
 /// task spec: `mlt=true` as a `/select` search component, and content-stream
 /// MLT.
-/// Route behavior shared by the real Axum router and coverage report. A route
-/// cannot be reported as covered unless this table wires it and accepts the
-/// captured method.
-struct RouteSpec {
-    path: &'static str,
-    accepts_method: fn(&str) -> bool,
-}
-
-fn any_method(_: &str) -> bool {
-    true
-}
-
-fn update_method(method: &str) -> bool {
-    matches!(method, "POST" | "GET")
-}
-
-/// Per-route body-limit policy. The fourth column of `search_api_routes!`.
+/// Per-route body-limit policy. The third column of `search_api_routes!`.
 ///
 /// `inherit_body_limit` is the normal case: the route says nothing, so the
 /// global `DefaultBodyLimit::max(resources.max_body_size)` layer applies.
@@ -525,39 +507,35 @@ fn extraction_body_limit(route: RouteMethods, extract_ceiling: usize) -> RouteMe
     route.layer(DefaultBodyLimit::max(extract_ceiling))
 }
 
+fn update_method(method: &str) -> bool {
+    matches!(method, "POST" | "GET")
+}
+
 macro_rules! search_api_routes {
     ($apply:ident $(, $extra:expr)?) => {
         $apply! {
             $([$extra])?
-            ("/wayfinder/{core}/update", update, update_method, inherit_body_limit),
-            ("/wayfinder/{core}/update/extract", update_extract, update_method, extraction_body_limit),
-            ("/wayfinder/{core}/select", select, any_method, inherit_body_limit),
-            ("/wayfinder/{core}/mlt", mlt, any_method, inherit_body_limit),
-            ("/wayfinder/{core}/terms", terms, any_method, inherit_body_limit),
-            ("/wayfinder/{core}/suggest", suggest, any_method, inherit_body_limit),
-            ("/wayfinder/{core}/admin/ping", ping, any_method, inherit_body_limit),
-            ("/wayfinder/admin/info/system", admin_info_system, any_method, inherit_body_limit),
-            ("/wayfinder/{core}/admin/system", core_admin_system, any_method, inherit_body_limit),
-            ("/wayfinder/{core}/schema/fieldtypes", schema_fieldtypes, any_method, inherit_body_limit),
-            ("/wayfinder/{core}/admin/luke", admin_luke, any_method, inherit_body_limit),
-            ("/wayfinder/{core}/admin/mbeans", admin_mbeans, any_method, inherit_body_limit),
+            ("/wayfinder/{core}/update", update, inherit_body_limit),
+            ("/wayfinder/{core}/update/extract", update_extract, extraction_body_limit),
+            ("/wayfinder/{core}/select", select, inherit_body_limit),
+            ("/wayfinder/{core}/mlt", mlt, inherit_body_limit),
+            ("/wayfinder/{core}/terms", terms, inherit_body_limit),
+            ("/wayfinder/{core}/suggest", suggest, inherit_body_limit),
+            ("/wayfinder/{core}/admin/ping", ping, inherit_body_limit),
+            ("/wayfinder/admin/info/system", admin_info_system, inherit_body_limit),
+            ("/wayfinder/{core}/admin/system", core_admin_system, inherit_body_limit),
+            ("/wayfinder/{core}/schema/fieldtypes", schema_fieldtypes, inherit_body_limit),
+            ("/wayfinder/{core}/admin/luke", admin_luke, inherit_body_limit),
+            ("/wayfinder/{core}/admin/mbeans", admin_mbeans, inherit_body_limit),
         }
     };
 }
 
-macro_rules! route_specs {
-    ($(($path:literal, $handler:ident, $accepts_method:ident, $body_limit:ident)),+ $(,)?) => {
-        &[$(RouteSpec { path: $path, accepts_method: $accepts_method }),+]
-    };
-}
-
 macro_rules! wire_routes {
-    ([$ceiling:expr] $(($path:literal, $handler:ident, $accepts_method:ident, $body_limit:ident)),+ $(,)?) => {
+    ([$ceiling:expr] $(($path:literal, $handler:ident, $body_limit:ident)),+ $(,)?) => {
         Router::new()$(.route($path, $body_limit(any($handler), $ceiling)))+
     };
 }
-
-const ROUTES: &[RouteSpec] = search_api_routes!(route_specs);
 
 const MLT_PARAMS: &[&str] = &[
     "q",
@@ -719,10 +697,8 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
     let router = search_api_routes!(wire_routes, extract_body_ceiling)
         // Admin UI (issue #94, PRD §5 v2.5). Outside `/wayfinder/*` on purpose:
         // this is Wayfinder's own surface, not part of the Solr wire API, so
-        // it can never shadow a path a Solr client expects — deliberately
-        // not part of `search_api_routes!`, which drives the coverage
-        // denominator's route surface. `get`, not `any` — the
-        // method-agnostic routing the macro uses exists to match Solr's
+        // it can never shadow a path a Solr client expects. `get`, not `any`
+        // — the method-agnostic routing the macro uses exists to match Solr's
         // request handlers, and that reason does not apply here.
         .route("/ui", get(core_ui))
         // Query tester (issue #127) — same reasoning as `/ui` above, and
@@ -1833,9 +1809,8 @@ async fn admin_mbeans(
     let mut core_bean = Map::new();
     core_bean.insert("class".to_string(), json!(state.core_name));
     core_bean.insert("description".to_string(), json!("WayfinderCore"));
-    // The `stats` sub-object appears only under `stats=true` -- without it Solr
-    // returns the bean list alone, and the coverage probe for
-    // `admin.mbeans.wayfinder-mbeans` GETs the endpoint with no `stats` at all.
+    // The `stats` sub-object appears only under `stats=true`; without it Solr
+    // returns the bean list alone.
     if want_stats {
         update_handler.insert("stats".to_string(), Value::Object(update_stats));
         core_bean.insert("stats".to_string(), core_stats);
@@ -1948,11 +1923,10 @@ fn field_type_entry(name: &str, class: &str) -> Value {
 /// second schema-reading path), static plausible placeholders where none does
 /// (`class` and the three default flags, see `field_type_entry`).
 ///
-/// Scope boundary — do not widen: this is the only schema endpoint in the
-/// coverage contract, and the only one with client evidence. `/schema`,
-/// `/schema/fields`, `/schema/dynamicfields`, `/schema/copyfields` and the
-/// rest of Solr's Schema API stay on the Solr 9.x parity roadmap (PRD §5).
-/// This route existing is not an invitation to add its siblings.
+/// Scope boundary — do not widen: this is the only implemented schema
+/// endpoint and the only one with client evidence. `/schema`, `/schema/fields`,
+/// `/schema/dynamicfields`, `/schema/copyfields`, and the rest of Solr's
+/// Schema API are unsupported.
 async fn schema_fieldtypes(
     State(state): State<Arc<AppState>>,
     AxPath(core): AxPath<String>,
@@ -4229,10 +4203,7 @@ async fn mlt(
 ///   not swept up by the gate: the component runs and contributes an empty
 ///   list, so the block is present and empty (`{"terms":{}}`).
 ///   `tests/terms.rs::terms_true_without_fl_produces_an_empty_terms_object`
-///   pins it. `src/coverage.rs`'s `terms.terms` probe deliberately does *not*
-///   use that request (issue #162): a hollow `{"terms":{}}` is nothing a
-///   client can read, so the probe sends `terms.fl=body` and requires a real
-///   term/frequency pair.
+///   pins it.
 /// - `terms.fl` is repeatable, one key under `terms` per field, each
 ///   independent.
 /// - The per-field value is a Solr NamedList of `(term, count)` pairs, so it
