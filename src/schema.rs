@@ -1307,13 +1307,14 @@ fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager>
     // write, with `Error getting tokenizer for field: _dynamic_text`, on an
     // index the marker now claims is at the current contract.
     //
-    // The aliases are inert, not a second semantics: reaching one of those
-    // branches requires `uses_changed_analyzed_path` to be false, which is
-    // computed over the persisted snapshot as well as the incoming schema, so
-    // the catch-all provably holds nothing. Pointing them at the *current*
-    // chains rather than reconstructing the old ones is deliberate -- if such a
-    // field ever did receive a value, it would be analyzed the way the v3
-    // marker on disk says it is.
+    // The aliases are not a second semantics: legacy adoption reaches them
+    // only after `CoreIndex::open` rejects configured affected paths and,
+    // before writing a current marker, verifies the persisted `_dynamic_text`
+    // term dictionaries are empty. A latest schema snapshot alone cannot prove
+    // that: an earlier analyzed rule may have been replaced by a raw rule.
+    // Pointing the aliases at the *current* chains rather than reconstructing
+    // the old ones is deliberate -- if such a field ever did receive a value,
+    // it would be analyzed the way the v3 marker on disk says it is.
     manager.register(TEXT_EN_TOKENIZER_V1, dynamic_text);
     manager.register(TEXT_EN_TOKENIZER_V2, text_en);
     // `text_general` is `_default`'s stemmer-free analyzed text type, so it gets
