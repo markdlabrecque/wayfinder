@@ -1,0 +1,12 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":3},
+  "suggest":{
+    "en":{
+      "e-ma":{
+        "numFound":1,
+        "suggestions":[{
+            "term":"e-<b>ma</b>il settings",
+            "weight":0,
+            "payload":""}]}}}}

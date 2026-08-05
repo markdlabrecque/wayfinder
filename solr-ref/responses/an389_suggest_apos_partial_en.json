@@ -1,0 +1,12 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":4},
+  "suggest":{
+    "en":{
+      "don'":{
+        "numFound":1,
+        "suggestions":[{
+            "term":"<b>don</b>'t panic",
+            "weight":0,
+            "payload":""}]}}}}

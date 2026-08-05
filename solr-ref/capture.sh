@@ -5175,3 +5175,425 @@ if want_any '^suggest_q_'; then
   release "$SUGGESTQ384_CONTAINER" "suggest #384 core '$SUGGESTQ384_CORE'"
 fi
 
+
+# --- accent folding, StandardTokenizer, WDGF, synonyms (issue #389) ----------
+# Ground truth for SPEC-389's four phases: the index/query analyzer split, the
+# `MappingCharFilter` accent folding, the `StandardTokenizer` replacement, and
+# `WordDelimiterGraphFilter` + `SynonymGraphFilter`. Wayfinder's `text_en` /
+# `text_und` presets today have none of those four stages, so every expectation
+# in those phases has to come from a captured response rather than from reading
+# `schema_extra_types.xml` and hoping Lucene agrees with the reading. Several of
+# the things this block pins contradict the reading (see the `\U0106` and
+# `last_is_prefix` captures below), which is exactly why it exists.
+#
+# Dedicated container/core, like the #223 and #384 blocks and for the same
+# reason: this needs the real shipped Search API configset -- the vendored
+# `accents_*.txt` / `synonyms_*.txt` / `stopwords_*.txt` / `protwords_*.txt`
+# resources and the real `text_en` / `text_und` chains -- which the canonical
+# tracer-bullet `content` core does not have. `SOLR_MODULES=analysis-extras` is
+# required by the configset's ICU/phonetic field types even though nothing here
+# uses them; without it the core fails to load.
+#
+# NO MANIFEST ROWS, deliberately. These are fixture-only captures asserted from
+# an ordinary integration test that loads them with the `fixture()` helper
+# (`tests/common/mod.rs:465`), the way `select_fl_ss_wildcard`
+# (`tests/select_fl_wildcard.rs:357`) and the whole `suggest_q_*` set are. The
+# differential harness cannot host them: its replay loop GETs every
+# `manifest.tsv` row against ONE Wayfinder core built from ONE schema const,
+# and these fixtures come from a `search-api`-configset core.
+#
+# Field choice: no invented names. `tm_X3b_en_*` -> `text_en` and
+# `tm_X3b_und_*` -> `text_und` are the shipped Search API dynamic fields
+# (`schema_extra_fields.xml:26` and `:64`), and every doc carries the same value
+# in the `_en_` and `_und_` twin so each capture pair isolates exactly one
+# variable: `text_und` is `text_en` minus SnowballPorter, over the `_und`
+# resource files. `/terms` pins the INDEX side (it lists the indexed terms
+# verbatim); `/select` pins the QUERY side.
+#
+# Not runnable standalone: `$OUT`/`$HERE` come from the top of the script, so
+# run the whole script or `--only '^an389_'`.
+AN389_CONTAINER=wayfinder-solr-389
+AN389_PORT=9089
+AN389_CORE=an389
+AN389_SOLR=http://127.0.0.1:$AN389_PORT/solr
+if want_any '^an389_'; then
+  docker rm -f "$AN389_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$AN389_CONTAINER" -p "127.0.0.1:$AN389_PORT:8983" \
+    -e SOLR_MODULES=analysis-extras \
+    -v "$HERE/search-api/configset:/opt/solr/server/solr/configsets/search-api:ro" \
+    solr:9 solr-precreate "$AN389_CORE" /opt/solr/server/solr/configsets/search-api >/dev/null
+  printf 'waiting for issue #389 Solr'
+  for _ in $(seq 90); do
+    if curl -sf "$AN389_SOLR/$AN389_CORE/admin/ping?wt=json" >/dev/null 2>&1; then
+      echo ' ok'
+      break
+    fi
+    printf '.'
+    sleep 1
+  done
+  curl -sf "$AN389_SOLR/$AN389_CORE/admin/ping?wt=json" >/dev/null
+
+  # Every non-ASCII character is a JSON `\uXXXX` escape on purpose: the whole
+  # point of the accent captures is WHICH codepoint went in, and a literal
+  # `Cafe' Central` in this file cannot tell precomposed U+00E9 from `e` +
+  # U+0301 -- the very distinction `an389_terms_accent_*` exists to pin. The
+  # `#384` block above uses the same convention for its U+212A / U+0130 doc.
+  #
+  # One dynamic field per concern (`_accent`, `_expand`, `_tok`, `_syn`,
+  # `_cat`, `_num`, `_wdgf`) so each `/terms` response is a clean, complete
+  # term list for one question instead of a pooled soup, and every `/select`
+  # hit list is attributable to a specific document.
+  curl -sf "$AN389_SOLR/$AN389_CORE/update?commit=true" \
+    -H 'Content-Type: application/json' --data-binary @- >/dev/null <<'AN389JSON'
+[
+  {"id":"an389_accent_nfc",   "tm_X3b_en_accent":["Caf\u00e9 Central"],      "tm_X3b_und_accent":["Caf\u00e9 Central"]},
+  {"id":"an389_accent_nfd",   "tm_X3b_en_accent":["cafe\u0301 decomposed"],  "tm_X3b_und_accent":["cafe\u0301 decomposed"]},
+  {"id":"an389_accent_ae",    "tm_X3b_en_accent":["\u00c6ther"],             "tm_X3b_und_accent":["\u00c6ther"]},
+  {"id":"an389_accent_sz",    "tm_X3b_en_accent":["Stra\u00dfe"],            "tm_X3b_und_accent":["Stra\u00dfe"]},
+  {"id":"an389_accent_fi",    "tm_X3b_en_accent":["\ufb01le"],               "tm_X3b_und_accent":["\ufb01le"]},
+  {"id":"an389_accent_cupper","tm_X3b_en_accent":["\u0106wik"],              "tm_X3b_und_accent":["\u0106wik"]},
+  {"id":"an389_accent_clower","tm_X3b_en_accent":["\u0107wikowski"],         "tm_X3b_und_accent":["\u0107wikowski"]},
+  {"id":"an389_accent_mixed", "tm_X3b_en_accent":["na\u00efve \u0152uvre \u00deor"], "tm_X3b_und_accent":["na\u00efve \u0152uvre \u00deor"]},
+  {"id":"an389_accent_lit",   "tm_X3b_en_accent":["zzU0106zz"],              "tm_X3b_und_accent":["zzU0106zz"]},
+  {"id":"an389_accent_lit2",  "tm_X3b_en_accent":["U0106 solitary"],         "tm_X3b_und_accent":["U0106 solitary"]},
+
+  {"id":"an389_expand_all",
+   "tm_X3b_en_expand":["\u00c6a \u0132b \u0152c \u00ded \u00e6e \u0133f \u0153g \u00dfh \u00fei \ufb00j \ufb01k \ufb02l \ufb03m \ufb04n \ufb05o \ufb06p"],
+   "tm_X3b_und_expand":["\u00c6a \u0132b \u0152c \u00ded \u00e6e \u0133f \u0153g \u00dfh \u00fei \ufb00j \ufb01k \ufb02l \ufb03m \ufb04n \ufb05o \ufb06p"]},
+
+  {"id":"an389_tok_apos",  "tm_X3b_en_tok":["don't"],            "tm_X3b_und_tok":["don't"]},
+  {"id":"an389_tok_host",  "tm_X3b_en_tok":["www.example.com"],  "tm_X3b_und_tok":["www.example.com"]},
+  {"id":"an389_tok_dec",   "tm_X3b_en_tok":["3.14"],             "tm_X3b_und_tok":["3.14"]},
+  {"id":"an389_tok_under", "tm_X3b_en_tok":["foo_bar"],          "tm_X3b_und_tok":["foo_bar"]},
+  {"id":"an389_tok_hyph",  "tm_X3b_en_tok":["e-mail"],           "tm_X3b_und_tok":["e-mail"]},
+  {"id":"an389_tok_cjk",   "tm_X3b_en_tok":["\u6771\u4eac\u90fd"], "tm_X3b_und_tok":["\u6771\u4eac\u90fd"]},
+  {"id":"an389_tok_at",    "tm_X3b_en_tok":["a@b.com"],          "tm_X3b_und_tok":["a@b.com"]},
+
+  {"id":"an389_syn_drupal",  "tm_X3b_en_syn":["drupal"],   "tm_X3b_und_syn":["drupal"]},
+  {"id":"an389_syn_abettor", "tm_X3b_en_syn":["abettor"],  "tm_X3b_und_syn":["abettor"]},
+
+  {"id":"an389_cat_delim", "tm_X3b_en_cat":["wifi_router"], "tm_X3b_und_cat":["wifi_router"]},
+  {"id":"an389_cat_joined","tm_X3b_en_cat":["wifirouter"],  "tm_X3b_und_cat":["wifirouter"]},
+  {"id":"an389_num_delim", "tm_X3b_en_num":["10.20.30"],    "tm_X3b_und_num":["10.20.30"]},
+  {"id":"an389_num_joined","tm_X3b_en_num":["102030"],      "tm_X3b_und_num":["102030"]},
+
+  {"id":"an389_wdgf_wifi", "tm_X3b_en_wdgf":["WiFi-2000"], "tm_X3b_und_wdgf":["WiFi-2000"]},
+  {"id":"an389_wdgf_abc",  "tm_X3b_en_wdgf":["ABC123"],    "tm_X3b_und_wdgf":["ABC123"]},
+  {"id":"an389_wdgf_sku",  "tm_X3b_en_wdgf":["SKU-42"],    "tm_X3b_und_wdgf":["SKU-42"]},
+
+  {"id":"an389_sg_under",  "twm_suggest":["foo_bar baz"],             "sm_context_tags":["site_alpha"]},
+  {"id":"an389_sg_wdgf",   "twm_suggest":["wifi_router_2000 config"], "sm_context_tags":["site_alpha"]},
+  {"id":"an389_sg_apos",   "twm_suggest":["don't panic"],             "sm_context_tags":["site_alpha"]},
+  {"id":"an389_sg_hyph",   "twm_suggest":["e-mail settings"],         "sm_context_tags":["site_alpha"]},
+  {"id":"an389_sg_dec",    "twm_suggest":["3.14 radians"],            "sm_context_tags":["site_alpha"]},
+  {"id":"an389_sg_nfc",    "twm_suggest":["Caf\u00e9 Central"],       "sm_context_tags":["site_alpha"]},
+  {"id":"an389_sg_sz",     "twm_suggest":["Stra\u00dfe Wien"],        "sm_context_tags":["site_alpha"]}
+]
+AN389JSON
+  # buildOn{Commit,Startup} are both false in the shipped configset, so the two
+  # suggester indexes exist only after an explicit build (same as #384).
+  curl -sf "$AN389_SOLR/$AN389_CORE/suggest?suggest.buildAll=true&wt=json" >/dev/null
+fi
+
+# Fixture-only capture, no manifest row (see the block comment). Deliberately
+# not `curl -sf`: several of these fixtures are legitimately EMPTY result sets
+# (`"numFound":0`), and in this block an empty result is often the whole point of
+# the capture, so a non-2xx guard would be the wrong check. The check that
+# matters -- that the body is a real Solr envelope rather than a stack trace or
+# a zero-length file written from a request that never reached the core -- is
+# done explicitly, and aborts rather than committing a fitted fixture.
+#
+# `responseHeader` is in the accepted-key list but is NOT required, because the
+# shipped Search API `/select` handler sets `omitHeader=true` in its own
+# defaults (`solrconfig_extra.xml:115`) -- so every `/select` fixture here is a
+# bare `response` object with no header and no `QTime`. `/suggest` (the
+# `/suggest` handler has no such default) does carry one.
+capan389() {  # capan389 <name> <core-relative-path>
+  local name=$1 path=$2
+  want "$name" || return 0
+  curl -sg "$AN389_SOLR/$AN389_CORE/$path" -o "$OUT/$name.json"
+  if ! python3 -c "import json,sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if any(k in d for k in ('responseHeader', 'response', 'terms', 'suggest')) else 1)" \
+      "$OUT/$name.json" 2>/dev/null; then
+    echo "capan389 $name: response is not a Solr JSON envelope -- refusing to write a fitted fixture" >&2
+    return 1
+  fi
+}
+
+# `terms.limit=-1` because the default is 10 and several of these fields index
+# more than ten terms -- a truncated term list would look like a missing term.
+# `terms.sort=index` for a stable order (the default `count` order ties
+# arbitrarily when every term has count 1). `omitHeader=true` matches the
+# existing `terms_*` fixtures.
+AN389_T='terms=true&terms.limit=-1&terms.sort=index&omitHeader=true&wt=json'
+capan389_terms() {  # capan389_terms <suffix>
+  capan389 "an389_terms_$1_en"  "terms?$AN389_T&terms.fl=tm_X3b_en_$1"
+  capan389 "an389_terms_$1_und" "terms?$AN389_T&terms.fl=tm_X3b_und_$1"
+}
+
+# `sort=id+asc` so the hit list is order-stable; `fl=id` because the doc ids are
+# self-describing and the stored value is already in this file.
+AN389_S='fl=id&rows=20&sort=id+asc&wt=json'
+capan389_sel() {  # capan389_sel <name> <query-value-already-url-encoded> [extra-params]
+  capan389 "$1" "select?q=$2&$AN389_S${3:+&$3}"
+}
+
+AN389_D='suggest.dictionary'
+capan389_sug() {  # capan389_sug <name> <dict> <suggest.q-already-url-encoded>
+  capan389 "$1" "suggest?$AN389_D=$2&suggest.q=$3&wt=json"
+}
+
+# --- F1 / F5: accent folding, INDEX side ------------------------------------
+# The complete indexed term list for the accent corpus. What each answer means:
+#   `cafe` present and `caf[U+00E9]` absent  -> U+00E9 folds (the headline claim).
+#   BOTH present                           -> something in the corpus is NOT
+#                                             being folded; the `_nfd` doc is
+#                                             the only candidate, which makes
+#                                             MappingCharFilter codepoint-
+#                                             literal rather than
+#                                             normalisation-aware.
+#   `strass`(_en) / `strasse`(_und)         -> U+00DF -> `ss` expands, and the
+#                                             `_en`/`_und` pair separates the
+#                                             expansion from SnowballPorter.
+#   `cwik` vs `[U+0107]wik`                   -> whether `accents_en.txt:20`'s
+#                                             `"\U0106"` (capital U, unlike
+#                                             every other line) folds at all.
+#   `zzczz` present                         -> it does NOT fold U+0106; the
+#                                             unrecognised `\U` escape parses
+#                                             as the LITERAL five-character
+#                                             string `U0106`, so `text_en`
+#                                             carries a bogus ASCII rule
+#                                             `U0106` -> `C`. `_und` is the
+#                                             control: `accents_und.txt` has no
+#                                             `\U` line, so `zzu0106zz` must
+#                                             survive there.
+capan389_terms accent
+# The sixteen length-CHANGING mappings, one per token, each given a distinct
+# ASCII tail so the folded form is unambiguous and >= 2 chars (LengthFilter
+# min=2 would otherwise eat them). All sixteen folded expansions present ->
+# the table means what it says and the offset-correction map in Phase 2 has to
+# cover every one of them. Any absent -> that mapping is a table-reading error.
+capan389_terms expand
+
+# --- F2 / F5: accent folding, QUERY side ------------------------------------
+# The folded ASCII query is the claim the issue headline rests on; the accented
+# query is its mirror (both sides fold, so both must hit the same doc).
+capan389_sel an389_select_accent_cafe_en          'tm_X3b_en_accent%3Acafe'
+capan389_sel an389_select_accent_cafe_accented_en 'tm_X3b_en_accent%3Acaf%C3%A9'
+# Precomposed vs decomposed: `cafe` + U+0301. A hit on the `_nfd` doc would
+# mean the filter normalises; a miss means it is codepoint-literal, and Phase 2
+# must NOT normalise (Rust `unicode-normalization` would be a divergence).
+capan389_sel an389_select_accent_cafe_nfd_en      'tm_X3b_en_accent%3Acafe%CC%81'
+capan389_sel an389_select_accent_aether_en        'tm_X3b_en_accent%3Aaether'
+capan389_sel an389_select_accent_strasse_en       'tm_X3b_en_accent%3Astrasse'
+capan389_sel an389_select_accent_file_en          'tm_X3b_en_accent%3Afile'
+capan389_sel an389_select_accent_ligature_en      'tm_X3b_en_accent%3A%EF%AC%81le'
+# `cwik` vs `[U+0106]wik`: the decisive `\U0106` pair. `cwik` hitting would mean
+# the escape folds; `[U+0106]wik` hitting while `cwik` misses means it does not.
+capan389_sel an389_select_accent_cwik_en          'tm_X3b_en_accent%3Acwik'
+capan389_sel an389_select_accent_cwik_accented_en 'tm_X3b_en_accent%3A%C4%86wik'
+# The literal-escape consequence, query side: if `U0106` -> `C` is a live ASCII
+# rule then `zzczz` finds the `zzU0106zz` doc, and `_und` (no `\U` line) does
+# not. Two fixtures because a single one cannot tell "the rule fires" from
+# "the term happens to exist".
+capan389_sel an389_select_accent_u0106_literal_en  'tm_X3b_en_accent%3Azzczz'
+capan389_sel an389_select_accent_u0106_literal_und 'tm_X3b_und_accent%3Azzczz'
+# `text_und` controls: same folding, no stemmer.
+capan389_sel an389_select_accent_cafe_und    'tm_X3b_und_accent%3Acafe'
+capan389_sel an389_select_accent_strasse_und 'tm_X3b_und_accent%3Astrasse'
+capan389_sel an389_select_accent_cwik_und    'tm_X3b_und_accent%3Acwik'
+
+# --- F3: StandardTokenizer (UAX#29) vs WDGF, and which stage did what -------
+# The full index-side term list for the seven hard tokens. Reading it:
+#   a term equal to the whole input   -> WDGF `preserveOriginal=1`.
+#   the split parts                   -> either the tokenizer or WDGF split it;
+#                                        the `/select` probes below separate
+#                                        those two, because WDGF can only
+#                                        re-join parts it produced ITSELF from
+#                                        one tokenizer token.
+#   a joined form (`dont`, `foobar`,
+#   `314`, `wwwexamplecom`, `bcom`)   -> index-side `catenateWords=1` /
+#                                        `catenateNumbers=1`.
+#   NO term at all for the CJK doc    -> StandardTokenizer emits CJK unigrams
+#                                        and LengthFilter(min=2) deletes all of
+#                                        them, i.e. `text_en`/`text_und` cannot
+#                                        index CJK at all. If instead a
+#                                        `[U+6771 U+4EAC U+90FD]` term appears, the
+#                                        tokenizer keeps CJK runs whole and
+#                                        Phase 3 must too.
+capan389_terms tok
+capan389_sel an389_select_tok_apos_en      'tm_X3b_en_tok%3A%22don%27t%22'
+capan389_sel an389_select_tok_apos_cat_en  'tm_X3b_en_tok%3Adont'
+capan389_sel an389_select_tok_host_en      'tm_X3b_en_tok%3A%22www.example.com%22'
+capan389_sel an389_select_tok_host_part_en 'tm_X3b_en_tok%3Aexample'
+capan389_sel an389_select_tok_dec_en       'tm_X3b_en_tok%3A%223.14%22'
+capan389_sel an389_select_tok_dec_cat_en   'tm_X3b_en_tok%3A314'
+capan389_sel an389_select_tok_under_en     'tm_X3b_en_tok%3Afoo_bar'
+capan389_sel an389_select_tok_under_cat_en 'tm_X3b_en_tok%3Afoobar'
+capan389_sel an389_select_tok_hyph_en      'tm_X3b_en_tok%3A%22e-mail%22'
+# The tokenizer/WDGF separator. `e-mail` is split by the TOKENIZER into `e` and
+# `mail` (and `e` is then length-filtered away), so WDGF never sees one token
+# to re-join -- `email` must MISS even though `foobar` (same shape, but `_` is
+# UAX#29 ExtendNumLet and so stays inside one token) HITS. If `email` hits,
+# the hyphen is word-internal to the tokenizer and Phase 3's rules are wrong.
+capan389_sel an389_select_tok_hyph_cat_en  'tm_X3b_en_tok%3Aemail'
+capan389_sel an389_select_tok_cjk_en       'tm_X3b_en_tok%3A%E6%9D%B1%E4%BA%AC%E9%83%BD'
+capan389_sel an389_select_tok_cjk_und      'tm_X3b_und_tok%3A%E6%9D%B1%E4%BA%AC%E9%83%BD'
+capan389_sel an389_select_tok_at_en        'tm_X3b_en_tok%3A%22a%40b.com%22'
+capan389_sel an389_select_tok_at_local_en  'tm_X3b_en_tok%3Ab.com'
+
+# --- F4: synonyms are QUERY-side only ---------------------------------------
+# The asymmetry proof first: the index term list must contain `drupal` and
+# `abettor` and NOT `durpal` / `abetter`. If the synonyms were index-side too,
+# both members of each pair would be listed here.
+capan389_terms syn
+# `drupal, durpal` is in BOTH `synonyms_en.txt` and `synonyms_und.txt`, so all
+# four of these must hit the same doc.
+capan389_sel an389_select_syn_drupal_en  'tm_X3b_en_syn%3Adrupal'
+capan389_sel an389_select_syn_durpal_en  'tm_X3b_en_syn%3Adurpal'
+capan389_sel an389_select_syn_drupal_und 'tm_X3b_und_syn%3Adrupal'
+capan389_sel an389_select_syn_durpal_und 'tm_X3b_und_syn%3Adurpal'
+# `abettor, abetter` is `synonyms_en.txt` ONLY (`synonyms_und.txt` is the single
+# line `drupal, durpal`), so `abetter` must hit under `_en` and MISS under
+# `_und`. That pair is what proves the tables are per-language rather than one
+# shared table -- nothing else in this block distinguishes them.
+capan389_sel an389_select_syn_abettor_en  'tm_X3b_en_syn%3Aabettor'
+capan389_sel an389_select_syn_abetter_en  'tm_X3b_en_syn%3Aabetter'
+capan389_sel an389_select_syn_abetter_und 'tm_X3b_und_syn%3Aabetter'
+
+# --- F6: the WDGF index/query asymmetry -------------------------------------
+# SPEC-389 says the index/query analyzer split (Phase 1) is only justified if
+# this fixture set shows an OBSERVABLE asymmetry, and to drop the claim if it
+# does not. The asymmetry is `catenateWords`/`catenateNumbers` = 1 on the index
+# side and 0 on the query side, and it is only visible with a corpus that has
+# BOTH forms as separate documents:
+#   `an389_cat_delim`  = `wifi_router`  -> index side, catenateWords=1, also
+#                                          indexes the joined `wifirouter`.
+#   `an389_cat_joined` = `wifirouter`   -> indexes only the joined form.
+# So:
+#   q=`wifirouter`  must hit BOTH  -> proves index-side catenation happened
+#                                     (`_delim` has no such surface form).
+#   q=`wifi_router` must hit ONLY `_delim` -> proves the QUERY side does NOT
+#                                     catenate; if it did, the query would also
+#                                     produce `wifirouter` and hit `_joined`.
+# A hit on `_joined` from the delimited query would falsify the asymmetry and
+# SPEC-389 says to drop the claim rather than build to it.
+capan389_terms cat
+capan389_sel an389_select_cat_joined_en  'tm_X3b_en_cat%3Awifirouter'
+capan389_sel an389_select_cat_delim_en   'tm_X3b_en_cat%3Awifi_router'
+# `_und` repeats both without SnowballPorter, so the asymmetry cannot be
+# mistaken for a stemming artefact.
+capan389_sel an389_select_cat_joined_und 'tm_X3b_und_cat%3Awifirouter'
+capan389_sel an389_select_cat_delim_und  'tm_X3b_und_cat%3Awifi_router'
+# The same experiment for `catenateNumbers` (1 index / 0 query), which is a
+# separate WDGF flag and could differ from `catenateWords`.
+capan389_terms num
+capan389_sel an389_select_num_joined_en 'tm_X3b_en_num%3A102030'
+capan389_sel an389_select_num_delim_en  'tm_X3b_en_num%3A%2210.20.30%22'
+# The issue's own three tokens. `abc123` / `abc` show that a single letter run
+# plus a single digit run gives NOTHING to catenate (one word part, one number
+# part), so `catenateWords` is inert there -- which is why the `_cat`/`_num`
+# corpus above exists instead.
+#
+# `an389_terms_wdgf_*` already proves neither `sku42` nor `wifi2000` is an
+# indexed term (the TOKENIZER split `SKU-42` / `WiFi-2000` before WDGF could
+# join anything, and WDGF only ever re-joins parts of ONE tokenizer token). So
+# these three ask a different question: can a joined QUERY still find the
+# delimited document, and does `q.op` change that? The hypothesis behind the
+# `q.op=AND` pair was that AND would turn the miss into a visible zero. It does
+# NOT -- both AND fixtures still hit -- because query-side WDGF stacks
+# `preserveOriginal` and the split parts at ONE position, and `q.op` operates on
+# positions, not on the alternatives within one. The graph's alternatives stay
+# ORed whatever `q.op` says, so `sku42` matches through `sku`+`42`. Captured
+# with both operators precisely so that non-effect is on the record rather than
+# being rediscovered in Phase 4.
+capan389_terms wdgf
+capan389_sel an389_select_wdgf_abc123_en   'tm_X3b_en_wdgf%3Aabc123'
+capan389_sel an389_select_wdgf_abc_en      'tm_X3b_en_wdgf%3Aabc'
+capan389_sel an389_select_wdgf_sku42_or_en 'tm_X3b_en_wdgf%3Asku42'
+capan389_sel an389_select_wdgf_sku42_and_en   'tm_X3b_en_wdgf%3Asku42'    'q.op=AND'
+capan389_sel an389_select_wdgf_wifi2000_and_en 'tm_X3b_en_wdgf%3Awifi2000' 'q.op=AND'
+
+# --- F7: `last_is_prefix` once a graph filter is in the chain ---------------
+# `core_index.rs:4177` decides "the user is still typing the last word" by
+# comparing the last token's end offset against the query's byte length. Phase 4
+# puts WDGF into the suggest chain, which stacks several tokens over the same
+# input span, so that derivation has to be re-made from observed Solr rather
+# than from the current comment. These are `suggest.q` probes typed one
+# character at a time through a delimiter, on the two shipped dictionaries
+# (`en` = `text_en`, `und` = `text_und`, `solrconfig_extra.xml:39,51`).
+#
+# What the answers mean, per pair:
+#   `foo` HIT but `foo_` and `foo_ba` MISS while `foo_bar` HITs
+#     -> a prefix is honoured only while the analyzed stream is a SINGLE token
+#        ending at the input's end. Once WDGF splits the input, the whole-token
+#        `preserveOriginal` form becomes a REQUIRED exact term, and a
+#        half-typed `foo_ba` is not an indexed term, so the suggestion dies.
+#        i.e. adding WDGF to the suggest chain BREAKS mid-delimiter
+#        autocomplete, and that is real Solr behaviour Wayfinder must copy.
+#   `foo_` MISSing while `foo_ba` also MISSes but for a DIFFERENT reason is the
+#     reason both are captured: `foo_`'s last stream token is the word part
+#     `foo` (end offset 3 != 4), so `last_is_prefix` is FALSE and even the
+#     prefix branch is gone; `foo_ba`'s last token IS `ba` (end offset 6 == 6),
+#     so `last_is_prefix` is TRUE and the miss comes only from the required
+#     `foo_ba` term. One fixture cannot tell those apart.
+#     (The two-branch mechanism is read off Lucene's `AnalyzingInfixSuggester`,
+#     which builds `addWholeMatch` MUST clauses for every token but the last and
+#     `addPrefixMatch` for the last -- see the #384 block's round-3 probes, which
+#     established the same split WITHOUT WDGF in the chain. What these fixtures
+#     observe directly is only the hit/miss and the `<b>` span; the mechanism is
+#     the reading that accounts for all of them, and Phase 4 must reproduce the
+#     OBSERVATIONS, not the reading.)
+capan389_sug an389_suggest_word_en           en foo
+capan389_sug an389_suggest_under_trail_en    en foo_
+capan389_sug an389_suggest_under_partial_en  en foo_ba
+capan389_sug an389_suggest_under_full_en     en foo_bar
+capan389_sug an389_suggest_wdgf_wordpart_en  en wifi_router
+capan389_sug an389_suggest_wdgf_partial_en   en wifi_router_20
+capan389_sug an389_suggest_wdgf_full_en      en wifi_router_2000
+capan389_sug an389_suggest_wdgf_partial_und  und wifi_router_20
+#   `3.` MISS but `3.1` HIT is the LengthFilter interaction: `3.1`'s number
+#   parts are both one character and are deleted, leaving `preserveOriginal`
+#   `3.1` as the ONLY surviving token -- single token, ends at the input end,
+#   so the prefix branch survives a delimiter here where `foo_ba` did not.
+#   `3.` analyzes to nothing at all (the bare `3` is length-filtered), so an
+#   EMPTY analyzed stream must return zero rather than matching everything.
+capan389_sug an389_suggest_dec_dot_en     en 3.
+capan389_sug an389_suggest_dec_partial_en en 3.1
+capan389_sug an389_suggest_dec_full_en    en 3.14
+#   `e-m` MISS / `e-ma` HIT: same LengthFilter story on a token the TOKENIZER
+#   split, and the highlight span (`e-<b>ma</b>il` vs `<b>e-ma</b>il`) says
+#   whether the bold offsets are the matched token's or the query's.
+capan389_sug an389_suggest_hyph_short_en   en e-m
+capan389_sug an389_suggest_hyph_partial_en en e-ma
+capan389_sug an389_suggest_hyph_full_en    en e-mail
+#   The apostrophe triple. `don'` and `don't` both hit, `dont` hits too -- and
+#   `dont` is the interesting one: it can only match through the index-side
+#   `catenateWords` term `dont`, which has NO contiguous span in the original
+#   phrase, so whether Solr emits a `<b>` at all here is the contract for a
+#   highlighter that cannot locate its own match.
+capan389_sug an389_suggest_apos_partial_en en don%27
+capan389_sug an389_suggest_apos_full_en    en don%27t
+capan389_sug an389_suggest_apos_cat_en     en dont
+#   Accent folding INSIDE the suggester, which is where the offset-correction
+#   map is load-bearing: the bold span is cut out of the ORIGINAL phrase using
+#   offsets that came through MappingCharFilter.
+#     `caf` -> `<b>Caf</b>[U+00E9] ...` (equal-length mapping, 3 chars)
+#     `cafe` -> whichever of `<b>Caf[U+00E9]</b>` / `<b>Cafe</b>[U+00E9]` comes
+#               back decides whether the 4-char analyzed term maps back to 4
+#               ORIGINAL chars.
+#     `stras` / `strasse` are the expanding case (U+00DF -> `ss`): a 7-char
+#     query and a 6-char stem over a 6-char original span. If the bold is
+#     `<b>Stra[U+00DF]e</b>` the offsets are corrected; anything shorter or
+#     longer means they are not, and Phase 2's naive "fold then tokenize" is
+#     ruled out on the spot.
+capan389_sug an389_suggest_accent_prefix_en en caf
+capan389_sug an389_suggest_accent_folded_en en cafe
+capan389_sug an389_suggest_expand_prefix_en en stras
+capan389_sug an389_suggest_expand_full_en   en strasse
+capan389_sug an389_suggest_accent_folded_und und cafe
+
+if want_any '^an389_'; then
+  release "$AN389_CONTAINER" "issue #389 accent/tokenizer/WDGF core '$AN389_CORE'"
+fi

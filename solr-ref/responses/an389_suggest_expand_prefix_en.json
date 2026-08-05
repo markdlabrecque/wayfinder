@@ -1,0 +1,12 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":2},
+  "suggest":{
+    "en":{
+      "stras":{
+        "numFound":1,
+        "suggestions":[{
+            "term":"<b>Straß</b>e Wien",
+            "weight":0,
+            "payload":""}]}}}}

@@ -1,0 +1,12 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":29},
+  "suggest":{
+    "en":{
+      "foo":{
+        "numFound":1,
+        "suggestions":[{
+            "term":"<b>foo</b>_bar baz",
+            "weight":0,
+            "payload":""}]}}}}

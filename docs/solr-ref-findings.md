@@ -3644,3 +3644,221 @@ garden}; for the misspelling `qwick`, `en`'s nearest is `quick` (1 edit) and
       unscheduled"); these three are zero-*reachable*-client evidence, which
       is a strictly stronger exclusion, and the descope is recorded next to
       the `solr_document` one so the parity picture stays in one place.
+
+## Findings from the issue #389 capture (accent folding, StandardTokenizer, WDGF, synonyms)
+
+Captured 2026-08-05 against `solr:9` (`wayfinder-solr-389`, port 9089, core `an389`)
+with the real vendored Search API configset -- so the shipped `text_en` / `text_und`
+chains, the vendored `accents_*.txt` / `synonyms_*.txt` / `stopwords_*.txt` /
+`protwords_*.txt`, and `SOLR_MODULES=analysis-extras`. Block appended at the end of
+`capture.sh`; 82 fixtures, all named `an389_*`, in **neither** manifest (the
+differential harness cannot replay a `search-api`-configset core, so the fixtures are
+asserted directly with the `fixture()` helper, `tests/common/mod.rs:465`, exactly as
+`select_fl_ss_wildcard` and the `suggest_q_*` set are).
+
+Every document carries the same value in a `tm_X3b_en_*` (`text_en`) and a
+`tm_X3b_und_*` (`text_und`) twin, so each `_en`/`_und` fixture pair isolates one
+variable: `text_und` is `text_en` minus SnowballPorter, over the `_und` resources.
+`/terms` pins the **index** side (it lists indexed terms verbatim); `/select` pins the
+**query** side; `/suggest` pins the suggester's analyzed-prefix behaviour.
+
+Note on fixture shape: every `/select` fixture here is a bare `response` object with
+**no `responseHeader` and no `QTime`**, because the shipped Search API `/select`
+handler sets `omitHeader=true` in its own defaults (`solrconfig_extra.xml:115`). The
+`/suggest` fixtures do carry a header, so they are the only ones in this set that
+need a `QTime` normaliser.
+
+195. **`accents_en.txt:20`'s `"\U0106" => "C"` does NOT fold `Ć`; it installs a
+      bogus literal ASCII rule `U0106` -> `C`.** Lucene's
+      `MappingCharFilterFactory` unescapes `\uXXXX` but has no `default:` throw for
+      an unrecognised escape -- the backslash is dropped and the following character
+      kept -- so the capital-`U` line (the only such line in the file; every other
+      one of the 92 mappings uses lowercase `\u`) parses as the five-character
+      string `U0106`. Three fixtures nail it: `an389_terms_accent_en` indexes
+      `ćwik` and `ćwikowski` (so neither `Ć` U+0106 nor `ć` U+0107 folds -- and
+      indeed there is no `ć` line at all); `an389_select_accent_cwik_en`
+      returns **0** while `an389_select_accent_cwik_accented_en` returns the
+      document; and the same term list contains **`zzczz`** for the input
+      `zzU0106zz`, i.e. the literal substitution really fires on ASCII text.
+      `accents_und.txt` has no `\U` line, and `an389_terms_accent_und` is the
+      control: it keeps `zzu0106zz` / `u0106` / `0106`, and
+      `an389_select_accent_u0106_literal_und` returns 0 where the `_en` twin
+      returns 1. **Consequence for Phase 2:** the `Ć` -> `C` mapping must NOT be
+      implemented, and the `U0106` -> `C` rule must be, bug and all -- it is
+      observable behaviour of the system being matched, and "fixing" it in
+      Wayfinder would be a divergence. Carry a comment saying so, or a later reader
+      will delete it as an obvious typo.
+
+196. **`MappingCharFilter` is codepoint-literal: NFD text is not folded, and the
+      folded and unfolded forms coexist in one index.** `an389_terms_accent_en`
+      lists **both** `cafe` (from `Caf` + precomposed U+00E9) and `café` (from
+      `cafe` + U+0301 COMBINING ACUTE), and `an389_select_accent_cafe_en` /
+      `an389_select_accent_cafe_nfd_en` each return exactly one, different
+      document. So the filter is a longest-match table lookup over codepoints with
+      **no Unicode normalisation anywhere in the chain**. Phase 2 must not reach
+      for `unicode-normalization`: NFC-folding the input first would make those two
+      documents collide, and diverge from Solr.
+
+197. **All sixteen length-changing (expanding) mappings fold exactly as the table
+      says, on both `text_en` and `text_und`.** `an389_expand_all` indexes one
+      token per expander with a distinct ASCII tail, and both
+      `an389_terms_expand_en` and `an389_terms_expand_und` return the same sixteen
+      terms: `aea ijb oec thd aee ijf oeg ssh thi ffj fik fll ffim ffln sto stp` --
+      i.e. `Æ`->`AE`, `Ĳ`->`IJ`, `Œ`->`OE`, `Þ`->`TH`, `æ`->`ae`, `ĳ`->`ij`,
+      `œ`->`oe`, `ß`->`ss`, `þ`->`th`, `ﬀ`->`ff`, `ﬁ`->`fi`, `ﬂ`->`fl`,
+      `ﬃ`->`ffi`, `ﬄ`->`ffl`, `ﬅ`->`st`, `ﬆ`->`st`. (`fll` and the two `st*` terms
+      are the table's own collisions, not capture errors: `ﬂ`->`fl` plus the tail
+      `l`, and both `ﬅ` and `ﬆ` map to `st`.) None is silently skipped, so Phase
+      2's offset-correction map has to cover all sixteen.
+
+198. **Token offsets survive the expanding mappings -- the suggester highlights the
+      ORIGINAL span, not the folded one.** This is the single highest-risk detail
+      in SPEC-389, and the suggester fixtures pin it directly.
+      `an389_suggest_expand_full_en` (`suggest.q=strasse`, 7 characters, analyzing
+      to the 6-character stem `strass`) returns `<b>Straße</b> Wien` -- six
+      original characters bolded, spanning the single `ß`. Its prefix sibling
+      `an389_suggest_expand_prefix_en` (`stras`) returns `<b>Straß</b>e Wien`.
+      Same story for the equal-length case: `an389_suggest_accent_folded_en`
+      (`cafe`) returns `<b>Café</b> Central` and `an389_suggest_accent_prefix_en`
+      (`caf`) returns `<b>Caf</b>é Central`. A "fold the string, then tokenize"
+      implementation cannot produce these spans, and `core_index.rs:4177`'s
+      `*last_end == query.len()` compares against the ORIGINAL query length, so the
+      folding stage must keep an offset-correction map. `text_en` additionally
+      stems `Straße` to `strass` on the index side (`an389_terms_accent_en`) while
+      `text_und` keeps `strasse` (`an389_terms_accent_und`), which separates the
+      expansion from the stemmer.
+
+199. **`StandardTokenizer` + WDGF: exactly which stage splits what.** From
+      `an389_terms_tok_en` / `_und` plus the ten `an389_select_tok_*` probes, per
+      input (`_und` differs only by the stemmer -- `example` vs `exampl`):
+      - `don't` -> `don't` (preserveOriginal), `don`, `dont`. The tokenizer keeps
+        the apostrophe word-internal (UAX#29 MidLetter); WDGF splits it, and the
+        `t` part is deleted by `LengthFilter(min=2)`. `dont` exists only because of
+        index-side `catenateWords=1`.
+      - `www.example.com` -> `www.example.com`, `www`, `example`, `com`,
+        `wwwexamplecom`. The tokenizer keeps it as ONE token (`.` is MidNumLet);
+        every split here is WDGF's.
+      - `3.14` -> `3.14`, `14`, `314`. One tokenizer token; WDGF's number parts are
+        `3` and `14`, and `3` is length-filtered away; `314` is index-side
+        `catenateNumbers=1`.
+      - `foo_bar` -> `foo_bar`, `foo`, `bar`, `foobar`. `_` is UAX#29 ExtendNumLet,
+        so it stays inside one tokenizer token and WDGF can both split and re-join
+        it.
+      - `e-mail` -> `mail`, and nothing else. The **tokenizer** splits on the
+        hyphen, so WDGF never sees one token to re-join, and `e` is
+        length-filtered. `an389_select_tok_hyph_cat_en` (`q=email`) returns **0** --
+        the sharp contrast with `foobar` hitting, and the cleanest available proof
+        that hyphen-splitting is the tokenizer's job and underscore-splitting is
+        WDGF's.
+      - `a@b.com` -> `b.com`, `com`, `bcom` (the `b` part is length-filtered). `@`
+        is a tokenizer boundary; `b.com` is then one token that WDGF splits and
+        re-joins.
+      - `東京都` -> **no terms at all.** `an389_terms_tok_en`/`_und` contain
+        nothing for it and `an389_select_tok_cjk_en`/`_und` both return 0.
+        `StandardTokenizer` emits CJK **unigrams** and `LengthFilter(min=2)` then
+        deletes every one of them, so the shipped `text_en` / `text_und` cannot
+        index CJK at all. Phase 3 must reproduce this, and #388's `LengthFilter
+        min=2` discussion should note that the min=2 is what makes CJK
+        unsearchable, not the tokenizer alone.
+
+200. **Synonyms are query-side only, and the tables are per-language.** The index
+      term lists `an389_terms_syn_en` / `_und` are exactly `[abettor, drupal]` --
+      no `durpal`, no `abetter` -- so `SynonymGraphFilter` is genuinely absent from
+      the index chain. Query side: `drupal, durpal` is in both `synonyms_en.txt`
+      and `synonyms_und.txt`, and all four of
+      `an389_select_syn_{drupal,durpal}_{en,und}` return the `drupal` document.
+      `abettor, abetter` is in `synonyms_en.txt` only (`synonyms_und.txt` is the
+      single line `drupal, durpal`), and `an389_select_syn_abetter_en` returns the
+      document while `an389_select_syn_abetter_und` returns **0** -- that pair is
+      what proves the two tables are separate rather than one shared table.
+
+201. **The WDGF index/query asymmetry IS observable, in both directions.**
+      SPEC-389 said to drop the Phase 1 index/query-split claim if this could not
+      be shown; it can. Corpus: `an389_cat_delim` = `wifi_router` and
+      `an389_cat_joined` = `wifirouter` in the same field, so the joined form
+      exists as a document in its own right.
+      - `an389_select_cat_joined_en` (`q=wifirouter`) returns **both** documents.
+        `wifi_router` has no such surface form, so the only way it can match is via
+        the index-side `catenateWords=1` term (`wifirout` under `text_en`,
+        `wifirouter` under `text_und`). The index side catenates.
+      - `an389_select_cat_delim_en` (`q=wifi_router`) returns **only**
+        `an389_cat_delim`. If the query side catenated it would also emit
+        `wifirouter` and hit `an389_cat_joined`. It does not. The query side does
+        not catenate.
+      `an389_select_cat_{joined,delim}_und` reproduce both without SnowballPorter,
+      so this is not a stemming artefact. The same pair for numbers
+      (`catenateNumbers` 1 index / 0 query) behaves identically:
+      `an389_select_num_joined_en` (`q=102030`) returns both `10.20.30` and
+      `102030`; `an389_select_num_delim_en` (`q="10.20.30"`) returns only
+      `10.20.30`. **Phase 1's index/query analyzer seam is therefore required, not
+      speculative.** Note that `/terms` alone cannot show this -- the catenated term
+      of one document is byte-identical to the surface term of the other -- so the
+      `/select` pair, not the term list, is the evidence.
+
+202. **WDGF only ever re-joins parts of ONE tokenizer token, and `q.op` does not
+      reach inside its graph.** `an389_terms_wdgf_en`/`_und` for `WiFi-2000`,
+      `ABC123` and `SKU-42` are `[123, 2000, 42, abc, abc123, sku, wifi]`: no
+      `wifi2000`, no `sku42`, because the tokenizer split on the hyphen first; and
+      no catenation for `ABC123`, because one letter run plus one digit run gives
+      only a single word part and a single number part to catenate. The hypothesis
+      that `q.op=AND` would turn the corresponding query into a visible zero is
+      **false**: `an389_select_wdgf_sku42_and_en` and
+      `an389_select_wdgf_wifi2000_and_en` both still return their document, exactly
+      like the default-OR `an389_select_wdgf_sku42_or_en`. Query-side WDGF stacks
+      `preserveOriginal` and the split parts at ONE position; `q.op` combines
+      positions, not the alternatives within a position, so the graph's
+      alternatives stay ORed and `sku42` matches through `sku` + `42`. Recorded so
+      Phase 4 does not reach for `q.op` as an isolation tool.
+
+203. **`last_is_prefix` under WDGF: the prefix branch survives only while the
+      analyzed stream ends in a single token reaching the input's end, and every
+      other token becomes a REQUIRED exact term -- so WDGF breaks mid-delimiter
+      autocomplete.** This replaces the derivation in the current
+      `core_index.rs:4177` comment, which Phase 4 invalidates. Observed
+      (`an389_suggest_*`; corpus phrases `foo_bar baz`, `wifi_router_2000 config`,
+      `don't panic`, `e-mail settings`, `3.14 radians`, `Café Central`,
+      `Straße Wien`):
+
+      | `suggest.q` | result |
+      |---|---|
+      | `foo` | 1 -- `<b>foo</b>_bar baz` |
+      | `foo_` | **0** |
+      | `foo_ba` | **0** |
+      | `foo_bar` | 1 -- `<b>foo_bar</b> baz` |
+      | `wifi_router` | **0** |
+      | `wifi_router_20` | **0** (also 0 on the `und` dictionary) |
+      | `wifi_router_2000` | 1 |
+      | `3.` | **0** |
+      | `3.1` | 1 -- `<b>3.1</b>4 radians` |
+      | `e-m` | **0** |
+      | `e-ma` | 1 -- `e-<b>ma</b>il settings` |
+      | `don'` | 1 -- `<b>don</b>'t panic` |
+      | `don't` | 1 -- `<b>don't</b> panic` |
+      | `dont` | 1 -- `don't panic`, **no `<b>` at all** |
+
+      The reading that accounts for all of them: `AnalyzingInfixSuggester` makes
+      only the last stream token a prefix and every earlier one a required exact
+      term (the #384 round-3 probes established that split without WDGF in the
+      chain), and WDGF's `preserveOriginal` adds the whole partially-typed token as
+      one of those required terms. `foo_ba` is not an indexed term, so the
+      suggestion dies even though `ba` would have prefix-matched; `foo_bar` is one
+      (`preserveOriginal` runs on the index side too), so it lives. `foo_` dies one
+      step earlier -- its last stream token is the word part `foo`, whose end offset
+      (3) is not the input length (4), so `last_is_prefix` is false as well. `3.1`
+      survives a delimiter only because both of its one-character number parts are
+      deleted by `LengthFilter(min=2)`, leaving `preserveOriginal` `3.1` as the
+      **only** token, single and input-final; `3.` analyzes to nothing at all, and
+      an empty stream must return zero rather than everything. `e-ma` is the same
+      story for a tokenizer-split token. **Practical consequence: putting WDGF into
+      the suggest chain makes autocomplete stop returning results while the user is
+      part-way through a delimited token.** That is real Solr behaviour and
+      Wayfinder must reproduce it, not improve on it.
+
+204. **A suggester match can have no highlightable span, and Solr then returns the
+      phrase with no `<b>` markup at all.** `an389_suggest_apos_cat_en`
+      (`suggest.q=dont`) returns `don't panic` **unwrapped**: the match went
+      through the index-side `catenateWords` term `dont`, which has no contiguous
+      run in the original phrase, so the highlighter has nothing to bold. Every
+      other fixture in this set returns at least one `<b>`. A Wayfinder highlighter
+      that assumes it can always locate its own match in the surface text will
+      either panic or fabricate a span here.

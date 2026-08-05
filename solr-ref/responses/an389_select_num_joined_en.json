@@ -1,0 +1,7 @@
+{
+  "response":{"numFound":2,"start":0,"numFoundExact":true,"docs":[
+      {
+        "id":"an389_num_delim"},
+      {
+        "id":"an389_num_joined"}]
+  }}
