@@ -307,6 +307,15 @@ pub struct WayfinderSchema {
     pub copy_fields: Vec<CopyFieldConfig>,
     pub field_types: Vec<FieldTypeConfig>,
     pub tokenizers: TokenizerManager,
+    /// Index-analyzer identity -> query-analyzer identity, for the field types
+    /// that declare a distinct query chain (issue #389 Phase 1). Both analyzers
+    /// live in `tokenizers`; only the *index* identity is ever written into the
+    /// Tantivy schema, so an entry here changes query-time analysis only and
+    /// never a term on disk (which is why `ANALYZER_CONTRACT` does not move).
+    /// A type absent from this map has one analyzer for both sides -- see
+    /// [`Self::query_tokenizer_name`], whose fallback is the whole reason
+    /// existing chains are unaffected.
+    query_tokenizer_names: HashMap<String, String>,
     field_handles: HashMap<String, Field>,
     /// Static `location`/`location_rpt` fields' two synthetic f64 columns,
     /// keyed by the user-facing field name: `(lat_field, lon_field)`. Kept out
@@ -542,22 +551,33 @@ impl WayfinderSchema {
         Some(out)
     }
 
-    /// Issue #389 Phase 1 stub: the index/query analyzer split is not
-    /// implemented yet, so this resolves the *index*-side tokenizer name
-    /// unconditionally -- exactly the identity lookup query paths use today
-    /// (`core_index.rs:2516`, `:3811`, `:4148`). Written only so Phase 1's
-    /// red tests compile against the shape the implementor is expected to
-    /// build; a real implementation consults a per-schema index-name ->
-    /// query-name map populated from `FieldTypeConfig::query_tokenizer` in
-    /// `build_tokenizers`.
+    /// The analyzer identity a **query**-time path must resolve, given the
+    /// index-time identity it found on the field (issue #389 Phase 1).
+    ///
+    /// Solr's `text_en`/`text_und` genuinely differ between their index and
+    /// query analyzers -- query-side `SynonymGraph`, and `WordDelimiterGraph`
+    /// with `catenateWords`/`catenateNumbers` set on the index side only
+    /// (`an389_select_cat_joined_en` matches 2 docs where
+    /// `an389_select_cat_delim_en` matches 1). This is the seam that lets the
+    /// two chains be separate analyzers rather than one.
+    ///
+    /// **Fallback is the rule, not the exception**: a field type with no query
+    /// analyzer registered resolves its index analyzer, so every chain that
+    /// has only one analyzer -- which, in Phase 1, is every chain Wayfinder
+    /// ships, including `text_en`, `text_general`, the `boost_term_payload`
+    /// pair and the `wayfinder_suggest_*` identities -- behaves exactly as it
+    /// did before the seam existed. Only a `[[field_types]]` entry that
+    /// declares `query_tokenizer` gets a second identity here.
     pub fn query_tokenizer_name(&self, index_tokenizer_name: &str) -> String {
-        index_tokenizer_name.to_string()
+        self.query_tokenizer_names
+            .get(index_tokenizer_name)
+            .cloned()
+            .unwrap_or_else(|| index_tokenizer_name.to_string())
     }
 
-    /// Issue #389 Phase 1 stub: query-time counterpart to
-    /// [`Self::tokenize`]. Currently just delegates to the index-side
-    /// analyzer via [`Self::query_tokenizer_name`]'s identity fallback --
-    /// the real split is unimplemented.
+    /// Query-time counterpart to [`Self::tokenize`]: analyzes `text` with
+    /// `type_name`'s **query** analyzer, falling back to its index analyzer
+    /// when the type declares none (issue #389 Phase 1).
     pub fn tokenize_query(&self, type_name: &str, text: &str) -> Option<Vec<String>> {
         let tokenizer_name = match resolve_type(type_name, &self.field_types).ok()? {
             ResolvedType::Str => "raw".to_string(),
@@ -1097,9 +1117,34 @@ pub fn dictionary_tokenizer(dictionary: &str) -> String {
     }
 }
 
-/// Builds the `TextAnalyzer` for a `[[field_types]]` chain.
-fn build_analyzer(ft: &FieldTypeConfig) -> Result<TextAnalyzer> {
-    let mut builder = match ft.tokenizer.as_str() {
+/// The tokenizer identity a `[[field_types]]` entry's **query** analyzer is
+/// registered under, derived from its index identity (which is the field type
+/// name itself). Deliberately not derivable from any schema type name a
+/// `type = "..."` can reference: nothing resolves a field to this identity, so
+/// it is reachable only through
+/// [`WayfinderSchema::query_tokenizer_name`] (issue #389 Phase 1).
+fn query_analyzer_identity(index_tokenizer_name: &str) -> String {
+    format!("wayfinder_query_{index_tokenizer_name}_v1")
+}
+
+/// Builds the `TextAnalyzer` for a `[[field_types]]` chain: the index-side one
+/// (`tokenizer` + `filters`) when `query_side` is false, and the query-side one
+/// (`query_tokenizer` + `query_filters`) when it is true. The two share every
+/// tokenizer and filter kind; only which pair of config fields they read from
+/// differs (issue #389 Phase 1).
+fn build_analyzer(ft: &FieldTypeConfig, query_side: bool) -> Result<TextAnalyzer> {
+    let (tokenizer, filters) = if query_side {
+        let tokenizer = ft.query_tokenizer.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "field type `{}` has no `query_tokenizer` to build a query analyzer from",
+                ft.name
+            )
+        })?;
+        (tokenizer, &ft.query_filters)
+    } else {
+        (ft.tokenizer.as_str(), &ft.filters)
+    };
+    let mut builder = match tokenizer {
         "simple" => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
         other => bail!(
             "unsupported tokenizer `{other}` on field type `{}` (supported: `simple`)",
@@ -1108,7 +1153,7 @@ fn build_analyzer(ft: &FieldTypeConfig) -> Result<TextAnalyzer> {
     };
     builder = builder.filter_dynamic(RemoveLongFilter::limit(40));
 
-    for filter in &ft.filters {
+    for filter in filters {
         let language = |kind: &str| -> Result<Language> {
             let name = filter.language.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -1159,7 +1204,16 @@ fn language_by_name(name: &str) -> Option<Language> {
 /// Registers Wayfinder's English preset, the other language presets, and
 /// every custom chain into a tokenizer manager seeded with Tantivy's defaults
 /// (`raw`, `default`, `en_stem`).
-fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager> {
+///
+/// Returns the manager alongside the index-identity -> query-identity map that
+/// backs [`WayfinderSchema::query_tokenizer_name`]: a `[[field_types]]` entry
+/// declaring `query_tokenizer` gets a *second* analyzer registered in the same
+/// manager under [`query_analyzer_identity`], and one entry in that map. Every
+/// other chain is absent from the map and therefore analyzes identically on
+/// both sides (issue #389 Phase 1).
+fn build_tokenizers(
+    field_types: &[FieldTypeConfig],
+) -> Result<(TokenizerManager, HashMap<String, String>)> {
     let manager = TokenizerManager::default();
     let english_stopwords =
         || StopWordFilter::new(Language::English).expect("Tantivy ships an English stopword list");
@@ -1250,8 +1304,9 @@ fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager>
     //
     // ponytail: four differences from the shipped `suggestAnalyzerFieldType`
     // chains (`text_en` at `schema_extra_types.xml:46`, `text_und` at `:167`)
-    // remain unimplemented; all four are filed as #389, and none is pinned by a
-    // fixture. #388 is a different gap (the global `text_en` / `text_general`
+    // remain unimplemented; all four are filed as #389, and all four are now
+    // pinned by the `an389_*` fixtures (findings 195-204), captured by #389
+    // Phase 0. #388 is a different gap (the global `text_en` / `text_general`
     // presets) and does not cover any of these.
     //   1. `MappingCharFilterFactory mapping="accents_en.txt"` /
     //      `"accents_und.txt"`, present on *both* the index and query analyzers
@@ -1269,14 +1324,25 @@ fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager>
     //      `last_is_prefix` derivation in `core_index.rs` (see the comment
     //      above `let last_is_prefix`) is only sound because no *graph* filter
     //      is in this chain, so the last token's end offset is necessarily
-    //      `maxEndOffset`. Adding WDGF (or the synonym graph filter in 2)
-    //      invalidates that and must be fixed there at the same time.
+    //      `maxEndOffset`. Adding WDGF invalidates that and must be fixed there
+    //      at the same time; findings 203-204 re-derive the rule under WDGF.
+    //      WDGF is the *only* graph source to worry about -- the shipped synonym
+    //      tables in 2 are single-token on both sides, so `SynonymGraphFilter`
+    //      stacks alternatives at one position and produces no graph. That is a
+    //      property of the shipped data, not of the filter.
     //
-    // ponytail: one chain serves both the `suggest.q` analysis and the stored
-    // phrase, whereas Solr's index and query analyzers for these field types
+    // ponytail: the shipped index and query analyzers for these field types
     // differ -- synonyms are query-side only, and WDGF's `catenateNumbers` /
     // `catenateWords` are `1` on the index side and `0` on the query side
-    // (`:51` vs `:62`, `:172` vs `:183`). Unpinned by any fixture.
+    // (`:51` vs `:62`, `:172` vs `:183`), which is observable
+    // (`an389_select_cat_joined_en` matches 2 docs, `an389_select_cat_delim_en`
+    // 1). #389 Phase 1 built the *seam* for that: `suggest_lookup` now resolves
+    // the stored phrase through the index identity and `suggest.q` through
+    // `WayfinderSchema::query_tokenizer_name`, and a `[[field_types]]` entry can
+    // register a second chain under a query identity. The gap itself is still
+    // open, because none of the chains registered here declares a query variant:
+    // both lookups still land on the one analyzer below. Phases 2 and 4 register
+    // the real query-side chains; until they do, this is structure only.
     //
     // ponytail: this fixes the SUGGEST path only. Wayfinder's global `text_en` /
     // `text_general` presets still have no `LengthFilter` and still use Rust's
@@ -1318,9 +1384,39 @@ fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager>
         );
     }
     for ft in field_types {
-        manager.register(&ft.name, build_analyzer(ft)?);
+        manager.register(&ft.name, build_analyzer(ft, false)?);
     }
-    Ok(manager)
+    // The query-side analyzers, in a second pass so a query identity can be
+    // checked against every index identity -- built-in and custom alike --
+    // rather than only the ones registered so far.
+    let mut query_tokenizer_names = HashMap::new();
+    for ft in field_types {
+        if ft.query_tokenizer.is_none() {
+            if !ft.query_filters.is_empty() {
+                bail!(
+                    "field type `{}` sets `query_filters` without a `query_tokenizer`: the query \
+                     filters would never run, because the query path falls back to the index \
+                     analyzer whenever no query tokenizer is declared",
+                    ft.name
+                );
+            }
+            continue;
+        }
+        let identity = query_analyzer_identity(&ft.name);
+        // A custom field type literally named `wayfinder_query_<other>_v1`
+        // would otherwise silently redefine `<other>`'s query analyzer (or have
+        // its own index analyzer redefined, depending on order). Fail closed.
+        if manager.get(&identity).is_some() {
+            bail!(
+                "field type `{}` needs the query-analyzer identity `{identity}`, which is already \
+                 registered -- rename the field type",
+                ft.name
+            );
+        }
+        manager.register(&identity, build_analyzer(ft, true)?);
+        query_tokenizer_names.insert(ft.name.clone(), identity);
+    }
+    Ok((manager, query_tokenizer_names))
 }
 
 fn text_options(tokenizer: &str, stored: bool, fast: bool) -> TextOptions {
@@ -1480,7 +1576,7 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
             );
         }
     }
-    let tokenizers = build_tokenizers(&parsed.field_types)?;
+    let (tokenizers, query_tokenizer_names) = build_tokenizers(&parsed.field_types)?;
 
     let mut builder = Schema::builder();
     let mut field_handles = HashMap::new();
@@ -1799,6 +1895,7 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
         copy_fields: parsed.copy_fields,
         field_types: parsed.field_types,
         tokenizers,
+        query_tokenizer_names,
         field_handles,
         location_fields,
         date_range_fields,

@@ -2513,7 +2513,14 @@ impl CoreIndex {
                 .map(|o| o.tokenizer()),
             _ => None,
         };
-        let Some(mut tokenizer) = tokenizer_name.and_then(|name| self.index.tokenizers().get(name))
+        // Query text, so the *query*-side analyzer of whatever the field's
+        // index-side identity is (#389 Phase 1). Absent a declared query
+        // chain -- which is every field type Wayfinder ships today --
+        // `query_tokenizer_name` returns the index identity unchanged, so this
+        // resolves exactly the analyzer it did before the seam existed.
+        let Some(mut tokenizer) = tokenizer_name
+            .map(|name| self.wf_schema.query_tokenizer_name(name))
+            .and_then(|name| self.index.tokenizers().get(&name))
         else {
             return vec![text.to_string()];
         };
@@ -3825,6 +3832,18 @@ impl CoreIndex {
             let tantivy::schema::FieldType::Str(text_options) = field_entry.field_type() else {
                 continue;
             };
+            // Deliberately the *index*-side analyzer, not the #389 Phase 1
+            // query-side one. What is being analyzed here is a stored source
+            // document, mined for terms that are then looked up in the posting
+            // lists directly (`searcher.doc_freq(&term)` below drops anything
+            // with `doc_freq == 0`) -- so the tokens must be index terms, the
+            // same way `Analyzer` on Lucene's `MoreLikeThis` is the index
+            // analyzer in Solr's MLT handler. Routing this through
+            // `query_tokenizer_name` would be inert today (nothing registers a
+            // query variant yet) and wrong the moment Phase 4 adds query-side
+            // synonyms: every synonym mined off the source doc would be a term
+            // the doc does not contain. No fixture pins MLT's analyzer choice;
+            // if one ever does and contradicts this, the fixture wins.
             let Some(mut tokenizer) = text_options
                 .get_indexing_options()
                 .map(|o| o.tokenizer())
@@ -4144,11 +4163,25 @@ impl CoreIndex {
         count: usize,
         highlight: bool,
     ) -> Result<Vec<SuggestHit>> {
-        let tokenizer_name = schema::dictionary_tokenizer(dictionary);
-        let Some(mut tokenizer) = self.wf_schema.tokenizers.get(&tokenizer_name) else {
+        // This path analyzes two different things, and #389 Phase 1 splits them:
+        // the stored `twm_suggest` phrase, which stands in for indexed terms and
+        // therefore takes the *index*-side analyzer, and `suggest.q`, which is
+        // query text and takes the *query*-side one. The `wayfinder_suggest_*`
+        // identities register no query variant in this phase, so
+        // `query_tokenizer_name` hands the same identity back and both are the
+        // same chain -- exactly as before the seam existed. Phase 2/4 give
+        // `text_en`/`text_und` a real query analyzer, and this is where the
+        // asymmetry (query-side synonyms, index-side catenation) lands.
+        let index_tokenizer_name = schema::dictionary_tokenizer(dictionary);
+        let query_tokenizer_name = self.wf_schema.query_tokenizer_name(&index_tokenizer_name);
+        let Some(mut phrase_tokenizer) = self.wf_schema.tokenizers.get(&index_tokenizer_name)
+        else {
             // No analyzer registered for this dictionary -> nothing to match.
             // Should not happen: `dictionary_tokenizer` always names one that
             // `build_tokenizers` registers, but the index is the trust boundary.
+            return Ok(Vec::new());
+        };
+        let Some(mut query_tokenizer) = self.wf_schema.tokenizers.get(&query_tokenizer_name) else {
             return Ok(Vec::new());
         };
         // Analyze the query into stems. The analyzer chain removes stopwords
@@ -4164,7 +4197,7 @@ impl CoreIndex {
         // plain `TermQuery` instead, so `suggest.q=qui ` matches nothing where
         // `suggest.q=qui` matches three (`suggest_q_trailing_space_en` vs
         // `suggest_q_prefix_en`).
-        let qtokens = analyzer_tokens(&mut tokenizer, query);
+        let qtokens = analyzer_tokens(&mut query_tokenizer, query);
         let Some((_, _, last_end)) = qtokens.last() else {
             return Ok(Vec::new());
         };
@@ -4210,7 +4243,7 @@ impl CoreIndex {
                 }
                 for phrase in self.stored_string_values(&doc, PHRASE_FIELD) {
                     if let Some(term) = suggest_match(
-                        &mut tokenizer,
+                        &mut phrase_tokenizer,
                         &phrase,
                         &query_tokens,
                         last_is_prefix,

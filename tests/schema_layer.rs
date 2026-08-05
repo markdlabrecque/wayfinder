@@ -2250,3 +2250,58 @@ type = "location_rpt"
     // A name with no such field is `None`, not a panic.
     assert!(wf.location_fields("nope").is_none());
 }
+
+/// A `query_filters` chain with no `query_tokenizer` is silently dead config:
+/// [`schema::WayfinderSchema::query_tokenizer_name`]'s fallback sends the query
+/// path to the index analyzer whenever no query tokenizer is declared, so the
+/// declared query filters would never run. Fail closed instead (issue #389
+/// Phase 1).
+#[test]
+fn query_filters_without_a_query_tokenizer_are_rejected() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "an389_orphan_query_filters"
+tokenizer = "simple"
+[[field_types.filters]]
+kind = "lowercase"
+[[field_types.query_filters]]
+kind = "stopwords"
+language = "english"
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path).expect_err("orphan query_filters must not load");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("query_filters") && msg.contains("query_tokenizer"),
+        "the error must name both keys so an operator knows which to add, got: {msg}"
+    );
+}
+
+/// The query analyzer is registered under a derived identity
+/// (`wayfinder_query_<index identity>_v1`), so a custom field type *named* that
+/// identity would collide with another type's query chain -- one silently
+/// redefining the other in the shared `TokenizerManager`. Fail closed (issue
+/// #389 Phase 1).
+#[test]
+fn a_field_type_named_like_a_query_identity_is_rejected() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "an389_collide"
+tokenizer = "simple"
+query_tokenizer = "simple"
+[[field_types]]
+name = "wayfinder_query_an389_collide_v1"
+tokenizer = "simple"
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path).expect_err("a colliding query identity must not load");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("wayfinder_query_an389_collide_v1") && msg.contains("already registered"),
+        "the error must name the colliding identity, got: {msg}"
+    );
+}
