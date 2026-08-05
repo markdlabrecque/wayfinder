@@ -4850,3 +4850,75 @@ cap_form_post "form_post_merge_rows" \
   'select?q=*:*&rows=2&fl=id&wt=json' 'rows=10'
 
 }
+
+# --- spellcheck.extendedResults={word,freq} shape (issue #360) ------------
+# #223's spellcheck fixtures capture the default (extendedResults=false) shape,
+# where each suggestion member is a bare string. With
+# spellcheck.extendedResults=true Solr instead returns each member as a
+# {word, freq} object (ground truth for #360's ResponseParser fix). This is a
+# dedicated Search API configset core for the same reason #223 uses one: the
+# canonical `content` core has no SpellCheckComponent, and this needs a real
+# `en` term dictionary. The corpus matches #223's (`quick`/`rocket`) so the
+# suggestions are directly comparable to spellcheck_flat.json.
+#
+# Reuses the same dictionary shape #223 set up, so the fixture is the ONLY
+# difference from spellcheck_flat.json: the `suggestion` members become
+# {word, freq} objects and Solr adds `origFreq`/`correctlySpelled`. Run the
+# whole script, or `--only '^spellcheck_360_'`.
+want_any '^spellcheck_360_' && {
+SPELL360_CONTAINER=wayfinder-solr-360
+SPELL360_PORT=9013
+SPELL360_CORE=spellcheck_360
+SPELL360_SOLR=http://127.0.0.1:$SPELL360_PORT/solr
+SPELL360_CONFIGSET=/opt/solr/server/solr/configsets/search-api
+
+docker rm -f "$SPELL360_CONTAINER" >/dev/null 2>&1 || true
+docker run -d --name "$SPELL360_CONTAINER" -p "127.0.0.1:$SPELL360_PORT:8983" \
+  -e SOLR_MODULES=analysis-extras \
+  -v "$HERE/search-api/configset:$SPELL360_CONFIGSET:ro" \
+  solr:9 solr-precreate "$SPELL360_CORE" "$SPELL360_CONFIGSET" >/dev/null
+printf 'waiting for issue #360 Solr'
+for _ in $(seq 60); do
+  if curl -sf "$SPELL360_SOLR/$SPELL360_CORE/admin/ping?wt=json" >/dev/null 2>&1; then
+    echo ' ok'
+    break
+  fi
+  printf '.'
+  sleep 1
+done
+curl -sf "$SPELL360_SOLR/$SPELL360_CORE/admin/ping?wt=json" >/dev/null
+curl -sf "$SPELL360_SOLR/$SPELL360_CORE/update?commit=true&wt=json" \
+  -H 'Content-Type: application/json' -d '[
+    {"id":"s1","spellcheck_en":["quick quick quick rocket rocket"]},
+    {"id":"s2","spellcheck_en":["quick brown fox"]}
+  ]' >/dev/null
+
+# Shape-reference capture ONLY -- no manifest row. This fixture pins the
+# {word, freq} extendedResults wire shape for the search_api_wayfinder PHP
+# ResponseParser (issue #360); the differential harness cannot exercise it,
+# because Wayfinder 400s spellcheck.extendedResults -- the param is not in
+# SELECT_PARAMS (src/lib.rs), and admitting it is a separate concern from
+# #360's parser fix. A manifest row would diverge on HTTP status rather than
+# wire shape and so would belong only on a future issue that admits the
+# param. Same shape-reference-without-manifest pattern the extract_* fixtures
+# use (cap_extract). Captured with the same `en` corpus/dictionary as the
+# #223 block so it is directly comparable to spellcheck_flat.json.
+capspell360() {  # capspell360 <name> <expected-status> <query-after-select?>
+  local name=$1 expected=$2 query=$3 actual
+  local url="$SPELL360_CORE/select?$query"
+  want "$name" || return 0
+  actual=$(curl -sg "$SPELL360_SOLR/$url" -o "$OUT/$name.json" -w '%{http_code}')
+  if [ "$actual" != "$expected" ]; then
+    echo "$name: expected HTTP $expected, got $actual" >&2
+    exit 1
+  fi
+}
+
+SPELL360_BASE='q=*:*&rows=0&wt=json&omitHeader=true&spellcheck=true'
+capspell360 spellcheck_360_extended 200 \
+  "$SPELL360_BASE&spellcheck.q=qwick%20roket&spellcheck.dictionary=en&spellcheck.collate=true&spellcheck.extendedResults=true&json.nl=flat"
+
+echo "captured issue #360 spellcheck.extendedResults fixture from '$SPELL360_CONTAINER' (port $SPELL360_PORT)"
+release "$SPELL360_CONTAINER" "spellcheck #360 core '$SPELL360_CORE'"
+
+}

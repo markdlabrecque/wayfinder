@@ -1,0 +1,24 @@
+{
+  "response":{"numFound":2,"start":0,"numFoundExact":true,"docs":[]
+  },
+  "spellcheck":{
+    "suggestions":[
+      "qwick",{
+        "numFound":1,
+        "startOffset":0,
+        "endOffset":5,
+        "origFreq":0,
+        "suggestion":[{
+            "word":"quick",
+            "freq":2}]},
+      "roket",{
+        "numFound":1,
+        "startOffset":6,
+        "endOffset":11,
+        "origFreq":0,
+        "suggestion":[{
+            "word":"rocket",
+            "freq":1}]}],
+    "correctlySpelled":true,
+    "collations":[
+      "collation","quick rocket"]}}

@@ -793,6 +793,94 @@ class ResponseParserTest extends TestCase {
   }
 
   /**
+   * #360: with spellcheck.extendedResults=true Solr returns each suggestion
+   * member as a {word, freq} object rather than a bare string. The shape here
+   * is ground truth read directly from
+   * solr-ref/responses/spellcheck_360_extended.json (captured against solr:9
+   * with spellcheck.extendedResults=true&json.nl=flat) -- including the
+   * `origFreq`/`correctlySpelled` keys Solr adds, which the parser ignores --
+   * not guessed and not copied from what the parser produces.
+   *
+   * The parser must detect the shape from the DATA (each member inspected),
+   * not from a spellcheck.extendedResults request param: it sees a response,
+   * and a response carrying objects is parsed as objects regardless of what
+   * was asked for. The member's `word` is extracted and its `freq` is dropped,
+   * because the downstream consumer
+   * (coverage/.../SolrSpellcheckBackendTrait.php:34-36) reads only
+   * `$word['word']` and discards frequency -- preserving `freq` here has no
+   * consumer.
+   *
+   * This is a robustness improvement, not a live bug: nothing in the vendored
+   * 4.4.0 source requests extendedResults, and Wayfinder's SELECT_PARAMS
+   * (src/lib.rs:329-335) does not even admit the param, so under strict_params
+   * the server 400s it and this shape never reaches the parser from Wayfinder
+   * today. A stock Solr client pointed here could still produce it, though.
+   *
+   * @covers ::parse
+   */
+  public function testParseSpellcheckExtendedResultsShapeExtractsWord(): void {
+    $response = [
+      'response' => ['numFound' => 2, 'start' => 0, 'docs' => []],
+      'spellcheck' => [
+        'suggestions' => [
+          'qwick', ['numFound' => 1, 'startOffset' => 0, 'endOffset' => 5, 'origFreq' => 0, 'suggestion' => [['word' => 'quick', 'freq' => 2]]],
+          'roket', ['numFound' => 1, 'startOffset' => 6, 'endOffset' => 11, 'origFreq' => 0, 'suggestion' => [['word' => 'rocket', 'freq' => 1]]],
+        ],
+        'correctlySpelled' => TRUE,
+        'collations' => ['collation', 'quick rocket'],
+      ],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $this->mockQuery('my_index'));
+
+    $this->assertSame([
+      'suggestions' => [
+        'qwick' => ['quick'],
+        'roket' => ['rocket'],
+      ],
+      'collation' => 'quick rocket',
+    ], $resultSet->getExtraData('search_api_spellcheck'));
+  }
+
+  /**
+   * #360: a suggestion member that is neither a bare string nor a {word, freq}
+   * object is SKIPPED, not fatal -- the parser must tolerate a mixed or
+   * unexpected shape (and, when extendedResults objects are present, the
+   * newly-accepted array path must not throw on a malformed array). Valid
+   * members around a malformed one still parse, in order: a bare string, a
+   * valid {word} object, then a malformed object (no `word` key), a non-string
+   * scalar, and NULL all interspersed.
+   *
+   * @covers ::parse
+   */
+  public function testParseSpellcheckSkipsMalformedSuggestionMembers(): void {
+    $response = [
+      'response' => ['numFound' => 1, 'start' => 0, 'docs' => []],
+      'spellcheck' => [
+        'suggestions' => [
+          'qwick', [
+            'numFound' => 3, 'startOffset' => 0, 'endOffset' => 5,
+            'suggestion' => [
+              'quick',
+              ['word' => 'quack', 'freq' => 1],
+              // Malformed: no `word` key -- skipped, not fatal.
+              ['freq' => 9],
+              7,
+              NULL,
+            ],
+          ],
+        ],
+      ],
+    ];
+
+    $resultSet = (new ResponseParser())->parse($response, $this->mockQuery('my_index'));
+
+    $this->assertSame([
+      'suggestions' => ['qwick' => ['quick', 'quack']],
+    ], $resultSet->getExtraData('search_api_spellcheck'));
+  }
+
+  /**
    * #342 "Applying the resolved language set": for a text field,
    * ResponseParser must read whichever language variant is actually present
    * on the doc, first match in resolved-language order. Here the query
