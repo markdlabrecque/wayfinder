@@ -20,22 +20,10 @@ struct SynonymTable {
     expansions: HashMap<String, Vec<String>>,
 }
 
-/// Canonical form at the synonym filter insertion point: it shares the
-/// production accent fold and lowercase step, then validates the delimiter
-/// graph. A configured member must remain one lexical token here; accepting a
-/// member which splits or spans positions would make a saved group mean
-/// something different from its same-position query-time expansion.
+/// Canonical form at the synonym filter insertion point. Schema owns this
+/// analyzer contract so persisted members cannot drift from query analysis.
 fn canonical_member(member: &str) -> Result<String> {
-    let mut folded = String::new();
-    crate::schema::fold_accents(member, &mut folded);
-    let folded = folded.to_lowercase();
-    if folded.is_empty() || !folded.chars().all(char::is_alphanumeric) {
-        bail!("synonym members must each be one nonempty safe token");
-    }
-    if !crate::schema::is_single_delimiter_position(&folded) {
-        bail!("synonym members must not split across delimiter positions");
-    }
-    Ok(folded)
+    crate::schema::canonicalize_synonym_member(member)
 }
 
 impl SynonymTable {

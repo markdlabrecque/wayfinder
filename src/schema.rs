@@ -1089,7 +1089,7 @@ impl<T: Tokenizer> Tokenizer for WordDelimiterTokenizer<T> {
             input: text,
             pending: VecDeque::new(),
             lookahead: None,
-            next_position: 0,
+            position_shift: 0,
             preserve_original: self.preserve_original,
         }
     }
@@ -1161,10 +1161,63 @@ fn delimiter_parts(text: &str, base_offset: usize, original_end: usize) -> Vec<D
     parts
 }
 
-/// Whether the pre-lowercase delimiter analysis emits exactly one position.
-/// Synonym expansion only supports same-position single-token alternatives.
-pub(crate) fn is_single_delimiter_position(text: &str) -> bool {
-    delimiter_parts(text, 0, text.len()).len() == 1
+fn is_cjk_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x3040..=0x30ff
+            | 0x3130..=0x318f
+            | 0x3400..=0x4dbf
+            | 0x4e00..=0x9fff
+            | 0xac00..=0xd7af
+            | 0xf900..=0xfaff
+            | 0x1100..=0x11ff
+            | 0x20000..=0x2ebef
+            | 0x30000..=0x323af
+    )
+}
+
+/// Canonicalizes one configured synonym member through the same pre-synonym
+/// query analysis steps. Synonym expansion can only add one same-position,
+/// position-length-one alternative, so the member must be one actual UAX term
+/// and its pre-lowercase delimiter graph must produce exactly that one term.
+pub(crate) fn canonicalize_synonym_member(member: &str) -> Result<String> {
+    let mut uax = Uax29Tokenizer;
+    let mut uax_stream = uax.token_stream(member);
+    if !uax_stream.advance() {
+        bail!("synonym members must each be one nonempty UAX token");
+    }
+    let uax_token = uax_stream.token().text.clone();
+    if uax_stream.advance() {
+        bail!("synonym members must each be one nonempty UAX token");
+    }
+    if uax_token
+        .chars()
+        .any(|character| character.is_numeric() || is_cjk_character(character))
+    {
+        bail!("synonym members must not contain digits or CJK characters");
+    }
+
+    let mut folded = String::new();
+    fold_accents(member, &mut folded);
+    let mut delimiter = TextAnalyzer::builder(Uax29Tokenizer)
+        .filter_dynamic(WordDelimiterFilter::search())
+        .build();
+    let mut graph = delimiter.token_stream(&folded);
+    if !graph.advance() {
+        bail!("synonym members must each be one nonempty safe token");
+    }
+    let token = graph.token().clone();
+    if token.position_length != 1 || graph.advance() {
+        bail!("synonym members must not split across delimiter positions");
+    }
+
+    let mut canonical = String::new();
+    for character in token.text.chars() {
+        // Match Tantivy's LowerCaser, which lowercases each Unicode scalar
+        // independently rather than applying Rust's contextual sigma rule.
+        canonical.extend(character.to_lowercase());
+    }
+    Ok(canonical)
 }
 
 struct WordDelimiterTokenStream<'a, T> {
@@ -1172,7 +1225,10 @@ struct WordDelimiterTokenStream<'a, T> {
     input: &'a str,
     pending: VecDeque<Token>,
     lookahead: Option<Token>,
-    next_position: usize,
+    /// Delimiter expansion increases graph width beyond the number of upstream
+    /// UAX positions it consumed. Later upstream positions must carry that
+    /// cumulative shift instead of being compacted behind the graph.
+    position_shift: usize,
     preserve_original: bool,
 }
 
@@ -1232,9 +1288,11 @@ impl<T: TokenStream> WordDelimiterTokenStream<'_, T> {
             return true;
         }
 
-        // Filters before us (notably stopwords) can leave position gaps. Keep
-        // those gaps while still reserving extra positions for split compounds.
-        let start = self.next_position.max(sources[0].position);
+        // Map every graph start from its upstream position. A split such as
+        // `sku42` consumes one UAX position but emits two, so it shifts every
+        // later upstream position by one; an already-present stopword gap must
+        // remain a gap after that expansion.
+        let start = sources[0].position + self.position_shift;
         let width = parts.len();
         let mut seen = HashSet::new();
         let mut push =
@@ -1344,7 +1402,7 @@ impl<T: TokenStream> WordDelimiterTokenStream<'_, T> {
         self.pending
             .make_contiguous()
             .sort_by_key(|token| token.position);
-        self.next_position = start + width;
+        self.position_shift += width - sources.len();
         true
     }
 }

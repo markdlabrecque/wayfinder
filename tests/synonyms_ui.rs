@@ -316,13 +316,33 @@ async fn configured_members_are_folded_and_reject_unsafe_analyzer_inputs() {
         b"smorrebrod,strasse,encyclopaedia\n"
     );
 
-    for invalid in ["foo-bar%2Cbaz", "%F0%9F%98%80%2Cbaz", "%CC%81%2Cbaz"] {
+    // Canonicalization must reject every member which the real query analyzer
+    // turns into multiple UAX terms, delimiter graph positions, or alternatives.
+    for invalid in [
+        "foo-bar%2Cbaz",
+        "sku42%2Cbaz",
+        "42%2Cbaz",
+        "camelCase%2Cbaz",
+        "%E6%9D%B1%2Cbaz",
+        "%E6%9D%B1%E4%BA%AC%E9%83%BD%2Cbaz",
+        "%F0%9F%98%80%2Cbaz",
+        "%CC%81%2Cbaz",
+    ] {
         let (status, _headers, body) = post_synonym_form(&app, &format!("groups={invalid}")).await;
         assert!(
             status.is_client_error(),
             "{invalid:?} must be rejected: {status} {body}"
         );
     }
+
+    // Tantivy lowercases Unicode one character at a time; it deliberately
+    // avoids Rust's contextual final-sigma rule, so ΟΣ canonicalizes to οσ.
+    let (status, _headers, body) = post_synonym_form(&app, "groups=%CE%9F%CE%A3%2Comega").await;
+    assert_save_succeeded(status, &body);
+    assert_eq!(
+        std::fs::read(dir.path().join(SYNONYM_FILE)).expect("Tantivy-cased synonym file"),
+        "οσ,omega\n".as_bytes()
+    );
 }
 
 #[tokio::test]

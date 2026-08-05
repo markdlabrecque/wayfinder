@@ -146,6 +146,16 @@ async fn suggest_keeps_mid_delimiter_input_as_a_prefix() {
 #[tokio::test]
 async fn delimiter_compounds_are_real_position_graphs_for_sequential_and_catenated_phrases() {
     let (app, _dir) = delimiter_app().await;
+    let (status, body) = post_docs(
+        &app,
+        &json!([{"id": "split-stopword-gap", "body": "SKU42 the fox"}]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "index split stopword corpus: {body}"
+    );
 
     // `SKU-42` crosses UAX tokens. Its parts must occupy positions 0 and 1,
     // while `sku42` spans both and leaves `next` at position 2. Flattening
@@ -158,6 +168,11 @@ async fn delimiter_compounds_are_real_position_graphs_for_sequential_and_catenat
     // Stopword removal leaves a real incoming position gap. The delimiter
     // graph must preserve it, so a compact quoted phrase cannot bridge `the`.
     assert_field_query_count(&app, "body", "%22quick+fox%22", 0).await;
+
+    // Splitting one upstream word into `sku`/`42` expands its graph width by
+    // one position. The following stopword gap must be mapped after that
+    // shift, rather than compacted by the expanded graph.
+    assert_field_query_count(&app, "body", "%22sku42+fox%22", 0).await;
 }
 
 #[tokio::test]
