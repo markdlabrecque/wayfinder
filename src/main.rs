@@ -57,19 +57,6 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
     let mut args = std::env::args().skip(1);
     let first = args.next();
-    if first.as_deref() == Some("coverage") {
-        if args.next().as_deref() != Some("--format") || args.next().as_deref() != Some("json") {
-            return Err(anyhow::anyhow!("usage: wayfinder coverage --format json"));
-        }
-        if args.next().is_some() {
-            return Err(anyhow::anyhow!("usage: wayfinder coverage --format json"));
-        }
-        println!(
-            "{}",
-            serde_json::to_string(&wayfinder::coverage_report().await)?
-        );
-        return Ok(());
-    }
     if first.as_deref() == Some("snapshot") {
         let source = PathBuf::from(args.next().ok_or_else(|| {
             anyhow::anyhow!("usage: wayfinder snapshot <live-data-dir> <fresh-destination-dir>")

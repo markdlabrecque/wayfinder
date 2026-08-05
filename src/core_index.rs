@@ -5890,14 +5890,10 @@ fast = true
         (dir, index, addr)
     }
 
-    /// Same body text (with the term swapped to "widget") as
-    /// `HL_SNIPPETS_PROBE_DOCS` in `src/coverage.rs`, whose gaps between the
-    /// three term occurrences are already pinned by
-    /// `hl_snippets_probe_doc_gaps_exceed_a_snippet_window` to exceed
-    /// Tantivy's 150-char default snippet window. Reusing that exact spacing
-    /// here means a highlighter that produces one fragment per occurrence
-    /// (rather than merging occurrences into a shared window) must return
-    /// three genuinely separate, non-overlapping fragments for this body.
+    /// The gaps between these three occurrences exceed Tantivy's 150-char
+    /// default snippet window. A highlighter that produces one fragment per
+    /// occurrence (rather than merging occurrences into a shared window) must
+    /// therefore return three genuinely separate, non-overlapping fragments.
     const THREE_WELL_SEPARATED_OCCURRENCES: &str = "widget prototype unveiled at the trade show. \
         the weather in the valley stayed mild and overcast for most of the week without much \
         wind at all. a second widget shipment arrived at the warehouse yesterday. meanwhile the \

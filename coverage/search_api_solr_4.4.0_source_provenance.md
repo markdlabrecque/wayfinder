@@ -18,8 +18,9 @@ is metadata about the snapshot, not part of the upstream module.
 
 The `archive_sha256` above is the same value pinned as
 `upstream.archive_sha256` in `search_api_solr_4.4.0_source_evidence.json`, and
-is asserted verbatim by `tests/search_api_coverage.rs`. The vendored bytes are
-extracted from that exact archive.
+is asserted verbatim by
+`tests/search_api_source_evidence.rs::source_evidence_is_hash_pinned_complete_and_auditable`.
+The vendored bytes are extracted from that exact archive.
 
 ### Equivalent canonical release
 

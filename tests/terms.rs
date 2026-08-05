@@ -548,9 +548,8 @@ async fn terms_absent_produces_no_terms_block() {
 
 /// The case that must NOT be swept up by the gating above: `terms=true` with
 /// no `terms.fl` runs the component, which contributes an empty list. The
-/// block is present and empty. `src/coverage.rs`'s `terms.terms` response
-/// denominator probe issues exactly this request and requires `terms` to be an
-/// object, so this pins the distinction the gating fix has to preserve.
+/// block is present and empty, pinning the distinction the gating fix must
+/// preserve.
 #[tokio::test]
 async fn terms_true_without_fl_produces_an_empty_terms_object() {
     let (app, _dir) = terms_app(&trace_corpus()).await;

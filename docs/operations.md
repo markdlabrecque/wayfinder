@@ -146,7 +146,6 @@ Create the host data directory for the same numeric user before the first start:
 ```sh
 sudo install -d -o 65532 -g 65532 -m 0750 ./data/content
 docker compose up -d --build
-docker compose exec wayfinder-content /wayfinder coverage --format json # optional capability report
 curl --fail 'http://127.0.0.1:8983/solr/content/admin/ping?wt=json'
 ```
 
