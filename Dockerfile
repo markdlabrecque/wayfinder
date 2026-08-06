@@ -50,5 +50,6 @@ FROM scratch
 COPY --from=builder /wayfinder-bin /wayfinder
 # See the /scratch-tmp note above: provide the writable /tmp extraction needs.
 COPY --from=builder /scratch-tmp /tmp
+COPY presets /presets
 
 ENTRYPOINT ["/wayfinder"]
