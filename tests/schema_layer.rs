@@ -311,32 +311,30 @@ fn text_en_preset_enforces_the_configsets_length_bounds_and_simple_case_folding(
         "a two-character token must survive -- unaffected either way"
     );
 
-    // ponytail: RemoveLongFilter::limit(40) counting bytes (not
-    // LengthFilterFactory's characters, which `_default` doesn't have at
-    // all) is a pre-existing divergence from `_default`, which drops
-    // nothing at any length. Unpinned by any fixture; out of scope for
-    // #388 (AMENDMENT 1 corrected the spec to leave this filter alone) and
-    // filed as a follow-up.
-    let a45 = "a".repeat(45);
-    assert_eq!(
-        wf.tokenize("text_en", &a45).expect("text_en preset"),
+    let long_english = "pneumonoultramicroscopicsilicovolcanoconiosis";
+    assert_eq!(long_english.len(), 45, "test setup: the word is 45 bytes");
+    assert_ne!(
+        wf.tokenize("text_en", long_english)
+            .expect("text_en preset"),
         Vec::<String>::new(),
-        "issue #388 AMENDMENT 1: static text_en keeps RemoveLongFilter::limit(40) (bytes) \
-         unchanged -- a 45-character/45-byte token must still be dropped"
+        "issue #393: static text_en must not silently drop a real 45-byte English token"
     );
-    let b100 = "b".repeat(100);
+
+    let at_resource_bound = "q".repeat(32_766);
     assert_eq!(
-        wf.tokenize("text_en", &b100).expect("text_en preset"),
-        Vec::<String>::new(),
-        "issue #388 AMENDMENT 1: 100 bytes is still well over RemoveLongFilter::limit(40) -- \
-         must be dropped, same as before this issue"
+        wf.tokenize("text_en", &at_resource_bound)
+            .expect("text_en preset")
+            .first()
+            .map(String::len),
+        Some(32_766),
+        "issue #393: static text_en's shared resource bound is inclusive"
     );
-    let c101 = "c".repeat(101);
+    let over_resource_bound = "q".repeat(32_767);
     assert_eq!(
-        wf.tokenize("text_en", &c101).expect("text_en preset"),
+        wf.tokenize("text_en", &over_resource_bound)
+            .expect("text_en preset"),
         Vec::<String>::new(),
-        "issue #388 AMENDMENT 1: 101 bytes is still well over RemoveLongFilter::limit(40) -- \
-         must be dropped, same as before this issue"
+        "issue #393: one token beyond static text_en's shared resource bound must be discarded"
     );
 
     assert_eq!(
@@ -386,36 +384,34 @@ fn text_general_preset_enforces_the_configsets_length_bounds_and_simple_case_fol
         "a two-character token must survive -- unaffected either way"
     );
 
-    // ponytail: text_general currently resolves to Tantivy's own built-in
-    // `default` tokenizer (SimpleTokenizer -> RemoveLongFilter::limit(40) ->
-    // LowerCaser), so it already carries this same byte-based 40-byte cut
-    // `_default` (no length filter at all) does not have. Pre-existing,
-    // unpinned by any fixture, and out of scope for #388 (AMENDMENT 1
-    // corrected the spec to leave this filter alone on both static
-    // presets) -- filed as a follow-up.
-    let a45 = "a".repeat(45);
+    let long_cjk = "도서관사서가새책장을정리한다";
     assert_eq!(
-        wf.tokenize("text_general", &a45)
-            .expect("text_general preset"),
-        Vec::<String>::new(),
-        "issue #388 AMENDMENT 1: static text_general keeps RemoveLongFilter::limit(40) \
-         (bytes) unchanged -- a 45-character/45-byte token must still be dropped"
+        (long_cjk.chars().count(), long_cjk.len()),
+        (14, 42),
+        "test setup: the CJK phrase is 14 characters and 42 bytes"
     );
-    let b100 = "b".repeat(100);
-    assert_eq!(
-        wf.tokenize("text_general", &b100)
+    assert_ne!(
+        wf.tokenize("text_general", long_cjk)
             .expect("text_general preset"),
         Vec::<String>::new(),
-        "issue #388 AMENDMENT 1: 100 bytes is still well over RemoveLongFilter::limit(40) \
-         -- must be dropped, same as before this issue"
+        "issue #393: static text_general must not silently drop a 14-character/42-byte CJK token"
     );
-    let c101 = "c".repeat(101);
+
+    let at_resource_bound = "a".repeat(32_766);
     assert_eq!(
-        wf.tokenize("text_general", &c101)
+        wf.tokenize("text_general", &at_resource_bound)
+            .expect("text_general preset")
+            .first()
+            .map(String::len),
+        Some(32_766),
+        "issue #393: the script-independent static-preset resource bound is inclusive"
+    );
+    let over_resource_bound = "a".repeat(32_767);
+    assert_eq!(
+        wf.tokenize("text_general", &over_resource_bound)
             .expect("text_general preset"),
         Vec::<String>::new(),
-        "issue #388 AMENDMENT 1: 101 bytes is still well over RemoveLongFilter::limit(40) \
-         -- must be dropped, same as before this issue"
+        "issue #393: one pathological token beyond the character bound must be discarded"
     );
 
     assert_eq!(
@@ -1707,16 +1703,34 @@ tokenizer = "{index_tok}"
     }
 }
 
-/// `ANALYZER_CONTRACT` guards on-disk term compatibility. Phase 4 adds index
-/// terms for word parts and catenations, so its contract must advance past the
-/// UAX #29-only v5 marker.
+/// `ANALYZER_CONTRACT` guards on-disk term compatibility. Issue #393 adds
+/// terms above the old 40-byte cutoff, so its contract must advance past v6.
 #[test]
-fn analyzer_contract_is_v6_after_phase_4_word_delimiter_terms() {
+fn analyzer_contract_is_v7_after_static_text_length_fix() {
     assert_eq!(
         schema::ANALYZER_CONTRACT,
+        "text_presets_static_length_v7",
+        "issue #393 changes indexed static text_en/text_general terms, so the analyzer \
+         contract must identify v7"
+    );
+}
+
+#[test]
+fn v6_marker_on_static_text_en_field_refuses_startup_requiring_reindex() {
+    let dir = TempDir::new().expect("temp dir");
+    create_older_analyzer_index(dir.path(), FULL_SCHEMA_TOML, "wayfinder_text_en_v6");
+    std::fs::write(
+        dir.path().join("data/wayfinder-analyzer-contract"),
         "text_presets_uax29_word_delimiter_v6",
-        "Phase 4 (issue #389) changes indexed word-delimiter terms, so the analyzer \
-         contract must identify v6"
+    )
+    .expect("write v6 analyzer contract marker");
+
+    let err = common::app_with_schema(dir.path(), FULL_SCHEMA_TOML)
+        .expect_err("a v6 index with static text_en terms must require reindexing for issue #393");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.to_lowercase().contains("reindex"),
+        "v6-with-affected-static-terms refusal must require reindexing, got: {msg}"
     );
 }
 

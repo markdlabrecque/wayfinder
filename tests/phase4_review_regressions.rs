@@ -188,7 +188,7 @@ async fn synonyms_reject_terms_removed_by_any_builtin_query_front() {
 
     for invalid in [
         "groups=the%2Cfoo".to_owned(),
-        format!("groups={}%2Cfoo", "x".repeat(40)),
+        format!("groups={}%2Cfoo", "x".repeat(32_767)),
     ] {
         let (status, body) = post_synonym_form(&app, &invalid).await;
         assert!(

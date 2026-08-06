@@ -130,18 +130,23 @@ pub fn builtin_type_names() -> Vec<String> {
     names
 }
 
-/// Versioned UAX #29 `text_general` identity. `default` and v3 remain
-/// registered for legacy-index diagnosis; newly-built fields record v4.
-const TEXT_GENERAL_TOKENIZER: &str = "wayfinder_text_general_v6";
+/// Versioned UAX #29 `text_general` identity. v6 and its predecessors remain
+/// registered for legacy-index diagnosis; newly-built fields record v7.
+const TEXT_GENERAL_TOKENIZER: &str = "wayfinder_text_general_v7";
+const TEXT_GENERAL_TOKENIZER_V6: &str = "wayfinder_text_general_v6";
 const TEXT_GENERAL_TOKENIZER_V5: &str = "wayfinder_text_general_v5";
 const TEXT_GENERAL_TOKENIZER_V4: &str = "wayfinder_text_general_v4";
 const TEXT_GENERAL_TOKENIZER_V3: &str = "wayfinder_text_general_v3";
 const TEXT_GENERAL_TOKENIZER_LEGACY: &str = "default";
 /// Wayfinder's versioned English analyzer uses UAX #29 word segmentation,
-/// then long-token removal, lowercase, English stopword removal, and stemming.
+/// an inclusive character-length bound, lowercase, English stopword removal,
+/// and stemming.
 /// It intentionally does not override Tantivy's `en_stem`, which remains
 /// available for custom analyzer chains and upstream defaults.
-const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v6";
+const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v7";
+/// The v6 predecessor remains registered only so a legacy Tantivy schema
+/// can be diagnosed safely; no newly-built field records this identity.
+const TEXT_EN_TOKENIZER_V6: &str = "wayfinder_text_en_v6";
 /// The Phase-3 predecessor remains registered only so a legacy Tantivy schema
 /// can be diagnosed safely; no newly-built field records this identity.
 const TEXT_EN_TOKENIZER_V5: &str = "wayfinder_text_en_v5";
@@ -207,6 +212,11 @@ pub const BOOST_TERM_PAYLOAD_DELIMITER: char = '|';
 const BOOST_TERM_PAYLOAD_MIN_LEN: usize = 2;
 const BOOST_TERM_PAYLOAD_MAX_LEN: usize = 100;
 
+/// Inclusive Unicode-scalar-value resource bound on the current static
+/// `text_en` and `text_general` presets. The one-character lower bound retains
+/// the `_default` fixture contract while preventing pathological token sizes.
+const STATIC_TEXT_MAX_TOKEN_LEN: usize = 32_766;
+
 /// Search-quality upper bound on `wayfinder_suggest_*` terms. It is measured
 /// in characters and inclusive; the chains deliberately carry no byte-based
 /// `RemoveLongFilter`, so a 45-byte ASCII token or a 14-character CJK token
@@ -222,11 +232,17 @@ const SUGGEST_UNDEFINED_DICTIONARY: &str = "und";
 /// UAX #29 segmentation. This is separate from Tantivy's schema: it lets
 /// startup identify old term formats before their tokenizer identity can be
 /// adopted.
-pub const ANALYZER_CONTRACT: &str = "text_presets_uax29_word_delimiter_v6";
+pub const ANALYZER_CONTRACT: &str = "text_presets_static_length_v7";
 /// A safely adopted index whose unused `_dynamic_text` catch-all still has an
-/// older tokenizer identity. It is not full v6 certification: a later rule
+/// older tokenizer identity. It is not full v7 certification: a later rule
 /// that starts writing analyzed dynamic values must reindex.
 pub const ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT: &str =
+    "text_presets_static_length_v7_legacy_dynamic_text";
+/// The Phase 4 word-delimiter contract, superseded by v7's static text length
+/// bound. It is retained to distinguish the changed static presets from every
+/// unaffected v6 path during migration.
+pub const ANALYZER_CONTRACT_V6: &str = "text_presets_uax29_word_delimiter_v6";
+pub const ANALYZER_CONTRACT_V6_LEGACY_DYNAMIC_TEXT: &str =
     "text_presets_uax29_word_delimiter_v6_legacy_dynamic_text";
 /// Phase 3's UAX #29 contract, superseded by Phase 4 word-delimiter terms.
 pub const ANALYZER_CONTRACT_V5: &str = "text_presets_uax29_v5";
@@ -527,12 +543,9 @@ impl WayfinderSchema {
         })
     }
 
-    /// Whether this schema can contain static data written by one of the
-    /// built-in analyzed-text presets whose chain has changed: `text_en`
-    /// (v1 Snowball stemming -> v2's Porter-compatible terminal-`y` behavior,
-    /// then v3's length bound and simple case folding) and `text_general`
-    /// (unchanged until v3, which gave it both of those and its own tokenizer
-    /// identity -- issue #388).
+    /// Whether this schema can contain static `text_en` or `text_general`
+    /// terms from the v6 chain whose 40-byte cutoff v7 replaces with an
+    /// inclusive Unicode-scalar-value bound.
     pub fn uses_changed_static_text(&self) -> bool {
         self.fields
             .iter()
@@ -1232,13 +1245,17 @@ pub(crate) fn canonicalize_synonym_member(member: &str) -> Result<String> {
     }
 
     // A synonym is core-wide, so it must survive the strictest pre-synonym
-    // built-in chain. Static text drops terms at 40 bytes and English chains
-    // remove their stopwords before expansion; accepting either would create
-    // a configured member that can never expand symmetrically.
+    // built-in chain. Static text drops members over its inclusive character
+    // bound and English chains remove their stopwords before expansion;
+    // accepting either would create a member that can never expand
+    // symmetrically.
     let english_stopwords =
         StopWordFilter::new(Language::English).expect("Tantivy ships English stopwords");
     let mut acceptance = TextAnalyzer::builder(RawTokenizer::default())
-        .filter(RemoveLongFilter::limit(40))
+        .filter_dynamic(LengthFilter {
+            min: 1,
+            max: STATIC_TEXT_MAX_TOKEN_LEN,
+        })
         .filter(english_stopwords)
         .build();
     {
@@ -1887,10 +1904,15 @@ pub fn is_configured_suggester(dictionary: &str) -> bool {
 }
 
 /// Whether an on-disk tokenizer identity uses issue #389's built-in token graph.
+/// v6 static identities remain graph analyzers for legacy-index diagnosis.
 pub fn is_current_builtin_graph_tokenizer(tokenizer: &str) -> bool {
     matches!(
         tokenizer,
-        TEXT_GENERAL_TOKENIZER | TEXT_EN_TOKENIZER | DYNAMIC_TEXT_TOKENIZER
+        TEXT_GENERAL_TOKENIZER
+            | TEXT_GENERAL_TOKENIZER_V6
+            | TEXT_EN_TOKENIZER
+            | TEXT_EN_TOKENIZER_V6
+            | DYNAMIC_TEXT_TOKENIZER
     ) || LANGUAGES
         .iter()
         .filter(|(code, _)| *code != "en")
@@ -2067,7 +2089,7 @@ fn build_tokenizers(
             .build(),
     );
     register_split(
-        TEXT_GENERAL_TOKENIZER,
+        TEXT_GENERAL_TOKENIZER_V6,
         TextAnalyzer::builder(Uax29Tokenizer)
             .filter_dynamic(AccentFoldingFilter)
             .filter_dynamic(WordDelimiterFilter::search())
@@ -2078,6 +2100,30 @@ fn build_tokenizers(
             .filter_dynamic(AccentFoldingFilter)
             .filter_dynamic(WordDelimiterFilter::search())
             .filter(RemoveLongFilter::limit(40))
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter_dynamic(SynonymFilter {
+                resource: synonyms.clone(),
+            })
+            .build(),
+    );
+    register_split(
+        TEXT_GENERAL_TOKENIZER,
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter_dynamic(WordDelimiterFilter::search())
+            .filter_dynamic(LengthFilter {
+                min: 1,
+                max: STATIC_TEXT_MAX_TOKEN_LEN,
+            })
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .build(),
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter_dynamic(WordDelimiterFilter::search())
+            .filter_dynamic(LengthFilter {
+                min: 1,
+                max: STATIC_TEXT_MAX_TOKEN_LEN,
+            })
             .filter_dynamic(SimpleLowerCaseFilter)
             .filter_dynamic(SynonymFilter {
                 resource: synonyms.clone(),
@@ -2145,7 +2191,7 @@ fn build_tokenizers(
             .build(),
     );
     // Kept for opening and diagnosing legacy schemas; new text_en fields use
-    // the v3 identity below.
+    // the v7 identity below.
     register_both(
         TEXT_EN_TOKENIZER_V2,
         TextAnalyzer::builder(SimpleTokenizer::default())
@@ -2189,7 +2235,7 @@ fn build_tokenizers(
             .build(),
     );
     register_split(
-        TEXT_EN_TOKENIZER,
+        TEXT_EN_TOKENIZER_V6,
         TextAnalyzer::builder(Uax29Tokenizer)
             .filter_dynamic(AccentFoldingFilter)
             .filter(RemoveLongFilter::limit(40))
@@ -2202,6 +2248,36 @@ fn build_tokenizers(
         TextAnalyzer::builder(Uax29Tokenizer)
             .filter_dynamic(AccentFoldingFilter)
             .filter(RemoveLongFilter::limit(40))
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter_dynamic(WordDelimiterFilter::search())
+            .filter_dynamic(SynonymFilter {
+                resource: synonyms.clone(),
+            })
+            .filter(PorterTerminalYFilter)
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    register_split(
+        TEXT_EN_TOKENIZER,
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter_dynamic(LengthFilter {
+                min: 1,
+                max: STATIC_TEXT_MAX_TOKEN_LEN,
+            })
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter_dynamic(WordDelimiterFilter::search())
+            .filter(PorterTerminalYFilter)
+            .filter(Stemmer::new(Language::English))
+            .build(),
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter_dynamic(LengthFilter {
+                min: 1,
+                max: STATIC_TEXT_MAX_TOKEN_LEN,
+            })
             .filter_dynamic(SimpleLowerCaseFilter)
             .filter(english_stopwords())
             .filter_dynamic(WordDelimiterFilter::search())
@@ -2314,11 +2390,10 @@ fn build_tokenizers(
     // The other chains in this file keep it because it matches *their* Solr
     // field types, not this one.
     //
-    // ponytail: this fixes the SUGGEST path only. Wayfinder's global `text_en` /
-    // `text_general` presets still have no `LengthFilter` and still use Rust's
-    // full-Unicode `LowerCaser`, so `/select` over a `text_en` field keeps
-    // diverging from Solr on both counts. That is a real, separate bug, filed as
-    // #388 -- not closed by this change.
+    // ponytail: suggest stays a distinct analyzer from the static presets. The
+    // latter use simple case folding and the broader 32_766-character resource
+    // bound; this path deliberately retains its independent 100-character
+    // search-quality bound rather than becoming an alias for `/select`.
     let suggest_front = || {
         TextAnalyzer::builder(Uax29Tokenizer)
             .filter_dynamic(AccentFoldingFilter)
@@ -2513,10 +2588,12 @@ fn parse_with_synonyms(raw: &str, synonyms: SynonymResource) -> Result<Wayfinder
         .chain([
             TEXT_GENERAL_TOKENIZER_LEGACY.to_string(),
             TEXT_GENERAL_TOKENIZER.to_string(),
+            TEXT_GENERAL_TOKENIZER_V6.to_string(),
             TEXT_GENERAL_TOKENIZER_V5.to_string(),
             TEXT_GENERAL_TOKENIZER_V4.to_string(),
             TEXT_GENERAL_TOKENIZER_V3.to_string(),
             TEXT_EN_TOKENIZER.to_string(),
+            TEXT_EN_TOKENIZER_V6.to_string(),
             TEXT_EN_TOKENIZER_V5.to_string(),
             TEXT_EN_TOKENIZER_V4.to_string(),
             TEXT_EN_TOKENIZER_V3.to_string(),

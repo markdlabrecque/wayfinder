@@ -230,7 +230,13 @@ async fn synonym_table_survives_reopen_and_is_loaded_before_the_first_query() {
 #[tokio::test]
 async fn invalid_group_rejects_without_replacing_live_or_durable_synonyms() {
     let (app, dir) = synonym_app().await;
-    let (status, _headers, body) = post_synonym_form(&app, "groups=Drupal%2CDurpal").await;
+    // The 45-byte English word is below the analyzer's inclusive 32_766
+    // Unicode-scalar-value member limit; byte length alone must not reject it.
+    let (status, _headers, body) = post_synonym_form(
+        &app,
+        "groups=Drupal%2CDurpal%2Cpneumonoultramicroscopicsilicovolcanoconiosis",
+    )
+    .await;
     assert_save_succeeded(status, &body);
     let path = dir.path().join(SYNONYM_FILE);
     let before = std::fs::read(&path).expect("baseline synonym file");
@@ -267,15 +273,16 @@ async fn invalid_group_rejects_without_replacing_live_or_durable_synonyms() {
     assert_query_count(&app, "durpal", 1).await;
 
     // Core-wide synonyms must survive every built-in chain before the synonym
-    // filter. English stopwords and the static chain's 40-byte cutoff do not.
+    // filter. English stopwords and members over the static chain's inclusive
+    // 32_766-Unicode-scalar-value limit do not.
     for invalid in [
         "groups=the%2Cfoo".to_owned(),
-        format!("groups={}%2Cfoo", "x".repeat(40)),
+        format!("groups={}%2Cfoo", "x".repeat(32_767)),
     ] {
         let (status, _headers, body) = post_synonym_form(&app, &invalid).await;
         assert!(
             status.is_client_error(),
-            "filtered synonym member must fail: status={status}, body: {body}"
+            "analyzer-rejected synonym member must fail: status={status}, body: {body}"
         );
         assert_eq!(
             std::fs::read(&path).expect("synonym file after filtered-member rejection"),
