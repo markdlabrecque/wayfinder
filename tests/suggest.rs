@@ -529,25 +529,31 @@ async fn suggest_q_count_matches_fixture() {
     .await;
 }
 
-/// Solr 9 IGNORES `suggest.highlight=false` on this handler: the response is
-/// STILL highlighted (`quick brown <b>fox</b>`), same as the highlight-on
-/// default. This is the decisive proof that Wayfinder must not honour the
-/// param as a toggle on the plain (non-cfq) lookup path.
+/// `suggest.highlight=false` disables highlighting on a plain (non-`cfq`)
+/// lookup: the matching suggestion is returned without tags.
 #[tokio::test]
-async fn suggest_q_hl_off_en_matches_fixture() {
-    assert_lookup_matches(
-        "suggest_q_hl_off_en",
+async fn suggest_q_hl_off_en_returns_plain_terms() {
+    let (app, _dir) = suggest_lookup_app().await;
+    let (status, body) = get(
+        &app,
         "suggest?suggest.dictionary=en&suggest.q=fox&suggest.highlight=false&wt=json",
     )
     .await;
+
+    assert_eq!(status, StatusCode::OK, "lookup must answer 200: {body}");
+    assert_eq!(
+        fixture("suggest_q_hl_off_en")["suggest"]["en"]["fox"]["suggestions"][0]["term"],
+        "quick brown <b>fox</b>",
+        "the frozen fixture must retain Solr's historical highlighted response"
+    );
+    assert_eq!(
+        body["suggest"]["en"]["fox"]["suggestions"][0]["term"], "quick brown fox",
+        "suggest.highlight=false must return the plain suggestion term: {body}"
+    );
 }
 
-/// The context-filtered (`cfq`) lookup path never highlights, regardless of
-/// `suggest.highlight`: `quick brown fox` comes back plain even with
-/// `suggest.highlight=true` explicitly set. Paired with
-/// `suggest_q_hl_off_en_matches_fixture`, this pins that highlighting is
-/// driven by which lookup method runs (plain vs. context-filtered), not by
-/// the `suggest.highlight` param at all.
+/// The context-filtered (`cfq`) lookup path remains plain even when
+/// `suggest.highlight=true` is explicitly set: `quick brown fox` has no tags.
 #[tokio::test]
 async fn suggest_q_hl_on_cfq_en_matches_fixture() {
     assert_lookup_matches(

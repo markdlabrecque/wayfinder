@@ -4469,20 +4469,13 @@ async fn suggest(
                 ));
             }
             let cfq = params.get("suggest.cfq");
-            // Captured Solr 9 quirk (issue #384): AnalyzingInfixSuggester
-            // highlights unconditionally EXCEPT when a context filter is
-            // present -- `cfq` engages the context-filtered lookup path, which
-            // does not highlight. So `suggest_q_infix_en` carries
-            // `<b>fox</b>` while `suggest_q_cfq_match` carries plain
-            // `quick brown fox`.
-            //
-            // The condition is whether a context filter is actually ENGAGED, not
-            // whether the parameter was present: `suggest.cfq=` (empty) parses to
-            // no clauses, gates no document, and Solr highlights it exactly as it
-            // highlights no `cfq` at all (`suggest_q_cfq_empty.json`, finding
-            // 196). Routing both through the same predicate is what keeps the two
-            // responses identical instead of special-casing the empty string.
-            let highlight = !core_index::cfq_engages_filter(cfq);
+            // `suggest.highlight` defaults to true, but an engaged context
+            // filter always uses the unhighlighted lookup path. An empty `cfq`
+            // parses to no clauses, so it is not engaged and follows the same
+            // highlighted path as an absent `cfq` (`suggest_q_cfq_empty.json`,
+            // finding 196). See PRD §2 divergence 12 (issue #400).
+            let highlight =
+                params.bool_or("suggest.highlight", true)? && !core_index::cfq_engages_filter(cfq);
             let hits = state
                 .index
                 // Guarded above: `count` is strictly positive here.

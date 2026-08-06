@@ -140,6 +140,13 @@ historical Solr fixture evidence. The numbering is stable for existing citations
 11. **`{!payload_score}` on a field without payloads is a 400.** Solr's historical response is an
     uncaught 500; Wayfinder returns a diagnosable validation error.
 
+12. **`/suggest` honors `suggest.highlight=false`.** The historical
+    `suggest_q_hl_off_en.json` and `suggest_q_hl_on_cfq_en.json` fixtures record Solr's
+    handler behavior, while Drupal's `QueryBuilder.php` sets the parameter false and
+    `search_api_autocomplete` highlights suggestions itself in `Suggester.php`. Wayfinder
+    therefore disables highlighting when it is false, while an absent or true value highlights
+    unless `suggest.cfq` engages a context filter (issue #400).
+
 ---
 
 ## 3. Configuration & schema
