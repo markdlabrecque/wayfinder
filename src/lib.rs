@@ -4399,29 +4399,36 @@ async fn suggest(
     // alone shapes the response: a `suggest` block, never a `command` key.
     match params.get("suggest.q") {
         Some(q) => {
-            let dictionary = params.get("suggest.dictionary").unwrap_or("und");
+            let dictionaries = params.get_all("suggest.dictionary");
+            let dictionaries = if dictionaries.is_empty() {
+                vec!["und"]
+            } else {
+                dictionaries
+            };
             // Solr resolves `suggest.dictionary` against the suggesters the
             // configset declares, and 400s an unknown name rather than falling
-            // back (`suggest_q_dict_unknown.json`, finding 195). The default
-            // above is `und`, which IS configured, so an ABSENT
-            // `suggest.dictionary` keeps being served -- only an explicit
-            // unknown name is rejected, and the configured set is per-language
-            // (`LANGUAGES` + `und`, one suggester per installed language field
-            // type) -- see `schema::is_configured_suggester` for the
+            // back (`suggest_q_dict_unknown.json`, finding 195). An absent
+            // `suggest.dictionary` defaults to `und`; explicit values are
+            // validated together before any lookup so no partial response can
+            // be assembled. The configured set is per-language (`LANGUAGES` +
+            // `und`, one suggester per installed language field type) -- see
+            // `schema::is_configured_suggester` for the
             // `text_fr_7_0_0.yml` evidence that `en`/`und` alone is a capture
             // artifact, not the contract.
-            if !schema::is_configured_suggester(dictionary) {
-                return Err(WfError::bad_request(
-                    "wayfinder::SuggestError",
-                    format!("No suggester named {dictionary} was configured"),
-                )
-                // `/suggest` never echoes params, and unlike the
-                // `suggest.count<=0` 500 this fixture carries `metadata` and no
-                // `trace` -- the shape `WfError` renders by default -- and no
-                // `suggest` block: the component fails before emitting its
-                // container.
-                .envelope(Envelope::NoParams)
-                .with_params(&params));
+            for dictionary in &dictionaries {
+                if !schema::is_configured_suggester(dictionary) {
+                    return Err(WfError::bad_request(
+                        "wayfinder::SuggestError",
+                        format!("No suggester named {dictionary} was configured"),
+                    )
+                    // `/suggest` never echoes params, and unlike the
+                    // `suggest.count<=0` 500 this fixture carries `metadata` and no
+                    // `trace` -- the shape `WfError` renders by default -- and no
+                    // `suggest` block: the component fails before emitting its
+                    // container.
+                    .envelope(Envelope::NoParams)
+                    .with_params(&params));
+                }
             }
             // Parsed SIGNED so a negative reaches the guard below rather than
             // failing the parse and silently becoming the default.
@@ -4476,28 +4483,30 @@ async fn suggest(
             // finding 196). See PRD §2 divergence 12 (issue #400).
             let highlight =
                 params.bool_or("suggest.highlight", true)? && !core_index::cfq_engages_filter(cfq);
-            let hits = state
-                .index
-                // Guarded above: `count` is strictly positive here.
-                .suggest_lookup(dictionary, q, cfq, count as usize, highlight)
-                .map_err(|e| {
-                    WfError::internal("wayfinder::SuggestError", e.to_string()).with_params(&params)
-                })?;
-            let suggestions: Vec<Value> = hits
-                .iter()
-                .map(|h| json!({"term": h.term, "weight": h.weight, "payload": h.payload}))
-                .collect();
-            let num_found = suggestions.len();
-            // Dynamic object keys (the dictionary name and the verbatim
+            // Dynamic object keys (the dictionary names and the verbatim
             // `suggest.q`), so build the nested objects by hand rather than via
             // `json!`, which would treat them as literal keys.
-            let mut q_obj = Map::new();
-            q_obj.insert("numFound".to_string(), json!(num_found));
-            q_obj.insert("suggestions".to_string(), Value::Array(suggestions));
-            let mut dict_obj = Map::new();
-            dict_obj.insert(q.to_string(), Value::Object(q_obj));
             let mut suggest_obj = Map::new();
-            suggest_obj.insert(dictionary.to_string(), Value::Object(dict_obj));
+            for dictionary in dictionaries {
+                let hits = state
+                    .index
+                    // Guarded above: `count` is strictly positive here.
+                    .suggest_lookup(dictionary, q, cfq, count as usize, highlight)
+                    .map_err(|e| {
+                        WfError::internal("wayfinder::SuggestError", e.to_string())
+                            .with_params(&params)
+                    })?;
+                let suggestions: Vec<Value> = hits
+                    .iter()
+                    .map(|h| json!({"term": h.term, "weight": h.weight, "payload": h.payload}))
+                    .collect();
+                let mut q_obj = Map::new();
+                q_obj.insert("numFound".to_string(), json!(suggestions.len()));
+                q_obj.insert("suggestions".to_string(), Value::Array(suggestions));
+                let mut dict_obj = Map::new();
+                dict_obj.insert(q.to_string(), Value::Object(q_obj));
+                suggest_obj.insert(dictionary.to_string(), Value::Object(dict_obj));
+            }
             body.insert("suggest".to_string(), Value::Object(suggest_obj));
         }
         None => {
