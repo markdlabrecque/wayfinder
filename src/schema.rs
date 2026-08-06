@@ -69,6 +69,17 @@ const LANGUAGES: &[(&str, Language)] = &[
     ("tr", Language::Turkish),
 ];
 
+/// Search API Solr's shipped language field-type codes without a Tantivy
+/// stemmer. Each is a real suggest dictionary with its own analyzer identity,
+/// but shares the unstemmed suggest chain rather than claiming to be `und`.
+/// Derived from the unique `field_type_language_code` values in
+/// `coverage/search_api_solr_4.4.0_source/config/optional/`
+/// `search_api_solr.solr_field_type.text_*.yml` after removing [`LANGUAGES`].
+const UNSTEMMED_SUGGEST_LANGUAGES: &[&str] = &[
+    "bg", "ca", "cs", "cy", "et", "fa", "ga", "hi", "hr", "id", "ja", "ko", "lv", "nb", "nn", "pl",
+    "pt-br", "pt-pt", "sk", "sr", "th", "uk", "zh-hans", "zh-hant",
+];
+
 /// The built-in type names `resolve_type` accepts that are not derived from
 /// the `LANGUAGES` table. Kept adjacent to `resolve_type`'s match arms: the
 /// two are the same list written twice, and `builtin_type_names` is what
@@ -1879,18 +1890,21 @@ fn suggest_tokenizer(code: &str) -> String {
 /// The analyzer (Tantivy tokenizer name) a `suggest.dictionary` value
 /// selects, mirroring the shipped `solr.SuggestComponent`'s
 /// `suggestAnalyzerFieldType` per-dictionary analyzer: `text_en` for `en`,
-/// `text_und` for `und`. The dictionary name IS the ISO language code the
-/// Suggester plugin passes (`Suggester.php` derives it from the langcode tag);
-/// a code in [`LANGUAGES`] gets that language's suggest chain, and
-/// `und`/anything-else the stemming-free one (Solr's `text_und` is the
-/// "undefined language" analyzer). Used by the `/suggest?suggest.q=` read path
-/// (issue #384).
+/// and the unstemmed chain for `und` plus installed Search API field-type codes
+/// lacking Tantivy stemmers. The dictionary name is the language code the
+/// Suggester plugin passes (`Suggester.php` derives it from the langcode tag),
+/// and every configured code retains that identity. Explicit unknown
+/// dictionaries are rejected by [`is_configured_suggester`] before this lookup;
+/// the fallback keeps the absent-dictionary `und` default. Used by the
+/// `/suggest?suggest.q=` read path (issue #384).
 ///
 /// These are the dedicated `wayfinder_suggest_*` chains, not the `text_*`
 /// presets, because the shipped suggest field types carry filters the presets do
 /// not -- see [`build_tokenizers`] for the chain and its remaining ceiling.
 pub fn dictionary_tokenizer(dictionary: &str) -> String {
-    if LANGUAGES.iter().any(|(code, _)| *code == dictionary) {
+    if LANGUAGES.iter().any(|(code, _)| *code == dictionary)
+        || UNSTEMMED_SUGGEST_LANGUAGES.contains(&dictionary)
+    {
         suggest_tokenizer(dictionary)
     } else {
         suggest_tokenizer(SUGGEST_UNDEFINED_DICTIONARY)
@@ -1901,6 +1915,7 @@ pub fn dictionary_tokenizer(dictionary: &str) -> String {
 pub fn is_configured_suggester(dictionary: &str) -> bool {
     dictionary == SUGGEST_UNDEFINED_DICTIONARY
         || LANGUAGES.iter().any(|(code, _)| *code == dictionary)
+        || UNSTEMMED_SUGGEST_LANGUAGES.contains(&dictionary)
 }
 
 /// Whether an on-disk tokenizer identity uses issue #389's built-in token graph.
@@ -2406,22 +2421,28 @@ fn build_tokenizers(
             })
             .filter_dynamic(SimpleLowerCaseFilter)
     };
-    // `stopwords_und.txt` is empty in the shipped configset, so the `und` chain
-    // has no stopword filter at all -- unlike `text_en`'s 33-word list.
-    register_split(
-        &suggest_tokenizer(SUGGEST_UNDEFINED_DICTIONARY),
-        suggest_front()
-            .filter_dynamic(WordDelimiterFilter::suggest())
-            .filter_dynamic(RemoveDuplicatesFilter)
-            .build(),
-        suggest_front()
-            .filter_dynamic(WordDelimiterFilter::suggest())
-            .filter_dynamic(SynonymFilter {
-                resource: synonyms.clone(),
-            })
-            .filter_dynamic(RemoveDuplicatesFilter)
-            .build(),
-    );
+    // `stopwords_und.txt` is empty in the shipped configset, so the unstemmed
+    // `und` and non-stemming-language chains have no stopword filter -- unlike
+    // `text_en`'s 33-word list. They remain separately registered because the
+    // requested dictionary name is the response key and analyzer identity.
+    for code in std::iter::once(SUGGEST_UNDEFINED_DICTIONARY)
+        .chain(UNSTEMMED_SUGGEST_LANGUAGES.iter().copied())
+    {
+        register_split(
+            &suggest_tokenizer(code),
+            suggest_front()
+                .filter_dynamic(WordDelimiterFilter::suggest())
+                .filter_dynamic(RemoveDuplicatesFilter)
+                .build(),
+            suggest_front()
+                .filter_dynamic(WordDelimiterFilter::suggest())
+                .filter_dynamic(SynonymFilter {
+                    resource: synonyms.clone(),
+                })
+                .filter_dynamic(RemoveDuplicatesFilter)
+                .build(),
+        );
+    }
     for (code, lang) in LANGUAGES {
         let index_chain = if *code == "en" {
             // Only `text_en` ships a stopword list; the same Porter terminal-y
@@ -2622,6 +2643,11 @@ fn parse_with_synonyms(raw: &str, synonyms: SynonymResource) -> Result<Wayfinder
                 }),
         )
         .chain(LANGUAGES.iter().map(|(code, _)| suggest_tokenizer(code)))
+        .chain(
+            UNSTEMMED_SUGGEST_LANGUAGES
+                .iter()
+                .map(|code| suggest_tokenizer(code)),
+        )
         .collect();
     if let Some(field_type) = parsed
         .field_types
@@ -3159,6 +3185,69 @@ mod tests {
             tokens
                 .iter()
                 .any(|token| token.text == "next" && token.position == 2)
+        );
+    }
+
+    #[test]
+    fn suggest_language_classification_matches_shipped_search_api_field_types() {
+        use std::collections::BTreeSet;
+
+        let optional_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("coverage/search_api_solr_4.4.0_source/config/optional");
+        let mut shipped_codes = BTreeSet::new();
+        for entry in std::fs::read_dir(&optional_dir).expect("read vendored Search API field types")
+        {
+            let path = entry.expect("read field-type entry").path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("search_api_solr.solr_field_type.text_")
+                || path.extension().and_then(|ext| ext.to_str()) != Some("yml")
+            {
+                continue;
+            }
+            let contents = std::fs::read_to_string(&path).expect("read vendored field type");
+            let code = contents
+                .lines()
+                .find_map(|line| line.strip_prefix("field_type_language_code:"))
+                .map(|code| code.trim().trim_matches(['\'', '"']).to_string())
+                .unwrap_or_else(|| panic!("{} has no field_type_language_code", path.display()));
+            shipped_codes.insert(code);
+        }
+
+        let stemmed: BTreeSet<String> = LANGUAGES
+            .iter()
+            .map(|(code, _)| (*code).to_string())
+            .collect();
+        let unstemmed: BTreeSet<String> = UNSTEMMED_SUGGEST_LANGUAGES
+            .iter()
+            .map(|code| (*code).to_string())
+            .collect();
+        assert_eq!(
+            stemmed.len(),
+            LANGUAGES.len(),
+            "LANGUAGES must not contain duplicate codes"
+        );
+        assert_eq!(
+            unstemmed.len(),
+            UNSTEMMED_SUGGEST_LANGUAGES.len(),
+            "UNSTEMMED_SUGGEST_LANGUAGES must not contain duplicate codes"
+        );
+        assert!(
+            stemmed.is_disjoint(&unstemmed),
+            "a suggest language must not be both stemmed and unstemmed"
+        );
+        assert!(
+            shipped_codes
+                .iter()
+                .all(|code| stemmed.contains(code) ^ unstemmed.contains(code)),
+            "every shipped Search API language field type must have exactly one suggest chain"
+        );
+        let expected_unstemmed: BTreeSet<String> =
+            shipped_codes.difference(&stemmed).cloned().collect();
+        assert_eq!(
+            unstemmed, expected_unstemmed,
+            "unstemmed suggest languages must be exactly the shipped codes without Tantivy stemmers"
         );
     }
 

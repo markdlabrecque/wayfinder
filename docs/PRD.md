@@ -152,6 +152,13 @@ historical Solr fixture evidence. The numbering is stable for existing citations
     one value per resolved language, and `WayfinderBackend::getSuggesterAutocompleteSuggestions()`
     consumes every dictionary key under `suggest` (issue #398).
 
+14. **Search API language dictionaries without Tantivy stemmers use an unstemmed chain.** Each
+    shipped Search API language field-type code remains its own `suggest.dictionary` response key
+    and uses tokenize, accent-fold, word-delimit, and lowercase analysis without stemming. This
+    serves languages such as `ja`, `pl`, and `zh-hans` instead of rejecting them or silently
+    substituting `und`; genuinely unconfigured dictionaries such as the frozen fixture's `xx`
+    remain a 400 (issue #397).
+
 ---
 
 ## 3. Configuration & schema
