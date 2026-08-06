@@ -96,27 +96,15 @@ fn create_older_analyzer_index(dir: &std::path::Path, toml: &str, tokenizer: &st
     let schema_path = dir.join("schema.toml");
     std::fs::write(&schema_path, toml).expect("write legacy schema");
     let wf_schema = schema::load(&schema_path).expect("legacy schema loads");
-    // Targets the CURRENT static-text_en identity (`wayfinder_text_en_v3` as
-    // of issue #388, previously `_v2`), so a caller-given older identity
+    // Targets the current static-text_en identity, so a caller-given older identity
     // (`wayfinder_text_en_v1`, bare `en_stem`, ...) actually lands in the
     // serialized schema in its place.
     let schema_json = serde_json::to_string(&wf_schema.tantivy_schema)
         .expect("serialize current Tantivy schema")
-        .replace("wayfinder_text_en_v3", tokenizer);
-    // As above, but for `_dynamic_text`'s CURRENT identity
-    // (`wayfinder_dynamic_text_v3` as of #388; it no longer coincides with
-    // static `text_en`'s v1 identity the way it did pre-#388). Swapped
-    // whenever the caller wants a truly historical shared identity on both
-    // paths at once: the fully pre-#51 bare `en_stem` state, or the v1/v2-era
-    // state in which `_dynamic_text` had not yet diverged from static
-    // `text_en`'s v1 identity (`wayfinder_text_en_v1` was the catch-all's
-    // identity through the v2 contract bump too -- only static `text_en`
-    // moved to `_v2`; see the `DYNAMIC_TEXT_TOKENIZER` doc comment in
-    // `src/schema.rs`). A caller building an all-raw-dynamic-rule schema (no
-    // static analyzed field at all, so the first replace above is a no-op)
-    // relies on this branch to land the retired identity on `_dynamic_text`.
+        .replace("wayfinder_text_en_v6", tokenizer)
+        .replace("wayfinder_dynamic_text_v6", tokenizer);
     let schema_json = if tokenizer == "en_stem" || tokenizer == "wayfinder_text_en_v1" {
-        schema_json.replace("wayfinder_dynamic_text_v3", tokenizer)
+        schema_json.replace("wayfinder_text_en_v1", tokenizer)
     } else {
         schema_json
     };
@@ -742,7 +730,7 @@ fn v1_marker_with_old_dynamic_postings_hidden_by_raw_snapshot_refuses_reindex() 
     let old = schema::load(&schema_path).expect("old analyzed schema loads");
     let legacy_schema_json = serde_json::to_string(&old.tantivy_schema)
         .expect("serialize old Tantivy schema")
-        .replace("wayfinder_dynamic_text_v3", "wayfinder_text_en_v1");
+        .replace("wayfinder_dynamic_text_v6", "wayfinder_text_en_v1");
     assert!(
         legacy_schema_json.contains("wayfinder_text_en_v1"),
         "test setup: old catch-all must persist its v1 tokenizer identity"
@@ -848,8 +836,8 @@ stored = true
         .expect("a v1 index with no changed analyzer path must remain adoptable");
     assert_eq!(
         std::fs::read_to_string(marker).expect("read upgraded analyzer contract"),
-        schema::ANALYZER_CONTRACT,
-        "safe v1 adoption must persist the current analyzer contract"
+        schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT,
+        "safe v1 adoption must retain the legacy dynamic analyzer contract"
     );
 
     // Issue #388 follow-up: this schema's raw (`string`) `[[dynamic_fields]]`
@@ -989,8 +977,8 @@ stored = true
         .expect_err("activating an analyzed rule on the old en_stem catch-all must reindex");
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("text_en") && msg.to_lowercase().contains("reindex"),
-        "legacy dynamic refusal must identify text_en and reindexing, got: {msg}"
+        msg.to_lowercase().contains("uax #29") && msg.to_lowercase().contains("reindex"),
+        "legacy dynamic refusal must identify the current UAX #29 contract and reindexing, got: {msg}"
     );
 }
 
@@ -1055,12 +1043,14 @@ async fn v1_marker_on_all_raw_dynamic_schema_adopts_rewrites_and_writes() {
          under a v1 marker",
     );
 
-    // 2. the marker is rewritten to the current (v3) contract.
+    // 2. The marker records that the persisted catch-all still names a legacy
+    // tokenizer. Raw writes remain safe, but later enabling analyzed dynamic
+    // rules must fail closed instead of falsely claiming the current chain.
     assert_eq!(
         std::fs::read_to_string(&marker).expect("read upgraded analyzer contract"),
-        schema::ANALYZER_CONTRACT,
-        "safe v1 adoption of an all-raw-dynamic-rule index must persist the current analyzer \
-         contract"
+        schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT,
+        "safe v1 adoption of an all-raw-dynamic-rule index must retain the legacy dynamic \
+         analyzer contract"
     );
 
     // 3. a subsequently POSTed and committed document returns 200 -- the
@@ -1078,6 +1068,18 @@ async fn v1_marker_on_all_raw_dynamic_schema_adopts_rewrites_and_writes() {
         StatusCode::OK,
         "a doc through the all-raw-dynamic `_dynamic_text` catch-all must write after safe v1 \
          adoption, got: {body:?}"
+    );
+    drop(app);
+
+    let analyzed_dynamic = ALL_RAW_DYNAMIC_SCHEMA_TOML.replace(
+        "pattern = \"*_s\"\ntype = \"string\"",
+        "pattern = \"*_s\"\ntype = \"text_general\"",
+    );
+    let err = common::app_with_schema(dir.path(), &analyzed_dynamic)
+        .expect_err("a legacy catch-all must not become analyzed under a current marker");
+    assert!(
+        format!("{err:#}").contains("reindex"),
+        "the unsafe rule change must clearly require reindexing: {err:#}"
     );
 }
 
@@ -1103,12 +1105,12 @@ async fn v2_marker_on_all_raw_dynamic_schema_adopts_rewrites_and_writes() {
          under a v2 marker",
     );
 
-    // 2. the marker is rewritten to the current (v3) contract.
+    // 2. the marker retains the persisted catch-all's legacy identity.
     assert_eq!(
         std::fs::read_to_string(&marker).expect("read upgraded analyzer contract"),
-        schema::ANALYZER_CONTRACT,
-        "safe v2 adoption of an all-raw-dynamic-rule index must persist the current analyzer \
-         contract"
+        schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT,
+        "safe v2 adoption of an all-raw-dynamic-rule index must retain the legacy dynamic \
+         analyzer contract"
     );
 
     // 3. the load-bearing write assertion -- see the v1 sibling test above.
@@ -1234,12 +1236,12 @@ stored = true
     // track whatever the CURRENT identity is.
     let legacy_schema_json = serde_json::to_string(&current.tantivy_schema)
         .expect("serialize current Tantivy schema")
-        .replace("wayfinder_dynamic_text_v3", "en_stem");
+        .replace("wayfinder_dynamic_text_v6", "en_stem");
     assert!(
         legacy_schema_json.contains("_dynamic_text")
             && legacy_schema_json.contains("en_stem")
-            && !legacy_schema_json.contains("wayfinder_dynamic_text_v3"),
-        "test setup: materialize the old `_dynamic_text` tokenizer identity"
+            && !legacy_schema_json.contains("wayfinder_dynamic_text_v6"),
+        "test setup: materialize the pre-UAX #29 `_dynamic_text` tokenizer identity"
     );
     let materialize_legacy = |root: &std::path::Path| {
         std::fs::write(root.join("schema.toml"), raw_only).expect("write legacy schema");
@@ -1402,6 +1404,322 @@ language = "english"
     );
 }
 
+// --- index/query analyzer split (issue #389 Phase 1) ------------------------
+//
+// Today `WayfinderSchema` (and every query-path caller in `core_index.rs`)
+// resolves exactly one analyzer per field type, used for both indexing and
+// query-time analysis. Solr's `text_en`/`text_und` genuinely differ between
+// the two (accent folding shared, but synonyms/WDGF catenation are query- or
+// index-only) -- see `an389_select_cat_joined_en` (2 docs) vs
+// `an389_select_cat_delim_en` (1 doc), findings 195-204. Phase 1 is the
+// structural prerequisite only: it introduces a second, query-side analyzer
+// identity per field type and a fallback when none is registered. It makes
+// **no** observable behaviour change to any existing chain.
+
+/// The core new capability: a `[[field_types]]` entry that registers a
+/// distinct query-side chain (`query_tokenizer` + `query_filters`) must
+/// resolve a genuinely different analyzer on `tokenize_query` than on
+/// `tokenize`. The index chain here has no stopword filter; the query chain
+/// does, so the difference is directly observable rather than incidental.
+#[test]
+fn field_type_query_analyzer_differs_from_index_analyzer() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "an389_split"
+tokenizer = "simple"
+query_tokenizer = "simple"
+[[field_types.filters]]
+kind = "lowercase"
+[[field_types.query_filters]]
+kind = "lowercase"
+[[field_types.query_filters]]
+kind = "stopwords"
+language = "english"
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let wf = schema::load(&path).expect("schema loads");
+
+    let index_tokens = wf
+        .tokenize("an389_split", "The Cat Sat")
+        .expect("index analyzer must be registered");
+    let query_tokens = wf
+        .tokenize_query("an389_split", "The Cat Sat")
+        .expect("query analyzer must be registered");
+
+    assert_eq!(
+        index_tokens,
+        vec!["the", "cat", "sat"],
+        "the index chain carries no stopword filter and must keep every token, got {index_tokens:?}"
+    );
+    assert_eq!(
+        query_tokens,
+        vec!["cat", "sat"],
+        "the query chain carries an English stopword filter and must drop \
+         `the`; Phase 1 must resolve a distinct query analyzer instead of \
+         reusing the index one (issue #389), got {query_tokens:?}"
+    );
+    assert_ne!(
+        index_tokens, query_tokens,
+        "a field type with a deliberately different query chain must analyze \
+         differently on the two paths"
+    );
+}
+
+/// Fallback rule: when a `[[field_types]]` entry registers no
+/// `query_tokenizer` at all, the query path must resolve exactly the index
+/// analyzer -- not merely an analyzer that happens to produce the same
+/// tokens for one sample input, but the *same registered chain*, checked
+/// here across several inputs including ones a stopword/stemmer difference
+/// would expose.
+#[test]
+fn field_type_with_no_query_tokenizer_falls_back_to_index_analyzer() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "an389_no_query_chain"
+tokenizer = "simple"
+[[field_types.filters]]
+kind = "lowercase"
+[[field_types.filters]]
+kind = "stopwords"
+language = "english"
+[[field_types.filters]]
+kind = "stemmer"
+language = "english"
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let wf = schema::load(&path).expect("schema loads");
+
+    for sample in ["The Quick Runners", "a b c", "Café", ""] {
+        assert_eq!(
+            wf.tokenize_query("an389_no_query_chain", sample),
+            wf.tokenize("an389_no_query_chain", sample),
+            "with no `query_tokenizer` configured, the query path must fall \
+             back to the index analyzer exactly, for input {sample:?}"
+        );
+    }
+}
+
+/// Every existing built-in chain must be unaffected: `text_en` and
+/// `text_general` register no query-side identity in Phase 1, so their query
+/// analyzer must resolve to the same tokens the index analyzer already
+/// produces (the real regression guard for both is
+/// `text_presets_tokenize_as_expected` above; this only pins that the new
+/// `tokenize_query` seam does not change their behaviour).
+#[test]
+fn builtin_text_presets_query_analyzer_is_unaffected() {
+    let (_dir, path) = write_schema(FULL_SCHEMA_TOML);
+    let wf = schema::load(&path).expect("schema loads");
+
+    for type_name in ["text_en", "text_general"] {
+        for sample in ["The Quick Runners", "Café Central", ""] {
+            assert_eq!(
+                wf.tokenize_query(type_name, sample),
+                wf.tokenize(type_name, sample),
+                "`{type_name}` registers no query analyzer in Phase 1, so \
+                 `tokenize_query` must equal `tokenize` for input {sample:?}"
+            );
+        }
+    }
+}
+
+/// The `wayfinder_suggest_*` chains (issue #384) are a second, non-field-type
+/// seam onto the same `TokenizerManager`: `dictionary_tokenizer` gives the
+/// raw tokenizer identity `suggest_lookup` resolves through directly, not a
+/// `[[field_types]]` name. Phase 1's lookup must leave that identity
+/// unchanged for every dictionary code, so the `/suggest` read path keeps
+/// resolving exactly the chain it does today.
+#[test]
+fn suggest_dictionary_tokenizer_query_lookup_is_unaffected() {
+    let (_dir, path) = write_schema(FULL_SCHEMA_TOML);
+    let wf = schema::load(&path).expect("schema loads");
+
+    for code in ["en", "und", "fr", "nosuchcode"] {
+        let name = schema::dictionary_tokenizer(code);
+        assert_eq!(
+            wf.query_tokenizer_name(&name),
+            name,
+            "dictionary `{code}` resolves tokenizer identity `{name}`; Phase 1 \
+             registers no query variant for it, so the lookup must return the \
+             same identity unchanged"
+        );
+    }
+}
+
+/// Runs `text` through the analyzer registered under `identity` in `manager`,
+/// or `None` if nothing is registered under that name. Deliberately at the
+/// *identity* level rather than the field-type level: the `wayfinder_suggest_*`
+/// and `boost_term_payload` chains are not reachable through a `type = "..."`
+/// name, and they are exactly the ones Phases 2 and 4 will split.
+fn analyze(
+    manager: &tantivy::tokenizer::TokenizerManager,
+    identity: &str,
+    text: &str,
+) -> Option<Vec<String>> {
+    let mut analyzer = manager.get(identity)?;
+    let mut stream = analyzer.token_stream(text);
+    let mut out = Vec::new();
+    while stream.advance() {
+        out.push(stream.token().text.clone());
+    }
+    Some(out)
+}
+
+/// Phase 1 is behaviour-free by construction, and this is the direct statement
+/// of it: the query-side `TokenizerManager` must be analyzer-for-analyzer
+/// identical to the index-side one for **every** chain Wayfinder ships. Both
+/// managers are keyed by the same (index) identities, so this compares like with
+/// like; a shipped chain that started analyzing differently on the two sides
+/// would be an unannounced behaviour change, and a shipped identity missing from
+/// the query manager would make its query path resolve nothing at all.
+///
+/// Phases 2 and 4 are what make the text presets and the suggest chains
+/// legitimately differ; when they land, this test must be narrowed to the chains
+/// that are still single-analyzer, with the reason for each split stated. Until
+/// then it is the guard that Phase 1 shipped no behaviour.
+#[test]
+fn shipped_chains_analyze_identically_on_both_managers() {
+    let (_dir, path) = write_schema(FULL_SCHEMA_TOML);
+    let wf = schema::load(&path).expect("schema loads");
+
+    // Inputs chosen to expose every filter the shipped chains carry: case,
+    // stopwords, stemming, accents, length bounds, and the delimiter/case-number
+    // boundaries Phase 4's WDGF is about.
+    let samples = [
+        "The Quick Runners",
+        "Café Central",
+        "don't",
+        "wifi_router",
+        "ABC123",
+        "a",
+        "",
+    ];
+
+    // Every identity `build_tokenizers` registers that is not one of Tantivy's
+    // own defaults: the two `text_en` chains, the `boost_term_payload` pair, the
+    // per-language `text_<code>` presets (via `builtin_type_names`), and the
+    // per-dictionary suggest chains.
+    let mut identities = vec![
+        "default".to_string(),
+        "wayfinder_text_general_v3".to_string(),
+        "wayfinder_text_general_v4".to_string(),
+        "wayfinder_text_general_v5".to_string(),
+        "wayfinder_text_general_v6".to_string(),
+        "wayfinder_text_en_v1".to_string(),
+        "wayfinder_text_en_v2".to_string(),
+        "wayfinder_text_en_v3".to_string(),
+        "wayfinder_text_en_v4".to_string(),
+        "wayfinder_text_en_v5".to_string(),
+        "wayfinder_text_en_v6".to_string(),
+        "wayfinder_dynamic_text_v3".to_string(),
+        "wayfinder_dynamic_text_v4".to_string(),
+        "wayfinder_dynamic_text_v5".to_string(),
+        "wayfinder_dynamic_text_v6".to_string(),
+        "wayfinder_boost_term_payload_v1".to_string(),
+        "wayfinder_boost_term_payload_raw_v1".to_string(),
+    ];
+    // Each non-English preset retains its old unversioned identity plus the
+    // folding, UAX #29, and current word-delimiter versions.
+    identities.extend(schema::builtin_type_names().into_iter().flat_map(|name| {
+        if name.starts_with("text_") && name != "text_en" && name != "text_general" {
+            vec![
+                name.clone(),
+                format!("wayfinder_{name}_v4"),
+                format!("wayfinder_{name}_v5"),
+                format!("wayfinder_{name}_v6"),
+            ]
+        } else {
+            Vec::new()
+        }
+    }));
+    // `dictionary_tokenizer` maps every language code plus the fallback onto its
+    // suggest identity, so this covers all of them without re-listing the table.
+    identities.extend(
+        ["en", "und", "fr", "ru", "ta", "nosuchcode"]
+            .into_iter()
+            .map(schema::dictionary_tokenizer),
+    );
+    // And the schema's own custom chains, whichever `FULL_SCHEMA_TOML` declares.
+    identities.extend(wf.field_types.iter().map(|ft| ft.name.clone()));
+
+    for identity in &identities {
+        for sample in samples {
+            let index_side = analyze(&wf.tokenizers, identity, sample);
+            let query_side = analyze(&wf.query_tokenizers, identity, sample);
+            assert!(
+                index_side.is_some(),
+                "`{identity}` must be registered in the index manager"
+            );
+            assert!(
+                query_side.is_some(),
+                "`{identity}` must be registered in the query manager too: the \
+                 query manager is keyed by index identity, so a missing entry \
+                 makes this chain's query path resolve no analyzer at all"
+            );
+            assert_eq!(
+                query_side, index_side,
+                "`{identity}` is a single-analyzer chain in Phase 1, so both \
+                 managers must hold the same analyzer for it -- input {sample:?}"
+            );
+        }
+    }
+}
+
+/// A `[[field_types]]` entry has two tokenizer keys accepting the same values,
+/// so an unsupported-tokenizer error that names neither leaves the operator
+/// guessing which line to fix. Each side's error must name its own key -- and
+/// the index-side one must NOT say `query_tokenizer`, which is the whole point.
+#[test]
+fn unsupported_tokenizer_error_names_the_side_it_came_from() {
+    for (index_tok, query_tok, expected_key, forbidden) in [
+        ("nosuchtokenizer", None, "`tokenizer`", "query_tokenizer"),
+        (
+            "simple",
+            Some("nosuchtokenizer"),
+            "`query_tokenizer`",
+            "on `tokenizer`",
+        ),
+    ] {
+        let query_line = query_tok
+            .map(|t| format!("query_tokenizer = \"{t}\"\n"))
+            .unwrap_or_default();
+        let toml = format!(
+            r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "an389_bad_tok"
+tokenizer = "{index_tok}"
+{query_line}"#
+        );
+        let (_dir, path) = write_schema(&toml);
+        let err = schema::load(&path).expect_err("an unsupported tokenizer must not load");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(expected_key),
+            "the error must name the key it came from ({expected_key}), got: {msg}"
+        );
+        assert!(
+            !msg.contains(forbidden),
+            "the error must not point at the other side ({forbidden}), got: {msg}"
+        );
+    }
+}
+
+/// `ANALYZER_CONTRACT` guards on-disk term compatibility. Phase 4 adds index
+/// terms for word parts and catenations, so its contract must advance past the
+/// UAX #29-only v5 marker.
+#[test]
+fn analyzer_contract_is_v6_after_phase_4_word_delimiter_terms() {
+    assert_eq!(
+        schema::ANALYZER_CONTRACT,
+        "text_presets_uax29_word_delimiter_v6",
+        "Phase 4 (issue #389) changes indexed word-delimiter terms, so the analyzer \
+         contract must identify v6"
+    );
+}
+
 #[test]
 fn custom_field_type_cannot_shadow_the_builtin_text_en_preset() {
     let toml = format!(
@@ -1421,23 +1739,42 @@ tokenizer = "simple"
 }
 
 #[test]
-fn custom_field_type_cannot_use_an_internal_text_en_tokenizer_identity() {
-    // Issue #388: static `text_en`/`text_general` and the `_dynamic_text`
-    // catch-all all move to new v3 tokenizer identities
-    // (`wayfinder_text_en_v3`, `wayfinder_text_general_v3`,
-    // `wayfinder_dynamic_text_v3`), because a tokenizer name is the on-disk
-    // analyzer identity. Old and new identities must ALL stay reserved so a
-    // custom `[[field_types]]` entry can never shadow one -- including
-    // `wayfinder_text_general_v3`, which is new territory: pre-#388,
-    // `text_general` resolved to Tantivy's own `default` tokenizer, not a
-    // Wayfinder-owned (and therefore reservable) identity at all.
-    for name in [
-        "wayfinder_text_en_v1",
-        "wayfinder_text_en_v2",
-        "wayfinder_text_en_v3",
-        "wayfinder_text_general_v3",
-        "wayfinder_dynamic_text_v3",
-    ] {
+fn custom_field_type_cannot_use_an_internal_analyzer_identity() {
+    let mut names = vec![
+        "default".to_string(),
+        "wayfinder_text_general_v3".to_string(),
+        "wayfinder_text_general_v4".to_string(),
+        "wayfinder_text_general_v5".to_string(),
+        "wayfinder_text_general_v6".to_string(),
+        "wayfinder_text_en_v1".to_string(),
+        "wayfinder_text_en_v2".to_string(),
+        "wayfinder_text_en_v3".to_string(),
+        "wayfinder_text_en_v4".to_string(),
+        "wayfinder_text_en_v5".to_string(),
+        "wayfinder_text_en_v6".to_string(),
+        "wayfinder_dynamic_text_v3".to_string(),
+        "wayfinder_dynamic_text_v4".to_string(),
+        "wayfinder_dynamic_text_v5".to_string(),
+        "wayfinder_dynamic_text_v6".to_string(),
+    ];
+    // Current and legacy non-English identities are both derived from
+    // LANGUAGES in production. Deriving the assertions from the exported
+    // built-in list prevents one newly-added language from becoming shadowable.
+    names.extend(
+        schema::builtin_type_names()
+            .into_iter()
+            .filter(|name| name.starts_with("text_") && name != "text_en" && name != "text_general")
+            .flat_map(|name| {
+                [
+                    name.clone(),
+                    format!("wayfinder_{name}_v3"),
+                    format!("wayfinder_{name}_v4"),
+                    format!("wayfinder_{name}_v5"),
+                    format!("wayfinder_{name}_v6"),
+                ]
+            }),
+    );
+    for name in names {
         let toml = format!(
             r#"{FULL_SCHEMA_TOML}
 [[field_types]]
@@ -1449,7 +1786,7 @@ tokenizer = "simple"
         let err = schema::load(&path)
             .expect_err("a custom field type must not overwrite an internal text_en tokenizer");
         assert!(
-            format!("{err:#}").contains(name),
+            format!("{err:#}").contains(name.as_str()),
             "reserved tokenizer-name error must identify `{name}`: {err:#}"
         );
     }
@@ -2874,3 +3211,40 @@ type = "location_rpt"
     // A name with no such field is `None`, not a panic.
     assert!(wf.location_fields("nope").is_none());
 }
+
+/// A `query_filters` chain with no `query_tokenizer` is silently dead config: a
+/// field type declaring no query tokenizer gets its *index* analyzer registered
+/// as its query analyzer too, so the declared query filters would never run.
+/// Fail closed instead (issue #389 Phase 1).
+#[test]
+fn query_filters_without_a_query_tokenizer_are_rejected() {
+    let toml = format!(
+        r#"{FULL_SCHEMA_TOML}
+[[field_types]]
+name = "an389_orphan_query_filters"
+tokenizer = "simple"
+[[field_types.filters]]
+kind = "lowercase"
+[[field_types.query_filters]]
+kind = "stopwords"
+language = "english"
+"#
+    );
+    let (_dir, path) = write_schema(&toml);
+    let err = schema::load(&path).expect_err("orphan query_filters must not load");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("query_filters") && msg.contains("query_tokenizer"),
+        "the error must name both keys so an operator knows which to add, got: {msg}"
+    );
+}
+
+// Deleted with its guard: `a_field_type_named_like_a_query_identity_is_rejected`
+// covered a collision that no longer exists. The query analyzers used to be
+// registered under a *derived* name (`wayfinder_query_<identity>_v1`) in the one
+// shared manager, so a custom field type could be named that. There is now a
+// second, complete manager keyed by the index identity, so the two sides no
+// longer share a namespace and there is nothing to collide with. The remaining
+// name guards -- `custom_field_type_cannot_shadow_the_builtin_text_en_preset`
+// and `custom_field_type_cannot_use_an_internal_text_en_tokenizer_identity` --
+// still cover the shared *index* namespace, which does still exist.

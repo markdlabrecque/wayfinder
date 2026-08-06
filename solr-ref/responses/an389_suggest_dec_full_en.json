@@ -1,0 +1,12 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1},
+  "suggest":{
+    "en":{
+      "3.14":{
+        "numFound":1,
+        "suggestions":[{
+            "term":"<b>3.14</b> radians",
+            "weight":0,
+            "payload":""}]}}}}

@@ -54,6 +54,14 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "s
 toml = "1.1.3"
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.6", features = ["catch-panic", "trace"] }
+# Unicode NFKD plus the General_Category=Mn table implement search-quality
+# accent folding without a fragile, incomplete hand-maintained mapping table (#389).
+unicode-normalization = "0.1.25"
+# UAX #29 word segmentation supplies the search-quality tokenizer for built-in
+# text and suggest analyzers (#389), preserving Unicode word boundaries without
+# treating punctuation or whitespace as terms.
+unicode-segmentation = "1.12.0"
+unicode-properties = "0.1.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 

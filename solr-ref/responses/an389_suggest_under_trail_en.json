@@ -1,0 +1,9 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1},
+  "suggest":{
+    "en":{
+      "foo_":{
+        "numFound":0,
+        "suggestions":[]}}}}

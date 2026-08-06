@@ -227,18 +227,12 @@ fn assert_matches_mlt_fixture_ignoring_score_magnitude(actual: Value, fixture_na
     );
 }
 
-/// Real (un-blanked) `maxScore` semantics check, specific to the
-/// `mlt_fl_rows_start` fixture's own data: `blank_bm25_score_magnitudes`
-/// blanks *both* sides of the comparison above, so a regression that changes
-/// `response.maxScore` from "the corpus-wide max over the full unpaginated
-/// MLT hit set" (finding 67) to "the max over just the returned page" would
-/// still pass every blanked-equality assert in this file, including the
-/// manifest loop below. This asserts the real, un-blanked relationship
-/// instead: `response.maxScore` must exceed the returned page's own max
-/// score (this fixture's page, `start=1&rows=2`, never contains the
-/// corpus-wide top hit), and `match.maxScore` — the *one*-doc `match`
-/// block's summary — must equal its own single doc's score exactly.
-fn assert_mlt_fl_rows_start_maxscore_semantics(actual: &Value) {
+/// Real (un-blanked) `maxScore` semantics check. The paginated response must
+/// retain the same corpus-wide maximum as the equivalent unpaginated query.
+/// Comparing those responses remains valid when analyzer changes reorder hits;
+/// assuming the first page's top hit is absent from a particular later page
+/// does not. `match.maxScore` must still equal its one document's score.
+fn assert_mlt_fl_rows_start_maxscore_semantics(actual: &Value, unpaginated: &Value) {
     let response = actual
         .get("response")
         .expect("mlt_fl_rows_start's response must be present");
@@ -252,11 +246,16 @@ fn assert_mlt_fl_rows_start_maxscore_semantics(actual: &Value) {
         .as_f64()
         .expect("response.maxScore must be present when fl=score");
     assert!(
-        response_max_score > page_max_score,
-        "response.maxScore ({response_max_score}) must be the corpus-wide max over the full \
-         unpaginated MLT hit set, strictly greater than this fixture's own returned page's max \
-         ({page_max_score}) — equal would mean maxScore was (wrongly) recomputed over just the \
-         page"
+        response_max_score >= page_max_score,
+        "response.maxScore ({response_max_score}) must not be below the returned page maximum \
+         ({page_max_score})"
+    );
+    assert_eq!(
+        response_max_score,
+        unpaginated["response"]["maxScore"]
+            .as_f64()
+            .expect("unpaginated response.maxScore must be present"),
+        "pagination must preserve the corpus-wide response.maxScore"
     );
 
     let match_block = actual
@@ -424,7 +423,13 @@ async fn mlt_fl_rows_start_paginates_the_similar_docs_result_set() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_mlt_fl_rows_start_maxscore_semantics(&body);
+    let (full_status, unpaginated) = get(
+        &app,
+        "mlt?q=id:mlt11&mlt.fl=body&mlt.mintf=1&mlt.mindf=1&fl=id,score&rows=100&start=0&wt=json",
+    )
+    .await;
+    assert_eq!(full_status, StatusCode::OK);
+    assert_mlt_fl_rows_start_maxscore_semantics(&body, &unpaginated);
     assert_matches_mlt_fixture_ignoring_score_magnitude(body, "mlt_fl_rows_start");
 }
 
@@ -1283,9 +1288,6 @@ async fn hermetic_mlt_fixture_requests_match_committed_fixtures() {
         const SCORE_MAGNITUDE_EXEMPT: &[&str] = &["mlt_fl_rows_start", "mlt_fl_wildcard_score"];
         let (expected, actual) = if SCORE_MAGNITUDE_EXEMPT.contains(&name) {
             let normalized_actual = normalize_mlt(actual);
-            if name == "mlt_fl_rows_start" {
-                assert_mlt_fl_rows_start_maxscore_semantics(&normalized_actual);
-            }
             (
                 blank_bm25_score_magnitudes(normalize_mlt(fixture(name))),
                 blank_bm25_score_magnitudes(normalized_actual),
