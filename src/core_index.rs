@@ -839,7 +839,7 @@ impl CoreIndex {
         // a fresh index into a legacy one.
         let has_snapshot = snapshot.exists();
         let (
-            _previous_static_text_en,
+            previous_static_text_length_bounded,
             previous_static_accent_folded_text,
             previous_analyzed_dynamic,
             previous_has_dynamic_fields,
@@ -855,7 +855,7 @@ impl CoreIndex {
             let previous_schema = schema::parse(&previous)
                 .context("parsing the index's stored schema for its analyzer contract")?;
             (
-                previous_schema.uses_static_text_en(),
+                previous_schema.uses_changed_static_text(),
                 previous_schema.uses_static_accent_folded_text(),
                 previous_schema.uses_analyzed_dynamic_path(),
                 previous_schema.has_dynamic_fields(),
@@ -865,10 +865,13 @@ impl CoreIndex {
         };
 
         // The v3/v4 folding releases changed built-in and dynamic text terms;
-        // v5 replaces their tokenizer with UAX #29 word segmentation. A marker
-        // or tokenizer identity from an earlier contract must never be adopted
-        // for any path that can contain those old terms.
+        // v5 replaces their tokenizer with UAX #29 word segmentation; and v7
+        // changes only static `text_en`/`text_general` length filtering. A
+        // marker or tokenizer identity from an earlier contract must never be
+        // adopted for a path that can contain changed terms.
         let analyzer_contract = schema::analyzer_contract_path(data_dir);
+        let uses_static_text_length_bounded =
+            wf_schema.uses_changed_static_text() || previous_static_text_length_bounded;
         let uses_static_accent_folded_text =
             wf_schema.uses_static_accent_folded_text() || previous_static_accent_folded_text;
         let uses_analyzed_dynamic =
@@ -896,6 +899,37 @@ impl CoreIndex {
             })?;
             match persisted.trim() {
                 schema::ANALYZER_CONTRACT => None,
+                schema::ANALYZER_CONTRACT_V6 if uses_static_text_length_bounded => {
+                    bail!(
+                        "the index in {} uses the v6 static text analyzer contract; reindex into a fresh data directory for the current length bound",
+                        data_dir.display()
+                    );
+                }
+                // v7 changes neither dynamic text nor non-English static
+                // presets, so a complete v6 contract can be advanced without
+                // treating those unaffected paths as stale.
+                schema::ANALYZER_CONTRACT_V6 => Some(schema::ANALYZER_CONTRACT),
+                schema::ANALYZER_CONTRACT_V6_LEGACY_DYNAMIC_TEXT
+                    if uses_static_text_length_bounded =>
+                {
+                    bail!(
+                        "the index in {} uses the v6 static text analyzer contract; reindex into a fresh data directory for the current length bound",
+                        data_dir.display()
+                    );
+                }
+                // The legacy-dynamic marker records a pre-v6 dynamic identity.
+                // It remains unsafe only for a configured analyzed-dynamic
+                // path; v7's static length change does not affect anything
+                // else covered by this marker.
+                schema::ANALYZER_CONTRACT_V6_LEGACY_DYNAMIC_TEXT if uses_analyzed_dynamic => {
+                    bail!(
+                        "the index in {} has a legacy _dynamic_text analyzer contract; reindex into a fresh data directory",
+                        data_dir.display()
+                    );
+                }
+                schema::ANALYZER_CONTRACT_V6_LEGACY_DYNAMIC_TEXT => {
+                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
+                }
                 schema::ANALYZER_CONTRACT_V5 if uses_changed_analyzed_path => {
                     bail!(
                         "the index in {} uses the pre-word-delimiter text analyzer contract; reindex into a fresh data directory",
@@ -912,7 +946,15 @@ impl CoreIndex {
                 schema::ANALYZER_CONTRACT_V5_LEGACY_DYNAMIC_TEXT => {
                     Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
                 }
-                schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT if uses_changed_analyzed_path => {
+                schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT
+                    if uses_static_text_length_bounded =>
+                {
+                    bail!(
+                        "the index in {} uses a static text analyzer contract older than v7; reindex into a fresh data directory for the current length bound",
+                        data_dir.display()
+                    );
+                }
+                schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT if uses_analyzed_dynamic => {
                     bail!(
                         "the index in {} predates the current UAX #29 text analyzer contract; reindex into a fresh data directory",
                         data_dir.display()
