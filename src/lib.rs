@@ -4410,11 +4410,11 @@ async fn suggest(
             // back (`suggest_q_dict_unknown.json`, finding 195). An absent
             // `suggest.dictionary` defaults to `und`; explicit values are
             // validated together before any lookup so no partial response can
-            // be assembled. The configured set is per-language (`LANGUAGES` +
-            // `und`, one suggester per installed language field type) -- see
-            // `schema::is_configured_suggester` for the
-            // `text_fr_7_0_0.yml` evidence that `en`/`und` alone is a capture
-            // artifact, not the contract.
+            // be assembled. The configured set includes each Tantivy-stemmed
+            // language and each shipped Search API language field type without
+            // a Tantivy stemmer, plus `und`; see `schema::is_configured_suggester`
+            // for the per-code registrations that make `en`/`und` alone a
+            // capture artifact, not the contract.
             for dictionary in &dictionaries {
                 if !schema::is_configured_suggester(dictionary) {
                     return Err(WfError::bad_request(

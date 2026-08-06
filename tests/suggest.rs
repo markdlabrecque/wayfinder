@@ -1177,6 +1177,31 @@ async fn suggest_q_per_language_dictionary_is_served() {
     }
 }
 
+/// A valid Drupal langcode with no Tantivy stemmer uses an unstemmed suggest
+/// analyzer. `zh-hans` must keep its requested key and produce actual
+/// prefix results from the corpus, rather than merely being admitted.
+#[tokio::test]
+async fn suggest_q_non_stemming_drupal_language_is_served_with_results() {
+    let (app, _dir) = suggest_lookup_app().await;
+    let (status, body) = get(
+        &app,
+        "suggest?suggest.dictionary=zh-hans&suggest.q=qui&wt=json",
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a valid non-stemming Drupal langcode must be served, got {status}: {body}"
+    );
+    assert_eq!(
+        body.pointer("/suggest/zh-hans/qui/numFound")
+            .and_then(Value::as_u64),
+        Some(3),
+        "zh-hans must use the unstemmed analyzer and return the corpus's three `qui` prefix results: {body}"
+    );
+}
+
 /// Repeated dictionaries are validated as a set before any lookup runs, so a
 /// later unknown name cannot leak a partial result for an earlier valid name.
 #[tokio::test]
