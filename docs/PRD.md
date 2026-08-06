@@ -147,6 +147,11 @@ historical Solr fixture evidence. The numbering is stable for existing citations
     therefore disables highlighting when it is false, while an absent or true value highlights
     unless `suggest.cfq` engages a context filter (issue #400).
 
+13. **Repeated `suggest.dictionary` values each receive a response key.** This is a Wayfinder
+    client contract rather than captured Solr behavior: the multilingual suggester request sends
+    one value per resolved language, and `WayfinderBackend::getSuggesterAutocompleteSuggestions()`
+    consumes every dictionary key under `suggest` (issue #398).
+
 ---
 
 ## 3. Configuration & schema

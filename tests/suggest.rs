@@ -1176,3 +1176,69 @@ async fn suggest_q_per_language_dictionary_is_served() {
         );
     }
 }
+
+/// Repeated dictionaries are validated as a set before any lookup runs, so a
+/// later unknown name cannot leak a partial result for an earlier valid name.
+#[tokio::test]
+async fn suggest_q_repeated_dictionaries_reject_unknown_without_partial_results() {
+    let (app, _dir) = suggest_lookup_app().await;
+    let (status, body) = get(
+        &app,
+        "suggest?suggest.dictionary=de&suggest.dictionary=xx&suggest.q=qui&wt=json",
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unknown repeated dictionary must answer 400: {body}"
+    );
+    assert_eq!(
+        body["error"]["msg"], "No suggester named xx was configured",
+        "the error must name the unknown dictionary: {body}"
+    );
+    assert!(
+        body.get("suggest").is_none(),
+        "validation must happen before lookup so no partial result is returned: {body}"
+    );
+}
+
+/// A multilingual client can repeat `suggest.dictionary`; each requested
+/// dictionary receives its own query result. This is a Wayfinder/client
+/// contract, independent of the frozen single-dictionary Solr fixtures.
+#[tokio::test]
+async fn suggest_q_repeated_dictionaries_return_one_result_per_dictionary() {
+    let (app, _dir) = suggest_lookup_app().await;
+    let (status, body) = get(
+        &app,
+        "suggest?suggest.dictionary=de&suggest.dictionary=fr&suggest.q=qui&wt=json",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "lookup must answer 200: {body}");
+    let dictionaries = body["suggest"]
+        .as_object()
+        .expect("suggest must be an object");
+    assert_eq!(
+        dictionaries.len(),
+        2,
+        "suggest must contain exactly the two requested dictionaries: {body}"
+    );
+    for dictionary in ["de", "fr"] {
+        let results = dictionaries
+            .get(dictionary)
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| {
+                panic!("suggest must contain a `{dictionary}` result object: {body}")
+            });
+        assert_eq!(
+            results.len(),
+            1,
+            "{dictionary} must contain one result object for the query: {body}"
+        );
+        assert!(
+            results.contains_key("qui"),
+            "{dictionary} must contain the `qui` result object: {body}"
+        );
+    }
+}
