@@ -26,15 +26,15 @@ The Cargo test suite has no Docker or network dependency.
 - Round 2 approved the code because that evidence is explicitly retained as post-merge operational work.
 - No code findings remain. No accepted implementation deviations were recorded.
 
-## Pending post-merge evidence and risks
+## Post-merge operational evidence
 
-The following steps remain pending and are not claimed as passed:
+- PR [#414](https://github.com/markdlabrecque/wayfinder/pull/414) merged as `59d83daa`.
+- Main CI [run 31078404628](https://github.com/markdlabrecque/wayfinder/actions/runs/31078404628) passed all required jobs.
+- Release [`v0.1.0`](https://github.com/markdlabrecque/wayfinder/releases/tag/v0.1.0) was published.
+- Publish [run 31078672486](https://github.com/markdlabrecque/wayfinder/actions/runs/31078672486) passed the native `arm64` job on `ubuntu-24.04-arm`, the native `amd64` job on `ubuntu-latest`, and the manifest merge job.
+- The [Wayfinder container package](https://github.com/markdlabrecque/wayfinder/pkgs/container/wayfinder) reports **Public**. Premise correction: it was already public on first inspection, so no manual private-to-public transition was necessary or possible. An anonymous clean-context pull with an empty temporary `DOCKER_CONFIG` succeeded. The release tag digest is `sha256:7d653a8b6f57ee669966512a466989cb9cc9d724b0b46b623fb7de47cce00687`.
+- `docker buildx imagetools inspect` showed `linux/amd64` digest `sha256:aaf135158ab0608b03d23cb951dc257e833b5ad7f7a963dd4ffc0fbcb7bf8e8d` and `linux/arm64` digest `sha256:25c5f7301f2637bc105a7361761f8caa058416641c377733fe4732ff6ed64025`, plus the expected `unknown/unknown` attestations.
+- On an actual Apple Silicon host, `uname -m` returned `arm64`; the pulled image ran as architecture `arm64`. The container started with `/presets/search-api.toml /data 0.0.0.0:8983`, mounted a temporary data volume, and `/wayfinder/content/admin/ping?wt=json` returned status `0` / `OK`. The mounted volume contained `wayfinder-schema.toml`, Tantivy locks and metadata, the analyzer contract, and `.managed.json`.
+- One initial harness check incorrectly expected `schema.snapshot.json` and exited `1` after the ping had already passed. The corrected check verified the actual nonempty persisted volume, and the full rerun passed.
 
-1. Publish a release tag.
-2. Set the GHCR package public once.
-3. Verify an anonymous pull.
-4. Verify the published manifest contains both `amd64` and `arm64`.
-5. Run the image with `/presets/search-api.toml`, a data volume, and a successful ping.
-6. Run the published image on actual arm64 hardware.
-
-Until these steps complete, public registry visibility, manifest composition, packaged-preset startup, persistent-volume operation, health behavior, and actual arm64 runtime compatibility remain operational risks. There are no other deferred follow-ups.
+No unresolved risks or deferred follow-ups remain.
