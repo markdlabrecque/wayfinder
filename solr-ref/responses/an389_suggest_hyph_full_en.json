@@ -1,0 +1,12 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":9},
+  "suggest":{
+    "en":{
+      "e-mail":{
+        "numFound":1,
+        "suggestions":[{
+            "term":"e-<b>mail</b> settings",
+            "weight":0,
+            "payload":""}]}}}}

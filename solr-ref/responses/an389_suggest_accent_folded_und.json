@@ -1,0 +1,12 @@
+{
+  "responseHeader":{
+    "status":0,
+    "QTime":1},
+  "suggest":{
+    "und":{
+      "cafe":{
+        "numFound":1,
+        "suggestions":[{
+            "term":"<b>Café</b> Central",
+            "weight":0,
+            "payload":""}]}}}}

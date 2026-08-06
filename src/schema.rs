@@ -9,7 +9,7 @@
 //! Out of scope (PRD §3): runtime schema mutation, `schema.xml`, per-field
 //! similarity.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -19,9 +19,15 @@ use tantivy::schema::{
     Schema, TextFieldIndexing, TextOptions,
 };
 use tantivy::tokenizer::{
-    Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer, StopWordFilter, TextAnalyzer,
-    Token, TokenFilter, TokenStream, Tokenizer, TokenizerManager, WhitespaceTokenizer,
+    Language, LowerCaser, RawTokenizer, RemoveLongFilter, SimpleTokenizer, Stemmer, StopWordFilter,
+    TextAnalyzer, Token, TokenFilter, TokenStream, Tokenizer, TokenizerManager,
+    WhitespaceTokenizer,
 };
+use unicode_normalization::UnicodeNormalization;
+use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::synonyms::SynonymResource;
 
 /// Catch-all Tantivy field holding every document field that resolved through a
 /// `[[dynamic_fields]]` pattern to a non-analyzed type (string/keyword/numeric/
@@ -124,53 +130,58 @@ pub fn builtin_type_names() -> Vec<String> {
     names
 }
 
-/// Wayfinder's versioned stemmer-free analyzer: simple tokenizer, the
-/// configset's character-counted length bound, then Lucene's simple (1:1) case
-/// folding. It stands in for the shipped configset's `text_und`, which has no
-/// stemmer and whose `stopwords_und.txt` is empty. Before #388 this was
-/// Tantivy's built-in `default` analyzer, which has neither bound nor simple
-/// folding; owning the identity is what lets the on-disk analyzer contract see
-/// the change.
-const TEXT_GENERAL_TOKENIZER: &str = "wayfinder_text_general_v3";
-/// Wayfinder's versioned Solr-compatible English analyzer: simple tokenizer,
-/// the configset's length bound, simple lowercase, English stopword removal,
-/// then Porter-compatible stemming. It intentionally does not override
-/// Tantivy's `en_stem`, which remains available for custom analyzer chains and
-/// upstream defaults.
-const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v3";
-/// The shared dynamic-text catch-all retains the pre-v2 Snowball analyzer.
-/// Drupal Search API's captured configset uses Snowball and preserves singular
-/// `day`; all analyzed dynamic rules share this one tokenizer in Tantivy.
-/// #388 gave it its own name: it carried static `text_en`'s v1 identity while
-/// the two chains happened to coincide, and they no longer do.
-const DYNAMIC_TEXT_TOKENIZER: &str = "wayfinder_dynamic_text_v3";
-/// The pre-#388 `text_en` identities. Both are still *registered*, as aliases
-/// of the chain that replaced each (see `build_tokenizers`), because a
-/// tokenizer name lives in the persisted Tantivy schema: an index that predates
-/// #388 and is legitimately adopted without a reindex still names one of these
-/// on its `_dynamic_text` catch-all, and a name the manager cannot resolve
-/// turns every later write into `Error getting tokenizer for field:
-/// _dynamic_text`. They also stay in the reserved list below, so a custom
-/// `[[field_types]]` entry still cannot redefine one.
-///
-/// `wayfinder_text_en_v1` was *both* the v1 static `text_en` identity and the
-/// `_dynamic_text` catch-all identity through v2; `wayfinder_text_en_v2` was
-/// the v2 static `text_en` identity.
-const TEXT_EN_TOKENIZER_V1: &str = "wayfinder_text_en_v1";
+/// Versioned UAX #29 `text_general` identity. `default` and v3 remain
+/// registered for legacy-index diagnosis; newly-built fields record v4.
+const TEXT_GENERAL_TOKENIZER: &str = "wayfinder_text_general_v6";
+const TEXT_GENERAL_TOKENIZER_V5: &str = "wayfinder_text_general_v5";
+const TEXT_GENERAL_TOKENIZER_V4: &str = "wayfinder_text_general_v4";
+const TEXT_GENERAL_TOKENIZER_V3: &str = "wayfinder_text_general_v3";
+const TEXT_GENERAL_TOKENIZER_LEGACY: &str = "default";
+/// Wayfinder's versioned English analyzer uses UAX #29 word segmentation,
+/// then long-token removal, lowercase, English stopword removal, and stemming.
+/// It intentionally does not override Tantivy's `en_stem`, which remains
+/// available for custom analyzer chains and upstream defaults.
+const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v6";
+/// The Phase-3 predecessor remains registered only so a legacy Tantivy schema
+/// can be diagnosed safely; no newly-built field records this identity.
+const TEXT_EN_TOKENIZER_V5: &str = "wayfinder_text_en_v5";
+/// The Phase-2 predecessor remains registered only so a legacy Tantivy schema
+/// can be diagnosed safely; no newly-built field records this identity.
+const TEXT_EN_TOKENIZER_V4: &str = "wayfinder_text_en_v4";
+/// The #388 predecessor remains registered for migration diagnosis.
+const TEXT_EN_TOKENIZER_V3: &str = "wayfinder_text_en_v3";
 const TEXT_EN_TOKENIZER_V2: &str = "wayfinder_text_en_v2";
-/// Built from the two consts above so the reservation list cannot drift from
-/// the set that is actually registered.
-const RETIRED_TEXT_TOKENIZERS: [&str; 2] = [TEXT_EN_TOKENIZER_V1, TEXT_EN_TOKENIZER_V2];
+/// The versioned dynamic-text catch-all retains Search API's Snowball behavior
+/// while using UAX #29 segmentation. Earlier identities remain registered only
+/// for legacy-index diagnosis.
+const DYNAMIC_TEXT_TOKENIZER: &str = "wayfinder_dynamic_text_v6";
+const DYNAMIC_TEXT_TOKENIZER_V5: &str = "wayfinder_dynamic_text_v5";
+const DYNAMIC_TEXT_TOKENIZER_V4: &str = "wayfinder_dynamic_text_v4";
+const DYNAMIC_TEXT_TOKENIZER_V3: &str = "wayfinder_dynamic_text_v3";
+const DYNAMIC_TEXT_TOKENIZER_V1: &str = "wayfinder_text_en_v1";
+const RETIRED_TEXT_TOKENIZERS: [&str; 5] = [
+    DYNAMIC_TEXT_TOKENIZER_V1,
+    TEXT_EN_TOKENIZER_V2,
+    TEXT_EN_TOKENIZER_V3,
+    TEXT_EN_TOKENIZER_V4,
+    TEXT_EN_TOKENIZER_V5,
+];
 
-/// `LengthFilterFactory min/max` on every text field type in the shipped
-/// `search_api_solr` configset (`schema_extra_types.xml`), applied on both the
-/// index and query analyzers. Both bounds are in *characters*, as Lucene's
-/// `LengthFilter` measures them, and both are inclusive (#388). They bound the
-/// `_dynamic_text` catch-all only -- the static presets follow Solr's `_default`
-/// configset, which has no `LengthFilterFactory` at all (see
-/// `build_tokenizers`).
-const TEXT_MIN_TOKEN_LEN: usize = 2;
-const TEXT_MAX_TOKEN_LEN: usize = 100;
+fn language_tokenizer(code: &str) -> String {
+    format!("wayfinder_text_{code}_v6")
+}
+
+fn language_tokenizer_v4(code: &str) -> String {
+    format!("wayfinder_text_{code}_v4")
+}
+
+fn language_tokenizer_v5(code: &str) -> String {
+    format!("wayfinder_text_{code}_v5")
+}
+
+fn legacy_language_tokenizer(code: &str) -> String {
+    format!("text_{code}")
+}
 
 /// `boost_term_payload`'s **indexing** analyzer: the module's front half
 /// (whitespace, length min=2/max=100, lowercase, remove-duplicates) followed by
@@ -196,42 +207,46 @@ pub const BOOST_TERM_PAYLOAD_DELIMITER: char = '|';
 const BOOST_TERM_PAYLOAD_MIN_LEN: usize = 2;
 const BOOST_TERM_PAYLOAD_MAX_LEN: usize = 100;
 
-/// `LengthFilterFactory min/max` on the shipped `suggestAnalyzerFieldType`
-/// chains (`text_en` / `text_und` in `schema_extra_types.xml`). The lower bound
-/// is observable on the read path: a one-character `suggest.q` analyzes to
-/// nothing and returns zero suggestions (`suggest_q_multibyte_prefix_en`,
-/// `suggest_q_multibyte_onechar_en`).
-/// Both bounds are in *characters*, as Lucene's `LengthFilter` measures them,
-/// and both are inclusive. The upper bound is the binding one on long tokens:
-/// the suggest chain deliberately carries no byte-based `RemoveLongFilter`, so
-/// a 45-byte ASCII token or a 14-character CJK token survives here exactly as
-/// it does in Solr.
-const SUGGEST_MIN_TOKEN_LEN: usize = 2;
+/// Search-quality upper bound on `wayfinder_suggest_*` terms. It is measured
+/// in characters and inclusive; the chains deliberately carry no byte-based
+/// `RemoveLongFilter`, so a 45-byte ASCII token or a 14-character CJK token
+/// survives. There is intentionally no lower bound: one-character and CJK
+/// tokens are meaningful (#389 Phase 3).
 const SUGGEST_MAX_TOKEN_LEN: usize = 100;
 /// The `suggest.dictionary` value the shipped `solr.SuggestComponent` gives the
 /// stemmer-free `text_und` analyzer, and the fallback for any code Wayfinder has
 /// no stemmer for.
 const SUGGEST_UNDEFINED_DICTIONARY: &str = "und";
 
-/// The on-disk analyzer contract for indexes built with Wayfinder's current
-/// analyzed-text chains: the Porter-compatible English preset plus #388's
-/// configset length bound and simple case folding on all three of `text_en`,
-/// `text_general`, and the `_dynamic_text` catch-all. This is separate from
-/// Tantivy's schema: it lets startup identify pre-contract indexes before their
-/// old tokenizer identity can be adopted.
-pub const ANALYZER_CONTRACT: &str = "text_en_solr_length_case_v3";
-/// The v2 marker: Porter-compatible `text_en`, but no length bound anywhere and
-/// Rust's full-Unicode lowercasing. Recognized explicitly during upgrade, so an
-/// index that cannot hold affected data is adopted while one that can fails
-/// closed.
-pub const ANALYZER_CONTRACT_V2: &str = "text_en_porter_compatible_v2";
-/// A safely adopted older index whose unused `_dynamic_text` catch-all still
-/// has an older tokenizer identity. It is not full certification at the current
-/// contract: a later rule that starts writing analyzed dynamic values must
-/// reindex. The value was minted at v2 and deliberately kept across v3 -- it
-/// means "safe legacy-dynamic adoption", not "certified at v2", and an index
-/// carrying it holds no analyzed data to be invalidated by a chain change.
+/// The on-disk analyzer contract for built-in text and dynamic analyzers using
+/// UAX #29 segmentation. This is separate from Tantivy's schema: it lets
+/// startup identify old term formats before their tokenizer identity can be
+/// adopted.
+pub const ANALYZER_CONTRACT: &str = "text_presets_uax29_word_delimiter_v6";
+/// A safely adopted index whose unused `_dynamic_text` catch-all still has an
+/// older tokenizer identity. It is not full v6 certification: a later rule
+/// that starts writing analyzed dynamic values must reindex.
 pub const ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT: &str =
+    "text_presets_uax29_word_delimiter_v6_legacy_dynamic_text";
+/// Phase 3's UAX #29 contract, superseded by Phase 4 word-delimiter terms.
+pub const ANALYZER_CONTRACT_V5: &str = "text_presets_uax29_v5";
+pub const ANALYZER_CONTRACT_V5_LEGACY_DYNAMIC_TEXT: &str =
+    "text_presets_uax29_v5_legacy_dynamic_text";
+/// Phase 2's accent-folding contract, superseded by UAX #29 segmentation in
+/// v5. It is recognized only to fail closed or safely adopt raw-only indexes.
+pub const ANALYZER_CONTRACT_V4: &str = "text_presets_accent_folding_v4";
+pub const ANALYZER_CONTRACT_V4_LEGACY_DYNAMIC_TEXT: &str =
+    "text_presets_accent_folding_v4_legacy_dynamic_text";
+/// The first folding contract changed static built-in text terms but left the
+/// dynamic catch-all unchanged. Its marker is recognized so static-only and
+/// raw-only indexes can upgrade safely while analyzed dynamic indexes reindex.
+pub const ANALYZER_CONTRACT_V3: &str = "text_en_solr_length_case_v3";
+/// Retained for indexes created by pre-release Phase 2 builds.
+pub const ANALYZER_CONTRACT_V3_LEGACY_DYNAMIC_TEXT: &str =
+    "text_en_porter_compatible_v3_legacy_dynamic_text";
+/// The pre-folding Porter-compatible contract.
+pub const ANALYZER_CONTRACT_V2: &str = "text_en_porter_compatible_v2";
+pub const ANALYZER_CONTRACT_V2_LEGACY_DYNAMIC_TEXT: &str =
     "text_en_porter_compatible_v2_legacy_dynamic_text";
 /// The v1 marker is recognized explicitly during upgrade, rather than treated
 /// as an unknown marker, so raw-only indexes can be adopted safely while
@@ -300,6 +315,16 @@ pub struct FieldTypeConfig {
     pub tokenizer: String,
     #[serde(default)]
     pub filters: Vec<FilterConfig>,
+    /// Issue #389 Phase 1 seam: a distinct query-time tokenizer, registered
+    /// alongside `tokenizer`'s index-time analyzer. `None` means this field
+    /// type has no separate query analyzer, so the query path must fall back
+    /// to the index one.
+    #[serde(default)]
+    pub query_tokenizer: Option<String>,
+    /// The filter chain for `query_tokenizer`. Only consulted when
+    /// `query_tokenizer` is `Some`.
+    #[serde(default)]
+    pub query_filters: Vec<FilterConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -342,6 +367,25 @@ pub struct WayfinderSchema {
     pub copy_fields: Vec<CopyFieldConfig>,
     pub field_types: Vec<FieldTypeConfig>,
     pub tokenizers: TokenizerManager,
+    /// The **query**-side twin of `tokenizers` (issue #389 Phase 1): a second,
+    /// complete manager in which every chain is registered under the *same*
+    /// identity it has in `tokenizers` — its **index** identity. A chain that
+    /// declares a query analyzer registers that analyzer here; a chain that does
+    /// not registers its index analyzer here as well. So every identity resolves
+    /// in both managers, and the two differ only where a chain genuinely has two
+    /// analyzers.
+    ///
+    /// Keying by the index identity is what makes the seam reachable from
+    /// Tantivy's own `QueryParser`, which resolves a field's analyzer *inside*
+    /// Tantivy from the manager it was handed, keyed by the tokenizer name in the
+    /// schema — i.e. the index identity. `QueryParser::new(schema, fields,
+    /// query_tokenizers)` is the whole of that wiring; a separate query-identity
+    /// namespace would have been unreachable from there.
+    ///
+    /// Only the index identity is ever written into the Tantivy schema, so an
+    /// entry here changes query-time analysis only and never a term on disk
+    /// (which is why `ANALYZER_CONTRACT` does not move).
+    pub query_tokenizers: TokenizerManager,
     field_handles: HashMap<String, Field>,
     /// Static `location`/`location_rpt` fields' two synthetic f64 columns,
     /// keyed by the user-facing field name: `(lat_field, lon_field)`. Kept out
@@ -495,6 +539,24 @@ impl WayfinderSchema {
             .any(|field| matches!(field.type_.as_str(), "text_en" | "text_general"))
     }
 
+    /// Whether the schema can contain static `text_en` terms from a pre-v2 chain.
+    pub fn uses_static_text_en(&self) -> bool {
+        self.fields.iter().any(|field| field.type_ == "text_en")
+    }
+
+    /// Whether a static built-in text preset has indexed terms subject to
+    /// Phase 2 accent folding. Custom and dynamic chains are not included:
+    /// neither receives this built-in filter.
+    pub fn uses_static_accent_folded_text(&self) -> bool {
+        self.fields.iter().any(|field| {
+            field.type_ == "text_general"
+                || field.type_ == "text_en"
+                || LANGUAGES
+                    .iter()
+                    .any(|(code, _)| field.type_ == format!("text_{code}"))
+        })
+    }
+
     /// Whether any configured dynamic rule can write analyzed text through
     /// `_dynamic_text`. This path changed before analyzer contract v1, but it
     /// deliberately retains v1 Snowball semantics in v2 for the captured
@@ -582,6 +644,46 @@ impl WayfinderSchema {
         }
         Some(out)
     }
+
+    /// The identity a **query**-time path looks up in [`Self::query_tokenizers`],
+    /// given the index-time identity it found on the field (issue #389 Phase 1) —
+    /// which is that same identity, unchanged. There is no query-side name
+    /// namespace: the query manager is keyed by index identity, precisely so
+    /// Tantivy's `QueryParser` can resolve a field's query analyzer itself from
+    /// the tokenizer name in the schema. This function exists to state that
+    /// invariant in one place and is what
+    /// `suggest_dictionary_tokenizer_query_lookup_is_unaffected` pins.
+    ///
+    /// The reason the two sides need to be able to differ at all is search
+    /// quality, not symmetry: synonym expansion belongs on the query side, where
+    /// it costs nothing on disk and the table can change without a reindex, and
+    /// aggressive splitting/recombining of delimited tokens is worth more on the
+    /// index side, where it is paid for once. That difference lives in *which
+    /// analyzer* the two managers hold under this one name, never in the name.
+    pub fn query_tokenizer_name(&self, index_tokenizer_name: &str) -> String {
+        index_tokenizer_name.to_string()
+    }
+
+    /// Query-time counterpart to [`Self::tokenize`]: analyzes `text` with
+    /// `type_name`'s **query** analyzer — the same identity resolved against
+    /// [`Self::query_tokenizers`] instead of `tokenizers` (issue #389 Phase 1).
+    /// A type that declares no query chain has its index analyzer registered in
+    /// both managers, so this equals [`Self::tokenize`] for it.
+    pub fn tokenize_query(&self, type_name: &str, text: &str) -> Option<Vec<String>> {
+        let tokenizer_name = match resolve_type(type_name, &self.field_types).ok()? {
+            ResolvedType::Str => "raw".to_string(),
+            ResolvedType::Text { tokenizer } => tokenizer,
+            ResolvedType::BoostTermPayload => BOOST_TERM_PAYLOAD_TOKENIZER.to_string(),
+            _ => return None,
+        };
+        let mut analyzer = self.query_tokenizers.get(&tokenizer_name)?;
+        let mut stream = analyzer.token_stream(text);
+        let mut out = Vec::new();
+        while stream.advance() {
+            out.push(stream.token().text.clone());
+        }
+        Some(out)
+    }
 }
 
 /// What a schema `type = "..."` resolves to.
@@ -650,7 +752,7 @@ fn resolve_type(type_: &str, custom: &[FieldTypeConfig]) -> Result<ResolvedType>
             });
             match code {
                 Some(code) => ResolvedType::Text {
-                    tokenizer: format!("text_{code}"),
+                    tokenizer: language_tokenizer(code),
                 },
                 None => bail!("unsupported field type `{other}`"),
             }
@@ -783,6 +885,680 @@ impl<T: TokenStream> TokenStream for PorterTerminalYTokenStream<T> {
         self.tail.token()
     }
 
+    fn token_mut(&mut self) -> &mut Token {
+        self.tail.token_mut()
+    }
+}
+
+/// Folds accents after tokenization, keeping Tantivy's original byte offsets.
+///
+/// This deliberately is not a Solr-style char filter: a char filter would need
+/// an offset-correction map for expansions such as `ß` -> `ss`, while changing
+/// only `Token::text` leaves offsets into the original query intact for suggest
+/// prefix matching and highlighting (#389 Phase 2). UAX#29 already treats the
+/// affected characters as letters, so folding after tokenization cannot move a
+/// token boundary.
+#[derive(Clone)]
+struct AccentFoldingFilter;
+
+impl TokenFilter for AccentFoldingFilter {
+    type Tokenizer<T: Tokenizer> = AccentFoldingTokenizer<T>;
+
+    fn transform<T: Tokenizer>(self, tokenizer: T) -> Self::Tokenizer<T> {
+        AccentFoldingTokenizer {
+            inner: tokenizer,
+            buffer: String::new(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AccentFoldingTokenizer<T> {
+    inner: T,
+    buffer: String,
+}
+
+impl<T: Tokenizer> Tokenizer for AccentFoldingTokenizer<T> {
+    type TokenStream<'a> = AccentFoldingTokenStream<'a, T::TokenStream<'a>>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        AccentFoldingTokenStream {
+            tail: self.inner.token_stream(text),
+            buffer: &mut self.buffer,
+        }
+    }
+}
+
+struct AccentFoldingTokenStream<'a, T> {
+    tail: T,
+    buffer: &'a mut String,
+}
+
+/// The shared folding primitive for search analyzers and persisted synonym
+/// members. It intentionally preserves case; `LowerCaser` runs after this
+/// filter in the production chain.
+pub(crate) fn fold_accents(text: &str, output: &mut String) {
+    output.clear();
+    for character in text.nfkd() {
+        if character.general_category() == GeneralCategory::NonspacingMark {
+            continue;
+        }
+        match character {
+            'ß' => output.push_str("ss"),
+            'ẞ' => output.push_str("SS"),
+            'æ' => output.push_str("ae"),
+            'Æ' => output.push_str("AE"),
+            'œ' => output.push_str("oe"),
+            'Œ' => output.push_str("OE"),
+            'þ' => output.push_str("th"),
+            'Þ' => output.push_str("TH"),
+            'ð' => output.push('d'),
+            'Ð' => output.push('D'),
+            'ø' => output.push('o'),
+            'Ø' => output.push('O'),
+            'đ' => output.push('d'),
+            'Đ' => output.push('D'),
+            'ł' => output.push('l'),
+            'Ł' => output.push('L'),
+            character => output.push(character),
+        }
+    }
+}
+
+impl<T: TokenStream> TokenStream for AccentFoldingTokenStream<'_, T> {
+    fn advance(&mut self) -> bool {
+        if !self.tail.advance() {
+            return false;
+        }
+
+        fold_accents(&self.tail.token().text, self.buffer);
+        let text = &mut self.tail.token_mut().text;
+        text.clear();
+        text.push_str(self.buffer);
+        true
+    }
+
+    fn token(&self) -> &Token {
+        self.tail.token()
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        self.tail.token_mut()
+    }
+}
+
+/// UAX #29 word-boundary tokenizer for Wayfinder's built-in search analyzers.
+///
+/// `unicode-segmentation` returns every UAX #29 boundary segment, including
+/// punctuation and whitespace. Whitespace-only and Unicode-punctuation-only
+/// segments are discarded; every other segment, including emoji, symbols, and
+/// combining-mark-only segments, becomes a term. The slice offsets come
+/// directly from the original input, so `Token` offsets remain original byte
+/// offsets for query prefix matching and highlighting.
+#[derive(Clone, Default)]
+struct Uax29Tokenizer;
+
+impl Tokenizer for Uax29Tokenizer {
+    type TokenStream<'a> = Uax29TokenStream<'a>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        Uax29TokenStream {
+            segments: text
+                .split_word_bound_indices()
+                .collect::<Vec<_>>()
+                .into_iter(),
+            token: Token::default(),
+            position: 0,
+        }
+    }
+}
+
+struct Uax29TokenStream<'a> {
+    segments: std::vec::IntoIter<(usize, &'a str)>,
+    token: Token,
+    position: usize,
+}
+
+impl TokenStream for Uax29TokenStream<'_> {
+    fn advance(&mut self) -> bool {
+        for (offset_from, segment) in self.segments.by_ref() {
+            if segment.chars().all(char::is_whitespace)
+                || segment.chars().all(|character| {
+                    matches!(
+                        character.general_category(),
+                        GeneralCategory::ConnectorPunctuation
+                            | GeneralCategory::DashPunctuation
+                            | GeneralCategory::ClosePunctuation
+                            | GeneralCategory::FinalPunctuation
+                            | GeneralCategory::InitialPunctuation
+                            | GeneralCategory::OtherPunctuation
+                            | GeneralCategory::OpenPunctuation
+                    )
+                })
+            {
+                continue;
+            }
+            self.token = Token {
+                offset_from,
+                offset_to: offset_from + segment.len(),
+                position: self.position,
+                position_length: 1,
+                text: segment.to_owned(),
+            };
+            self.position += 1;
+            return true;
+        }
+        false
+    }
+
+    fn token(&self) -> &Token {
+        &self.token
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        &mut self.token
+    }
+}
+
+/// Symmetric search-quality word delimiter expansion (#389 Phase 4).
+///
+/// Every original UAX word is retained, alongside its case/number/delimiter
+/// parts and their catenation. A punctuation-separated UAX run, such as
+/// `SKU-42`, is one compound too, so it gains `sku42`; whitespace always ends
+/// that run. All alternatives share a position; this is a graph in the
+/// token-stream sense, but query and index chains intentionally emit the same
+/// forms.
+#[derive(Clone)]
+struct WordDelimiterFilter {
+    preserve_original: bool,
+}
+
+impl WordDelimiterFilter {
+    fn search() -> Self {
+        Self {
+            preserve_original: true,
+        }
+    }
+
+    fn suggest() -> Self {
+        Self {
+            preserve_original: false,
+        }
+    }
+}
+
+impl TokenFilter for WordDelimiterFilter {
+    type Tokenizer<T: Tokenizer> = WordDelimiterTokenizer<T>;
+
+    fn transform<T: Tokenizer>(self, tokenizer: T) -> Self::Tokenizer<T> {
+        WordDelimiterTokenizer {
+            inner: tokenizer,
+            preserve_original: self.preserve_original,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WordDelimiterTokenizer<T> {
+    inner: T,
+    preserve_original: bool,
+}
+
+impl<T: Tokenizer> Tokenizer for WordDelimiterTokenizer<T> {
+    type TokenStream<'a> = WordDelimiterTokenStream<'a, T::TokenStream<'a>>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        WordDelimiterTokenStream {
+            tail: self.inner.token_stream(text),
+            input: text,
+            pending: VecDeque::new(),
+            lookahead: None,
+            position_shift: 0,
+            preserve_original: self.preserve_original,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DelimiterPart {
+    text: String,
+    offset_from: usize,
+    offset_to: usize,
+}
+
+fn delimiter_parts(text: &str, base_offset: usize, original_end: usize) -> Vec<DelimiterPart> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    // Accent folding can change byte width while retaining source offsets. In
+    // that case individual split bounds are unknowable here, so keep the full
+    // original token range rather than risking a non-UTF-8 suggest slice.
+    let offsets_are_exact = text.len() == original_end - base_offset;
+    let offsets = |from: usize, to: usize| {
+        if offsets_are_exact {
+            (base_offset + from, base_offset + to)
+        } else {
+            (base_offset, original_end)
+        }
+    };
+    let mut parts = Vec::new();
+    let mut start = None;
+    for (index, (offset, current)) in chars.iter().copied().enumerate() {
+        let previous = index.checked_sub(1).map(|previous| chars[previous].1);
+        let next = chars.get(index + 1).map(|(_, character)| *character);
+        let boundary = previous.is_some_and(|previous| {
+            (previous.is_alphabetic() && current.is_numeric())
+                || (previous.is_numeric() && current.is_alphabetic())
+                || (previous.is_lowercase() && current.is_uppercase())
+                || (previous.is_uppercase()
+                    && current.is_uppercase()
+                    && next.is_some_and(char::is_lowercase))
+        });
+        if !current.is_alphanumeric() {
+            if let Some(start) = start.take() {
+                let (offset_from, offset_to) = offsets(start, offset);
+                parts.push(DelimiterPart {
+                    text: text[start..offset].to_string(),
+                    offset_from,
+                    offset_to,
+                });
+            }
+        } else if boundary {
+            if let Some(start) = start.replace(offset) {
+                let (offset_from, offset_to) = offsets(start, offset);
+                parts.push(DelimiterPart {
+                    text: text[start..offset].to_string(),
+                    offset_from,
+                    offset_to,
+                });
+            }
+        } else if start.is_none() {
+            start = Some(offset);
+        }
+    }
+    if let Some(start) = start {
+        let (offset_from, offset_to) = offsets(start, text.len());
+        parts.push(DelimiterPart {
+            text: text[start..].to_string(),
+            offset_from,
+            offset_to,
+        });
+    }
+    // UAX deliberately retains non-punctuation symbols (for example emoji) as
+    // meaningful terms. They have no alphanumeric run, but must remain a graph
+    // part rather than disappearing or being catenated to a linked word.
+    if parts.is_empty() && !text.is_empty() {
+        let (offset_from, offset_to) = offsets(0, text.len());
+        parts.push(DelimiterPart {
+            text: text.to_string(),
+            offset_from,
+            offset_to,
+        });
+    }
+    parts
+}
+
+/// Canonicalizes one configured synonym member through the same pre-synonym
+/// query analysis steps. Synonym expansion can only add one same-position,
+/// position-length-one alternative, so the member must be one actual UAX term
+/// and its pre-lowercase delimiter graph must produce exactly that one term.
+pub(crate) fn canonicalize_synonym_member(member: &str) -> Result<String> {
+    let mut folded = String::new();
+    fold_accents(member, &mut folded);
+
+    // The analyzer, rather than a hand-maintained script or numeric blacklist,
+    // decides whether a member is safe. Folding is included because it is part
+    // of the query chain and compatibility ideographs can change under NFKD.
+    let mut uax = Uax29Tokenizer;
+    let mut uax_stream = uax.token_stream(&folded);
+    if !uax_stream.advance() || uax_stream.advance() {
+        bail!("synonym members must each be one nonempty UAX token");
+    }
+    let mut delimiter = TextAnalyzer::builder(Uax29Tokenizer)
+        .filter_dynamic(WordDelimiterFilter::search())
+        .build();
+    let mut graph = delimiter.token_stream(&folded);
+    if !graph.advance() {
+        bail!("synonym members must each be one nonempty safe token");
+    }
+    let token = graph.token().clone();
+    if token.position_length != 1 || graph.advance() {
+        bail!("synonym members must not split across delimiter positions");
+    }
+
+    let mut canonical = String::new();
+    for character in token.text.chars() {
+        // Match the simple, one-scalar lowercase filter used by the current
+        // static English/general and dynamic query chains.
+        canonical.push(character.to_lowercase().next().unwrap_or(character));
+    }
+
+    // A synonym is core-wide, so it must survive the strictest pre-synonym
+    // built-in chain. Static text drops terms at 40 bytes and English chains
+    // remove their stopwords before expansion; accepting either would create
+    // a configured member that can never expand symmetrically.
+    let english_stopwords =
+        StopWordFilter::new(Language::English).expect("Tantivy ships English stopwords");
+    let mut acceptance = TextAnalyzer::builder(RawTokenizer::default())
+        .filter(RemoveLongFilter::limit(40))
+        .filter(english_stopwords)
+        .build();
+    {
+        let mut accepted = acceptance.token_stream(&canonical);
+        if !accepted.advance() {
+            bail!("synonym members must survive built-in length and stopword filters");
+        }
+    }
+    Ok(canonical)
+}
+
+struct WordDelimiterTokenStream<'a, T> {
+    tail: T,
+    input: &'a str,
+    pending: VecDeque<Token>,
+    lookahead: Option<Token>,
+    /// Delimiter expansion can widen or narrow a graph relative to the span
+    /// of upstream positions it consumed. Later positions carry this signed
+    /// cumulative shift instead of being compacted or underflowing.
+    position_shift: isize,
+    preserve_original: bool,
+}
+
+fn is_punctuation(character: char) -> bool {
+    matches!(
+        character.general_category(),
+        GeneralCategory::ConnectorPunctuation
+            | GeneralCategory::DashPunctuation
+            | GeneralCategory::ClosePunctuation
+            | GeneralCategory::FinalPunctuation
+            | GeneralCategory::InitialPunctuation
+            | GeneralCategory::OtherPunctuation
+            | GeneralCategory::OpenPunctuation
+    )
+}
+
+/// UAX can emit the sides of `SKU-42` as separate tokens. Buffering the next
+/// UAX token lets this filter preserve one compound graph without ever joining
+/// across whitespace.
+fn is_compound_separator(gap: &str) -> bool {
+    !gap.is_empty() && gap.chars().all(is_punctuation)
+}
+
+impl<T: TokenStream> WordDelimiterTokenStream<'_, T> {
+    fn next_source(&mut self) -> Option<Token> {
+        self.lookahead
+            .take()
+            .or_else(|| self.tail.advance().then(|| self.tail.token().clone()))
+    }
+
+    fn fill_compound(&mut self) -> bool {
+        let Some(first) = self.next_source() else {
+            return false;
+        };
+        let mut sources = vec![first];
+        while let Some(next) = self.next_source() {
+            let previous = sources.last().expect("compound has its first token");
+            let gap = &self.input[previous.offset_to..next.offset_from];
+            if is_compound_separator(gap) {
+                sources.push(next);
+            } else {
+                self.lookahead = Some(next);
+                break;
+            }
+        }
+
+        let compound_start = sources[0].offset_from;
+        let compound_end = sources.last().expect("compound is nonempty").offset_to;
+        let parts: Vec<DelimiterPart> = sources
+            .iter()
+            .flat_map(|source| delimiter_parts(&source.text, source.offset_from, source.offset_to))
+            .collect();
+        let upstream_start = sources[0].position;
+        let Some(upstream_end) = sources
+            .last()
+            .and_then(|source| source.position.checked_add(source.position_length))
+        else {
+            return false;
+        };
+        let Some(upstream_span) = upstream_end.checked_sub(upstream_start) else {
+            return false;
+        };
+        let width = parts.len();
+        if parts.is_empty() {
+            // Accent folding removes combining-only input. It still consumes
+            // an upstream span, so carry its negative graph delta forward.
+            return self.apply_position_delta(width, upstream_span);
+        }
+
+        // Map every graph start from its upstream position. A split such as
+        // `sku42` consumes one UAX position but emits two, so it shifts every
+        // later upstream position by one; an already-present stopword gap must
+        // remain a gap after that expansion. checked_add_signed also prevents
+        // a narrowing delta from producing a negative output position.
+        let Some(start) = upstream_start.checked_add_signed(self.position_shift) else {
+            return false;
+        };
+        let mut seen = HashSet::new();
+        let mut push =
+            |text: String, position: usize, position_length: usize, from: usize, to: usize| {
+                if !text.is_empty() && seen.insert((text.clone(), position, position_length)) {
+                    self.pending.push_back(Token {
+                        offset_from: from,
+                        offset_to: to,
+                        position,
+                        position_length,
+                        text,
+                    });
+                }
+            };
+        for (index, part) in parts.iter().enumerate() {
+            push(
+                part.text.clone(),
+                start + index,
+                1,
+                part.offset_from,
+                part.offset_to,
+            );
+        }
+        let source_has_symbol = sources.iter().any(|source| {
+            source
+                .text
+                .chars()
+                .any(|character| !character.is_alphanumeric() && !is_punctuation(character))
+        }) || self.input[compound_start..compound_end].contains('@');
+        let compound_has_dash = sources
+            .windows(2)
+            .any(|pair| self.input[pair[0].offset_to..pair[1].offset_from].contains('-'));
+        let compound_has_number = sources
+            .iter()
+            .any(|source| source.text.chars().any(char::is_numeric));
+        if self.preserve_original
+            && !source_has_symbol
+            && (!compound_has_dash || compound_has_number)
+        {
+            // Use the upstream token text, not the raw input slice: filters may
+            // already have lowercased/folded it before this wrapper runs. Raw
+            // text here would create a second differently-cased alternative.
+            let mut preserved = sources[0].text.clone();
+            for pair in sources.windows(2) {
+                preserved.push_str(&self.input[pair[0].offset_to..pair[1].offset_from]);
+                preserved.push_str(&pair[1].text);
+            }
+            push(preserved, start, width, compound_start, compound_end);
+        }
+        // UAX may deliver an address as one punctuation-linked compound. Keep
+        // the right-hand `b.com`/`bcom` forms as well as its all-parts spelling.
+        if let Some(symbol_offset) = self.input[compound_start..compound_end].find('@') {
+            let suffix_offset = compound_start + symbol_offset + '@'.len_utf8();
+            let suffix = &self.input[suffix_offset..compound_end];
+            let suffix_parts = delimiter_parts(suffix, suffix_offset, compound_end);
+            if let Some(last) = suffix_parts.last() {
+                let suffix_start = start + parts.len() - suffix_parts.len();
+                push(
+                    suffix.to_string(),
+                    suffix_start,
+                    suffix_parts.len(),
+                    suffix_parts[0].offset_from,
+                    last.offset_to,
+                );
+                push(
+                    suffix_parts.iter().map(|part| part.text.as_str()).collect(),
+                    suffix_start,
+                    suffix_parts.len(),
+                    suffix_parts[0].offset_from,
+                    last.offset_to,
+                );
+            }
+        }
+        if !source_has_symbol {
+            let all = parts
+                .iter()
+                .map(|part| part.text.as_str())
+                .collect::<String>();
+            push(all, start, width, compound_start, compound_end);
+        }
+
+        let mut run_start = 0;
+        while run_start < parts.len() {
+            if !parts[run_start].text.chars().all(char::is_alphabetic) {
+                run_start += 1;
+                continue;
+            }
+            let mut run_end = run_start + 1;
+            while run_end < parts.len() && parts[run_end].text.chars().all(char::is_alphabetic) {
+                run_end += 1;
+            }
+            if run_end - run_start > 1 {
+                push(
+                    parts[run_start..run_end]
+                        .iter()
+                        .map(|part| part.text.as_str())
+                        .collect(),
+                    start + run_start,
+                    run_end - run_start,
+                    parts[run_start].offset_from,
+                    parts[run_end - 1].offset_to,
+                );
+            }
+            run_start = run_end;
+        }
+        // Token streams must be monotonic by position. The catenated forms are
+        // created after the sequential parts above, so restore graph order
+        // before downstream filters/indexing observe the batch.
+        self.pending
+            .make_contiguous()
+            .sort_by_key(|token| token.position);
+        self.apply_position_delta(width, upstream_span)
+    }
+
+    /// Apply the graph-width delta against the positions actually covered by
+    /// the upstream graph. Source count is not that span: punctuation-linked
+    /// emoji and folded-away combining marks make the distinction observable.
+    fn apply_position_delta(&mut self, width: usize, upstream_span: usize) -> bool {
+        let Some(width) = isize::try_from(width).ok() else {
+            return false;
+        };
+        let Some(upstream_span) = isize::try_from(upstream_span).ok() else {
+            return false;
+        };
+        let Some(delta) = width.checked_sub(upstream_span) else {
+            return false;
+        };
+        let Some(shift) = self.position_shift.checked_add(delta) else {
+            return false;
+        };
+        self.position_shift = shift;
+        true
+    }
+}
+
+impl<T: TokenStream> TokenStream for WordDelimiterTokenStream<'_, T> {
+    fn advance(&mut self) -> bool {
+        loop {
+            if let Some(token) = self.pending.pop_front() {
+                *self.tail.token_mut() = token;
+                return true;
+            }
+            if !self.fill_compound() {
+                return false;
+            }
+        }
+    }
+
+    fn token(&self) -> &Token {
+        self.tail.token()
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        self.tail.token_mut()
+    }
+}
+
+/// Query-side expand-style synonym filter. The resource is an Arc<RwLock>, so
+/// every analyzer clone sees a hot replacement without rebuilding a Tantivy
+/// index. Shipped tables are single-token groups, therefore this emits stacked
+/// position-length-one alternatives; word delimiter expansion is the only
+/// graph source for that data.
+#[derive(Clone)]
+struct SynonymFilter {
+    resource: SynonymResource,
+}
+
+impl TokenFilter for SynonymFilter {
+    type Tokenizer<T: Tokenizer> = SynonymTokenizer<T>;
+
+    fn transform<T: Tokenizer>(self, tokenizer: T) -> Self::Tokenizer<T> {
+        SynonymTokenizer {
+            inner: tokenizer,
+            resource: self.resource,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SynonymTokenizer<T> {
+    inner: T,
+    resource: SynonymResource,
+}
+
+impl<T: Tokenizer> Tokenizer for SynonymTokenizer<T> {
+    type TokenStream<'a> = SynonymTokenStream<T::TokenStream<'a>>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        SynonymTokenStream {
+            tail: self.inner.token_stream(text),
+            resource: self.resource.clone(),
+            pending: VecDeque::new(),
+        }
+    }
+}
+
+struct SynonymTokenStream<T> {
+    tail: T,
+    resource: SynonymResource,
+    pending: VecDeque<Token>,
+}
+
+impl<T: TokenStream> TokenStream for SynonymTokenStream<T> {
+    fn advance(&mut self) -> bool {
+        if let Some(token) = self.pending.pop_front() {
+            *self.tail.token_mut() = token;
+            return true;
+        }
+        if !self.tail.advance() {
+            return false;
+        }
+        let source = self.tail.token().clone();
+        for text in self.resource.expansions(&source.text) {
+            self.pending.push_back(Token {
+                text,
+                ..source.clone()
+            });
+        }
+        true
+    }
+
+    fn token(&self) -> &Token {
+        self.tail.token()
+    }
     fn token_mut(&mut self) -> &mut Token {
         self.tail.token_mut()
     }
@@ -1080,7 +1856,7 @@ pub fn split_delimited_payload(token: &str) -> Option<(&str, f32)> {
 /// global `text_en` / `text_general` presets, and conflating them is what made
 /// the read path diverge (see [`build_tokenizers`]).
 fn suggest_tokenizer(code: &str) -> String {
-    format!("wayfinder_suggest_{code}_v1")
+    format!("wayfinder_suggest_{code}_v4")
 }
 
 /// The analyzer (Tantivy tokenizer name) a `suggest.dictionary` value
@@ -1104,85 +1880,73 @@ pub fn dictionary_tokenizer(dictionary: &str) -> String {
     }
 }
 
-/// Is `dictionary` a *configured* suggester -- one Solr's `SuggestComponent`
-/// would resolve rather than reject? Solr matches `suggest.dictionary` against
-/// the declared `<lst name="suggester">` entries and answers
-/// `No suggester named <name> was configured` (400) for anything else, captured
-/// as `solr-ref/responses/suggest_q_dict_unknown.json` (finding 195).
-///
-/// **The set is per-language, not just `en`/`und`.** `search_api_solr` generates
-/// one suggester per INSTALLED language field type, and each language's field-type
-/// config ships its own: `coverage/search_api_solr_4.4.0_source/config/optional/
-/// search_api_solr.solr_field_type.text_fr_7_0_0.yml:215-226` declares
-/// `class: solr.SuggestComponent` with a suggester `name: fr`, `indexPath: ./fr`.
-/// So the shipped `solr-ref/search-api/configset/solrconfig_extra.xml:32-56`
-/// carrying only `en` and `und` is an artifact of which field types the capture
-/// environment had installed -- NOT the contract. A French site's Solr answers
-/// `suggest.dictionary=fr` with 200, and a French site does send it:
-/// `Suggester.php:247` sets `$options['dictionary'] = $langcode` and `:280` passes
-/// it straight to the suggest component.
-///
-/// Hence [`LANGUAGES`] plus [`SUGGEST_UNDEFINED_DICTIONARY`] (`und` is not in
-/// `LANGUAGES`), which is exactly the set of `wayfinder_suggest_*` chains
-/// `build_tokenizers` registers (`src/schema.rs:1296` for `und`, `:1312` per
-/// `LANGUAGES` entry) -- the same fan-out [`dictionary_tokenizer`] resolves
-/// through and the reservation list at `:1413` covers.
-/// Both halves come out of the same per-language YAML, so agreeing with the
-/// analyzer set is agreeing with Solr, not a coincidence. A name outside it
-/// (`xx`) is still the fixture's 400.
-///
-/// The widening also clears a second-order case that would otherwise have been a
-/// live bug: the multilingual branch sends a REPEATED `suggest.dictionary`
-/// (`Suggester.php:253`, `$options['dictionary'] = $langcodes`), and
-/// `Params::get` is first-wins (`src/params.rs:52`), so a multilingual site whose
-/// first langcode was neither `en` nor `und` -- `de`, say -- would have been 400'd
-/// by a two-name set. First-wins is itself the right reading of the repeat
-/// (finding 193 pinned it for `spellcheck.dictionary`); what was wrong was the
-/// narrow set, and `de` is now served.
-///
-/// [`dictionary_tokenizer`] keeps its own `und` fallback regardless: it is the
-/// analyzer resolver, and the index stays a trust boundary for a name that never
-/// passed through this gate (the build/command path does not).
-///
-/// ponytail: admission is Wayfinder's always-on 18-language fan-out, not a
-/// configset-derived set. A real site that installed only the `en` and `und`
-/// field types would 400 `fr` where Wayfinder answers 200 -- Wayfinder is
-/// permissive by exactly the amount its analyzer set is always-on. The ceiling
-/// is "no configset, so no per-deployment suggester list" (PRD: wire format
-/// only, never Solr's config format); the alternative -- inventing a config
-/// surface to narrow it -- would be worse than being permissive.
-///
-/// ponytail: the same gap runs the OTHER way, and that direction is the one
-/// with a live client. #385's `QueryBuilder::suggesterParams`
-/// (`drupal/search_api_wayfinder/src/QueryBuilder.php:497`) sends the Drupal
-/// langcode as the dictionary, and Drupal has far more langcodes than
-/// [`LANGUAGES`] has entries -- so a `ja`, `pl` or `zh-hans` site now gets a
-/// 400 where its real Solr, having installed `text_ja`, answers 200. Before
-/// this gate it got 200 with `und` results. Neither answer is right for both
-/// inputs: `xx` is the fixture's 400 and `ja` is Solr's 200, and with no
-/// configset to consult nothing here can tell the two apart. The 400 is chosen
-/// because it is consistent with the real ceiling -- Wayfinder has no `text_ja`
-/// chain at all, so a `ja` suggest dictionary was never being served, only
-/// silently substituted -- and because failing loudly names the ceiling instead
-/// of hiding it. Closing it properly means the 18-language set growing, which
-/// is its own issue.
+/// Whether a requested dictionary has a registered per-language suggester.
 pub fn is_configured_suggester(dictionary: &str) -> bool {
     dictionary == SUGGEST_UNDEFINED_DICTIONARY
         || LANGUAGES.iter().any(|(code, _)| *code == dictionary)
 }
 
-/// Builds the `TextAnalyzer` for a `[[field_types]]` chain.
-fn build_analyzer(ft: &FieldTypeConfig) -> Result<TextAnalyzer> {
-    let mut builder = match ft.tokenizer.as_str() {
+/// Whether an on-disk tokenizer identity uses issue #389's built-in token graph.
+pub fn is_current_builtin_graph_tokenizer(tokenizer: &str) -> bool {
+    matches!(
+        tokenizer,
+        TEXT_GENERAL_TOKENIZER | TEXT_EN_TOKENIZER | DYNAMIC_TEXT_TOKENIZER
+    ) || LANGUAGES
+        .iter()
+        .filter(|(code, _)| *code != "en")
+        .any(|(code, _)| tokenizer == language_tokenizer(code))
+}
+
+/// Which of a `[[field_types]]` entry's two chains [`build_analyzer`] is
+/// building (issue #389 Phase 1). Also names the config key an error message has
+/// to point an operator at: `tokenizer` and `query_tokenizer` accept the same
+/// values, so an error that names neither leaves the operator guessing which of
+/// the two lines to fix.
+#[derive(Copy, Clone)]
+enum AnalyzerSide {
+    Index,
+    Query,
+}
+
+impl AnalyzerSide {
+    /// The `[[field_types]]` key holding this side's tokenizer.
+    fn tokenizer_key(self) -> &'static str {
+        match self {
+            Self::Index => "tokenizer",
+            Self::Query => "query_tokenizer",
+        }
+    }
+}
+
+/// Builds the `TextAnalyzer` for one side of a `[[field_types]]` chain: the
+/// index-side one (`tokenizer` + `filters`) or the query-side one
+/// (`query_tokenizer` + `query_filters`). The two share every tokenizer and
+/// filter kind; only which pair of config fields they read from differs
+/// (issue #389 Phase 1).
+fn build_analyzer(ft: &FieldTypeConfig, side: AnalyzerSide) -> Result<TextAnalyzer> {
+    let (tokenizer, filters) = match side {
+        AnalyzerSide::Query => {
+            let tokenizer = ft.query_tokenizer.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "field type `{}` has no `query_tokenizer` to build a query analyzer from",
+                    ft.name
+                )
+            })?;
+            (tokenizer, &ft.query_filters)
+        }
+        AnalyzerSide::Index => (ft.tokenizer.as_str(), &ft.filters),
+    };
+    let mut builder = match tokenizer {
         "simple" => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
         other => bail!(
-            "unsupported tokenizer `{other}` on field type `{}` (supported: `simple`)",
+            "unsupported tokenizer `{other}` on `{}` of field type `{}` (supported: `simple`)",
+            side.tokenizer_key(),
             ft.name
         ),
     };
     builder = builder.filter_dynamic(RemoveLongFilter::limit(40));
 
-    for filter in &ft.filters {
+    for filter in filters {
         let language = |kind: &str| -> Result<Language> {
             let name = filter.language.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -1233,111 +1997,268 @@ fn language_by_name(name: &str) -> Option<Language> {
 /// Registers Wayfinder's English preset, the other language presets, and
 /// every custom chain into a tokenizer manager seeded with Tantivy's defaults
 /// (`raw`, `default`, `en_stem`).
-fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager> {
+///
+/// Returns **two** complete managers, index-side and query-side (issue #389
+/// Phase 1). Every chain is registered in both, under the same identity — the
+/// index one — so any name resolves in either manager and the two differ only
+/// where a chain genuinely has two analyzers. A `[[field_types]]` entry
+/// declaring `query_tokenizer` puts its query analyzer into the query manager;
+/// every other chain puts its index analyzer there, which is what makes the
+/// "no query chain declared" case *a registration* rather than a lookup-time
+/// fallback.
+///
+/// Keying the query manager by the index identity is not cosmetic: it is what
+/// lets `QueryParser::new(schema, fields, query_manager)` reach the query
+/// analyzers at all. Tantivy resolves a field's analyzer internally from the
+/// manager it was handed, keyed by the tokenizer name recorded in the schema,
+/// which is always the index identity (`QueryParser::for_index` is exactly
+/// `QueryParser::new(index.schema(), fields, index.tokenizers().clone())`).
+fn build_tokenizers(
+    field_types: &[FieldTypeConfig],
+    synonyms: &SynonymResource,
+) -> Result<(TokenizerManager, TokenizerManager)> {
     let manager = TokenizerManager::default();
+    let query_manager = TokenizerManager::default();
+    // Registers one analyzer as *both* sides of a chain. Built-in, dynamic,
+    // and suggest chains use the same UAX #29 tokenizer at index and query time
+    // so punctuation boundaries and meaningful singletons remain symmetric.
+    let register_both = |name: &str, analyzer: TextAnalyzer| {
+        manager.register(name, analyzer.clone());
+        query_manager.register(name, analyzer);
+    };
+    let register_split =
+        |name: &str, index_analyzer: TextAnalyzer, query_analyzer: TextAnalyzer| {
+            manager.register(name, index_analyzer);
+            query_manager.register(name, query_analyzer);
+        };
     let english_stopwords =
         || StopWordFilter::new(Language::English).expect("Tantivy ships an English stopword list");
-    // The three global analyzed-text chains (#388). All three fold case with
-    // `SimpleLowerCaseFilter`, because Lucene's `LowerCaseFilterFactory` is
-    // Unicode's simple (1:1) mapping in *both* reference configsets, and Rust's
-    // `LowerCaser` is the full mapping (they disagree on U+0130). That is what
-    // changes their on-disk terms, and why all three take new v3 identities.
-    //
-    // The *length* bound is not shared, because the three chains stand in for
-    // field types from two different configsets (#388 AMENDMENT 1):
-    //
-    //   - `_dynamic_text` is the Search API catch-all every analyzed dynamic
-    //     rule flows through, and the shipped `search_api_solr` configset gives
-    //     every one of its text types `LengthFilterFactory min="2" max="100"`,
-    //     counted in characters. The captured `select_analyzer_*` fixtures pin
-    //     both ends: `tm_title:i` returns zero, and a 45-character token is
-    //     found (`select_analyzer_long45_und`).
-    //   - static `text_en` / `text_general` stand in for Solr's *`_default`*
-    //     configset instead -- that is what pins `text_en`'s `day` -> `dai`
-    //     Porter terminal-y rule (PRD open question 5), which the Search API
-    //     configset's Snowball chain contradicts; the dedicated edismax
-    //     reference core used no configset argument at all.
-    //     `_default`'s `text_en` has no `LengthFilterFactory`, and five edismax
-    //     fixtures pin that: `edismax_basic`, `edismax_score_baseline`,
-    //     `edismax_boost_multiplicative`, `edismax_term_boost` and
-    //     `edismax_operators_required` rank `eD` above `eB` only while the
-    //     one-character tokens in the unrelated `pA`/`pB`/`mmA`-`mmD` docs stay
-    //     in the index, keeping Solr's BM25 average field length. So these two
-    //     chains keep the length filter they already had, untouched.
-    //
-    // ponytail: the length filter they already had is `RemoveLongFilter`, whose
-    // 40-byte cut is a divergence from `_default` (which drops nothing at any
-    // length) in its own right. Pre-existing, unpinned by any fixture, and
-    // deliberately out of #388's scope -- filed as #393.
-    //
-    // `_dynamic_text`, by contrast, drops `RemoveLongFilter` entirely: that
-    // filter is byte-based (`token.text.len() < limit`) while
-    // `LengthFilterFactory` is character-based, so keeping both would reinstate
-    // the divergence at 40 bytes and make `TEXT_MAX_TOKEN_LEN` unreachable. The
-    // same reasoning is written out for the suggest chain below.
-    //
-    // Solr orders the chain `Stop -> WDGF -> Length -> LowerCase -> Snowball`;
-    // running `Length` before the stopword filter cannot change the surviving
-    // set, because both filters only ever remove tokens.
-    let dynamic_text = TextAnalyzer::builder(SimpleTokenizer::default())
-        .filter_dynamic(LengthFilter {
-            min: TEXT_MIN_TOKEN_LEN,
-            max: TEXT_MAX_TOKEN_LEN,
-        })
-        .filter_dynamic(SimpleLowerCaseFilter)
-        .filter_dynamic(english_stopwords())
-        .filter_dynamic(Stemmer::new(Language::English))
-        .build();
-    let text_en = TextAnalyzer::builder(SimpleTokenizer::default())
-        .filter_dynamic(RemoveLongFilter::limit(40))
-        .filter_dynamic(SimpleLowerCaseFilter)
-        .filter_dynamic(english_stopwords())
-        .filter_dynamic(PorterTerminalYFilter)
-        .filter_dynamic(Stemmer::new(Language::English))
-        .build();
-    manager.register(DYNAMIC_TEXT_TOKENIZER, dynamic_text.clone());
-    manager.register(TEXT_EN_TOKENIZER, text_en.clone());
-    // The pre-#388 identities stay resolvable, aliased to the chain that
-    // replaced each. A tokenizer name is part of the *persisted Tantivy
-    // schema*, and `catch_all_fields` gives `_dynamic_text` to any schema with
-    // a dynamic rule at all -- including the all-raw (`string`/`int`) schemas
-    // the v1/v2 contract branches legitimately adopt without a reindex. Such an
-    // index still names `wayfinder_text_en_v1` on that field, and leaving the
-    // name unregistered does not fail the open: it fails every subsequent
-    // write, with `Error getting tokenizer for field: _dynamic_text`, on an
-    // index the marker now claims is at the current contract.
-    //
-    // The aliases are not a second semantics: legacy adoption reaches them
-    // only after `CoreIndex::open` rejects configured affected paths and,
-    // before writing a current marker, verifies the persisted `_dynamic_text`
-    // term dictionaries are empty. A latest schema snapshot alone cannot prove
-    // that: an earlier analyzed rule may have been replaced by a raw rule.
-    // Pointing the aliases at the *current* chains rather than reconstructing
-    // the old ones is deliberate -- if such a field ever did receive a value,
-    // it would be analyzed the way the v3 marker on disk says it is.
-    manager.register(TEXT_EN_TOKENIZER_V1, dynamic_text);
-    manager.register(TEXT_EN_TOKENIZER_V2, text_en);
-    // `text_general` is `_default`'s stemmer-free analyzed text type, so it gets
-    // no stopword or stemmer filter. Pre-#388 it was Tantivy's own `default`
-    // tokenizer, whose chain is exactly this one with `LowerCaser` in place of
-    // `SimpleLowerCaseFilter`; owning the identity is what lets the analyzer
-    // contract see the folding change.
-    manager.register(
-        TEXT_GENERAL_TOKENIZER,
+    // Keep every pre-folding identity registered with its original chain. An
+    // old schema can therefore be opened only long enough for migration
+    // diagnosis; no new field is allowed to record one of these names.
+    register_both(
+        TEXT_GENERAL_TOKENIZER_LEGACY,
         TextAnalyzer::builder(SimpleTokenizer::default())
-            .filter_dynamic(RemoveLongFilter::limit(40))
+            .filter(RemoveLongFilter::limit(40))
+            .filter(LowerCaser)
+            .build(),
+    );
+    register_both(
+        TEXT_GENERAL_TOKENIZER_V3,
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(RemoveLongFilter::limit(40))
             .filter_dynamic(SimpleLowerCaseFilter)
+            .build(),
+    );
+    register_both(
+        TEXT_GENERAL_TOKENIZER_V4,
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter_dynamic(AccentFoldingFilter)
+            .filter(RemoveLongFilter::limit(40))
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .build(),
+    );
+    register_both(
+        TEXT_GENERAL_TOKENIZER_V5,
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter(RemoveLongFilter::limit(40))
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .build(),
+    );
+    register_split(
+        TEXT_GENERAL_TOKENIZER,
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter_dynamic(WordDelimiterFilter::search())
+            .filter(RemoveLongFilter::limit(40))
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .build(),
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter_dynamic(WordDelimiterFilter::search())
+            .filter(RemoveLongFilter::limit(40))
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter_dynamic(SynonymFilter {
+                resource: synonyms.clone(),
+            })
+            .build(),
+    );
+    register_both(
+        DYNAMIC_TEXT_TOKENIZER_V1,
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(RemoveLongFilter::limit(40))
+            .filter(LowerCaser)
+            .filter(english_stopwords())
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    register_both(
+        DYNAMIC_TEXT_TOKENIZER_V3,
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter_dynamic(LengthFilter { min: 2, max: 100 })
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    register_both(
+        DYNAMIC_TEXT_TOKENIZER_V4,
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter_dynamic(AccentFoldingFilter)
+            .filter_dynamic(LengthFilter { min: 2, max: 100 })
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    register_both(
+        DYNAMIC_TEXT_TOKENIZER_V5,
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter_dynamic(LengthFilter { min: 1, max: 100 })
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    register_split(
+        DYNAMIC_TEXT_TOKENIZER,
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter_dynamic(LengthFilter { min: 1, max: 100 })
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter_dynamic(WordDelimiterFilter::search())
+            .filter(Stemmer::new(Language::English))
+            .build(),
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter_dynamic(LengthFilter { min: 1, max: 100 })
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter_dynamic(WordDelimiterFilter::search())
+            .filter_dynamic(SynonymFilter {
+                resource: synonyms.clone(),
+            })
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    // Kept for opening and diagnosing legacy schemas; new text_en fields use
+    // the v3 identity below.
+    register_both(
+        TEXT_EN_TOKENIZER_V2,
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(RemoveLongFilter::limit(40))
+            .filter(LowerCaser)
+            .filter(english_stopwords())
+            .filter(PorterTerminalYFilter)
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    register_both(
+        TEXT_EN_TOKENIZER_V3,
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(RemoveLongFilter::limit(40))
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter(PorterTerminalYFilter)
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    register_both(
+        TEXT_EN_TOKENIZER_V4,
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter_dynamic(AccentFoldingFilter)
+            .filter(RemoveLongFilter::limit(40))
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter(PorterTerminalYFilter)
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    register_both(
+        TEXT_EN_TOKENIZER_V5,
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter(RemoveLongFilter::limit(40))
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter(PorterTerminalYFilter)
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    register_split(
+        TEXT_EN_TOKENIZER,
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter(RemoveLongFilter::limit(40))
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter_dynamic(WordDelimiterFilter::search())
+            .filter(PorterTerminalYFilter)
+            .filter(Stemmer::new(Language::English))
+            .build(),
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter(RemoveLongFilter::limit(40))
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter_dynamic(WordDelimiterFilter::search())
+            .filter_dynamic(SynonymFilter {
+                resource: synonyms.clone(),
+            })
+            .filter(PorterTerminalYFilter)
+            .filter(Stemmer::new(Language::English))
             .build(),
     );
     for (code, lang) in LANGUAGES {
         if *code == "en" {
             continue; // registered above under Wayfinder's versioned identity.
         }
-        manager.register(
-            &format!("text_{code}"),
+        register_both(
+            &legacy_language_tokenizer(code),
             TextAnalyzer::builder(SimpleTokenizer::default())
                 .filter(RemoveLongFilter::limit(40))
                 .filter(LowerCaser)
+                .filter(Stemmer::new(*lang))
+                .build(),
+        );
+        register_both(
+            &language_tokenizer_v4(code),
+            TextAnalyzer::builder(SimpleTokenizer::default())
+                .filter_dynamic(AccentFoldingFilter)
+                .filter(RemoveLongFilter::limit(40))
+                .filter(LowerCaser)
+                .filter(Stemmer::new(*lang))
+                .build(),
+        );
+        register_both(
+            &language_tokenizer_v5(code),
+            TextAnalyzer::builder(Uax29Tokenizer)
+                .filter_dynamic(AccentFoldingFilter)
+                .filter(RemoveLongFilter::limit(40))
+                .filter(LowerCaser)
+                .filter(Stemmer::new(*lang))
+                .build(),
+        );
+        register_split(
+            &language_tokenizer(code),
+            TextAnalyzer::builder(Uax29Tokenizer)
+                .filter_dynamic(AccentFoldingFilter)
+                .filter_dynamic(WordDelimiterFilter::search())
+                .filter(RemoveLongFilter::limit(40))
+                .filter(LowerCaser)
+                .filter(Stemmer::new(*lang))
+                .build(),
+            TextAnalyzer::builder(Uax29Tokenizer)
+                .filter_dynamic(AccentFoldingFilter)
+                .filter_dynamic(WordDelimiterFilter::search())
+                .filter(RemoveLongFilter::limit(40))
+                .filter(LowerCaser)
+                .filter_dynamic(SynonymFilter {
+                    resource: synonyms.clone(),
+                })
                 .filter(Stemmer::new(*lang))
                 .build(),
         );
@@ -1356,13 +2277,13 @@ fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager>
             .filter_dynamic(LowerCaser)
             .filter_dynamic(RemoveDuplicatesFilter)
     };
-    manager.register(
+    register_both(
         BOOST_TERM_PAYLOAD_TOKENIZER,
         boost_term_payload_front()
             .filter_dynamic(DelimitedPayloadStripFilter)
             .build(),
     );
-    manager.register(
+    register_both(
         BOOST_TERM_PAYLOAD_VERBATIM_TOKENIZER,
         boost_term_payload_front().build(),
     );
@@ -1376,13 +2297,11 @@ fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager>
     //     -> LowerCase -> [SnowballPorter English, text_en only]
     //     -> RemoveDuplicates
     //
-    // Two of those gaps are observable in the captured fixtures and are
-    // reproduced here: the `Length` lower bound (a one-character `suggest.q`
-    // analyzes to nothing -- `suggest_q_multibyte_prefix_en`,
-    // `suggest_q_multibyte_onechar_en`) and Lucene's SIMPLE case folding
-    // (`suggest_q_multibyte_grow_en`; see `SimpleLowerCaseFilter`). `Stop` runs
-    // after `Length` rather than before it, which cannot change the surviving
-    // set: both filters only remove tokens.
+    // The Solr-derived lower length bound is deliberately not reproduced: a
+    // one-character or CJK word is meaningful for search quality. Simple case
+    // folding is retained (`suggest_q_multibyte_grow_en`; see
+    // `SimpleLowerCaseFilter`). `Stop` runs after `Length`, which cannot change
+    // the surviving set because both filters only remove tokens.
     //
     // Unlike Wayfinder's other chains, this one has *no* `RemoveLongFilter`:
     // that filter is byte-based (`token.text.len() < limit`), and the shipped
@@ -1395,74 +2314,100 @@ fn build_tokenizers(field_types: &[FieldTypeConfig]) -> Result<TokenizerManager>
     // The other chains in this file keep it because it matches *their* Solr
     // field types, not this one.
     //
-    // ponytail: four differences from the shipped `suggestAnalyzerFieldType`
-    // chains (`text_en` at `schema_extra_types.xml:46`, `text_und` at `:167`)
-    // remain unimplemented; all four are filed as #389, and none is pinned by a
-    // fixture. #388 is a different gap (the global `text_en` / `text_general`
-    // presets) and does not cover any of these.
-    //   1. `MappingCharFilterFactory mapping="accents_en.txt"` /
-    //      `"accents_und.txt"`, present on *both* the index and query analyzers
-    //      (`:48`, `:58`, `:169`, `:179`). Same class of defect as the U+0130
-    //      lowercasing bug, and more reachable: `suggest.q=cafe` matches an
-    //      accented `Cafe Central` in Solr and misses here.
-    //   2. `SynonymGraphFilterFactory synonyms="synonyms_en.txt" expand="true"
-    //      ignoreCase="true"` (`synonyms_und.txt` for `text_und`) -- query
-    //      analyzer only (`:60`, `:181`).
-    //   3. `StandardTokenizerFactory` where this chain uses `SimpleTokenizer`,
-    //      so the token boundaries themselves are only approximately Solr's.
-    //   4. `WordDelimiterGraphFilterFactory`, so a phrase with an internal
-    //      case/number/punctuation boundary analyzes differently than Solr
-    //      would. Closing this one has a dependency outside this file: the
-    //      `last_is_prefix` derivation in `core_index.rs` (see the comment
-    //      above `let last_is_prefix`) is only sound because no *graph* filter
-    //      is in this chain, so the last token's end offset is necessarily
-    //      `maxEndOffset`. Adding WDGF (or the synonym graph filter in 2)
-    //      invalidates that and must be fixed there at the same time.
-    //
-    // ponytail: one chain serves both the `suggest.q` analysis and the stored
-    // phrase, whereas Solr's index and query analyzers for these field types
-    // differ -- synonyms are query-side only, and WDGF's `catenateNumbers` /
-    // `catenateWords` are `1` on the index side and `0` on the query side
-    // (`:51` vs `:62`, `:172` vs `:183`). Unpinned by any fixture.
-    //
+    // ponytail: this fixes the SUGGEST path only. Wayfinder's global `text_en` /
+    // `text_general` presets still have no `LengthFilter` and still use Rust's
+    // full-Unicode `LowerCaser`, so `/select` over a `text_en` field keeps
+    // diverging from Solr on both counts. That is a real, separate bug, filed as
+    // #388 -- not closed by this change.
     let suggest_front = || {
-        TextAnalyzer::builder(SimpleTokenizer::default())
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            // Search-quality UAX #29 words may be meaningful one-character
+            // terms (including CJK), so retain the upper bound but do not
+            // carry forward Solr's blind min=2 cutoff.
             .filter_dynamic(LengthFilter {
-                min: SUGGEST_MIN_TOKEN_LEN,
+                min: 1,
                 max: SUGGEST_MAX_TOKEN_LEN,
             })
             .filter_dynamic(SimpleLowerCaseFilter)
     };
     // `stopwords_und.txt` is empty in the shipped configset, so the `und` chain
     // has no stopword filter at all -- unlike `text_en`'s 33-word list.
-    manager.register(
+    register_split(
         &suggest_tokenizer(SUGGEST_UNDEFINED_DICTIONARY),
         suggest_front()
+            .filter_dynamic(WordDelimiterFilter::suggest())
+            .filter_dynamic(RemoveDuplicatesFilter)
+            .build(),
+        suggest_front()
+            .filter_dynamic(WordDelimiterFilter::suggest())
+            .filter_dynamic(SynonymFilter {
+                resource: synonyms.clone(),
+            })
             .filter_dynamic(RemoveDuplicatesFilter)
             .build(),
     );
     for (code, lang) in LANGUAGES {
-        let mut chain = suggest_front();
-        if *code == "en" {
+        let index_chain = if *code == "en" {
             // Only `text_en` ships a stopword list; the same Porter terminal-y
-            // compatibility rule `TEXT_EN_TOKENIZER` needs applies here too,
-            // since it is the same SnowballPorter English filter being matched.
-            chain = chain
+            // compatibility rule `TEXT_EN_TOKENIZER` needs applies here too.
+            suggest_front()
                 .filter_dynamic(english_stopwords())
-                .filter_dynamic(PorterTerminalYFilter);
-        }
-        manager.register(
+                .filter_dynamic(WordDelimiterFilter::suggest())
+                .filter_dynamic(PorterTerminalYFilter)
+        } else {
+            suggest_front().filter_dynamic(WordDelimiterFilter::suggest())
+        };
+        let query_chain = if *code == "en" {
+            suggest_front()
+                .filter_dynamic(english_stopwords())
+                .filter_dynamic(WordDelimiterFilter::suggest())
+                .filter_dynamic(SynonymFilter {
+                    resource: synonyms.clone(),
+                })
+                .filter_dynamic(PorterTerminalYFilter)
+        } else {
+            suggest_front()
+                .filter_dynamic(WordDelimiterFilter::suggest())
+                .filter_dynamic(SynonymFilter {
+                    resource: synonyms.clone(),
+                })
+        };
+        register_split(
             &suggest_tokenizer(code),
-            chain
+            index_chain
+                .filter_dynamic(Stemmer::new(*lang))
+                .filter_dynamic(RemoveDuplicatesFilter)
+                .build(),
+            query_chain
                 .filter_dynamic(Stemmer::new(*lang))
                 .filter_dynamic(RemoveDuplicatesFilter)
                 .build(),
         );
     }
     for ft in field_types {
-        manager.register(&ft.name, build_analyzer(ft)?);
+        // The custom chains. Both managers get an entry under the field type's
+        // own name -- that name IS the index identity, and the query manager is
+        // keyed by it -- so the only question is which analyzer goes into the
+        // query manager.
+        manager.register(&ft.name, build_analyzer(ft, AnalyzerSide::Index)?);
+        let query_analyzer = match ft.query_tokenizer {
+            Some(_) => build_analyzer(ft, AnalyzerSide::Query)?,
+            None => {
+                if !ft.query_filters.is_empty() {
+                    bail!(
+                        "field type `{}` sets `query_filters` without a `query_tokenizer`: the \
+                         query filters would never run, because a type declaring no query \
+                         tokenizer gets its *index* analyzer registered as its query analyzer too",
+                        ft.name
+                    );
+                }
+                build_analyzer(ft, AnalyzerSide::Index)?
+            }
+        };
+        query_manager.register(&ft.name, query_analyzer);
     }
-    Ok(manager)
+    Ok((manager, query_manager))
 }
 
 fn text_options(tokenizer: &str, stored: bool, fast: bool) -> TextOptions {
@@ -1497,8 +2442,23 @@ pub fn load(path: &Path) -> Result<WayfinderSchema> {
     parse(&raw).with_context(|| format!("parsing schema file {}", path.display()))
 }
 
+/// As [`load`], but with a core's live synonym resource installed into query
+/// analyzers. `CoreIndex::open` is the production caller; plain `load`/`parse`
+/// retain an empty resource for schema-only validation tests.
+pub fn load_with_synonyms(path: &Path, synonyms: SynonymResource) -> Result<WayfinderSchema> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading schema file {}", path.display()))?;
+    parse_with_synonyms(&raw, synonyms)
+        .with_context(|| format!("parsing schema file {}", path.display()))
+}
+
 /// As `load`, but from the TOML text directly.
 pub fn parse(raw: &str) -> Result<WayfinderSchema> {
+    let temporary = tempfile::tempdir().context("creating empty schema synonym resource")?;
+    parse_with_synonyms(raw, SynonymResource::open(temporary.path())?)
+}
+
+fn parse_with_synonyms(raw: &str, synonyms: SynonymResource) -> Result<WayfinderSchema> {
     let parsed: SchemaFile = toml::from_str(raw)?;
     if parsed
         .fields
@@ -1540,26 +2500,50 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     // `tests/schema_layer.rs`: it asserts the plausible additions (`boolean`,
     // `bool`, `binary`, `location`) are still unresolvable, so the moment one
     // gains an arm the suite fails and names this list.
-    // `TEXT_EN_TOKENIZER` is not a schema type name but is
-    // reserved alongside them: it is the tokenizer identity `text_en` registers
-    // under, and a chain registering over it would redefine the built-in preset.
-    // The same holds for `TEXT_GENERAL_TOKENIZER` and `DYNAMIC_TEXT_TOKENIZER`
-    // (#388) and for the retired identities in `RETIRED_TEXT_TOKENIZERS`, which
-    // an older on-disk index still names.
-    // The `wayfinder_suggest_*` identities (#384) are reserved for the same
-    // reason -- a custom chain under one of those names would redefine the
-    // analyzer the `/suggest` read path resolves through `dictionary_tokenizer`.
+    // The built-in tokenizer identities are reserved alongside the field type
+    // names: a custom chain registering over one would redefine that preset.
+    // Non-English current and legacy identities are derived from `LANGUAGES`,
+    // so adding a language cannot leave its internal analyzer shadowable. The
+    // `wayfinder_suggest_*` identities (#384) are reserved for the same reason
+    // -- a custom chain under one of those names would redefine the analyzer
+    // the `/suggest` read path resolves through `dictionary_tokenizer`.
     let reserved_type_names: Vec<String> = builtin_type_names()
         .into_iter()
         .chain(RETIRED_TEXT_TOKENIZERS.iter().map(|name| name.to_string()))
         .chain([
-            TEXT_EN_TOKENIZER.to_string(),
+            TEXT_GENERAL_TOKENIZER_LEGACY.to_string(),
             TEXT_GENERAL_TOKENIZER.to_string(),
+            TEXT_GENERAL_TOKENIZER_V5.to_string(),
+            TEXT_GENERAL_TOKENIZER_V4.to_string(),
+            TEXT_GENERAL_TOKENIZER_V3.to_string(),
+            TEXT_EN_TOKENIZER.to_string(),
+            TEXT_EN_TOKENIZER_V5.to_string(),
+            TEXT_EN_TOKENIZER_V4.to_string(),
+            TEXT_EN_TOKENIZER_V3.to_string(),
+            TEXT_EN_TOKENIZER_V2.to_string(),
             DYNAMIC_TEXT_TOKENIZER.to_string(),
+            DYNAMIC_TEXT_TOKENIZER_V5.to_string(),
+            DYNAMIC_TEXT_TOKENIZER_V4.to_string(),
+            DYNAMIC_TEXT_TOKENIZER_V3.to_string(),
+            DYNAMIC_TEXT_TOKENIZER_V1.to_string(),
             BOOST_TERM_PAYLOAD_TOKENIZER.to_string(),
             BOOST_TERM_PAYLOAD_VERBATIM_TOKENIZER.to_string(),
             suggest_tokenizer(SUGGEST_UNDEFINED_DICTIONARY),
         ])
+        .chain(
+            LANGUAGES
+                .iter()
+                .filter(|(code, _)| *code != "en")
+                .flat_map(|(code, _)| {
+                    [
+                        legacy_language_tokenizer(code),
+                        format!("wayfinder_text_{code}_v3"),
+                        language_tokenizer_v4(code),
+                        language_tokenizer_v5(code),
+                        language_tokenizer(code),
+                    ]
+                }),
+        )
         .chain(LANGUAGES.iter().map(|(code, _)| suggest_tokenizer(code)))
         .collect();
     if let Some(field_type) = parsed
@@ -1627,7 +2611,7 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
             );
         }
     }
-    let tokenizers = build_tokenizers(&parsed.field_types)?;
+    let (tokenizers, query_tokenizers) = build_tokenizers(&parsed.field_types, &synonyms)?;
 
     let mut builder = Schema::builder();
     let mut field_handles = HashMap::new();
@@ -1807,8 +2791,8 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
     for name in catch_all_fields(&parsed.dynamic_fields) {
         // ponytail: Tantivy gives this shared JSON catch-all one analyzer for
         // every analyzed dynamic rule. Keep the captured Search API configset's
-        // Snowball behavior (`day` stays `day`) here; static built-in `text_en`
-        // uses the v2 Porter-compatible analyzer independently.
+        // Snowball behavior (`day` stays `day`) here while folding accents;
+        // static built-in `text_en` uses its Porter-compatible analyzer independently.
         let tokenizer = if *name == DYNAMIC_TEXT_FIELD {
             DYNAMIC_TEXT_TOKENIZER
         } else {
@@ -1946,6 +2930,7 @@ pub fn parse(raw: &str) -> Result<WayfinderSchema> {
         copy_fields: parsed.copy_fields,
         field_types: parsed.field_types,
         tokenizers,
+        query_tokenizers,
         field_handles,
         location_fields,
         date_range_fields,
@@ -2049,4 +3034,94 @@ pub fn check_compatible(previous: &str, current: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn uax29_tokens(text: &str) -> Vec<Token> {
+        let mut tokenizer = Uax29Tokenizer;
+        let mut stream = tokenizer.token_stream(text);
+        let mut tokens = Vec::new();
+        while stream.advance() {
+            tokens.push(stream.token().clone());
+        }
+        tokens
+    }
+
+    #[test]
+    fn word_delimiter_compound_is_a_monotonic_position_graph() {
+        let mut tokenizer = WordDelimiterFilter::search().transform(Uax29Tokenizer);
+        let mut stream = tokenizer.token_stream("SKU-42 next");
+        let mut tokens = Vec::new();
+        while stream.advance() {
+            tokens.push(stream.token().clone());
+        }
+        assert!(
+            tokens
+                .windows(2)
+                .all(|pair| pair[0].position <= pair[1].position)
+        );
+        assert!(tokens.iter().any(|token| {
+            (token.text == "SKU-42" || token.text == "SKU42")
+                && token.position == 0
+                && token.position_length == 2
+        }));
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.text == "SKU" && token.position == 0)
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.text == "42" && token.position == 1)
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.text == "next" && token.position == 2)
+        );
+    }
+
+    #[test]
+    fn graph_semantics_are_reserved_for_exact_builtin_tokenizer_identities() {
+        assert!(is_current_builtin_graph_tokenizer(TEXT_EN_TOKENIZER));
+        assert!(is_current_builtin_graph_tokenizer(DYNAMIC_TEXT_TOKENIZER));
+        assert!(!is_current_builtin_graph_tokenizer("operator_custom_v6"));
+        assert!(!is_current_builtin_graph_tokenizer("wayfinder_text_en_v5"));
+    }
+
+    #[test]
+    fn uax29_tokenizer_retains_emoji_symbols_and_combining_only_segments() {
+        let input = "😀 !!! ★";
+        let tokens = uax29_tokens(input);
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| token.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["😀", "★"],
+            "only whitespace-only and punctuation-only UAX #29 segments may be discarded"
+        );
+        for token in tokens {
+            assert_eq!(
+                &input[token.offset_from..token.offset_to],
+                token.text,
+                "UAX #29 terms must retain offsets into the original input"
+            );
+        }
+
+        let combining_only = "\u{301}";
+        let token = uax29_tokens(combining_only)
+            .pop()
+            .expect("a combining-only UAX #29 segment must be retained");
+        assert_eq!(token.text, combining_only);
+        assert_eq!(
+            (token.offset_from, token.offset_to),
+            (0, combining_only.len()),
+            "combining-only terms must retain original offsets"
+        );
+    }
 }

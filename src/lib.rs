@@ -47,6 +47,7 @@ mod query;
 pub mod schema;
 pub mod snapshot;
 mod stats;
+mod synonyms;
 
 pub use config::ServerConfig;
 
@@ -701,6 +702,10 @@ fn build(schema_path: &Path, data_dir: &Path, config: ServerConfig) -> anyhow::R
         // — the method-agnostic routing the macro uses exists to match Solr's
         // request handlers, and that reason does not apply here.
         .route("/ui", get(core_ui))
+        // Per-core query-side synonym administration (issue #389). Unlike the
+        // Solr wire routes this is Wayfinder-owned operator UI, so a normal
+        // GET/POST form is intentional.
+        .route("/ui/synonyms", get(synonyms_ui).post(synonyms_ui_post))
         // Query tester (issue #127) — same reasoning as `/ui` above, and
         // deliberately a thin wrapper: `query_ui` calls `select` itself.
         .route("/ui/query", get(query_ui))
@@ -875,6 +880,95 @@ async fn core_ui(State(state): State<Arc<AppState>>) -> Response {
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("failed to render the admin UI: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /ui/synonyms` — editable query-side synonym groups (issue #389).
+async fn synonyms_ui(State(state): State<Arc<AppState>>) -> Response {
+    match admin_ui::render_synonym_page(&state.core_name, &state.index.synonym_groups()) {
+        Ok(body) => Html(body).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to render the synonym editor: {error}"),
+        )
+            .into_response(),
+    }
+}
+
+/// A browser form POST must come from this host. API/non-browser clients often
+/// send neither Origin nor Referer, which is intentionally allowed; once either
+/// browser provenance header is present it must name the request Host exactly.
+fn same_origin_form_post(headers: &HeaderMap) -> bool {
+    let provenance = [header::ORIGIN, header::REFERER];
+    if provenance.iter().all(|name| !headers.contains_key(name)) {
+        return true;
+    }
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    provenance
+        .iter()
+        .filter_map(|name| headers.get(name))
+        .all(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|raw| raw.parse::<axum::http::Uri>().ok())
+                .and_then(|uri| {
+                    uri.authority()
+                        .map(|authority| authority.as_str().to_string())
+                })
+                .is_some_and(|authority| authority.eq_ignore_ascii_case(host))
+        })
+}
+
+/// `POST /ui/synonyms` validates the complete form before it writes. The
+/// `SynonymResource` persists to a same-directory temp file and then swaps its
+/// Arc<RwLock> table, so failed input can change neither live nor durable state.
+async fn synonyms_ui_post(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let form_content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .to_ascii_lowercase()
+                .starts_with("application/x-www-form-urlencoded")
+        });
+    if !form_content_type {
+        return (
+            StatusCode::BAD_REQUEST,
+            "synonym editor requires a form-encoded body",
+        )
+            .into_response();
+    }
+    if !same_origin_form_post(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            "cross-origin synonym form POST rejected",
+        )
+            .into_response();
+    }
+    let body = match std::str::from_utf8(&body) {
+        Ok(body) => body,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "synonym editor body must be UTF-8").into_response();
+        }
+    };
+    let groups = Params::parse(body).get("groups").unwrap_or("").to_string();
+    match state.index.replace_synonyms(&groups) {
+        Ok(()) => synonyms_ui(State(state)).await,
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            format!("invalid synonym groups: {error:#}"),
         )
             .into_response(),
     }

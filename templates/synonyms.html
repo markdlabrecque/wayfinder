@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Wayfinder &mdash; synonyms ({{ core_name }})</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 2rem; }
+      input[type=text] { width: 28rem; }
+      li { margin: 0.4rem 0; }
+      button { margin-left: 0.3rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Wayfinder</h1>
+    <h2>Synonyms &mdash; core {{ core_name }}</h2>
+    <p>Groups expand symmetrically at query time; saving does not reindex documents.</p>
+    <label for="synonym-filter">Filter groups</label>
+    <input id="synonym-filter" type="search" autocomplete="off">
+    <form method="post" action="/ui/synonyms" id="synonym-form">
+      <ul id="synonym-groups">
+        {% for group in groups %}
+        <li><input type="text" value="{{ group }}" aria-label="synonym group"><button type="button" data-action="edit">edit</button><button type="button" data-action="delete">delete</button></li>
+        {% endfor %}
+      </ul>
+      <button type="button" data-action="add">add</button>
+      <input type="hidden" name="groups" id="synonym-groups-value">
+      <button type="submit">Save synonyms</button>
+    </form>
+    <script>
+      (() => {
+        const list = document.getElementById('synonym-groups');
+        const filter = document.getElementById('synonym-filter');
+        const add = document.querySelector('[data-action="add"]');
+        filter.addEventListener('input', () => {
+          const needle = filter.value.toLowerCase();
+          for (const row of list.children) row.hidden = !row.querySelector('input').value.toLowerCase().includes(needle);
+        });
+        add.addEventListener('click', () => {
+          const row = document.createElement('li');
+          row.innerHTML = '<input type="text" aria-label="synonym group"><button type="button" data-action="edit">edit</button><button type="button" data-action="delete">delete</button>';
+          list.append(row);
+          row.querySelector('input').focus();
+        });
+        list.addEventListener('click', event => {
+          const action = event.target.dataset.action;
+          if (action === 'delete') event.target.closest('li').remove();
+          if (action === 'edit') event.target.closest('li').querySelector('input').focus();
+        });
+        document.getElementById('synonym-form').addEventListener('submit', () => {
+          document.getElementById('synonym-groups-value').value = [...list.querySelectorAll('input')].map(input => input.value).filter(Boolean).join('\n');
+        });
+      })();
+    </script>
+  </body>
+</html>

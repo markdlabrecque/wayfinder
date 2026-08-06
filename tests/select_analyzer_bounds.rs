@@ -3,18 +3,14 @@
 //!
 //! Wayfinder's global analyzed text chains diverge from the shipped
 //! `search_api_solr` configset (`solr-ref/search-api/configset/schema_extra_types.xml`)
-//! in three ways, all pinned by the twelve fixtures this file compares against:
+//! in two ways pinned by the ten fixtures this file compares against:
 //!
-//! 1. **No minimum token length.** Every text field type in the configset
-//!    carries `LengthFilterFactory min="2" max="100"`, index and query side.
-//!    Wayfinder has no lower bound, so a one-character query token survives
-//!    where Solr drops it.
-//! 2. **Wrong lowercasing.** Lucene's `LowerCaseFilterFactory` is Java's
+//! 1. **Wrong lowercasing.** Lucene's `LowerCaseFilterFactory` is Java's
 //!    `Character.toLowerCase`, Unicode's *simple* (1:1) mapping. Tantivy's
 //!    `LowerCaser` is Rust's `str::to_lowercase`, the *full* mapping. They
 //!    disagree on U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE: Java folds it
 //!    to a bare `i`, Rust to `i` + U+0307 COMBINING DOT ABOVE.
-//! 3. **Wrong upper bound.** Wayfinder uses `RemoveLongFilter::limit(40)`
+//! 2. **Wrong upper bound.** Wayfinder uses `RemoveLongFilter::limit(40)`
 //!    (bytes); the configset's only upper bound is `LengthFilterFactory
 //!    max="100"` (characters, inclusive).
 //!
@@ -115,25 +111,12 @@ async fn assert_select_matches_fixture(query_field_and_term: &str, fixture_name:
     common::assert_matches_fixture(body, fixture_name);
 }
 
-// --- 1. LengthFilterFactory min="2" -----------------------------------------
+// Solr's one-character `min=2` fixture assertions are intentionally absent:
+// issue #389 retains meaningful singleton terms for search quality. The UAX #29
+// and dynamic analyzer suites own that behavior instead of this Solr contract.
 
-/// Discriminates divergence 1 (no lower bound): `i` is in neither stopword
-/// list, so a hit here can only come from the missing `LengthFilterFactory
-/// min="2"`. Predicted RED: Wayfinder has no lower bound today, so `q=...:i`
-/// still analyzes to a token and matches doc `a1`.
-#[tokio::test]
-async fn select_analyzer_onechar_en_matches_fixture() {
-    assert_select_matches_fixture("tm_X3b_en_title:i", "select_analyzer_onechar_en").await;
-}
-
-/// As `onechar_en`, over the `text_general`-typed `tm_*` dynamic rule (which
-/// still resolves through the same `_dynamic_text` catch-all). Predicted RED.
-#[tokio::test]
-async fn select_analyzer_onechar_und_matches_fixture() {
-    assert_select_matches_fixture("tm_title:i", "select_analyzer_onechar_und").await;
-}
-
-/// Control for `onechar_en`: same doc, same field, a token of two-or-more
+/// Same doc and fields as the retired one-character fixture assertions, using
+/// a token of two-or-more characters.
 /// characters. Must hit regardless of the length bound. Predicted GREEN
 /// already (a length bound only ever *removes* matches, never adds one).
 #[tokio::test]
@@ -151,7 +134,7 @@ async fn select_analyzer_onechar_control_und_matches_fixture() {
     assert_select_matches_fixture("tm_title:count", "select_analyzer_onechar_control_und").await;
 }
 
-// --- 2. U+0130 simple-vs-full lowercasing -----------------------------------
+// --- 1. U+0130 simple-vs-full lowercasing -----------------------------------
 
 /// Discriminates divergence 2: an all-ASCII `istanbul` query against an
 /// indexed `İstanbul` (U+0130). Lucene's simple fold makes the indexed token
@@ -195,7 +178,7 @@ async fn select_analyzer_dotted_i_control_en_matches_fixture() {
     .await;
 }
 
-// --- 3. Upper bound: LengthFilterFactory max="100" (inclusive), NOT
+// --- 2. Upper bound: LengthFilterFactory max="100" (inclusive), NOT
 //        RemoveLongFilter::limit(40) bytes ----------------------------------
 
 /// Discriminates divergence 3 in the direction where Wayfinder drops a token

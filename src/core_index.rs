@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -51,11 +51,16 @@ use crate::local_params;
 use crate::params::Params;
 use crate::query::{self, QueryError};
 use crate::schema::{self, ValueKind, WayfinderSchema};
+use crate::synonyms::SynonymResource;
 
 /// Ceiling on how many distinct terms one `facet.field` enumerates. Tantivy's
 /// own aggregation bucket limit is the binding constraint, so the request asks
 /// for exactly that many and no more.
 const MAX_FACET_TERMS: u32 = DEFAULT_BUCKET_LIMIT;
+/// A graph with N stacked alternatives has an exponential number of phrase
+/// paths. Refuse it before constructing an unbounded Cartesian product.
+const MAX_PHRASE_GRAPH_PATHS: usize = 1024;
+const MAX_PHRASE_GRAPH_DEPTH: usize = 256;
 
 /// `highlight_field`'s sentinel `max_num_chars` meaning "do not fragment at
 /// all -- return the whole field as one snippet". Solr's `hl.fragsize=0`
@@ -472,6 +477,7 @@ struct CommitState {
     /// means "no pending schedule".
     deadline: Mutex<Option<Instant>>,
     condvar: Condvar,
+    closing: AtomicBool,
 }
 
 impl CommitState {
@@ -527,6 +533,9 @@ const SCHEDULER_IDLE_POLL: Duration = Duration::from_millis(200);
 fn run_scheduler(weak: std::sync::Weak<CommitState>) {
     loop {
         let Some(state) = weak.upgrade() else { return };
+        if state.closing.load(Ordering::Acquire) {
+            return;
+        }
         let mut deadline = state
             .deadline
             .lock()
@@ -789,15 +798,35 @@ pub struct CoreIndex {
     /// `lock xadd`, no fences.
     deletes_by_id: AtomicU64,
     deletes_by_query: AtomicU64,
+    /// Per-core query-side synonym table. Its Arc is captured by query
+    /// analyzers; keeping this owner exposes atomic hot replacement to the UI.
+    synonyms: SynonymResource,
+    /// Joined during `Drop` so a router that has been dropped releases
+    /// Tantivy's single-writer lock before a same-directory reopen begins.
+    scheduler: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for CoreIndex {
+    fn drop(&mut self) {
+        // `run_scheduler` temporarily upgrades its Weak while sleeping. Wake
+        // and join it here so that temporary Arc cannot keep IndexWriter's
+        // lock alive past the router's drop (notably a per-core reopen).
+        self.state.closing.store(true, Ordering::Release);
+        self.state.condvar.notify_all();
+        if let Some(scheduler) = self.scheduler.take() {
+            let _ = scheduler.join();
+        }
+    }
 }
 
 impl CoreIndex {
     pub fn open(schema_path: &Path, data_dir: &Path, config: &ServerConfig) -> Result<CoreIndex> {
         let schema_toml = std::fs::read_to_string(schema_path)
             .with_context(|| format!("reading schema file {}", schema_path.display()))?;
-        let wf_schema = schema::load(schema_path)?;
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("creating data dir {}", data_dir.display()))?;
+        let synonyms = SynonymResource::open(data_dir)?;
+        let wf_schema = schema::load_with_synonyms(schema_path, synonyms.clone())?;
 
         // Startup schema check (PRD §3 / open question 4): an index carries the
         // schema it was built with, and an incompatible change must refuse to
@@ -809,50 +838,55 @@ impl CoreIndex {
         // empty data directory, so directory existence alone must never turn
         // a fresh index into a legacy one.
         let has_snapshot = snapshot.exists();
-        let (previous_changed_static_text, previous_analyzed_dynamic, previous_has_dynamic_fields) =
-            if has_snapshot {
-                let previous = std::fs::read_to_string(&snapshot)
-                    .with_context(|| format!("reading stored schema {}", snapshot.display()))?;
-                schema::check_compatible(&previous, &schema_toml).with_context(|| {
-                    format!(
-                        "the index in {} was built with an incompatible schema",
-                        data_dir.display()
-                    )
-                })?;
-                let previous_schema = schema::parse(&previous)
-                    .context("parsing the index's stored schema for its analyzer contract")?;
-                (
-                    previous_schema.uses_changed_static_text(),
-                    previous_schema.uses_analyzed_dynamic_path(),
-                    previous_schema.has_dynamic_fields(),
+        let (
+            _previous_static_text_en,
+            previous_static_accent_folded_text,
+            previous_analyzed_dynamic,
+            previous_has_dynamic_fields,
+        ) = if has_snapshot {
+            let previous = std::fs::read_to_string(&snapshot)
+                .with_context(|| format!("reading stored schema {}", snapshot.display()))?;
+            schema::check_compatible(&previous, &schema_toml).with_context(|| {
+                format!(
+                    "the index in {} was built with an incompatible schema",
+                    data_dir.display()
                 )
-            } else {
-                (false, false, false)
-            };
+            })?;
+            let previous_schema = schema::parse(&previous)
+                .context("parsing the index's stored schema for its analyzer contract")?;
+            (
+                previous_schema.uses_static_text_en(),
+                previous_schema.uses_static_accent_folded_text(),
+                previous_schema.uses_analyzed_dynamic_path(),
+                previous_schema.has_dynamic_fields(),
+            )
+        } else {
+            (false, false, false, false)
+        };
 
-        // Analyzer contract v2 changes static built-in `text_en` from the v1
-        // Snowball pipeline to the captured Porter terminal-y behavior. The
-        // shared `_dynamic_text` catch-all deliberately keeps v1 Snowball
-        // semantics for Search API, so a normal v1 marker makes that path safe.
-        // Pre-v1/legacy-dynamic markers still require reindexing before an
-        // analyzed dynamic rule can use their older `en_stem` catch-all.
-        //
-        // Contract v3 (#388) changes all three analyzed-text chains at once --
-        // static `text_en`, static `text_general`, and `_dynamic_text` -- by
-        // adding the configset's character-counted length bound and Lucene's
-        // simple case folding. The incoming and latest-snapshot predicates
-        // reject any configured affected path, but a snapshot can no longer
-        // describe an analyzed rule that historically wrote terms before a
-        // later raw-only edit. A legacy marker may therefore become current
-        // only after the persisted `_dynamic_text` term dictionaries prove
-        // empty. The configured-path predicate still serves the v1 and v2
-        // checks that fail before that physical proof is needed.
+        // The v3/v4 folding releases changed built-in and dynamic text terms;
+        // v5 replaces their tokenizer with UAX #29 word segmentation. A marker
+        // or tokenizer identity from an earlier contract must never be adopted
+        // for any path that can contain those old terms.
         let analyzer_contract = schema::analyzer_contract_path(data_dir);
-        let uses_changed_static_text =
-            wf_schema.uses_changed_static_text() || previous_changed_static_text;
+        let uses_static_accent_folded_text =
+            wf_schema.uses_static_accent_folded_text() || previous_static_accent_folded_text;
         let uses_analyzed_dynamic =
             wf_schema.uses_analyzed_dynamic_path() || previous_analyzed_dynamic;
-        let uses_changed_analyzed_path = uses_changed_static_text || uses_analyzed_dynamic;
+        let uses_changed_analyzed_path = uses_static_accent_folded_text || uses_analyzed_dynamic;
+        let adopt_legacy_index = || -> Result<&'static str> {
+            if has_snapshot && legacy_dynamic_text_has_indexed_terms(data_dir)? {
+                bail!(
+                    "the index in {} has legacy _dynamic_text postings; reindex into a fresh data directory for the current analyzer contract",
+                    data_dir.display()
+                );
+            }
+            Ok(if previous_has_dynamic_fields {
+                schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT
+            } else {
+                schema::ANALYZER_CONTRACT
+            })
+        };
         let marker_to_write = if analyzer_contract.exists() {
             let persisted = std::fs::read_to_string(&analyzer_contract).with_context(|| {
                 format!(
@@ -862,55 +896,87 @@ impl CoreIndex {
             })?;
             match persisted.trim() {
                 schema::ANALYZER_CONTRACT => None,
+                schema::ANALYZER_CONTRACT_V5 if uses_changed_analyzed_path => {
+                    bail!(
+                        "the index in {} uses the pre-word-delimiter text analyzer contract; reindex into a fresh data directory",
+                        data_dir.display()
+                    );
+                }
+                schema::ANALYZER_CONTRACT_V5 => Some(adopt_legacy_index()?),
+                schema::ANALYZER_CONTRACT_V5_LEGACY_DYNAMIC_TEXT if uses_changed_analyzed_path => {
+                    bail!(
+                        "the index in {} uses the pre-word-delimiter text analyzer contract; reindex into a fresh data directory",
+                        data_dir.display()
+                    );
+                }
+                schema::ANALYZER_CONTRACT_V5_LEGACY_DYNAMIC_TEXT => {
+                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
+                }
                 schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT if uses_changed_analyzed_path => {
                     bail!(
-                        "the index in {} predates the current text_en/_dynamic_text analyzer contract; reindex into a fresh data directory",
+                        "the index in {} predates the current UAX #29 text analyzer contract; reindex into a fresh data directory",
                         data_dir.display()
                     );
                 }
                 schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT => None,
-                // A v2 marker certifies the Porter-compatible text_en chain but
-                // predates v3's length bound and simple case folding, which
-                // changed every analyzed-text chain (#388).
+                schema::ANALYZER_CONTRACT_V4 if uses_changed_analyzed_path => {
+                    bail!(
+                        "the index in {} uses the pre-UAX #29 text analyzer contract; reindex into a fresh data directory",
+                        data_dir.display()
+                    );
+                }
+                schema::ANALYZER_CONTRACT_V4 => Some(adopt_legacy_index()?),
+                schema::ANALYZER_CONTRACT_V4_LEGACY_DYNAMIC_TEXT if uses_changed_analyzed_path => {
+                    bail!(
+                        "the index in {} uses the pre-UAX #29 text analyzer contract; reindex into a fresh data directory",
+                        data_dir.display()
+                    );
+                }
+                schema::ANALYZER_CONTRACT_V4_LEGACY_DYNAMIC_TEXT => {
+                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
+                }
+                schema::ANALYZER_CONTRACT_V3 if uses_changed_analyzed_path => {
+                    bail!(
+                        "the index in {} uses the pre-UAX #29 text analyzer contract; reindex into a fresh data directory",
+                        data_dir.display()
+                    );
+                }
+                schema::ANALYZER_CONTRACT_V3 => Some(adopt_legacy_index()?),
+                schema::ANALYZER_CONTRACT_V3_LEGACY_DYNAMIC_TEXT if uses_changed_analyzed_path => {
+                    bail!(
+                        "the index in {} uses the pre-UAX #29 text analyzer contract; reindex into a fresh data directory",
+                        data_dir.display()
+                    );
+                }
+                schema::ANALYZER_CONTRACT_V3_LEGACY_DYNAMIC_TEXT => {
+                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
+                }
                 schema::ANALYZER_CONTRACT_V2 if uses_changed_analyzed_path => {
                     bail!(
-                        "the index in {} uses the v2 text_en analyzer contract; reindex into a fresh data directory for the length-bounded, simple-case-folded text_en/text_general/_dynamic_text analyzers",
+                        "the index in {} uses a pre-folding text_en/text preset analyzer contract; reindex into a fresh data directory for accent folding",
                         data_dir.display()
                     );
                 }
-                schema::ANALYZER_CONTRACT_V2 => {
-                    if has_snapshot && legacy_dynamic_text_has_indexed_terms(data_dir)? {
-                        bail!(
-                            "the index in {} has legacy _dynamic_text postings; reindex into a fresh data directory for the current analyzer contract",
-                            data_dir.display()
-                        );
-                    }
-                    Some(schema::ANALYZER_CONTRACT)
+                schema::ANALYZER_CONTRACT_V2 => Some(adopt_legacy_index()?),
+                schema::ANALYZER_CONTRACT_V2_LEGACY_DYNAMIC_TEXT if uses_changed_analyzed_path => {
+                    bail!(
+                        "the index in {} uses a pre-folding text_en/text preset analyzer contract; reindex into a fresh data directory for accent folding",
+                        data_dir.display()
+                    );
                 }
-                // A v1 marker certified the dynamic catch-all's Snowball
-                // pipeline, which v2 left alone -- but v3 re-cases and
-                // length-bounds it too, so an index with an analyzed dynamic
-                // rule is no longer adoptable either: its terms are stale on
-                // both counts. This branch spans two contract steps, so the
-                // message names both reasons.
+                schema::ANALYZER_CONTRACT_V2_LEGACY_DYNAMIC_TEXT => {
+                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
+                }
                 schema::ANALYZER_CONTRACT_V1 if uses_changed_analyzed_path => {
                     bail!(
-                        "the index in {} uses the v1 text_en analyzer contract; reindex into a fresh data directory for the Porter-compatible text_en analyzer and the length-bounded, simple-case-folded text_en/text_general/_dynamic_text analyzers",
+                        "the index in {} uses a pre-folding text_en/text preset analyzer contract; reindex into a fresh data directory for accent folding",
                         data_dir.display()
                     );
                 }
-                schema::ANALYZER_CONTRACT_V1 => {
-                    if has_snapshot && legacy_dynamic_text_has_indexed_terms(data_dir)? {
-                        bail!(
-                            "the index in {} has legacy _dynamic_text postings; reindex into a fresh data directory for the current analyzer contract",
-                            data_dir.display()
-                        );
-                    }
-                    Some(schema::ANALYZER_CONTRACT)
-                }
+                schema::ANALYZER_CONTRACT_V1 => Some(adopt_legacy_index()?),
                 schema::ANALYZER_CONTRACT_V1_LEGACY_DYNAMIC_TEXT if uses_changed_analyzed_path => {
                     bail!(
-                        "the index in {} predates the current text_en/_dynamic_text analyzer contract; reindex into a fresh data directory",
+                        "the index in {} predates the current text_en/text preset/dynamic-text analyzer contract; reindex into a fresh data directory",
                         data_dir.display()
                     );
                 }
@@ -926,11 +992,11 @@ impl CoreIndex {
             }
         } else if has_snapshot && uses_changed_analyzed_path {
             bail!(
-                "the index in {} predates the current text_en/_dynamic_text analyzer contract; reindex into a fresh data directory",
+                "the index in {} predates the current text_en/text preset/dynamic-text analyzer contract; reindex into a fresh data directory",
                 data_dir.display()
             );
-        } else if has_snapshot && previous_has_dynamic_fields {
-            Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
+        } else if has_snapshot {
+            Some(adopt_legacy_index()?)
         } else {
             Some(schema::ANALYZER_CONTRACT)
         };
@@ -998,12 +1064,13 @@ impl CoreIndex {
             pending_docs: AtomicU64::new(0),
             deadline: Mutex::new(None),
             condvar: Condvar::new(),
+            closing: AtomicBool::new(false),
         });
         // A `Weak` handle, not a strong one: the scheduler thread must not be
         // the thing keeping `CommitState` (and so the writer/reader) alive —
         // it should exit once `CoreIndex` itself drops, not leak forever.
         let weak = Arc::downgrade(&state);
-        thread::spawn(move || run_scheduler(weak));
+        let scheduler = thread::spawn(move || run_scheduler(weak));
 
         Ok(CoreIndex {
             wf_schema,
@@ -1016,6 +1083,8 @@ impl CoreIndex {
             version_source: AtomicI64::new(version_seed()),
             deletes_by_id: AtomicU64::new(0),
             deletes_by_query: AtomicU64::new(0),
+            synonyms,
+            scheduler: Some(scheduler),
         })
     }
 
@@ -1037,6 +1106,18 @@ impl CoreIndex {
     /// (`UPDATE.updateHandler.deletesByQuery`).
     pub fn deletes_by_query(&self) -> u64 {
         self.deletes_by_query.load(Ordering::Relaxed)
+    }
+
+    /// Current normalized groups for the per-core admin page.
+    pub fn synonym_groups(&self) -> Vec<Vec<String>> {
+        self.synonyms.groups()
+    }
+
+    /// Atomically persists and hot-swaps query-side synonyms. Index terms are
+    /// intentionally untouched: analyzers consult this shared resource only on
+    /// the query manager, so no reindex or reader reload is required.
+    pub fn replace_synonyms(&self, groups: &str) -> Result<()> {
+        self.synonyms.replace(groups)
     }
 
     /// Adds documents from a Solr-style JSON array-of-docs body. Returns the
@@ -1385,6 +1466,29 @@ impl CoreIndex {
         Ok(())
     }
 
+    /// Tantivy's own `QueryParser`, wired to the **query**-side tokenizer
+    /// manager (issue #389 Phase 1).
+    ///
+    /// Deliberately not `QueryParser::for_index`, which is literally
+    /// `QueryParser::new(index.schema(), default_fields, index.tokenizers()
+    /// .clone())` (tantivy-0.26.1) — i.e. the *indexing* manager. Tantivy
+    /// resolves each field's analyzer itself, inside the parser, from the manager
+    /// it was handed and keyed by the tokenizer name recorded in the schema; the
+    /// query manager is keyed by those same identities, so handing it over here
+    /// is the entire wiring the `q` path needs. Nothing else is lost: schema and
+    /// default fields are the only other things `for_index` supplied.
+    ///
+    /// Every chain Wayfinder ships registers one analyzer in both managers, so
+    /// this resolves exactly what `for_index` did until Phase 2/4 give `text_en`
+    /// / `text_und` a real query-side chain.
+    fn query_parser(&self, default_field: Field) -> QueryParser {
+        QueryParser::new(
+            self.index.schema(),
+            vec![default_field],
+            self.wf_schema.query_tokenizers.clone(),
+        )
+    }
+
     /// Parses a Solr `q` (or `fq`) query string into a Tantivy query.
     /// `*:*` is special-cased to `AllQuery`, matching Solr's match-all idiom.
     ///
@@ -1473,7 +1577,7 @@ impl CoreIndex {
         let rewritten = self.rewrite_dynamic_fields(&self.rewrite_wildcard_subclause(source));
         let user_ast = tantivy::query_grammar::parse_query(&rewritten)
             .map_err(|_| anyhow!("could not parse query `{query_str}`"))?;
-        let parser = QueryParser::for_index(&self.index, vec![default_field]);
+        let parser = self.query_parser(default_field);
         self.build_ast(user_ast, &parser, default_field_name, &nested)
             .map_err(anyhow::Error::from)
     }
@@ -1934,10 +2038,18 @@ impl CoreIndex {
         // LengthFilter min=2 rather than a term nothing carries. `parse_block`
         // has already stripped the quotes `escapePhrase()` adds.
         //
-        // `tokenize` returns `None` for a type with no analysis chain at all (a
-        // numeric field, say). That is deliberately *not* treated as "analyzes
-        // to empty": such a field is not payload-bearing either, and the
-        // non-payload-field error below names the real problem.
+        // `tokenize_query` -- the query-side manager (#389 Phase 1) -- because
+        // that is what "its own query analyzer" means now that the two sides can
+        // differ. Inert today: `boost_term_payload` has one analysis chain, so
+        // both managers hold the same analyzer for it. It stops being inert the
+        // moment a payload-bearing field type declares two, and the bug it would
+        // cause then (a `v` analyzed by the index chain, matched against
+        // query-chain terms) is silent.
+        //
+        // `tokenize_query` returns `None` for a type with no analysis chain at
+        // all (a numeric field, say). That is deliberately *not* treated as
+        // "analyzes to empty": such a field is not payload-bearing either, and
+        // the non-payload-field error below names the real problem.
         //
         // With no `v` at all, the query text is the *bound* run after `}` --
         // Solr's general local-params contract (finding 173), which
@@ -1952,7 +2064,8 @@ impl CoreIndex {
         let analyzed = if query_text.is_empty() {
             None
         } else {
-            self.wf_schema.tokenize(&field_config.type_, query_text)
+            self.wf_schema
+                .tokenize_query(&field_config.type_, query_text)
         };
         if let Some(terms) = &analyzed {
             if terms.is_empty() {
@@ -2120,7 +2233,7 @@ impl CoreIndex {
             .map_err(|_| QueryError::Syntax(format!("could not parse query `{q}`")))?;
         let flat = flatten_edismax_clauses(user_ast);
 
-        let parser = QueryParser::for_index(&self.index, vec![default_field]);
+        let parser = self.query_parser(default_field);
         let mut literal_texts: Vec<String> = Vec::new();
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::with_capacity(flat.len());
         for (occur, leaf_boost, leaf) in flat {
@@ -2128,7 +2241,7 @@ impl CoreIndex {
                 tantivy::query_grammar::UserInputLeaf::Literal(lit) if lit.field_name.is_none() => {
                     literal_texts.push(lit.phrase.clone());
                     let quoted = lit.delimiter != tantivy::query_grammar::Delimiter::None;
-                    self.build_field_disjunction(&lit.phrase, quoted, &qf_fields, tie)
+                    self.build_field_disjunction(&lit.phrase, quoted, &qf_fields, tie)?
                 }
                 _ => self.build_ast(
                     tantivy::query_grammar::UserInputAst::Leaf(Box::new(leaf)),
@@ -2202,7 +2315,7 @@ impl CoreIndex {
 
         if let Some(pf_spec) = pf
             && let Some(pf_query) =
-                self.build_pf_query(pf_spec, default_field_name, &literal_texts, tie)
+                self.build_pf_query(pf_spec, default_field_name, &literal_texts, tie)?
         {
             outer_clauses.push((Occur::Should, pf_query));
         }
@@ -2409,7 +2522,7 @@ impl CoreIndex {
         quoted: bool,
         qf_fields: &[(FieldTarget, f32)],
         tie: f32,
-    ) -> Box<dyn Query> {
+    ) -> Result<Box<dyn Query>, QueryError> {
         let mut disjuncts: Vec<Box<dyn Query>> = Vec::with_capacity(qf_fields.len());
         for (target, field_boost) in qf_fields {
             // A field-LESS literal never reaches `build_leaf`, so #341's
@@ -2455,26 +2568,23 @@ impl CoreIndex {
                 }
                 continue;
             }
-            let tokens = self.tokenize_for_target(target, phrase_text);
-            let base: Box<dyn Query> = match tokens.as_slice() {
+            let alternatives = self.token_alternatives_for_target(target, phrase_text);
+            let base: Box<dyn Query> = match alternatives.as_slice() {
                 [] => continue,
-                [only] => Box::new(TermQuery::new(
-                    self.term_for_target(target, only),
+                [only] if only.len() == 1 => Box::new(TermQuery::new(
+                    self.term_for_target(target, &only[0]),
                     IndexRecordOption::WithFreqsAndPositions,
                 )),
-                _ if quoted => {
-                    let terms: Vec<Term> = tokens
-                        .iter()
-                        .map(|t| self.term_for_target(target, t))
-                        .collect();
-                    Box::new(PhraseQuery::new(terms))
-                }
+                _ if quoted => self.graph_phrase_query(target, phrase_text)?,
                 _ => {
-                    let clauses: Vec<(Occur, Box<dyn Query>)> = tokens
+                    let mut seen = BTreeSet::new();
+                    let clauses: Vec<(Occur, Box<dyn Query>)> = alternatives
                         .iter()
-                        .map(|t| {
+                        .flatten()
+                        .filter(|term| seen.insert((*term).clone()))
+                        .map(|term| {
                             let q: Box<dyn Query> = Box::new(TermQuery::new(
-                                self.term_for_target(target, t),
+                                self.term_for_target(target, term),
                                 IndexRecordOption::WithFreqsAndPositions,
                             ));
                             (Occur::Should, q)
@@ -2486,9 +2596,11 @@ impl CoreIndex {
             disjuncts.push(Box::new(BoostQuery::new(base, *field_boost)));
         }
         if disjuncts.is_empty() {
-            Box::new(EmptyQuery)
+            Ok(Box::new(EmptyQuery))
         } else {
-            Box::new(DisjunctionMaxQuery::with_tie_breaker(disjuncts, tie))
+            Ok(Box::new(DisjunctionMaxQuery::with_tie_breaker(
+                disjuncts, tie,
+            )))
         }
     }
 
@@ -2508,31 +2620,29 @@ impl CoreIndex {
         default_field_name: &str,
         literal_texts: &[String],
         tie: f32,
-    ) -> Option<Box<dyn Query>> {
+    ) -> Result<Option<Box<dyn Query>>, QueryError> {
         let pf_fields = self.resolve_field_weights(pf_spec, default_field_name);
         let joined = literal_texts.join(" ");
         if pf_fields.is_empty() || joined.trim().is_empty() {
-            return None;
+            return Ok(None);
         }
         let mut disjuncts: Vec<Box<dyn Query>> = Vec::new();
         for (target, field_boost) in &pf_fields {
-            let tokens = self.tokenize_for_target(target, &joined);
-            if tokens.len() < 2 {
+            let paths = self.token_graph_paths_for_target(target, &joined)?;
+            if paths.iter().all(|path| path.len() < 2) {
                 continue;
             }
-            let terms: Vec<Term> = tokens
-                .iter()
-                .map(|t| self.term_for_target(target, t))
-                .collect();
-            let phrase: Box<dyn Query> = Box::new(PhraseQuery::new(terms));
+            // `pf` is a phrase boost too: it must see the same synonym and
+            // delimiter alternatives as qf, never pick an arbitrary first one.
+            let phrase = self.graph_phrase_query(target, &joined)?;
             disjuncts.push(Box::new(BoostQuery::new(phrase, *field_boost)));
         }
         if disjuncts.is_empty() {
-            None
+            Ok(None)
         } else {
-            Some(Box::new(DisjunctionMaxQuery::with_tie_breaker(
+            Ok(Some(Box::new(DisjunctionMaxQuery::with_tie_breaker(
                 disjuncts, tie,
-            )))
+            ))))
         }
     }
 
@@ -2558,43 +2668,274 @@ impl CoreIndex {
         }
     }
 
-    /// Tokenizes free-standing `text` (not a stored doc value — a `q`/`pf`
-    /// clause's own literal text) with `target`'s own indexing analyzer, the
-    /// same tokenizer chain `mlt_query` mines stored values with. For a
-    /// dynamic target that analyzer is the catch-all container's, not a
-    /// declared field's (see the `JsonObject` arm below). A non-text target
-    /// (or one with no configured tokenizer) falls back to the raw text as a
-    /// single "token" — edismax's `qf`/`pf` are only ever pointed at text
-    /// fields per this issue's scope, so this is a defensive fallback, not a
-    /// path any fixture exercises.
-    fn tokenize_for_target(&self, target: &FieldTarget, text: &str) -> Vec<String> {
+    /// Returns a query target only for a current Phase-4 built-in analyzer.
+    /// Custom chains retain Tantivy's existing literal semantics unchanged.
+    fn phase4_literal_target(&self, field_name: &str) -> Option<FieldTarget> {
+        let (target, field) = if let Some(path) =
+            field_name.strip_prefix(&format!("{}.", schema::DYNAMIC_TEXT_FIELD))
+        {
+            let container = self.wf_schema.field(schema::DYNAMIC_TEXT_FIELD)?;
+            (
+                FieldTarget::Dynamic {
+                    container,
+                    path: path.to_string(),
+                },
+                container,
+            )
+        } else {
+            let field = self.wf_schema.field(field_name)?;
+            (FieldTarget::Static(field), field)
+        };
+        let index_schema = self.index.schema();
+        let tokenizer = match index_schema.get_field_entry(field).field_type() {
+            tantivy::schema::FieldType::Str(options) => options
+                .get_indexing_options()
+                .map(|options| options.tokenizer()),
+            tantivy::schema::FieldType::JsonObject(options) => options
+                .get_text_indexing_options()
+                .map(|options| options.tokenizer()),
+            _ => None,
+        }?;
+        schema::is_current_builtin_graph_tokenizer(tokenizer).then_some(target)
+    }
+
+    /// Builds one Should group per analyzed position and requires every group.
+    /// This is the position-aware alternative to Tantivy's phrase-only handling
+    /// of a multi-token stream, and is what makes hot query synonyms useful.
+    fn expanded_literal_query(&self, target: &FieldTarget, text: &str) -> Box<dyn Query> {
+        let mut positions: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        let schema = self.index.schema();
+        let tokenizer_name = match schema.get_field_entry(target.field()).field_type() {
+            tantivy::schema::FieldType::Str(options) => options
+                .get_indexing_options()
+                .map(|options| options.tokenizer()),
+            tantivy::schema::FieldType::JsonObject(options) => options
+                .get_text_indexing_options()
+                .map(|options| options.tokenizer()),
+            _ => None,
+        };
+        if let Some(mut tokenizer) =
+            tokenizer_name.and_then(|name| self.wf_schema.query_tokenizers.get(name))
+        {
+            let mut stream = tokenizer.token_stream(text);
+            stream.process(&mut |token| {
+                positions
+                    .entry(token.position)
+                    .or_default()
+                    .push(token.text.clone())
+            });
+        }
+        let clauses: Vec<(Occur, Box<dyn Query>)> = positions
+            .into_values()
+            .map(|terms| {
+                let mut seen = BTreeSet::new();
+                let alternatives: Vec<(Occur, Box<dyn Query>)> = terms
+                    .into_iter()
+                    .filter(|term| seen.insert(term.clone()))
+                    .map(|term| {
+                        let query: Box<dyn Query> = Box::new(TermQuery::new(
+                            self.term_for_target(target, &term),
+                            IndexRecordOption::WithFreqsAndPositions,
+                        ));
+                        (Occur::Should, query)
+                    })
+                    .collect();
+                (
+                    Occur::Must,
+                    Box::new(BooleanQuery::new(alternatives)) as Box<dyn Query>,
+                )
+            })
+            .collect();
+        if clauses.is_empty() {
+            Box::new(EmptyQuery)
+        } else {
+            Box::new(BooleanQuery::new(clauses))
+        }
+    }
+
+    /// Reads the query analyzer as graph edges: `(start position, span, term)`.
+    /// Word-delimiter parts are sequential edges while preserved/catenated forms
+    /// span the compound; synonyms are same-position, span-one alternatives.
+    fn token_graph_for_target(
+        &self,
+        target: &FieldTarget,
+        text: &str,
+    ) -> Vec<(usize, usize, String)> {
+        let schema = self.index.schema();
+        let tokenizer_name = match schema.get_field_entry(target.field()).field_type() {
+            tantivy::schema::FieldType::Str(options) => {
+                options.get_indexing_options().map(|o| o.tokenizer())
+            }
+            tantivy::schema::FieldType::JsonObject(options) => {
+                options.get_text_indexing_options().map(|o| o.tokenizer())
+            }
+            _ => None,
+        };
+        let Some(mut tokenizer) =
+            tokenizer_name.and_then(|name| self.wf_schema.query_tokenizers.get(name))
+        else {
+            return vec![(0, 1, text.to_string())];
+        };
+        let mut edges = Vec::new();
+        let mut stream = tokenizer.token_stream(text);
+        stream.process(&mut |token| {
+            let edge = (
+                token.position,
+                token.position_length.max(1),
+                token.text.clone(),
+            );
+            if !edges.contains(&edge) {
+                edges.push(edge);
+            }
+        });
+        edges
+    }
+
+    /// Enumerates complete paths through an analyzed token graph. The hard cap
+    /// is checked before each path allocation, turning adversarial synonym
+    /// input into a clear query error instead of an allocation blow-up.
+    fn token_graph_paths_for_target(
+        &self,
+        target: &FieldTarget,
+        text: &str,
+    ) -> Result<Vec<Vec<(usize, String)>>, QueryError> {
+        let edges = self.token_graph_for_target(target, text);
+        let Some(start) = edges.iter().map(|(position, _, _)| *position).min() else {
+            return Ok(Vec::new());
+        };
+        let end = edges
+            .iter()
+            .map(|(position, span, _)| position + span)
+            .max()
+            .expect("edges is nonempty");
+        let mut graph: BTreeMap<usize, Vec<(usize, String)>> = BTreeMap::new();
+        for (position, span, term) in edges {
+            graph.entry(position).or_default().push((span, term));
+        }
+        // Iterative traversal avoids one stack frame per query token. When a
+        // filter removes a token, advance to the next position that has an
+        // edge while retaining the gap in the path's recorded offsets.
+        let mut paths = Vec::new();
+        let mut pending = vec![(start, Vec::new())];
+        while let Some((position, path)) = pending.pop() {
+            if position >= end {
+                if paths.len() >= MAX_PHRASE_GRAPH_PATHS {
+                    return Err(QueryError::Syntax(format!(
+                        "phrase expansion exceeds {MAX_PHRASE_GRAPH_PATHS} graph paths"
+                    )));
+                }
+                paths.push(path);
+                continue;
+            }
+            if let Some(alternatives) = graph.get(&position) {
+                if paths.len() + pending.len() + alternatives.len() > MAX_PHRASE_GRAPH_PATHS {
+                    return Err(QueryError::Syntax(format!(
+                        "phrase expansion exceeds {MAX_PHRASE_GRAPH_PATHS} graph paths"
+                    )));
+                }
+                for (span, term) in alternatives.iter().rev() {
+                    if path.len() >= MAX_PHRASE_GRAPH_DEPTH {
+                        return Err(QueryError::Syntax(format!(
+                            "phrase graph exceeds {MAX_PHRASE_GRAPH_DEPTH} token positions"
+                        )));
+                    }
+                    let mut next = path.clone();
+                    next.push((position, term.clone()));
+                    pending.push((position + span, next));
+                }
+            } else if let Some(next_position) =
+                graph.range((position + 1)..).next().map(|(p, _)| *p)
+            {
+                pending.push((next_position, path));
+            }
+        }
+        Ok(paths)
+    }
+
+    fn graph_phrase_query(
+        &self,
+        target: &FieldTarget,
+        text: &str,
+    ) -> Result<Box<dyn Query>, QueryError> {
+        let paths = self.token_graph_paths_for_target(target, text)?;
+        let start = paths
+            .iter()
+            .flat_map(|path| path.first().map(|(position, _)| *position))
+            .min()
+            .unwrap_or(0);
+        let clauses = paths
+            .into_iter()
+            .filter(|path| !path.is_empty())
+            .map(|path| {
+                let query: Box<dyn Query> = if path.len() == 1 {
+                    Box::new(TermQuery::new(
+                        self.term_for_target(target, &path[0].1),
+                        IndexRecordOption::WithFreqsAndPositions,
+                    ))
+                } else if path
+                    .iter()
+                    .enumerate()
+                    .all(|(offset, (position, _))| *position == start + offset)
+                {
+                    Box::new(PhraseQuery::new(
+                        path.into_iter()
+                            .map(|(_, term)| self.term_for_target(target, &term))
+                            .collect(),
+                    ))
+                } else {
+                    Box::new(PhraseQuery::new_with_offset(
+                        path.into_iter()
+                            .map(|(position, term)| {
+                                (position - start, self.term_for_target(target, &term))
+                            })
+                            .collect(),
+                    ))
+                };
+                (Occur::Should, query)
+            })
+            .collect();
+        Ok(Box::new(BooleanQuery::new(clauses)))
+    }
+
+    /// Builds a position-aware phrase disjunction instead of flattening graph
+    /// alternatives into a required sequence.
+    fn expanded_phrase_query(
+        &self,
+        target: &FieldTarget,
+        text: &str,
+    ) -> Result<Box<dyn Query>, QueryError> {
+        self.graph_phrase_query(target, text)
+    }
+
+    /// Analyzes free-standing query text into same-position alternatives.
+    /// Query-side synonyms and word-delimiter forms must survive edismax's
+    /// `qf` path just as they do the default `q`/`fq` parser.
+    fn token_alternatives_for_target(&self, target: &FieldTarget, text: &str) -> Vec<Vec<String>> {
         let schema = self.index.schema();
         let field_entry = schema.get_field_entry(target.field());
         let tokenizer_name = match field_entry.field_type() {
             tantivy::schema::FieldType::Str(text_options) => {
                 text_options.get_indexing_options().map(|o| o.tokenizer())
             }
-            // A dynamic `qf`/`pf` name lives inside a catch-all JSON
-            // container, whose analyzer is declared on the container's own
-            // `JsonObjectOptions` (`_dynamic_text` = `text_en`, `_dynamic` =
-            // `raw`) — the same chain `generate_literals_for_json_object`
-            // uses when a dynamic name reaches Tantivy's parser via the
-            // query-text path.
             tantivy::schema::FieldType::JsonObject(json_options) => json_options
                 .get_text_indexing_options()
                 .map(|o| o.tokenizer()),
             _ => None,
         };
-        let Some(mut tokenizer) = tokenizer_name.and_then(|name| self.index.tokenizers().get(name))
+        let Some(mut tokenizer) =
+            tokenizer_name.and_then(|name| self.wf_schema.query_tokenizers.get(name))
         else {
-            return vec![text.to_string()];
+            return vec![vec![text.to_string()]];
         };
-        let mut tokens = Vec::new();
+        let mut positions: BTreeMap<usize, Vec<String>> = BTreeMap::new();
         let mut token_stream = tokenizer.token_stream(text);
         token_stream.process(&mut |token: &tantivy::tokenizer::Token| {
-            tokens.push(token.text.clone());
+            let alternatives = positions.entry(token.position).or_default();
+            if !alternatives.contains(&token.text) {
+                alternatives.push(token.text.clone());
+            }
         });
-        tokens
+        positions.into_values().collect()
     }
 
     /// Rewrites an embedded `*:*` sub-clause (e.g. `*:* AND lazy`) to a bare
@@ -2758,6 +3099,41 @@ impl CoreIndex {
             && let Some((start_col, end_col)) = self.leaf_date_range_columns(field)
         {
             return self.build_date_range_leaf(&leaf, start_col, end_col);
+        }
+
+        // Tantivy's parser turns every multi-token analyzer result into a
+        // phrase, even alternatives emitted at one token position. Phase 4's
+        // word-delimiter and synonym filters deliberately emit alternatives,
+        // so build a Must-of-Shoulds query instead: each analyzed position is
+        // required, and any part/catenation/synonym at that position may match.
+        // Quoted literals expand to one PhraseQuery per alternative path;
+        // prefixes retain Tantivy's dedicated prefix path.
+        if let UserInputLeaf::Literal(literal) = &leaf
+            && literal.delimiter == tantivy::query_grammar::Delimiter::None
+            && !literal.prefix
+            && literal.slop == 0
+            && matches!(
+                query::classify_literal(&literal.phrase),
+                query::LiteralKind::Plain
+            )
+            && let Some(target) = self
+                .phase4_literal_target(literal.field_name.as_deref().unwrap_or(default_field_name))
+        {
+            return Ok(self.expanded_literal_query(&target, &literal.phrase));
+        }
+
+        if let UserInputLeaf::Literal(literal) = &leaf
+            && literal.delimiter != tantivy::query_grammar::Delimiter::None
+            && !literal.prefix
+            && literal.slop == 0
+            && matches!(
+                query::classify_literal(&literal.phrase),
+                query::LiteralKind::Plain
+            )
+            && let Some(target) = self
+                .phase4_literal_target(literal.field_name.as_deref().unwrap_or(default_field_name))
+        {
+            return self.expanded_phrase_query(&target, &literal.phrase);
         }
 
         if leaf_field_name(&leaf).is_some_and(is_dynamic_container_field) {
@@ -3897,6 +4273,23 @@ impl CoreIndex {
             let tantivy::schema::FieldType::Str(text_options) = field_entry.field_type() else {
                 continue;
             };
+            // Deliberately the *index*-side manager, not the #389 Phase 1
+            // query-side one -- `searcher.index().tokenizers()` is the index
+            // manager, since that is what `CoreIndex::open` hands Tantivy. What
+            // is analyzed here is a stored source document, mined for terms that
+            // are then looked up in the posting lists directly
+            // (`searcher.doc_freq(&term)` below drops anything with
+            // `doc_freq == 0`) -- so the tokens must be index terms. Routing this
+            // through the query manager would be inert today (both managers hold
+            // the same chain for every shipped type) and wrong the moment Phase 4
+            // adds query-side synonyms: every synonym mined off the source doc
+            // would be a term the doc does not contain, and the `doc_freq == 0`
+            // filter below would thin `interestingTerms` as soon as the two
+            // chains produce different tokens for the same text.
+            //
+            // Both of those are arguments from what this code does, not from what
+            // any other engine does: the input is stored document text and the
+            // output must be terms that exist in the postings.
             let Some(mut tokenizer) = text_options
                 .get_indexing_options()
                 .map(|o| o.tokenizer())
@@ -4216,38 +4609,54 @@ impl CoreIndex {
         count: usize,
         highlight: bool,
     ) -> Result<Vec<SuggestHit>> {
+        // This path analyzes two different things, and #389 Phase 1 splits them:
+        // the stored `twm_suggest` phrase, which stands in for indexed terms and
+        // therefore comes off the *index*-side manager, and `suggest.q`, which is
+        // query text and comes off the *query*-side one. Both managers are keyed
+        // by the same identity -- the one `dictionary_tokenizer` names -- and in
+        // this phase both hold the same chain for it, so this is exactly as
+        // before the seam existed. Phase 2/4 register a real query-side chain for
+        // `text_en`/`text_und`, and this is where the asymmetry (query-side
+        // synonyms, index-side catenation) then lands, with no change here.
         let tokenizer_name = schema::dictionary_tokenizer(dictionary);
-        let Some(mut tokenizer) = self.wf_schema.tokenizers.get(&tokenizer_name) else {
+        let Some(mut phrase_tokenizer) = self.wf_schema.tokenizers.get(&tokenizer_name) else {
             // No analyzer registered for this dictionary -> nothing to match.
             // Should not happen: `dictionary_tokenizer` always names one that
             // `build_tokenizers` registers, but the index is the trust boundary.
+            return Ok(Vec::new());
+        };
+        let Some(mut query_tokenizer) = self.wf_schema.query_tokenizers.get(&tokenizer_name) else {
             return Ok(Vec::new());
         };
         // Analyze the query into stems. The analyzer chain removes stopwords
         // (`text_en` carries an English `StopWordFilter`), so a stopword-only
         // query yields no tokens and matches nothing -- matching the captured
         // `the`-as-`suggest.q` behaviour (zero suggestions) exactly.
-        // The query's token stems, plus one bit derived from its offsets:
-        // whether the analyzed stream reaches the END of the query string.
-        // `AnalyzingInfixSuggester.lookup` makes the last token a `PrefixQuery`
-        // only when `maxEndOffset == offsetAtt.endOffset()` after `ts.end()` --
-        // i.e. when nothing was discarded after the last surviving token. A
-        // trailing separator (the ordinary "user typed a space" case) makes it a
-        // plain `TermQuery` instead, so `suggest.q=qui ` matches nothing where
-        // `suggest.q=qui` matches three (`suggest_q_trailing_space_en` vs
-        // `suggest_q_prefix_en`).
-        let qtokens = analyzer_tokens(&mut tokenizer, query);
-        let Some((_, _, last_end)) = qtokens.last() else {
+        // Autocomplete is a user-intent rule: a non-whitespace suffix that
+        // survives analysis is still being typed and is therefore a prefix.
+        // Graph-producing delimiter expansion can emit several alternatives
+        // with one source offset, so stream order cannot prove which token owns
+        // the end. Instead ask whether *any* surviving token reaches the input
+        // end; `foo_` consequently remains a prefix for `foo_bar`. A trailing
+        // space reaches no token and deliberately keeps the final term exact,
+        // preserving `suggest_q_trailing_space_en`.
+        //
+        // The shipped synonym groups are single-token only, so they stack
+        // position-length-one alternatives and do not themselves form a graph;
+        // that is a property of the data, not an assumption about synonyms.
+        let qtokens = analyzer_tokens(&mut query_tokenizer, query);
+        if qtokens.is_empty() {
             return Ok(Vec::new());
-        };
-        // Tokens come out in order, so the last one's end IS `maxEndOffset`.
-        // ponytail: a query whose trailing text is a *stopword* rather than
-        // whitespace (`suggest.q=qui the`) follows from the same rule -- the
-        // stopword is discarded, so the stream no longer reaches the end and the
-        // final token becomes exact. That is implied, not captured: no fixture
-        // pins it.
-        let last_is_prefix = *last_end == query.len();
-        let query_tokens: Vec<String> = qtokens.into_iter().map(|(stem, _, _)| stem).collect();
+        }
+        let last_is_prefix = qtokens.iter().any(|(_, _, _, end)| *end == query.len());
+        let mut query_positions: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        for (stem, position, _, _) in qtokens {
+            let alternatives = query_positions.entry(position).or_default();
+            if !alternatives.contains(&stem) {
+                alternatives.push(stem);
+            }
+        }
+        let query_tokens: Vec<Vec<String>> = query_positions.into_values().collect();
         let cfq = parse_cfq(cfq);
 
         // No `twm_suggest` field at all -> the schema carries no suggestion
@@ -4282,7 +4691,7 @@ impl CoreIndex {
                 }
                 for phrase in self.stored_string_values(&doc, PHRASE_FIELD) {
                     if let Some(term) = suggest_match(
-                        &mut tokenizer,
+                        &mut phrase_tokenizer,
                         &phrase,
                         &query_tokens,
                         last_is_prefix,
@@ -4950,7 +5359,7 @@ pub struct SuggestHit {
 /// change a token's byte length (in both directions -- see `suggest_match`), so
 /// `offset_from + stem.len()` is not a position in the original text and is not
 /// even guaranteed to be a char boundary.
-type Tok = (String, usize, usize);
+type Tok = (String, usize, usize, usize);
 
 /// Analyzes `text` with `tokenizer` into its surviving (post-stopword,
 /// post-stem) tokens with their original byte offsets. Empty for a stopword-only
@@ -4960,7 +5369,7 @@ fn analyzer_tokens(tokenizer: &mut TextAnalyzer, text: &str) -> Vec<Tok> {
     let mut out = Vec::new();
     while stream.advance() {
         let t = stream.token();
-        out.push((t.text.clone(), t.offset_from, t.offset_to));
+        out.push((t.text.clone(), t.position, t.offset_from, t.offset_to));
     }
     out
 }
@@ -5016,7 +5425,7 @@ fn analyzer_tokens(tokenizer: &mut TextAnalyzer, text: &str) -> Vec<Tok> {
 fn suggest_match(
     tokenizer: &mut TextAnalyzer,
     phrase: &str,
-    query_tokens: &[String],
+    query_tokens: &[Vec<String>],
     last_is_prefix: bool,
     highlight: bool,
 ) -> Option<String> {
@@ -5027,21 +5436,26 @@ fn suggest_match(
     // When the analyzed query did not reach the end of the query string, Lucene
     // adds the final token to `matchedTokens` and queries it as a `TermQuery`:
     // every token is exact and every hit highlights as a whole match.
-    let (exact, prefix): (&[String], Option<&str>) = if last_is_prefix {
+    let (exact, prefix): (&[Vec<String>], Option<&Vec<String>>) = if last_is_prefix {
         (init, Some(last))
     } else {
         (query_tokens, None)
     };
     // Exact tokens must equal a phrase-token stem; the prefix token (when there
     // is one) need only prefix one. Both are order-independent.
-    if exact
-        .iter()
-        .any(|qt| !ptokens.iter().any(|(ps, _, _)| ps == qt))
-    {
+    if exact.iter().any(|alternatives| {
+        !alternatives
+            .iter()
+            .any(|term| ptokens.iter().any(|(phrase, _, _, _)| phrase == term))
+    }) {
         return None;
     }
-    if let Some(prefix) = prefix
-        && !ptokens.iter().any(|(ps, _, _)| ps.starts_with(prefix))
+    if let Some(prefixes) = prefix
+        && !prefixes.iter().any(|prefix| {
+            ptokens
+                .iter()
+                .any(|(phrase, _, _, _)| phrase.starts_with(prefix))
+        })
     {
         return None;
     }
@@ -5052,7 +5466,7 @@ fn suggest_match(
     // covers gets bolded, so one query token can light up several phrase
     // tokens (`suggest_q_multihl_en`).
     let mut spans: Vec<(usize, usize)> = Vec::new();
-    for (stem, off_from, off_to) in &ptokens {
+    for (stem, _, off_from, off_to) in &ptokens {
         // Lucene's own order: `matchedTokens.contains(...)` first, the prefix
         // branch only as an `else if`.
         //
@@ -5062,10 +5476,17 @@ fn suggest_match(
         // queries that were captured (`suggest_q_overlap_en`,
         // `suggest_q_prefix_nonfinal_en`) are both misses, so the case is
         // unreachable from any pinned input.
-        let end = if exact.iter().any(|qt| qt == stem) {
+        let end = if exact
+            .iter()
+            .any(|alternatives| alternatives.iter().any(|term| term == stem))
+        {
             // addWholeMatch: the entire surface token.
             *off_to
-        } else if let Some(prefix) = prefix.filter(|p| stem.starts_with(*p)) {
+        } else if let Some(prefix) = prefix.and_then(|alternatives| {
+            alternatives
+                .iter()
+                .find(|term| stem.starts_with(String::as_str(term)))
+        }) {
             // addPrefixMatch: `prefix.length()` CHARACTERS of the surface token,
             // or the whole token when the surface is no longer than the prefix.
             // `char_indices().nth(n)` yields a real char boundary or nothing, so
