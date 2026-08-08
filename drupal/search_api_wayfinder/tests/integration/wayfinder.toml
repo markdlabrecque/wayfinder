@@ -1,5 +1,0 @@
-# Harness-only credentials for issue #240. Never use these outside this
-# isolated Docker stack.
-[auth]
-username = "operator"
-password = "secret"
