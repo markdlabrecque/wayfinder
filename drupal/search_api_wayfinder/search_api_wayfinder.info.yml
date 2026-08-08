@@ -1,7 +1,0 @@
-name: Wayfinder
-type: module
-description: 'Search API backend plugin for Wayfinder, a Solr-wire-compatible search server.'
-package: Search
-core_version_requirement: ^10.3 || ^11
-dependencies:
-  - search_api:search_api
