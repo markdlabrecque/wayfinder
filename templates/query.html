@@ -1,58 +1,63 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <title>Wayfinder &mdash; query tester ({{ core_name }})</title>
-    <style>
-      body { font-family: system-ui, sans-serif; margin: 2rem; }
-      label { display: inline-block; width: 8rem; font-weight: 600; }
-      input[type=text] { width: 28rem; }
-      p { margin: 0.4rem 0; }
-      pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; }
-      .status-error { color: #a00; }
-    </style>
-  </head>
-  <body>
-    <h1>Wayfinder</h1>
-    <h2>Query tester &mdash; core {{ core_name }}</h2>
-    <form method="get" action="/ui/query">
-      <p>
+{% extends "_layout.html" %}
+{% import "_nav.html" as nav %}
+
+{% block title %}Wayfinder &mdash; query tester ({{ core_name }}){% endblock %}
+{% block sections %}{% call nav::bar("query") %}{% endcall %}{% endblock %}
+
+{% block page %}
+<div class="page-head">
+  <h2>Query tester</h2>
+  <p class="lede">
+    Runs against the same <code>/select</code> handler the wire API serves, and
+    shows its response verbatim.
+  </p>
+</div>
+
+<form method="get" action="/ui/query">
+  <div class="panel">
+    <h3>Parameters</h3>
+    <div class="panel-body">
+      <div class="field-grid">
         <label for="wf-q">q</label>
-        <input type="text" id="wf-q" name="q" value="{{ q }}">
-      </p>
-      <p>
+        <input type="text" id="wf-q" name="q" value="{{ q }}" spellcheck="false">
+
         <label for="wf-fq">fq</label>
-        <input type="text" id="wf-fq" name="fq" value="{{ fq }}">
-      </p>
-      <p>
+        <input type="text" id="wf-fq" name="fq" value="{{ fq }}" spellcheck="false">
+
         <label for="wf-fl">fl</label>
-        <input type="text" id="wf-fl" name="fl" value="{{ fl }}">
-      </p>
-      <p>
+        <input type="text" id="wf-fl" name="fl" value="{{ fl }}" spellcheck="false">
+
         <label for="wf-rows">rows</label>
-        <input type="text" id="wf-rows" name="rows" value="{{ rows }}">
-      </p>
-      <p>
+        <input type="text" id="wf-rows" name="rows" value="{{ rows }}" inputmode="numeric">
+
         <label for="wf-start">start</label>
-        <input type="text" id="wf-start" name="start" value="{{ start }}">
-      </p>
-      <p>
+        <input type="text" id="wf-start" name="start" value="{{ start }}" inputmode="numeric">
+
         <label for="wf-facet-field">facet.field</label>
-        <input type="text" id="wf-facet-field" name="facet.field" value="{{ facet_field }}">
-      </p>
-      <p>
+        <input type="text" id="wf-facet-field" name="facet.field" value="{{ facet_field }}" spellcheck="false">
+
         <label for="wf-facet">facet</label>
-        <input type="checkbox" id="wf-facet" name="facet" value="true"{% if facet %} checked{% endif %}>
-        <span>enable faceting (Solr ignores facet.field without it)</span>
-      </p>
-      <p><button type="submit">Run query</button></p>
-    </form>
-    {% if has_result %}
-    <h3>
+        <div class="checkbox">
+          <input type="checkbox" id="wf-facet" name="facet" value="true"{% if facet %} checked{% endif %}>
+          <span>enable faceting (Solr ignores facet.field without it)</span>
+        </div>
+
+        <div class="actions"><button type="submit" class="primary">Run query</button></div>
+      </div>
+    </div>
+  </div>
+</form>
+
+{% if has_result %}
+<div class="panel">
+  <h3>Response</h3>
+  <div class="panel-body">
+    <p class="note">
       HTTP status:
-      <span{% if result_status >= 400 %} class="status-error"{% endif %}>{{ result_status }}</span>
-    </h3>
-    <pre>{{ result_json|safe }}</pre>
-    {% endif %}
-  </body>
-</html>
+      <span class="badge{% if result_status >= 400 %} is-error{% endif %}">{{ result_status }}</span>
+    </p>
+  </div>
+  <pre>{{ result_json|safe }}</pre>
+</div>
+{% endif %}
+{% endblock %}

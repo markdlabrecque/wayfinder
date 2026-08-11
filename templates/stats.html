@@ -1,45 +1,50 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <title>Wayfinder &mdash; index stats ({{ core_name }})</title>
-    <style>
-      body { font-family: system-ui, sans-serif; margin: 2rem; }
-      table { border-collapse: collapse; margin-bottom: 2rem; }
-      th, td { text-align: left; padding: 0.25rem 1rem 0.25rem 0; }
-      th { font-weight: 600; }
-      .note { color: #666; max-width: 40rem; }
-    </style>
-  </head>
-  <body>
-    <h1>Wayfinder</h1>
-    <h2>Index stats &mdash; core {{ core_name }}</h2>
-    <table>
-      <tbody>
-        <tr>
-          <th scope="row">Documents</th>
-          <td>{{ doc_count }}</td>
-        </tr>
-        <tr>
-          <th scope="row">Segments</th>
-          <td>{{ segment_count }}</td>
-        </tr>
-        <tr>
-          <th scope="row">Size on disk</th>
-          <td>{{ size_human }} ({{ size_bytes }} bytes)</td>
-        </tr>
-        <tr>
-          <th scope="row">Process uptime</th>
-          <td>{{ uptime_secs }} seconds ({{ uptime_human }})</td>
-        </tr>
-      </tbody>
-    </table>
+{% extends "_layout.html" %}
+{% import "_nav.html" as nav %}
 
-    <h3>Memory</h3>
+{% block title %}Wayfinder &mdash; index stats ({{ core_name }}){% endblock %}
+{% block sections %}{% call nav::bar("stats") %}{% endcall %}{% endblock %}
+
+{% block page %}
+<div class="page-head">
+  <h2>Index stats</h2>
+  <p class="lede">
+    Derived at request time from the same in-process state the query pipeline
+    uses. Nothing here is cached.
+  </p>
+</div>
+
+<div class="panel narrow">
+  <h3>Index</h3>
+  <table class="kv">
+    <tbody>
+      <tr>
+        <th scope="row">Documents</th>
+        <td>{{ doc_count }}</td>
+      </tr>
+      <tr>
+        <th scope="row">Segments</th>
+        <td>{{ segment_count }}</td>
+      </tr>
+      <tr>
+        <th scope="row">Size on disk</th>
+        <td>{{ size_human }} ({{ size_bytes }} bytes)</td>
+      </tr>
+      <tr>
+        <th scope="row">Process uptime</th>
+        <td>{{ uptime_secs }} seconds ({{ uptime_human }})</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="panel narrow">
+  <h3>Memory</h3>
+  <div class="panel-body">
     <p class="note">
       Resident memory is not reported. Wayfinder is mmap-based: the OS page
       cache holds the index, doing the work a JVM heap does for Solr, so there
       is no heap-shaped figure to show here and this page does not invent one.
     </p>
-  </body>
-</html>
+  </div>
+</div>
+{% endblock %}

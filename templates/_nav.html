@@ -1,0 +1,12 @@
+{#- Section nav, shared by every admin page. `active` is the page key, and
+    marks the current tab for assistive tech with `aria-current="page"`. -#}
+{%- macro bar(active) -%}
+<ul>
+  <li><a href="/ui"{% if active == "core" %} aria-current="page"{% endif %}>Overview</a></li>
+  <li><a href="/ui/schema"{% if active == "schema" %} aria-current="page"{% endif %}>Schema</a></li>
+  <li><a href="/ui/synonyms"{% if active == "synonyms" %} aria-current="page"{% endif %}>Synonyms</a></li>
+  <li><a href="/ui/query"{% if active == "query" %} aria-current="page"{% endif %}>Query</a></li>
+  <li><a href="/ui/stats"{% if active == "stats" %} aria-current="page"{% endif %}>Stats</a></li>
+  <li><a href="/ui/ping"{% if active == "ping" %} aria-current="page"{% endif %}>Ping</a></li>
+</ul>
+{%- endmacro -%}
