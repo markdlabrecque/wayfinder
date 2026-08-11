@@ -1,22 +1,25 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <title>Wayfinder &mdash; schema ({{ core_name }})</title>
-    <style>
-      body { font-family: system-ui, sans-serif; margin: 2rem; }
-      table { border-collapse: collapse; margin-bottom: 2rem; }
-      th, td { text-align: left; padding: 0.25rem 1rem 0.25rem 0; }
-      th { font-weight: 600; }
-      .none { color: #666; font-style: italic; }
-    </style>
-  </head>
-  <body>
-    <h1>Wayfinder</h1>
-    <h2>Schema &mdash; core {{ core_name }}</h2>
+{% extends "_layout.html" %}
+{% import "_nav.html" as nav %}
 
-    <h3>Fields</h3>
-    <table>
+{% block title %}Wayfinder &mdash; schema ({{ core_name }}){% endblock %}
+{% block sections %}{% call nav::bar("schema") %}{% endcall %}{% endblock %}
+
+{% block page %}
+<div class="page-head">
+  <h2>Schema</h2>
+  <p class="lede">
+    The schema the running index actually uses, read from memory &mdash; not a
+    fresh read of the TOML on disk. Read-only.
+  </p>
+</div>
+
+{#- Table cells here are deliberately attribute-free: the schema view's tests
+    parse rows by splitting on the literal `<td>`, so styling hangs off the
+    table's own class and column position instead. -#}
+<div class="panel">
+  <h3>Fields</h3>
+  <div class="table-scroll">
+    <table class="data flags">
       <thead>
         <tr>
           <th scope="col">Field</th>
@@ -40,12 +43,16 @@
         {% endfor %}
       </tbody>
     </table>
+  </div>
+</div>
 
-    <h3>Dynamic fields</h3>
-    {% if dynamic_fields.is_empty() %}
-    <p class="none">none declared</p>
-    {% else %}
-    <table>
+<div class="panel">
+  <h3>Dynamic fields</h3>
+  {% if dynamic_fields.is_empty() %}
+  <div class="panel-body"><p class="empty">none declared</p></div>
+  {% else %}
+  <div class="table-scroll">
+    <table class="data flags">
       <thead>
         <tr>
           <th scope="col">Pattern</th>
@@ -67,13 +74,17 @@
         {% endfor %}
       </tbody>
     </table>
-    {% endif %}
+  </div>
+  {% endif %}
+</div>
 
-    <h3>Copy fields</h3>
-    {% if copy_fields.is_empty() %}
-    <p class="none">none declared</p>
-    {% else %}
-    <table>
+<div class="panel">
+  <h3>Copy fields</h3>
+  {% if copy_fields.is_empty() %}
+  <div class="panel-body"><p class="empty">none declared</p></div>
+  {% else %}
+  <div class="table-scroll">
+    <table class="data pairs">
       <thead>
         <tr>
           <th scope="col">Source</th>
@@ -83,12 +94,12 @@
       <tbody>
         {% for copy in copy_fields %}
         <tr>
-          <td>{{ copy.source }}</td>
-          <td>{{ copy.dest }}</td>
+          <td>{{ copy.source }}</td><td>{{ copy.dest }}</td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
-    {% endif %}
-  </body>
-</html>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

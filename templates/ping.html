@@ -1,23 +1,39 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <title>Wayfinder &mdash; ping ({{ core_name }})</title>
-    <style>
-      body { font-family: system-ui, sans-serif; margin: 2rem; }
-      .ping { font-size: 1.25rem; font-weight: 600; }
-      .note { color: #666; max-width: 40rem; }
-    </style>
-  </head>
-  <body>
-    <h1>Wayfinder</h1>
-    <h2>Ping &mdash; core {{ core_name }}</h2>
-    <p class="ping">Status: {{ status }}</p>
-    <p class="note">
-      This is the value this process's own
-      <code>/wayfinder/{{ core_name }}/admin/ping</code> handler returned for this
-      request (HTTP {{ http_status }}) &mdash; the page runs that handler, it
-      does not perform a health check of its own.
-    </p>
-  </body>
-</html>
+{% extends "_layout.html" %}
+{% import "_nav.html" as nav %}
+
+{% block title %}Wayfinder &mdash; ping ({{ core_name }}){% endblock %}
+{% block sections %}{% call nav::bar("ping") %}{% endcall %}{% endblock %}
+
+{% block page %}
+<div class="page-head">
+  <h2>Ping</h2>
+  <p class="lede">What this process's own ping handler answered for this request.</p>
+</div>
+
+<div class="panel narrow">
+  <h3>Health</h3>
+  <div class="panel-body">
+    {#- Label and value sit in one element with no markup between them: the
+        ping tests read the first word after the `status` label, so any tag in
+        between would be picked up as the value. -#}
+    <p class="badge is-large{% if status == "OK" %} is-ok{% endif %}"><span class="dot" aria-hidden="true"></span>Status: {{ status }}</p>
+  </div>
+  <table class="kv">
+    <tbody>
+      <tr>
+        <th scope="row">HTTP response</th>
+        <td>{{ http_status }}</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="callout narrow">
+  <p>
+    This is the value this process's own
+    <code>/wayfinder/{{ core_name }}/admin/ping</code> handler returned for this
+    request (HTTP {{ http_status }}) &mdash; the page runs that handler, it does
+    not perform a health check of its own.
+  </p>
+</div>
+{% endblock %}

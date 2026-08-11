@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Wayfinder{% endblock %}</title>
+    {#- Inline favicon: same compass mark as the masthead, and it stops the
+        browser requesting a /favicon.ico this server does not serve. -#}
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='11' fill='%230d6a86'/%3E%3Cpath d='M16.4 7.6 14 14l-6.4 2.4L10 10z' fill='%23fff'/%3E%3C/svg%3E">
+    <style>
+      /* Design tokens. One stylesheet, inlined: the admin UI is a handful of
+         server-rendered pages with no asset pipeline, so a shared <style> in
+         the layout keeps every page consistent without adding a static-file
+         route. */
+      :root {
+        color-scheme: light dark;
+        --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+        --bg: #eef1f6;
+        --panel: #ffffff;
+        --panel-alt: #f7f9fc;
+        --text: #11161d;
+        --muted: #59636f;
+        --line: #dfe4ec;
+        --line-soft: #eaeef4;
+        --brand: #0d6a86;
+        --brand-strong: #095467;
+        --brand-tint: #e3f1f6;
+        --danger: #a4232b;
+        --danger-tint: #fdeceb;
+        --good: #1a6c48;
+        --good-tint: #e2f4e9;
+        --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 8px 24px -12px rgba(16, 24, 40, .18);
+        --radius: 12px;
+        --focus: #0d6a86;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0d1117;
+          --panel: #151b23;
+          --panel-alt: #1b222c;
+          --text: #e8edf4;
+          --muted: #9fabba;
+          --line: #29313d;
+          --line-soft: #212934;
+          --brand: #6fc7de;
+          --brand-strong: #a5dcec;
+          --brand-tint: #14303a;
+          --danger: #ff9c95;
+          --danger-tint: #3a1d1d;
+          --good: #79d3a5;
+          --good-tint: #14301f;
+          --shadow: none;
+          --focus: #6fc7de;
+        }
+      }
+
+      *, *::before, *::after { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font-sans);
+        font-size: 15px;
+        line-height: 1.55;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      a { color: var(--brand-strong); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+      a:hover { color: var(--brand); }
+
+      :focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 2px;
+        border-radius: 4px;
+      }
+
+      code, pre, .mono { font-family: var(--font-mono); }
+
+      .skip-link {
+        position: absolute;
+        left: -9999px;
+        top: 0;
+        background: var(--panel);
+        color: var(--text);
+        padding: .6rem 1rem;
+        border: 1px solid var(--line);
+        border-radius: 0 0 var(--radius) 0;
+        z-index: 10;
+      }
+      .skip-link:focus { left: 0; }
+
+      /* `padding-inline` only: `main` and the masthead row are also `.wrap`,
+         and a shorthand here would reset their vertical padding. */
+      .wrap { width: 100%; max-width: 76rem; margin: 0 auto; padding-inline: 1.5rem; }
+
+      /* Masthead ------------------------------------------------------- */
+      .topbar {
+        background: var(--panel);
+        border-bottom: 1px solid var(--line);
+      }
+      .topbar-inner {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: .75rem 1rem;
+        padding-top: .9rem;
+        padding-bottom: .9rem;
+      }
+      .brand { display: flex; align-items: center; gap: .6rem; }
+      .brand-mark { color: var(--brand); flex: none; }
+      .brand h1 {
+        margin: 0;
+        font-size: 1.15rem;
+        font-weight: 650;
+        letter-spacing: -.01em;
+      }
+      .brand-tag {
+        font-size: .7rem;
+        text-transform: uppercase;
+        letter-spacing: .09em;
+        color: var(--muted);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: .1rem .45rem;
+      }
+      .core-chip {
+        margin-left: auto;
+        font-size: .82rem;
+        color: var(--muted);
+        background: var(--panel-alt);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: .2rem .7rem;
+      }
+      .core-chip strong { color: var(--text); font-family: var(--font-mono); font-weight: 600; }
+
+      /* Section nav ---------------------------------------------------- */
+      .sections { background: var(--panel); border-bottom: 1px solid var(--line); }
+      .sections ul {
+        display: flex;
+        flex-wrap: wrap;
+        gap: .25rem;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      .sections a {
+        display: block;
+        padding: .6rem .8rem;
+        color: var(--muted);
+        text-decoration: none;
+        font-weight: 550;
+        border-bottom: 2px solid transparent;
+        border-radius: 6px 6px 0 0;
+      }
+      .sections a:hover { color: var(--text); background: var(--panel-alt); }
+      .sections a[aria-current="page"] {
+        color: var(--brand-strong);
+        border-bottom-color: var(--brand);
+      }
+
+      /* Page ----------------------------------------------------------- */
+      main { padding: 2rem 0 4rem; }
+      .page-head { margin-bottom: 1.5rem; }
+      .page-head h2 {
+        margin: 0;
+        font-size: 1.6rem;
+        line-height: 1.25;
+        font-weight: 650;
+        letter-spacing: -.02em;
+      }
+      .lede { margin: .5rem 0 0; color: var(--muted); max-width: 62ch; }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+        margin-bottom: 1.25rem;
+        overflow: hidden;
+      }
+      .panel > h3 {
+        margin: 0;
+        padding: .85rem 1.15rem;
+        font-size: .78rem;
+        font-weight: 650;
+        text-transform: uppercase;
+        letter-spacing: .08em;
+        color: var(--muted);
+        background: var(--panel-alt);
+        border-bottom: 1px solid var(--line);
+      }
+      /* Fact panels hold a handful of short key/value rows; letting them run
+         the full 76rem strands the values far from their labels. */
+      .narrow { max-width: 46rem; }
+      .panel-body { padding: 1.15rem; }
+      .panel-body > :first-child { margin-top: 0; }
+      .panel-body > :last-child { margin-bottom: 0; }
+
+      /* Tables --------------------------------------------------------- */
+      .table-scroll { overflow-x: auto; }
+      .panel-body + table, .panel-body + .table-scroll { border-top: 1px solid var(--line); }
+      table { border-collapse: collapse; width: 100%; }
+
+      /* Key/value facts. */
+      table.kv th, table.kv td {
+        text-align: left;
+        padding: .7rem 1.15rem;
+        border-top: 1px solid var(--line-soft);
+        vertical-align: baseline;
+      }
+      table.kv tr:first-child th, table.kv tr:first-child td { border-top: 0; }
+      table.kv th { font-weight: 550; color: var(--muted); width: 14rem; }
+      table.kv td { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+      /* Row-per-record listings. */
+      table.data { font-size: .92rem; }
+      table.data th, table.data td {
+        text-align: left;
+        padding: .6rem 1rem;
+        border-top: 1px solid var(--line-soft);
+        white-space: nowrap;
+      }
+      table.data thead th {
+        border-top: 0;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+        position: sticky;
+        top: 0;
+        font-size: .74rem;
+        font-weight: 650;
+        text-transform: uppercase;
+        letter-spacing: .06em;
+        color: var(--muted);
+      }
+      table.data tbody tr:hover { background: var(--panel-alt); }
+      table.data td:first-child { font-family: var(--font-mono); font-weight: 550; }
+      table.data.flags td:nth-child(n+3) { width: 8rem; }
+      table.data.pairs td { font-family: var(--font-mono); }
+
+      .empty { margin: 0; color: var(--muted); font-style: italic; }
+
+      /* Notes and badges ---------------------------------------------- */
+      .note {
+        margin: 0;
+        color: var(--muted);
+        max-width: 68ch;
+      }
+      .callout {
+        display: flex;
+        gap: .75rem;
+        padding: .9rem 1.05rem;
+        background: var(--panel-alt);
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--brand);
+        border-radius: 8px;
+        color: var(--muted);
+      }
+      .callout p { margin: 0; max-width: 68ch; }
+      .callout code { color: var(--text); }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: .4rem;
+        font-family: var(--font-mono);
+        font-size: .95rem;
+        font-weight: 600;
+        padding: .3rem .7rem;
+        border-radius: 999px;
+        background: var(--brand-tint);
+        color: var(--brand-strong);
+        border: 1px solid var(--line);
+      }
+      .badge.is-error { background: var(--danger-tint); color: var(--danger); }
+      .badge.is-large { font-size: 1.05rem; padding: .45rem 1rem; }
+      .badge.is-ok { background: var(--good-tint); color: var(--good); }
+      .badge .dot { width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; }
+
+      /* Forms ---------------------------------------------------------- */
+      .field-grid {
+        display: grid;
+        grid-template-columns: minmax(6rem, 9rem) minmax(0, 34rem);
+        gap: .75rem 1rem;
+        align-items: center;
+      }
+      /* Monospace labels because they name request parameters verbatim; use
+         `.field-grid.prose-labels` for ordinary wording. */
+      .field-grid > label { font-weight: 550; font-family: var(--font-mono); font-size: .9rem; }
+      .field-grid.prose-labels > label { font-family: inherit; font-size: inherit; }
+      .field-grid > .hint { grid-column: 2; color: var(--muted); font-size: .88rem; margin: -.4rem 0 0; }
+
+      @media (max-width: 34rem) {
+        .field-grid { grid-template-columns: minmax(0, 1fr); gap: .35rem; }
+        .field-grid > .hint, .field-grid > .actions { grid-column: 1; }
+      }
+
+      input[type=text], input[type=search] {
+        width: 100%;
+        font: inherit;
+        color: var(--text);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: .45rem .6rem;
+      }
+      input[type=text]:hover, input[type=search]:hover { border-color: var(--muted); }
+      input[type=checkbox] { accent-color: var(--brand); width: 1.05rem; height: 1.05rem; }
+
+      .checkbox { display: flex; align-items: center; gap: .5rem; }
+      .checkbox span { color: var(--muted); }
+
+      button {
+        font: inherit;
+        font-weight: 550;
+        color: var(--text);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: .4rem .8rem;
+        cursor: pointer;
+      }
+      button:hover { background: var(--panel-alt); border-color: var(--muted); }
+      button.primary {
+        background: var(--brand);
+        border-color: var(--brand);
+        color: #fff;
+      }
+      @media (prefers-color-scheme: dark) {
+        button.primary { color: #08222a; }
+      }
+      button.primary:hover { background: var(--brand-strong); border-color: var(--brand-strong); }
+      button.quiet { color: var(--muted); border-color: transparent; background: transparent; padding: .3rem .5rem; }
+      button.quiet:hover { color: var(--text); background: var(--panel-alt); border-color: var(--line); }
+
+      .actions { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
+
+      /* Result payload ------------------------------------------------- */
+      pre {
+        margin: 0;
+        padding: 1rem 1.15rem;
+        background: var(--panel-alt);
+        border-top: 1px solid var(--line);
+        overflow-x: auto;
+        font-size: .88rem;
+        line-height: 1.5;
+        tab-size: 2;
+      }
+
+      /* Editable list rows -------------------------------------------- */
+      .rows { list-style: none; margin: 0; padding: 0; display: grid; gap: .5rem; }
+      .rows li { display: flex; align-items: center; gap: .4rem; }
+      .rows li input[type=text] { max-width: 34rem; }
+      .rows li[hidden] { display: none; }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <div class="wrap topbar-inner">
+        <div class="brand">
+          <svg class="brand-mark" width="26" height="26" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <circle cx="12" cy="12" r="9.25"></circle>
+            <path d="M15.4 8.6 13.4 13.4 8.6 15.4 10.6 10.6z" fill="currentColor" stroke="none"></path>
+          </svg>
+          <h1>Wayfinder</h1>
+          <span class="brand-tag">admin</span>
+        </div>
+        <p class="core-chip">core <strong>{{ core_name }}</strong></p>
+      </div>
+    </header>
+
+    <div class="sections">
+      <nav class="wrap" aria-label="Admin sections">
+        {% block sections %}{% endblock %}
+      </nav>
+    </div>
+
+    <main id="main" class="wrap">
+      {% block page %}{% endblock %}
+    </main>
+    {% block scripts %}{% endblock %}
+  </body>
+</html>
