@@ -149,6 +149,49 @@ async fn mlt_app() -> (Router, TempDir) {
     (app, dir)
 }
 
+/// `mlt.fl` must resolve a concrete field name through the Search API preset's
+/// dynamic text rules. The corpus keeps the signal isolated to that requested
+/// dynamic field so a response hit proves MLT mined it rather than another
+/// stored field.
+#[tokio::test]
+async fn mlt_mines_a_requested_search_api_dynamic_text_field() {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), include_str!("../presets/search-api.toml"))
+        .expect("the Search API preset must build");
+    let docs = serde_json::json!([
+        {"id": "seed", "tm_X3b_en_body": ["quartz river canyon"]},
+        {"id": "similar", "tm_X3b_en_body": ["quartz river canyon"]},
+        {"id": "unrelated", "tm_X3b_en_body": ["sunny meadow"]}
+    ]);
+    let (status, indexed) = common::post_docs(&app, &docs).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "dynamic MLT corpus must index: {indexed}"
+    );
+
+    let (status, body) = get(
+        &app,
+        "mlt?q=id:seed&mlt.fl=tm_X3b_en_body&mlt.mintf=1&mlt.mindf=1&fl=id&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "MLT over a dynamic text field must succeed: {body}"
+    );
+    assert_eq!(
+        body.pointer("/response/numFound"),
+        Some(&serde_json::json!(1)),
+        "the shared terms from the requested dynamic field must produce one similar doc: {body}"
+    );
+    assert_eq!(
+        body.pointer("/response/docs/0/id"),
+        Some(&serde_json::json!("similar")),
+        "MLT must mine tm_X3b_en_body, not return the unrelated document: {body}"
+    );
+}
+
 /// `common::normalize_envelope`/`common::diff::normalize` only strip
 /// `_version_`/`_root_` from `/response/docs` — the `/mlt` envelope carries
 /// the *same* internal fields under `/match/docs` too, since `match` is its
