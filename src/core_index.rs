@@ -30,7 +30,7 @@ use tantivy::query::{
     TermQuery,
 };
 use tantivy::schema::document::Value as _;
-use tantivy::schema::{Field, IndexRecordOption, OwnedValue};
+use tantivy::schema::{Field, IndexRecordOption, OwnedValue, Type};
 use tantivy::snippet::SnippetGenerator;
 use tantivy::time::OffsetDateTime;
 use tantivy::time::format_description::well_known::Rfc3339;
@@ -4158,6 +4158,220 @@ impl CoreIndex {
         Ok(snippets)
     }
 
+    fn dynamic_highlight_terms(
+        &self,
+        query: &dyn Query,
+        target: &FieldTarget,
+        cross_field_query_terms: bool,
+    ) -> Result<BTreeMap<String, Score>> {
+        let prefix = self
+            .term_for_target(target, "")
+            .serialized_value_bytes()
+            .to_vec();
+        let mut term_texts = BTreeSet::new();
+        query.query_terms(&mut |term, _| {
+            let bytes = term.serialized_value_bytes();
+            let same_dynamic_path = bytes.starts_with(prefix.as_slice());
+            if !cross_field_query_terms && !same_dynamic_path {
+                return;
+            }
+            if let Some(text) = Self::json_string_term_text(term) {
+                term_texts.insert(text.to_string());
+            } else if cross_field_query_terms && let Some(text) = term.value().as_str() {
+                term_texts.insert(text.to_string());
+            }
+        });
+
+        let searcher = self.reader.searcher();
+        let mut terms = BTreeMap::new();
+        for text in term_texts {
+            let indexed_term = self.term_for_target(target, &text);
+            let doc_freq = searcher.doc_freq(&indexed_term)?;
+            if doc_freq > 0 {
+                terms.insert(text, 1.0 / (1.0 + doc_freq as Score));
+            }
+        }
+        Ok(terms)
+    }
+
+    /// Extracts the string payload from Tantivy's JSON term encoding,
+    /// discarding the path (`path\0svalue`). `Term::value().as_str()` only
+    /// works for ordinary string terms, so decoding this representation is
+    /// what lets the default cross-field highlighter carry a term between
+    /// different dynamic JSON paths.
+    fn json_string_term_text(term: &Term) -> Option<&str> {
+        if term.typ() != Type::Json {
+            return None;
+        }
+        let bytes = term.serialized_value_bytes();
+        let path_end = bytes.iter().position(|byte| *byte == 0)?;
+        let value = bytes.get(path_end + 1..)?;
+        (value.first() == Some(&b's')).then(|| std::str::from_utf8(&value[1..]).ok())?
+    }
+
+    /// Highlights a concrete name resolved through a dynamic text rule. The
+    /// value is stored inside the shared JSON catch-all, so Tantivy's regular
+    /// field-based snippet path cannot read it directly; the catch-all's
+    /// analyzer and JSON-path query terms still provide the same fragment
+    /// semantics once the stored value is extracted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn highlight_dynamic_field_with_options(
+        &self,
+        query: &dyn Query,
+        addr: DocAddress,
+        field_name: &str,
+        max_num_chars: usize,
+        pre: &str,
+        post: &str,
+        snippets_cap: usize,
+        cross_field_query_terms: bool,
+        original_fragments: bool,
+        merge_contiguous: bool,
+    ) -> Result<Vec<String>> {
+        const MAX_SNIPPETS_PER_FIELD: usize = 100;
+
+        let rule = self
+            .wf_schema
+            .match_dynamic(field_name)
+            .ok_or_else(|| anyhow!("can not highlight undefined field: {field_name}"))?;
+        let container_name = self.wf_schema.dynamic_target(rule);
+        let container = self
+            .wf_schema
+            .field(container_name)
+            .ok_or_else(|| anyhow!("can not highlight undefined field: {field_name}"))?;
+        let target = FieldTarget::Dynamic {
+            container,
+            path: field_name.to_string(),
+        };
+        let terms = self.dynamic_highlight_terms(query, &target, cross_field_query_terms)?;
+        let values = self.stored_string_values(&self.reader.searcher().doc(addr)?, field_name);
+        let mut text = values.join(" ").trim().to_string();
+        if text.is_empty() || terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if original_fragments {
+            return self.original_highlight_fragments(
+                container,
+                &text,
+                &terms,
+                max_num_chars,
+                pre,
+                post,
+                snippets_cap,
+                merge_contiguous,
+            );
+        }
+
+        let tokenizer = self.index.tokenizer_for_field(container)?;
+        let mut generator = SnippetGenerator::new(terms, tokenizer, container, max_num_chars);
+        generator.set_max_num_chars(max_num_chars);
+        if max_num_chars == WHOLE_FIELD_MAX_CHARS {
+            let mut snippet = generator.snippet(&text);
+            if snippet.is_empty() {
+                return Ok(Vec::new());
+            }
+            let Some(base) = text.find(snippet.fragment()) else {
+                return Ok(Vec::new());
+            };
+            let end = base + snippet.fragment().len();
+            snippet.set_snippet_prefix_postfix(pre, post);
+            let mut html = encode_minimal(&text[..base]);
+            html.push_str(&snippet.to_html());
+            html.push_str(&encode_minimal(&text[end..]));
+            return Ok(vec![html]);
+        }
+
+        let wanted = snippets_cap.min(MAX_SNIPPETS_PER_FIELD);
+        let mut snippets = Vec::new();
+        for _ in 0..MAX_SNIPPETS_PER_FIELD {
+            if snippets.len() >= wanted {
+                break;
+            }
+            let mut snippet = generator.snippet(&text);
+            if snippet.is_empty() {
+                break;
+            }
+            let Some(base) = text.find(snippet.fragment()) else {
+                break;
+            };
+            let masked: Vec<Range<usize>> = snippet
+                .highlighted()
+                .iter()
+                .map(|range| base + range.start..base + range.end)
+                .collect();
+            snippet.set_snippet_prefix_postfix(pre, post);
+            let html = snippet.to_html();
+            if !snippets.contains(&html) {
+                snippets.push(html);
+            }
+            let mut bytes = text.into_bytes();
+            for range in masked {
+                bytes
+                    .get_mut(range)
+                    .expect("a highlight range lies inside the dynamic field text")
+                    .fill(b' ');
+            }
+            text = String::from_utf8(bytes)
+                .context("masking a highlighted range produced invalid UTF-8")?;
+        }
+        Ok(snippets)
+    }
+
+    /// `hl.preserveMulti=true` for a field resolved through a dynamic pattern.
+    /// Dynamic values are stored in one JSON catch-all, so the pattern's own
+    /// multi-valued metadata must select this per-value path rather than the
+    /// static-field lookup used by `highlight_field_preserve_multi`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn highlight_dynamic_field_preserve_multi(
+        &self,
+        query: &dyn Query,
+        addr: DocAddress,
+        field_name: &str,
+        max_num_chars: usize,
+        pre: &str,
+        post: &str,
+        snippets_cap: usize,
+        cross_field_query_terms: bool,
+        merge_contiguous: bool,
+    ) -> Result<Vec<String>> {
+        let rule = self
+            .wf_schema
+            .match_dynamic(field_name)
+            .ok_or_else(|| anyhow!("can not highlight undefined field: {field_name}"))?;
+        let container_name = self.wf_schema.dynamic_target(rule);
+        let container = self
+            .wf_schema
+            .field(container_name)
+            .ok_or_else(|| anyhow!("can not highlight undefined field: {field_name}"))?;
+        let doc = self.reader.searcher().doc(addr)?;
+        let values = self.stored_string_values(&doc, field_name);
+        let target = FieldTarget::Dynamic {
+            container,
+            path: field_name.to_string(),
+        };
+        let terms = self.dynamic_highlight_terms(query, &target, cross_field_query_terms)?;
+        let mut out = Vec::with_capacity(values.len());
+        for value in &values {
+            let fragments = self.original_highlight_fragments(
+                container,
+                value,
+                &terms,
+                max_num_chars,
+                pre,
+                post,
+                snippets_cap,
+                merge_contiguous,
+            )?;
+            if fragments.is_empty() {
+                out.push(encode_minimal(value));
+            } else {
+                out.extend(fragments);
+            }
+        }
+        Ok(out)
+    }
+
     /// `hl.preserveMulti=true` highlighting (issue #353). Only ever called on
     /// the `hl.method=original` path -- the default (`hl.method=unified`)
     /// highlighter is a documented no-op for `hl.preserveMulti` (captured:
@@ -4256,6 +4470,32 @@ impl CoreIndex {
         Ok(out)
     }
 
+    fn mine_mlt_values(
+        &self,
+        values: &[String],
+        tokenizer: &mut TextAnalyzer,
+        target: &FieldTarget,
+        opts: &MltOptions,
+        term_frequencies: &mut HashMap<Term, usize>,
+    ) {
+        for value in values {
+            let mut token_stream = tokenizer.token_stream(value);
+            let mut token_count = 0;
+            while token_stream.advance() {
+                token_count += 1;
+                if token_count > opts.max_num_tokens_parsed {
+                    break;
+                }
+                let token = token_stream.token();
+                if mlt_is_noise_word(&token.text, opts.min_word_length, opts.max_word_length) {
+                    continue;
+                }
+                let term = self.term_for_target(target, &token.text);
+                *term_frequencies.entry(term).or_insert(0) += 1;
+            }
+        }
+    }
+
     /// Builds the `/mlt` similarity query for `addr` — mines terms from
     /// `field_names`'s stored values (every declared field if absent, from
     /// `mlt.fl`), tuned by `opts`.
@@ -4316,22 +4556,8 @@ impl CoreIndex {
                 continue;
             };
             // Deliberately the *index*-side manager, not the #389 Phase 1
-            // query-side one -- `searcher.index().tokenizers()` is the index
-            // manager, since that is what `CoreIndex::open` hands Tantivy. What
-            // is analyzed here is a stored source document, mined for terms that
-            // are then looked up in the posting lists directly
-            // (`searcher.doc_freq(&term)` below drops anything with
-            // `doc_freq == 0`) -- so the tokens must be index terms. Routing this
-            // through the query manager would be inert today (both managers hold
-            // the same chain for every shipped type) and wrong the moment Phase 4
-            // adds query-side synonyms: every synonym mined off the source doc
-            // would be a term the doc does not contain, and the `doc_freq == 0`
-            // filter below would thin `interestingTerms` as soon as the two
-            // chains produce different tokens for the same text.
-            //
-            // Both of those are arguments from what this code does, not from what
-            // any other engine does: the input is stored document text and the
-            // output must be terms that exist in the postings.
+            // query-side one: MLT mines stored source text and looks the
+            // resulting index terms up in the posting lists.
             let Some(mut tokenizer) = text_options
                 .get_indexing_options()
                 .map(|o| o.tokenizer())
@@ -4339,24 +4565,65 @@ impl CoreIndex {
             else {
                 continue;
             };
-            for value in doc.get_all(field) {
-                let Some(text) = value.as_str() else {
+            let values: Vec<String> = doc
+                .get_all(field)
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect();
+            self.mine_mlt_values(
+                &values,
+                &mut tokenizer,
+                &FieldTarget::Static(field),
+                &opts,
+                &mut term_frequencies,
+            );
+        }
+
+        // Dynamic fields share a JSON catch-all, so an explicit `mlt.fl`
+        // name must be mined from its stored value and addressed with the
+        // JSON-path term encoding rather than being silently skipped with the
+        // static-field loop above. Absent `mlt.fl` deliberately retains the
+        // existing static-only default.
+        if let Some(names) = field_names {
+            for (name_index, name) in names.iter().enumerate() {
+                if names[..name_index].iter().any(|previous| previous == name)
+                    || self.wf_schema.is_static(name)
+                {
+                    continue;
+                }
+                let Some(rule) = self.wf_schema.match_dynamic(name) else {
                     continue;
                 };
-                let mut token_stream = tokenizer.token_stream(text);
-                let mut token_count = 0;
-                while token_stream.advance() {
-                    token_count += 1;
-                    if token_count > opts.max_num_tokens_parsed {
-                        break;
-                    }
-                    let token = token_stream.token();
-                    if mlt_is_noise_word(&token.text, opts.min_word_length, opts.max_word_length) {
-                        continue;
-                    }
-                    let term = Term::from_field_text(field, &token.text);
-                    *term_frequencies.entry(term).or_insert(0) += 1;
+                if self.wf_schema.resolved_value_kind(name) != Some(ValueKind::Text) {
+                    continue;
                 }
+                let container_name = self.wf_schema.dynamic_target(rule);
+                let Some(container) = self.wf_schema.field(container_name) else {
+                    continue;
+                };
+                let tantivy::schema::FieldType::JsonObject(options) =
+                    schema.get_field_entry(container).field_type()
+                else {
+                    continue;
+                };
+                let Some(mut tokenizer) = options
+                    .get_text_indexing_options()
+                    .map(|o| o.tokenizer())
+                    .and_then(|name| tokenizer_manager.get(name))
+                else {
+                    continue;
+                };
+                let target = FieldTarget::Dynamic {
+                    container,
+                    path: name.clone(),
+                };
+                let values = self.stored_string_values(&doc, name);
+                self.mine_mlt_values(
+                    &values,
+                    &mut tokenizer,
+                    &target,
+                    &opts,
+                    &mut term_frequencies,
+                );
             }
         }
 

@@ -193,13 +193,21 @@ pub fn highlighting(
             // path (the default `hl.method=unified` is a captured no-op for
             // it), and only on a multi-valued field -- on a single-valued
             // field "one snippet per value" is just the ordinary path.
-            let preserve_multi = original_fragments
-                && params.get("hl.preserveMulti") == Some("true")
-                && index
+            let is_multi_valued = if index.wf_schema.is_static(field_name) {
+                index
                     .wf_schema
                     .field_config(field_name)
-                    .is_some_and(|c| c.multi_valued);
-            let mut snippets = if preserve_multi {
+                    .is_some_and(|c| c.multi_valued)
+            } else {
+                index
+                    .wf_schema
+                    .match_dynamic(field_name)
+                    .is_some_and(|rule| rule.multi_valued)
+            };
+            let preserve_multi = original_fragments
+                && params.get("hl.preserveMulti") == Some("true")
+                && is_multi_valued;
+            let mut snippets = if preserve_multi && index.wf_schema.is_static(field_name) {
                 index.highlight_field_preserve_multi(
                     query,
                     addr,
@@ -211,8 +219,33 @@ pub fn highlighting(
                     cross_field_query_terms,
                     merge_contiguous,
                 )?
-            } else {
+            } else if preserve_multi {
+                index.highlight_dynamic_field_preserve_multi(
+                    query,
+                    addr,
+                    field_name,
+                    max_chars,
+                    pre,
+                    post,
+                    snippets_cap,
+                    cross_field_query_terms,
+                    merge_contiguous,
+                )?
+            } else if index.wf_schema.is_static(field_name) {
                 index.highlight_field_with_options(
+                    query,
+                    addr,
+                    field_name,
+                    max_chars,
+                    pre,
+                    post,
+                    snippets_cap,
+                    cross_field_query_terms,
+                    original_fragments,
+                    merge_contiguous,
+                )?
+            } else {
+                index.highlight_dynamic_field_with_options(
                     query,
                     addr,
                     field_name,
@@ -419,12 +452,16 @@ fn highlightable_fields(schema: &WayfinderSchema) -> Vec<&str> {
 /// `facet::check_facetable`'s precedent for the same distinction on
 /// `facet.field`.
 fn check_highlightable(schema: &WayfinderSchema, field_name: &str) -> Result<()> {
-    match schema.field_config(field_name) {
-        None => bail!("can not highlight undefined field: {field_name}"),
-        Some(_) => match schema.value_kind(field_name) {
+    if schema.is_static(field_name) {
+        return match schema.value_kind(field_name) {
             Some(ValueKind::Text) => Ok(()),
             _ => bail!("can not highlight a non-text field: {field_name}"),
-        },
+        };
+    }
+    match schema.resolved_value_kind(field_name) {
+        Some(ValueKind::Text) => Ok(()),
+        Some(_) => bail!("can not highlight a non-text field: {field_name}"),
+        None => bail!("can not highlight undefined field: {field_name}"),
     }
 }
 

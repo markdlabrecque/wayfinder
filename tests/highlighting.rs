@@ -317,6 +317,133 @@ async fn hl_non_text_field_is_400() {
     );
 }
 
+/// A Search API field name resolved solely through the shipped preset's
+/// `tm_X3b_en_*` dynamic rule must be a valid highlighting field, not just a
+/// queryable/indexable field.
+#[tokio::test]
+async fn hl_fl_accepts_and_highlights_a_search_api_dynamic_text_field() {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), include_str!("../presets/search-api.toml"))
+        .expect("the Search API preset must build");
+    let docs = json!([{
+        "id": "dynamic-hl",
+        "tm_X3b_en_body": ["Wombat Forest"]
+    }]);
+    let (status, indexed) = post_docs(&app, &docs).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "dynamic preset field must index: {indexed}"
+    );
+
+    let (status, body) = get(
+        &app,
+        "select?q=tm_X3b_en_body:wombat&hl=true&hl.fl=tm_X3b_en_body&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a dynamic Search API text field must be accepted by hl.fl: {body}"
+    );
+    assert_eq!(
+        body.pointer("/response/numFound"),
+        Some(&json!(1)),
+        "the dynamic-field query must find the indexed document: {body}"
+    );
+    let snippet = body
+        .pointer("/highlighting/dynamic-hl/tm_X3b_en_body/0")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("dynamic hl.fl must produce a snippet: {body}"));
+    assert!(
+        snippet.contains("<em>Wombat</em>"),
+        "the matching term in the dynamic field must be highlighted: {body}"
+    );
+}
+
+/// Dynamic fields share a JSON catch-all, so query terms must be decoded from
+/// their JSON-path term representation even when the query and highlighted
+/// field use different paths. Solr's default `hl.requireFieldMatch=false`
+/// allows this cross-field highlight; `true` remains the strict control.
+#[tokio::test]
+async fn hl_dynamic_default_require_field_match_highlights_another_dynamic_field() {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), include_str!("../presets/search-api.toml"))
+        .expect("the Search API preset must build");
+    let docs = json!([{
+        "id": "dynamic-cross-hl",
+        "tm_X3b_en_title": ["Wombat title"],
+        "tm_X3b_en_body": ["Wombat body"]
+    }]);
+    let (status, indexed) = post_docs(&app, &docs).await;
+    assert_eq!(status, StatusCode::OK, "indexing must succeed: {indexed}");
+
+    let (status, body) = get(
+        &app,
+        "select?q=tm_X3b_en_title:wombat&hl=true&hl.fl=tm_X3b_en_body&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "cross-dynamic highlighting must succeed: {body}"
+    );
+    assert_eq!(
+        body.pointer("/highlighting/dynamic-cross-hl/tm_X3b_en_body/0"),
+        Some(&json!("<em>Wombat</em> body")),
+        "absent hl.requireFieldMatch must decode the title JSON term and highlight body: {body}"
+    );
+
+    let (status, body) = get(
+        &app,
+        "select?q=tm_X3b_en_title:wombat&hl=true&hl.fl=tm_X3b_en_body\
+         &hl.requireFieldMatch=true&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "strict dynamic highlighting must succeed: {body}"
+    );
+    assert_eq!(
+        body.pointer("/highlighting/dynamic-cross-hl"),
+        Some(&json!({})),
+        "hl.requireFieldMatch=true must not cross dynamic JSON paths: {body}"
+    );
+}
+
+/// `hl.preserveMulti=true` is resolved from dynamic pattern metadata, not a
+/// static `[[fields]]` entry. Each stored value must retain its own snippet.
+#[tokio::test]
+async fn hl_dynamic_preserve_multi_returns_one_snippet_per_value() {
+    let dir = TempDir::new().expect("temp dir");
+    let app = common::app_with_schema(dir.path(), include_str!("../presets/search-api.toml"))
+        .expect("the Search API preset must build");
+    let docs = json!([{
+        "id": "dynamic-preserve-hl",
+        "tm_X3b_en_body": ["Wombat Forest", "quiet meadow"]
+    }]);
+    let (status, indexed) = post_docs(&app, &docs).await;
+    assert_eq!(status, StatusCode::OK, "indexing must succeed: {indexed}");
+
+    let (status, body) = get(
+        &app,
+        "select?q=tm_X3b_en_body:wombat&hl=true&hl.fl=tm_X3b_en_body\
+         &hl.method=original&hl.preserveMulti=true&wt=json",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "dynamic preserveMulti must succeed: {body}"
+    );
+    assert_eq!(
+        body.pointer("/highlighting/dynamic-preserve-hl/tm_X3b_en_body"),
+        Some(&json!(["<em>Wombat</em> Forest", "quiet meadow"])),
+        "dynamic preserveMulti must preserve both values in indexed order: {body}"
+    );
+}
+
 // --- SELECT_PARAMS regression guard --------------------------------------
 
 #[tokio::test]
