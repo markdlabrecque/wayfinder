@@ -1,33 +1,35 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <title>Wayfinder &mdash; core {{ core_name }}</title>
-    <style>
-      body { font-family: system-ui, sans-serif; margin: 2rem; }
-      table { border-collapse: collapse; }
-      th, td { text-align: left; padding: 0.25rem 1rem 0.25rem 0; }
-      th { font-weight: 600; }
-    </style>
-  </head>
-  <body>
-    <h1>Wayfinder</h1>
-    <h2>Core: {{ core_name }}</h2>
-    <table>
-      <tbody>
-        <tr>
-          <th scope="row">Name</th>
-          <td>{{ core_name }}</td>
-        </tr>
-        <tr>
-          <th scope="row">Documents</th>
-          <td>{{ doc_count }}</td>
-        </tr>
-        <tr>
-          <th scope="row">Size on disk</th>
-          <td>{{ size_human }} ({{ size_bytes }} bytes)</td>
-        </tr>
-      </tbody>
-    </table>
-  </body>
-</html>
+{% extends "_layout.html" %}
+{% import "_nav.html" as nav %}
+
+{% block title %}Wayfinder &mdash; core {{ core_name }}{% endblock %}
+{% block sections %}{% call nav::bar("core") %}{% endcall %}{% endblock %}
+
+{% block page %}
+<div class="page-head">
+  <h2>Core overview</h2>
+  <p class="lede">
+    Live figures for the single core this process serves, read straight from the
+    in-memory index state.
+  </p>
+</div>
+
+<div class="panel narrow">
+  <h3>Core</h3>
+  <table class="kv">
+    <tbody>
+      <tr>
+        <th scope="row">Name</th>
+        <td>{{ core_name }}</td>
+      </tr>
+      <tr>
+        <th scope="row">Documents</th>
+        <td>{{ doc_count }}</td>
+      </tr>
+      <tr>
+        <th scope="row">Size on disk</th>
+        <td>{{ size_human }} ({{ size_bytes }} bytes)</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+{% endblock %}
