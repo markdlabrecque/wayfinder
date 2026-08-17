@@ -47,11 +47,21 @@ stored = true
 
     impl Drop for Server {
         fn drop(&mut self) {
-            if matches!(self.child.try_wait(), Ok(None)) {
-                let _ = Command::new("kill")
-                    .args(["-TERM", &self.child.id().to_string()])
-                    .status();
-                let _ = self.child.wait();
+            match self.child.try_wait() {
+                Ok(Some(_)) => {}
+                Ok(None) => match self.child.kill() {
+                    Ok(()) => {
+                        if let Err(error) = self.child.wait() {
+                            eprintln!("failed to wait for snapshot test server: {error}");
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("failed to terminate snapshot test server: {error}");
+                    }
+                },
+                Err(error) => {
+                    eprintln!("failed to inspect snapshot test server: {error}");
+                }
             }
         }
     }
