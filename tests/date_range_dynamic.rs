@@ -22,7 +22,7 @@
 //! `dr341_multi_within_one` and `dr341_multi_contains_one` were captured to
 //! catch. Those four are not softened.
 //!
-//! Findings 165-172 in `docs/solr-ref-findings.md` are the authoritative prose;
+//! Findings 165-172 in `solr-ref/FINDINGS.md` are the authoritative prose;
 //! each test cites its fixture and finding.
 
 // The `dead_code` allow for the shared helpers is an inner attribute inside

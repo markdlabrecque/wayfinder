@@ -32,7 +32,7 @@ pub fn parse_field_weights(spec: &str) -> Vec<(String, f32)> {
 
 /// `min_should_match`: Solr edismax's `mm` grammar, `(spec, clause_count) ->
 /// required_count`. See `tests/mm.rs`'s module doc and finding 68
-/// (`docs/solr-ref-findings.md`) for the full derivation, verified against a
+/// (`solr-ref/FINDINGS.md`) for the full derivation, verified against a
 /// real Solr 9 rather than reconstructed from memory of the reference-guide
 /// prose (which gets at least one case, `-25%`, wrong).
 ///

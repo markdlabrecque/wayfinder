@@ -24,7 +24,7 @@
 //!
 //! Every expected value in the fixture-derived test comes from that
 //! committed fixture, never from what an implementation would produce
-//! (repo convention, `docs/solr-ref-findings.md` finding 10).
+//! (repo convention, `solr-ref/FINDINGS.md` finding 10).
 //!
 //! `ExtractLimits::default()` itself is not asserted here: phase 0 has no
 //! captured value to derive an expectation from (no route exists to

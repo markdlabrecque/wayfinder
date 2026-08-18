@@ -21,7 +21,7 @@
 //! conflict with the real architecture (no `CoreRegistry` exists). A
 //! multi-core listing test (`tests/admin_ui_multi_core.rs`) was written
 //! against that premise and has been removed rather than built toward, per
-//! the resolution recorded in issue #94 and docs/PRD.md.
+//! the resolution recorded in issue #94 and docs/COMPATIBILITY.md.
 
 mod common;
 

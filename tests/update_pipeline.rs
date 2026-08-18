@@ -3,7 +3,7 @@
 //! GET `/update`, single-valued-field enforcement, copy-field enforcement,
 //! the dynamic `*_dt` round trip, and autocommit config consumption.
 //!
-//! Ground truth is `docs/solr-ref-findings.md` findings 46-49 and the
+//! Ground truth is `solr-ref/FINDINGS.md` findings 46-49 and the
 //! fixtures they cite in `solr-ref/responses/update_*` / `ping_unknown_core*`,
 //! captured against a self-contained `update9` core (the dedicated Solr capture's
 //! tail block). This file mirrors that core's schema and `u1..u5` seed corpus
@@ -224,7 +224,7 @@ fn assert_ping_error(status: StatusCode, body: &Value, want_code: u16) {
 /// exactly one fixture: `update_select_overwrite_false`. Two live docs share
 /// uniqueKey `u7` there (a deliberate `overwrite=false` duplicate), and no
 /// query field can tie-break them — orchestrator ruling, issue #9, recorded
-/// in `docs/solr-ref-findings.md`'s finding-46-49 block: even with no
+/// in `solr-ref/FINDINGS.md`'s finding-46-49 block: even with no
 /// background merges, tantivy 0.26.1's `SegmentRegister`
 /// (`src/indexer/segment_register.rs`) holds segments in a
 /// `std::collections::HashMap<SegmentId, SegmentEntry>`, so segment

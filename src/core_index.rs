@@ -64,7 +64,7 @@ const MAX_PHRASE_GRAPH_DEPTH: usize = 256;
 
 /// `highlight_field`'s sentinel `max_num_chars` meaning "do not fragment at
 /// all -- return the whole field as one snippet". Solr's `hl.fragsize=0`
-/// (`docs/solr-ref-findings.md` finding 81, resolved in `crate::highlight`)
+/// (`solr-ref/FINDINGS.md` finding 81, resolved in `crate::highlight`)
 /// is the only thing that produces it.
 ///
 /// `usize::MAX` is safe to hand to `SnippetGenerator::set_max_num_chars`:
@@ -3696,7 +3696,7 @@ impl CoreIndex {
         // `/select` response over a corpus full of dynamic fields, and its doc
         // key order ends `..., "sm_field_keywords", "hash", "timestamp",
         // "ss_search_api_language", "score"`: `score` after every dynamic
-        // field. That agrees with finding 24 (`docs/solr-ref-findings.md`) —
+        // field. That agrees with finding 24 (`solr-ref/FINDINGS.md`) —
         // Solr appends its pseudo-fields (`_version_`, `_root_`, and `score`
         // itself) at the end — and with `mlt_fl_wildcard_score.json`, where
         // `score` follows `_version_`/`_root_`.
@@ -3904,7 +3904,7 @@ impl CoreIndex {
     /// Generates up to `snippets_cap` distinct highlighted HTML snippets for
     /// `field_name` in the doc at `addr`, against `query`'s terms in that
     /// field (Solr's `hl`/`hl.fl`). `snippets_cap` is Solr's `hl.snippets`:
-    /// it caps and never pads (finding 53, `docs/solr-ref-findings.md`), so
+    /// it caps and never pads (finding 53, `solr-ref/FINDINGS.md`), so
     /// a field with fewer matches than the cap simply returns fewer. It is a
     /// parameter rather than the caller's `take()` because each snippet costs
     /// a full `SnippetGenerator` pass over the field text (see the ponytail

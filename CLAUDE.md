@@ -1,7 +1,8 @@
 # Wayfinder — working agreement
 
-A Solr-wire-compatible search backend in Rust on Tantivy. Read `docs/PRD.md` before
-non-trivial work; it is the source of scope decisions.
+A Solr-wire-compatible search backend in Rust on Tantivy. Read `docs/COMPATIBILITY.md` before
+changing routes, parameters, envelopes, or scope boundaries. Read `docs/CONFIGURATION.md` before
+changing schemas or server settings.
 
 ## Workflow
 
@@ -30,8 +31,8 @@ non-trivial work; it is the source of scope decisions.
    re-run the gates locally afterwards. Concurrent branches here routinely conflict in
    `src/lib.rs` and `tests/common/mod.rs`; a green branch plus a green `main` does not imply a
    green merge.
-7. **Link the report, don't retype it.** Substantive work leaves a report in
-   `docs/reports/YYYY-MM-DD-<slug>.md`; the PR body summarises and points at it.
+7. **Record substantive work in the PR.** Summarise changed behavior, verification, review, and
+   unresolved follow-ups in the PR body instead of adding repository-local implementation reports.
 
 ## Hot files, for parallel work
 
@@ -44,7 +45,7 @@ wants some of these, so assign ownership per branch before starting:
 | `src/lib.rs` | almost every issue | routing, handler bodies, `SELECT_PARAMS`/`UPDATE_PARAMS` |
 | `src/core_index.rs` | search/index features | the index-creation call is a repeat conflict site |
 | `tests/common/mod.rs` | every test suite | shared helpers; the `dead_code` allow lives here as an inner attribute — do not add a second one on `mod common;` |
-| `docs/solr-ref-findings.md` | anything learning a Solr fact | append a numbered finding |
+| `solr-ref/FINDINGS.md` | historical wire/client evidence | retain numbered findings; product scope lives in `docs/COMPATIBILITY.md` |
 
 Sequencing that has already proven necessary: error-envelope work lands before features that
 produce errors, and schema-layer work lands before features that need new field types.
@@ -60,8 +61,8 @@ produce errors, and schema-layer work lands before features that need new field 
   implementation pass; preserve fixture-derived assertions for the behaviours they record.
 - **Wire format only.** The current wire uses Solr parameter names, semantics, and JSON envelopes,
   never Solr configuration files.
-- `docs/solr-ref-findings.md` records factual Solr and client evidence. Existing deliberate
-  differences are described in PRD §2; unsupported boundaries are stated in PRD §5.
+- `solr-ref/FINDINGS.md` records historical Solr and client evidence. Current deliberate
+  differences and unsupported boundaries live in `docs/COMPATIBILITY.md`.
 - Implementing a new request param? Add it to `SELECT_PARAMS`/`UPDATE_PARAMS` in `src/lib.rs`,
   or `strict_params = true` will 400 a param Wayfinder actually supports.
 

@@ -7,7 +7,7 @@
 //! follow-up to the findings 97-101 MLT refinement block). The canonical 5-doc
 //! tracer-bullet corpus has too little shared
 //! vocabulary for MLT term statistics to mean anything
-//! (`docs/solr-ref-findings.md` finding 64). Nothing is derived from what
+//! (`solr-ref/FINDINGS.md` finding 64). Nothing is derived from what
 //! Wayfinder happens to produce.
 //!
 //! Scope, per the issue: `q` (selects the source doc), `mlt.fl`, `mlt.mintf`,

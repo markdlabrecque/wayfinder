@@ -29,7 +29,7 @@
 //!   the thread behind it, so that shape frees the *caller* while the runaway
 //!   parser keeps burning a thread from tokio's **shared** blocking pool —
 //!   the pool `/select`, `/update`, and every other filesystem-touching path
-//!   depend on (see `docs/reports/2026-08-01-text-extraction-exploration.md`).
+//!   depend on; fixture-backed extraction tests pin the supported behavior.
 //! - **Wrapping `spawn_extraction` in a timeout is correct and safe**, and
 //!   since the #257 follow-up it is not optional: the timeout is baked into
 //!   `spawn_extraction` itself so a caller cannot forget it. The permit is
@@ -4902,7 +4902,7 @@ mod tests {
     /// parser failures, the same shape and `Parse` arm (500) as the existing
     /// `extract_corrupt_pdf.json`. No new fixture lands on a budget-violation
     /// status (413/503/415/400), so the mapping below is unchanged. Recorded
-    /// in `docs/reports/2026-08-03-pdf-extraction-corpus.md`.
+    /// by the PDF corpus tests in `tests/pdf_extractor.rs`.
     ///
     /// Recheck #3 (issue #294, the PDF extractor landing): the eight #261 PDF
     /// fixtures are exercised directly by the extraction feature tests.

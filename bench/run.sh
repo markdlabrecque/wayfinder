@@ -8,7 +8,7 @@
 # first query, p95 query latency (warm cache: the same query N_QUERIES
 # times; and cold cache: one query per distinct corpus term after a core
 # RELOAD flushes Solr's caches -- issue #251), container image size, and
-# index size on disk -- then renders `docs/benchmarks.md` via
+# index size on disk -- then renders `bench/RESULTS.md` via
 # `wayfinder_bench::results`.
 #
 # Requires: docker, curl, cargo. Mirrors solr-ref/capture.sh's Docker
@@ -427,11 +427,11 @@ SOLR_IMAGE_MB=$(awk -v b="$SOLR_IMAGE_BYTES" 'BEGIN { printf "%.2f", b / 1048576
 docker rm -f "$SOLR_CONTAINER" >/dev/null 2>&1 || true
 
 # --- Render ----------------------------------------------------------------
-echo "== rendering docs/benchmarks.md =="
+echo "== rendering bench/RESULTS.md =="
 "$BENCH_BIN/render_report" \
   "$SOLR_STARTUP_IDLE_MB" "$SOLR_POST_INDEX_MB" "$SOLR_LOAD_MB" "$SOLR_COLD_MS" "$SOLR_IMAGE_MB" "$SOLR_INDEX_MB" "$SOLR_LATENCIES_WARM" "$SOLR_LATENCIES_COLD" \
   "$WF_STARTUP_IDLE_MB" "$WF_POST_INDEX_MB" "$WF_LOAD_MB" "$WF_COLD_MS" "$WF_IMAGE_MB" "$WF_INDEX_MB" "$WF_LATENCIES_WARM" "$WF_LATENCIES_COLD" \
   "$SIZE" \
-  "$ROOT/docs/benchmarks.md"
+  "$ROOT/bench/RESULTS.md"
 
-echo "done: see $ROOT/docs/benchmarks.md"
+echo "done: see $ROOT/bench/RESULTS.md"

@@ -6,7 +6,7 @@
 //! **The issue's own premise is wrong and this file does not build to it.**
 //! It claims Solr accepts `1`/`0`/`t`/`f`/`y` -- measured behaviour, captured
 //! against real `solr:9` (port 8996, 2026-08-01) and recorded in
-//! `docs/solr-ref-findings.md`, is:
+//! `solr-ref/FINDINGS.md`, is:
 //! - `true` if the lowercased value starts with `true`, `on`, or `yes`
 //! - `false` if it starts with `false` or `off`, or equals `no` exactly
 //! - anything else, including the empty string, is a 400 with

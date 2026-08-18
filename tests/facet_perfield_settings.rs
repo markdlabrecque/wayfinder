@@ -5,7 +5,7 @@
 //! `f.<field>.facet.missing` already works (issue #140) -- see
 //! `tests/facet_field_missing_override.rs`, the worked example this file
 //! follows. #296 as filed asked only for the three remaining per-field names.
-//! Findings 147-151 (`docs/solr-ref-findings.md`) settle that this is only
+//! Findings 147-151 (`solr-ref/FINDINGS.md`) settle that this is only
 //! half the feature:
 //!
 //! - finding 147: `f.<X>.facet.*` always resolves `X` against the field being

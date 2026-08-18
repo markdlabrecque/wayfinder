@@ -1705,7 +1705,7 @@ async fn admin_info_system(
 /// (targeted Solr branch, `"9.x"`), and `$parts[4]` (`"0"`) must all be
 /// present and non-empty, or those calls hit an undefined array index and
 /// the version handshake breaks for real (finding 78,
-/// docs/solr-ref-findings.md). A shorter placeholder like
+/// solr-ref/FINDINGS.md). A shorter placeholder like
 /// `"wayfinder-{core}"` only has 2 dash-separated parts and fails this.
 const CORE_ADMIN_SCHEMA: &str = "drupal-4.4.0-wayfinder-9.x-0";
 
@@ -3974,7 +3974,7 @@ async fn select(
 /// document the same way `/select`'s `q` does; `mlt.fl` names which stored
 /// fields to mine for interesting terms (every declared field if absent);
 /// `fl`/`rows`/`start` page the similar-docs result set exactly as
-/// `/select` does. See `docs/solr-ref-findings.md` findings 60-67 for the
+/// `/select` does. See `solr-ref/FINDINGS.md` findings 60-67 for the
 /// captured envelope shape this mirrors.
 async fn mlt(
     State(state): State<Arc<AppState>>,

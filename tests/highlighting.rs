@@ -7,7 +7,7 @@
 //! container (`wayfinder-solr-4`, port 8991) running the same schema and
 //! 5-doc "quick brown fox" corpus as the canonical `content` core
 //! (`common::SCHEMA_TOML` / `common::corpus()`). See
-//! `docs/solr-ref-findings.md` findings 52-55 for the narrative.
+//! `solr-ref/FINDINGS.md` findings 52-55 for the narrative.
 //!
 //! Two shapes here are the crux of the issue and are asserted structurally,
 //! not just via the whole-envelope fixture diff, so a future refactor cannot
@@ -228,7 +228,7 @@ async fn hl_no_field_match_matches_fixture_and_has_empty_object_shape() {
 // fixture (no such request was captured against the reference container),
 // so the exact wording and the `.with_response()` shape are this
 // implementation's own inference from that sibling precedent, not ground
-// truth -- see `docs/solr-ref-findings.md`'s "Not yet captured" section.
+// truth -- see `solr-ref/FINDINGS.md`'s "Not yet captured" section.
 
 #[tokio::test]
 async fn hl_undefined_field_is_400_and_carries_the_base_querys_response_block() {
@@ -602,7 +602,7 @@ async fn hl_preserve_multi_is_a_noop_under_the_default_unified_method() {
 // --- Issue #139: hl.fl=*, hl.mergeContiguous, hl.requireFieldMatch --------
 //
 // Every captured `search_api_solr` request asks for highlighting the same
-// way (`docs/solr-ref-findings.md`'s highlighting section, issue #139's
+// way (`solr-ref/FINDINGS.md`'s highlighting section, issue #139's
 // brief): `hl.fl=*`, `hl.requireFieldMatch=false`, `hl.mergeContiguous=false`,
 // alongside the already-implemented `hl.snippets`/`hl.fragsize`/
 // `hl.simple.pre`/`hl.simple.post`. `hl.fl=*` appears in 19 of the 28 traces
@@ -827,7 +827,7 @@ async fn hl_search_api_solr_markers_round_trip() {
 }
 
 /// The tracer-bullet integration test: the exact parameter combination every
-/// captured `search_api_solr` request sends (`docs/solr-ref-findings.md`'s
+/// captured `search_api_solr` request sends (`solr-ref/FINDINGS.md`'s
 /// highlighting section; issue #139's brief), replayed end-to-end. Every
 /// individual piece is pinned by a narrower test above/in this file
 /// (`hl.fl=*`, both highlighting booleans on their false/default paths, `hl.fragsize=0`

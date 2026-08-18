@@ -7,7 +7,7 @@
 //! and `src/config.rs`'s `ServerConfig` carries that knob under
 //! `[resources] max_body_size` (bytes), defaulting to `10_000_000` — see the
 //! doc comment on `Resources::max_body_size` and finding 79 in
-//! `docs/solr-ref-findings.md` for why that default's value is what it is.
+//! `solr-ref/FINDINGS.md` for why that default's value is what it is.
 //!
 //! These tests cover the shipped behaviour:
 //! - `oversized_bulk_update_succeeds_under_the_default_limit` shows the

@@ -8,7 +8,7 @@
 //! `solr-ref/responses/group_*.json`, captured against a dedicated `grouping`
 //! Solr core (the dedicated Solr capture's issue-#290 block, container
 //! `wayfinder-solr-290`, port 8997) -- never from what Wayfinder happens to
-//! produce. Finding 130 (`docs/solr-ref-findings.md`) is the source sweep that
+//! produce. Finding 130 (`solr-ref/FINDINGS.md`) is the source sweep that
 //! narrowed the param surface: `search_api_solr`'s `setGrouping()` sends
 //! exactly `group.field`, `group.ngroups=true` (unconditional), `group.truncate`,
 //! `group.facet`, `group.limit` (when set & != 1), `group.offset` (when set),

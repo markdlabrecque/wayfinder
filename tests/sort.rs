@@ -576,7 +576,7 @@ async fn an_empty_sort_param_behaves_as_no_sort() {
 // ordering, multi-segment ordering.
 //
 // Every expected value below is read from a fixture in `solr-ref/responses/`
-// captured against a real `solr:9`'s `sortdebt` core (`docs/solr-ref-findings.md`
+// captured against a real `solr:9`'s `sortdebt` core (`solr-ref/FINDINGS.md`
 // findings 34-37), never invented. The 6-doc corpus (`s1..s6`) is reproduced in
 // `sortdebt_doc` below, exactly per the task spec's table.
 //

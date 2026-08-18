@@ -1,5 +1,5 @@
 //! Takes raw measurements captured by `bench/run.sh` and renders the
-//! `docs/benchmarks.md` table (issue #13). Plain positional CLI args plus
+//! `bench/RESULTS.md` table (issue #13). Plain positional CLI args plus
 //! two latency-sample files (one float per line) -- no JSON dependency
 //! needed for a handful of scalars.
 //!

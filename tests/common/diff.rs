@@ -23,7 +23,7 @@ pub struct Normalized {
 }
 
 /// Normalises a Solr/Wayfinder response envelope per PRD §8 and
-/// `docs/solr-ref-findings.md`:
+/// `solr-ref/FINDINGS.md`:
 /// - drops `responseHeader.QTime` (always variable).
 /// - drops `_version_` / `_root_` from every doc in `response.docs`
 ///   (Wayfinder's explicit default-`fl` decision, finding 9 — reuses/extends
@@ -478,7 +478,7 @@ fn strip_x_parsed_by_metadata_arrmap(arr: Vec<Value>) -> (Value, bool) {
 /// The ratified `/update/extract` divergences. Two scopes, each handling a
 /// distinct, documented class of Tika-specific content Wayfinder deliberately
 /// does not reproduce — see the PRD's ratified-divergence entry and
-/// `docs/solr-ref-findings.md` findings 120-127:
+/// `solr-ref/FINDINGS.md` findings 120-127:
 ///
 /// **Plain formats (issue #258) — text/HTML/etc.**: `X-Parsed-By` names Java
 /// Tika/PDFBox/etc. class names Wayfinder has no honest equivalent for, in

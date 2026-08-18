@@ -363,7 +363,7 @@ async fn core_admin_system_strict_params_rejects_unknown_param() {
 /// indexes into `$parts[1]` (module version), `$parts[3]` (targeted Solr
 /// branch), and `$parts[4]` — all three must be present and non-empty, or
 /// those calls hit an undefined array index (finding 78,
-/// docs/solr-ref-findings.md; ground truth:
+/// solr-ref/FINDINGS.md; ground truth:
 /// `solr-ref/responses/admin_system.json`'s `core.schema`).
 #[tokio::test]
 async fn core_admin_system_schema_has_the_dash_part_shape_search_api_solr_indexes_into() {
