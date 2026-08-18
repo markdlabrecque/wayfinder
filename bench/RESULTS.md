@@ -11,7 +11,7 @@ Measured against PRD §8 targets, on a corpus of 2000000 docs generated determin
 | p95 query latency, warm cache (facet+filter+highlight, 2000000 docs) | baseline | <= baseline | 9.79 ms | 9.73 ms | Solr: HTTP to the Docker container's published port, served from Solr's queryResultCache. Wayfinder: HTTP to the native process's bound port; Wayfinder has no query result cache. |
 | p95 query latency, cold cache (distinct queries, 2000000 docs) | baseline | <= baseline | 18.90 ms | 15.20 ms | Solr: HTTP to the Docker container's published port, after a core RELOAD flushed Solr's caches. Wayfinder: HTTP to the native process's bound port. Every query in this pass is distinct. |
 | Container image size | ~500 MB | < 30 MB | 659.4 MB | 14.1 MB | Both: Docker image size (`docker inspect`), not a running-container measurement. |
-| Index size on disk | baseline | <= 1.2x baseline | 389.5 MB | 330.8 MB | Solr: size inside the Docker container's data volume (`docker exec du`). Wayfinder: size of the native process's data directory on the host (`du`). |
+| Index size on disk | baseline | <= 1.2x baseline | 389.5 MB | 330.8 MB | Solr: Lucene `data/index` directory inside the Docker container (`docker exec du`); excludes tlog. Wayfinder: Tantivy/native data directory on the host (`du`), including tiny Wayfinder schema/analyzer metadata. |
 
 ## Notes
 
