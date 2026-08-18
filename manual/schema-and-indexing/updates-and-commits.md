@@ -20,8 +20,8 @@ idempotent whole documents, inspect the result, and retry only deliberately.
 
 No commit parameter leaves writes **pending**: acknowledged but not searchable
 or guaranteed across a crash. `commit=true`, a body `commit`, and
-`softCommit=true` synchronously make preceding writes **searchable**; in this
-implementation soft commit is a hard commit/reload. `commitWithin` schedules
+`softCommit=true` synchronously make preceding writes **searchable and durable**;
+in this implementation soft commit is the same hard commit/reload. `commitWithin` schedules
 visibility after its window. `autocommit_max_docs` and `autocommit_max_time`
 commit pending writes at their thresholds. A successful completed commit is
 **durable**; SIGTERM also flushes acknowledged pending updates before clean exit.

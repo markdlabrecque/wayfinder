@@ -3,6 +3,7 @@
 set -euo pipefail
 
 image="${WAYFINDER_SMOKE_IMAGE:-wayfinder-extraction-smoke:local}"
+curl_timeout=(--connect-timeout 2 --max-time 10)
 workdir="$(mktemp -d)"
 container=""
 cleanup() {
@@ -44,11 +45,13 @@ port="$(docker port "$container" 8983/tcp | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')
 base="http://127.0.0.1:$port"
 
 for _ in $(seq 1 100); do
-  if curl --fail --silent --show-error "$base/wayfinder/smoke/admin/ping?wt=json" >/dev/null; then break; fi
+  if curl "${curl_timeout[@]}" --fail --silent --show-error \
+    "$base/wayfinder/smoke/admin/ping?wt=json" >/dev/null; then break; fi
   sleep 0.1
 done
-curl --fail --silent --show-error "$base/wayfinder/smoke/admin/ping?wt=json" >/dev/null
-response="$(curl --fail --silent --show-error --request POST \
+curl "${curl_timeout[@]}" --fail --silent --show-error \
+  "$base/wayfinder/smoke/admin/ping?wt=json" >/dev/null
+response="$(curl "${curl_timeout[@]}" --fail --silent --show-error --request POST \
   --form "file=@$workdir/upload.txt;type=text/plain" \
   "$base/wayfinder/smoke/update/extract?extractOnly=true&wt=json")"
 printf '%s\n' "$response" | grep -F 'container extraction smoke' >/dev/null

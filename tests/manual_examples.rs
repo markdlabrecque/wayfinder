@@ -18,6 +18,7 @@ mod unix {
     use tempfile::TempDir;
 
     const CORE: &str = "getting-started";
+    const QUICKSTART_MD: &str = include_str!("../manual/getting-started/quickstart.md");
     const SCHEMA_TOML: &str = include_str!("../manual/getting-started/schema.toml");
     const CORPUS_JSON: &str = include_str!("../manual/getting-started/corpus.json");
 
@@ -50,6 +51,7 @@ mod unix {
         let log = std::fs::File::create(log).expect("create/truncate quickstart server log");
         Server {
             child: Command::new(env!("CARGO_BIN_EXE_wayfinder"))
+                .env_remove("WAYFINDER_CONFIG")
                 .env("RUST_LOG", "info")
                 .arg(schema)
                 .arg(data_dir)
@@ -101,9 +103,12 @@ mod unix {
         (status, head.to_owned(), body.to_owned())
     }
 
-    fn wait_until_serving(addr: SocketAddr, log: &Path) {
+    fn wait_until_serving(server: &mut Server, addr: SocketAddr, log: &Path) -> bool {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
+            if matches!(server.child.try_wait(), Ok(Some(_))) {
+                return false;
+            }
             let child_bound = std::fs::read_to_string(log)
                 .is_ok_and(|contents| contents.contains("wayfinder listening"));
             if child_bound
@@ -120,7 +125,7 @@ mod unix {
                 if stream.read_to_string(&mut response).is_ok()
                     && response.starts_with("HTTP/1.1 200")
                 {
-                    return;
+                    return true;
                 }
             }
             assert!(
@@ -129,6 +134,27 @@ mod unix {
             );
             thread::sleep(Duration::from_millis(25));
         }
+    }
+
+    fn start_server_with_retry(schema: &Path, data_dir: &Path, log: &Path) -> (Server, SocketAddr) {
+        for _ in 0..5 {
+            let addr = unused_loopback_addr();
+            let mut server = start_server(schema, data_dir, addr, log);
+            if wait_until_serving(&mut server, addr, log) {
+                return (server, addr);
+            }
+            let failure = std::fs::read_to_string(log)
+                .unwrap_or_else(|error| format!("could not read child log: {error}"));
+            assert!(
+                failure.contains("Address already in use")
+                    && !failure.contains("wayfinder listening"),
+                "retry is allowed only for a pre-bind address collision; child log: {failure}"
+            );
+        }
+        panic!(
+            "Wayfinder repeatedly failed before binding: {}",
+            std::fs::read_to_string(log).unwrap_or_else(|error| error.to_string())
+        );
     }
 
     fn sigterm(server: &mut Server) -> ExitStatus {
@@ -175,6 +201,32 @@ mod unix {
 
     #[test]
     fn canonical_quickstart_runs_a_real_binary_through_restart() {
+        for fragment in [
+            "\"$BASE/admin/ping?wt=json\"",
+            "\"$BASE/update?commit=true&wt=json\"",
+            "'q=trail'",
+            "'fq=category:guides'",
+            "'fl=id,title,rank'",
+            "'sort=rank asc'",
+            "'start=1'",
+            "'rows=1'",
+            "'facet=true'",
+            "'facet.field=category'",
+            "one `filters` document in `response.docs`",
+            "`response.numFound`\nis `2`",
+            "`facet_counts` includes the `guides` category",
+            "\"http://$LISTENER/ui\"",
+            "\"http://$LISTENER/ui/query\"",
+            "\"http://$LISTENER/ui/stats\"",
+            "'q=*:*'",
+            "response.numFound: 3",
+        ] {
+            assert!(
+                QUICKSTART_MD.contains(fragment),
+                "the real-binary request/expectation must remain coupled to the documented fragment {fragment:?}"
+            );
+        }
+
         let corpus: Value = serde_json::from_str(CORPUS_JSON).expect("canonical corpus is JSON");
         assert_eq!(
             corpus,
@@ -193,9 +245,7 @@ mod unix {
         std::fs::create_dir(&data_dir).expect("create manual data directory");
 
         let log = temp.path().join("server.log");
-        let addr = unused_loopback_addr();
-        let mut server = start_server(&schema, &data_dir, addr, &log);
-        wait_until_serving(addr, &log);
+        let (mut server, addr) = start_server_with_retry(&schema, &data_dir, &log);
 
         let (status, headers, body) = http_request(
             addr,
@@ -261,9 +311,7 @@ mod unix {
             "SIGTERM must stop the quickstart server cleanly: {exit}"
         );
 
-        let restart_addr = unused_loopback_addr();
-        let mut restarted = start_server(&schema, &data_dir, restart_addr, &log);
-        wait_until_serving(restart_addr, &log);
+        let (mut restarted, restart_addr) = start_server_with_retry(&schema, &data_dir, &log);
         let (status, headers, body) = http_request(
             restart_addr,
             "GET",

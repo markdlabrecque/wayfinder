@@ -16,8 +16,9 @@ is for controlled bulk work; log parameters are ignored there. `rows_limit` and
 `facet_limit_max` clamp. Document-store compression/block size apply only at
 index creation, so later edits are inert until reindex. `time_allowed` and
 `searcher_pool_size` are accepted but inert. Extraction has separate body,
-intake, parse, output, and deadline budgets; capacity plan their product rather
-than assuming one query limit controls them. Tantivy is mmap/page-cache based,
+intake, parse, output, and deadline budgets. Size resident upload memory from
+`max_inflight_uploads × max_body_bytes`; plan parse concurrency, output limits,
+and deadlines independently rather than treating them as one multiplier. Tantivy is mmap/page-cache based,
 not a process heap-size knob.
 
 ## Native, systemd, and image lifecycle

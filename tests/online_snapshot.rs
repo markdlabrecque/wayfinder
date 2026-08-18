@@ -193,6 +193,10 @@ stored = true
         );
         assert_eq!(status, 200, "committed update must succeed: {response}");
 
+        let live_synonyms = live_data_dir.join("synonyms.txt");
+        std::fs::write(&live_synonyms, "trail,path\n").expect("create durable live synonym state");
+        assert!(live_synonyms.is_file(), "live synonym state must exist");
+
         let snapshot = Command::new(env!("CARGO_BIN_EXE_wayfinder"))
             .arg("snapshot")
             .arg(&live_data_dir)
@@ -208,6 +212,10 @@ stored = true
         assert!(
             matches!(live_server.child.try_wait(), Ok(None)),
             "snapshot must not stop the live server"
+        );
+        assert!(
+            !snapshot_data_dir.join("synonyms.txt").exists(),
+            "online index snapshot must omit durable synonym state"
         );
         let (status, response) = http_request(
             live_addr,

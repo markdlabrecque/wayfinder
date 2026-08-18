@@ -20,7 +20,7 @@ Canonical schema syntax and migration rules are in
 | `date` | RFC 3339 UTC timestamp. |
 | `location` | Latitude/longitude point stored through synthetic fast columns; supports documented spatial queries. |
 | `location_rpt` | Latitude/longitude point with the same encoding; supports the documented heatmap boundary. |
-| `boost_term_payload` | Payload-bearing text: whitespace tokens, length 2–100, lowercase, duplicate removal, and final `|<float>` payload. It is for the bounded `{!payload_score}` evaluator. |
+| `boost_term_payload` | Payload-bearing text: whitespace tokens, length 2–100, lowercase, duplicate removal, and final `\|<float>` payload. It is for the bounded `{!payload_score}` evaluator. |
 | `date_range` | Interval-valued date. Verbatim text is retained and synthetic start/end date columns support documented interval predicates; it is not a scalar date. |
 | `text_ar` | Lowercase and Arabic stemming. |
 | `text_da` | Lowercase and Danish stemming. |

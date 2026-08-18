@@ -81,10 +81,22 @@ SIGKILL for recovery from an unresponsive process.
 The repository `Dockerfile` builds a static `scratch` image. Its `/tmp` is sticky and
 world-writable (`01777`) so runtime UID/GID `65532` can stage multipart extraction. Publish its
 port on host loopback only, or omit `ports` when clients share an internal container network.
-Before `docker compose up`, fail closed on the host when authentication/configuration is intended:
+Before `docker compose up`, make both bind-mounted configurations readable by
+the container's numeric identity and fail closed by testing as exact UID/GID
+`65532:65532`. This Linux preflight uses util-linux `setpriv` so it does not
+depend on a passwd entry or inherit the invoking user's groups:
 
 ```sh
-test -r ./deploy/content.toml || { echo "missing Compose WAYFINDER_CONFIG" >&2; exit 1; }
+sudo chown 65532:65532 ./deploy/content-schema.toml ./deploy/content.toml
+sudo chmod 0444 ./deploy/content-schema.toml
+sudo chmod 0400 ./deploy/content.toml
+if ! sudo setpriv --reuid=65532 --regid=65532 --clear-groups \
+       /usr/bin/test -r ./deploy/content-schema.toml ||
+   ! sudo setpriv --reuid=65532 --regid=65532 --clear-groups \
+       /usr/bin/test -r ./deploy/content.toml; then
+  echo "Compose configuration is unreadable by UID/GID 65532:65532" >&2
+  exit 1
+fi
 ```
 
 ```yaml
@@ -109,7 +121,8 @@ services:
     stop_grace_period: 60s
 ```
 
-Create `./data/content` for UID/GID 65532 before first start.
+Create the writable data directory before first start with
+`sudo install -d -o 65532 -g 65532 -m 0750 ./data/content`.
 
 ## TLS and authentication
 

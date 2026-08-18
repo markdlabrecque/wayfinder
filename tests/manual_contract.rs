@@ -53,6 +53,7 @@ fn manual_has_a_quickstart_lifecycle_and_executable_examples() {
         "stop",
         "restart",
         "mktemp -d",
+        "unset wayfinder_config before running this default quickstart",
         "assert_listener_free",
         "wait_for_wayfinder",
         "emitted by this child only after its bind succeeds",

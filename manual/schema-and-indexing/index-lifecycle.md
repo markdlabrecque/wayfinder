@@ -17,9 +17,10 @@ detector.
 **Prerequisites:** know the unique key, capture a complete backup or source
 record, and test the selector on a non-production-like copy. **Visibility and
 durability:** an update is pending until explicit `commit=true`, a commit request,
-or an autocommit threshold. `softCommit` makes pending work searchable but is
-not the durability promise; `commitWithin` is bounded scheduling, not a
-transaction acknowledgement. **Failure/retry:** transport failure leaves the
+or an autocommit threshold. In Wayfinder, `softCommit=true` performs the same
+hard commit and reader reload as `commit=true`, making preceding writes
+searchable and durable. `commitWithin` is bounded scheduling, not a transaction
+acknowledgement. **Failure/retry:** transport failure leaves the
 outcome unknown; retrying a whole replacement is generally safe only when the
 same ID/body is intended, while retrying a delete-by-query can compound later
 changes. **Validation:** query by ID and compare counts after a durable commit.

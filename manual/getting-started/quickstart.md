@@ -18,6 +18,10 @@ CORPUS=manual/getting-started/corpus.json
 CORE=getting-started
 LISTENER=127.0.0.1:8983
 BASE=http://$LISTENER/wayfinder/$CORE
+if [ "${WAYFINDER_CONFIG+x}" = x ]; then
+  echo "Unset WAYFINDER_CONFIG before running this default quickstart." >&2
+  exit 1
+fi
 DATA_DIR=$(mktemp -d "${TMPDIR:-/tmp}/wayfinder-getting-started.XXXXXX")
 LOG=$DATA_DIR/server.log
 WAYFINDER_PID=

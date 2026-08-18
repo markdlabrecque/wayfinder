@@ -73,7 +73,7 @@ dest = "body"
 | `location` | Latitude/longitude point with synthetic fast columns for supported spatial queries |
 | `location_rpt` | Latitude/longitude point with the same encoding and the supported heatmap boundary |
 | `date_range` | Interval-valued date with verbatim value plus synthetic start/end columns; not a scalar date |
-| `boost_term_payload` | Payload-bearing text for the bounded `{!payload_score}` evaluator; tokens use a final `|<float>` payload |
+| `boost_term_payload` | Payload-bearing text for the bounded `{!payload_score}` evaluator; tokens use a final `\|<float>` payload |
 
 Static `text_en` fields apply the captured Porter terminal-`y` behavior (`day` becomes `dai`, while
 `sky` remains `sky`). The shared `_dynamic_text` catch-all retains the v1 Snowball behavior because

@@ -36,8 +36,9 @@ configuration is durable only when retained with its deployment set; mbeans
 state is not. Failure/retry: reject malformed credentials/config, correct them,
 and retry startup; do not weaken access controls to diagnose. Validation: test
 unauthenticated ping, rejected protected request, authenticated read, TLS at
-the proxy, and stderr redaction. Rollback: restore the prior proxy/server
-configuration and restart or reroute. 
+the proxy, and URI redaction in the proxy or log-retention pipeline. Never put
+credentials in request URIs: Wayfinder stderr can contain the full URI.
+Rollback: restore the prior proxy/server configuration and restart or reroute.
 
 Hermetic evidence: `tests/basic_auth.rs`, `tests/admin_mbeans.rs`,
 `tests/admin_ui_index_stats.rs`, and `tests/ops_shutdown.rs`.
