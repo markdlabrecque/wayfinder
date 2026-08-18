@@ -42,7 +42,23 @@ mod unix {
                 let _ = Command::new("kill")
                     .args(["-TERM", &self.child.id().to_string()])
                     .status();
-                let _ = self.child.wait();
+                if wait_for_child(&mut self.child, Duration::from_secs(2)).is_none() {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                }
+            }
+        }
+    }
+
+    fn wait_for_child(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Ok(None) | Err(_) => return None,
             }
         }
     }
@@ -166,10 +182,15 @@ mod unix {
             .status()
             .expect("send SIGTERM to Wayfinder");
         assert!(status.success(), "kill -TERM must succeed: {status}");
+        if let Some(exit) = wait_for_child(&mut server.child, Duration::from_secs(10)) {
+            return exit;
+        }
         server
             .child
-            .wait()
-            .expect("wait for graceful Wayfinder exit")
+            .kill()
+            .expect("force-kill Wayfinder after graceful-shutdown timeout");
+        let forced = server.child.wait().expect("reap force-killed Wayfinder");
+        panic!("Wayfinder did not exit within 10 seconds of SIGTERM; forced exit: {forced}");
     }
 
     fn json_response(status: u16, headers: &str, body: String, route: &str) -> Value {
@@ -197,6 +218,11 @@ mod unix {
     }
 
     fn has_facet_pair(values: &[Value], term: &str, count: u64) -> bool {
+        assert_eq!(
+            values.len() % 2,
+            0,
+            "facet array must contain complete term/count pairs: {values:?}"
+        );
         values
             .chunks_exact(2)
             .any(|pair| pair[0] == term && pair[1].as_u64() == Some(count))
