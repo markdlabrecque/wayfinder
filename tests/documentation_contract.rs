@@ -131,4 +131,28 @@ fn historical_findings_remain_immutable_evidence() {
         actual.len(),
         "findings must not be duplicated"
     );
+
+    let mut in_finding = false;
+    let mut hash = 0xcbf29ce484222325_u64;
+    for line in FINDINGS.lines() {
+        if line.starts_with("## ") {
+            in_finding = false;
+        }
+        if line
+            .split_once('.')
+            .is_some_and(|(number, _)| number.parse::<u16>().is_ok())
+        {
+            in_finding = true;
+        }
+        if in_finding {
+            for byte in line.bytes().chain(std::iter::once(b'\n')) {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+    }
+    assert_eq!(
+        hash, 0xcc31601a94cd57a2,
+        "numbered factual finding bodies must remain historical evidence"
+    );
 }
