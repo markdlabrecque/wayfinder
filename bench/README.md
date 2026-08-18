@@ -1,13 +1,13 @@
 # wayfinder-bench
 
-Benchmark tooling for issue #13 (PRD §8: Conformance & benchmarking).
+Benchmark tooling for issue #13 (conformance and benchmarking).
 Standalone crate (`pure std`, no dependencies) -- not a workspace member of
 the root `wayfinder` package. It has two jobs:
 
 1. Generate a deterministic synthetic corpus (`src/corpus.rs`), so a
    benchmark run is reproducible byte-for-byte given the same seed and size.
 2. Turn raw measurements into the `bench/RESULTS.md` table
-   (`src/results.rs`), matching PRD §8's target table row-for-row.
+   (`src/results.rs`), matching the target table row-for-row.
 
 ## Running the 50k benchmark
 
