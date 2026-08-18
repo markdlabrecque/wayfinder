@@ -21,3 +21,9 @@ jobs:
       - run: cargo fmt --check --manifest-path bench/Cargo.toml
       - run: cargo clippy --manifest-path bench/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path bench/Cargo.toml
+
+  container-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/container-extraction-smoke.sh

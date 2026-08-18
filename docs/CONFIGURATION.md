@@ -70,6 +70,10 @@ dest = "body"
 | `int`, `long` | Signed 64-bit integer |
 | `float`, `double` | 64-bit float |
 | `date` | RFC 3339 UTC timestamp |
+| `location` | Latitude/longitude point with synthetic fast columns for supported spatial queries |
+| `location_rpt` | Latitude/longitude point with the same encoding and the supported heatmap boundary |
+| `date_range` | Interval-valued date with verbatim value plus synthetic start/end columns; not a scalar date |
+| `boost_term_payload` | Payload-bearing text for the bounded `{!payload_score}` evaluator; tokens use a final `|<float>` payload |
 
 Static `text_en` fields apply the captured Porter terminal-`y` behavior (`day` becomes `dai`, while
 `sky` remains `sky`). The shared `_dynamic_text` catch-all retains the v1 Snowball behavior because
@@ -96,7 +100,13 @@ language = "english"
 
 Filters run in declaration order. Supported kinds are `lowercase`, `stopwords`, and `stemmer`.
 Tantivy has no stopword list for Arabic, Greek, Romanian, Tamil, or Turkish; requesting one is a
-load-time error.
+load-time error. `tokenizer` supports `simple` for custom types.
+
+A custom type can separately declare `query_tokenizer` and ordered `query_filters`; they accept
+the same tokenizer and filter options as the index-side `tokenizer` and `filters`. Omitting
+`query_tokenizer` uses the index analyzer at query time. `query_filters` without `query_tokenizer`
+is a load-time error. A query-side chain changes query analysis only; it never changes existing
+postings.
 
 Custom type names cannot shadow built-ins. `_version_` is always reserved. `_dynamic` and
 `_dynamic_text` are reserved whenever dynamic rules exist. Duplicate field names, custom type
@@ -120,10 +130,15 @@ schema is incompatible. Adding, removing, or changing a static field requires a 
 directory and reindex. Adding the first dynamic rule or removing the last does too, because that
 adds or removes the catch-all fields.
 
-Copy rules and custom analyzer definitions are not structural, but their changes affect only newly
-indexed content. Persisted analyzer-contract checks may still require reindexing when old and new
-query-time analysis would disagree. Follow the startup error rather than editing persisted schema
-metadata.
+Copy rules and custom analyzer definitions are not structural, but index-analyzer changes affect
+only newly indexed content. Query-only `query_tokenizer`/`query_filters` changes do not rewrite
+postings. Persisted analyzer-contract checks may still require reindexing when old and new
+query-time analysis would disagree. Changing to or from `location`, `location_rpt`, `date_range`,
+or `boost_term_payload` is a static-field migration and requires a fresh data directory and
+reindex. Follow the startup error rather than editing persisted schema metadata.
+
+The mechanically checked [manual schema inventory](../manual/reference/schema.md) lists every
+built-in type, custom analyzer option, and migration boundary.
 
 `presets/search-api.toml` supplies the Drupal Search API dynamic-field convention.
 

@@ -1,0 +1,23 @@
+[
+  {
+    "id": "intro",
+    "title": "Trail map introduction",
+    "body": "Follow a trail from a small corpus to a searchable index.",
+    "category": "guides",
+    "rank": 10
+  },
+  {
+    "id": "filters",
+    "title": "Trail filter guide",
+    "body": "Filter a trail query with an exact category field.",
+    "category": "guides",
+    "rank": 20
+  },
+  {
+    "id": "reference",
+    "title": "Reference fields",
+    "body": "Reference material describes stored and fast fields.",
+    "category": "reference",
+    "rank": 30
+  }
+]

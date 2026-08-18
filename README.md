@@ -6,6 +6,7 @@ general Solr replacement or an ongoing parity project.
 
 ## Documentation
 
+- [User manual](manual/README.md) — executable quickstart, task guides, operations, and checked references
 - [Configuration](docs/CONFIGURATION.md) — schema, analyzers, server settings, defaults, and live knobs
 - [Compatibility](docs/COMPATIBILITY.md) — supported wire, capabilities, divergences, and boundaries
 - [Deployment](docs/DEPLOYMENT.md) — systemd, containers, TLS, backup, restore, reindex, and upgrades
