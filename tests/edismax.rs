@@ -8,7 +8,7 @@
 //! has only one text field (`body`) and an unanalyzed `category`, so it
 //! cannot exercise `qf`'s per-field weighting or `pf`'s phrase boost at all.
 //! Same precedent as `tests/mlt.rs`'s dedicated MLT corpus. Nothing here is
-//! derived from what Wayfinder happens to produce; `docs/solr-ref-findings.md`
+//! derived from what Wayfinder happens to produce; `solr-ref/FINDINGS.md`
 //! findings 68-75 record what was learned capturing it.
 //!
 //! ## Scope, per the issue
@@ -55,7 +55,7 @@ use tempfile::TempDir;
 
 /// Two text_en fields (`title`, `body`) over the same `id` shape as the
 /// canonical tracer-bullet schema — matches the dedicated Solr capture's edismax
-/// block schema exactly (`docs/solr-ref-findings.md`, "Findings from issue
+/// block schema exactly (`solr-ref/FINDINGS.md`, "Findings from issue
 /// #7"), so the captured fixtures are ground truth here too. Core named
 /// `content` per the same convention `tests/mlt.rs`'s `MLT_SCHEMA_TOML`
 /// documents: Wayfinder's own core name is independent of the Solr core the
@@ -938,7 +938,7 @@ async fn mm_present_but_empty_400s_like_a_malformed_spec() {
     // an empty `mm` and falls back to its normal OR default, same as `mm`
     // being absent entirely. Confirmed against real Solr (one-off
     // container, same schema/corpus as this file's other `mm_*` tests --
-    // `docs/solr-ref-findings.md`) that `mm=` (present, but empty) 400s with
+    // `solr-ref/FINDINGS.md`) that `mm=` (present, but empty) 400s with
     // a `NumberFormatException`, same as any other malformed `mm` spec --
     // it does NOT silently fall back to anything. `mm` entirely *absent* is
     // a different case (see `mm_absent_still_uses_normal_or_default` below)

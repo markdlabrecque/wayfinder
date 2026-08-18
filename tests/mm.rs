@@ -6,7 +6,7 @@
 //! its own (a pure grammar-to-integer function needs no live-Solr ground
 //! truth). The *values* in the table below are not taken from memory of
 //! Solr's reference-guide prose, though: they were verified against a real,
-//! disposable Solr 9 (finding 68, `docs/solr-ref-findings.md`) because two
+//! disposable Solr 9 (finding 68, `solr-ref/FINDINGS.md`) because two
 //! independently-plausible readings of the grammar disagree on at least one
 //! entry (`-25%` at `clause_count=3` — floor gives 3, a ceiling-based
 //! "N% may be missing" reading gives 2; real Solr returns 3). Every row

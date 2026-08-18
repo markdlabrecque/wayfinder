@@ -1,5 +1,5 @@
 //! Issue #13: unit tests for the metrics-to-markdown-table logic in
-//! isolation -- fixed, invented raw numbers in, exact `docs/benchmarks.md`
+//! isolation -- fixed, invented raw numbers in, exact `bench/RESULTS.md`
 //! table text out. No real benchmark run involved.
 //!
 //! Table shape: six columns -- `Metric | Solr baseline | Wayfinder target |

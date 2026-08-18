@@ -171,7 +171,7 @@ pub struct Resources {
     /// `multipartUploadLimitInKB`) govern form-urlencoded and multipart
     /// uploads specifically, not the raw `application/json` body a bulk
     /// `/update` actually sends, and the captured configset leaves them
-    /// unset (finding 79, `docs/solr-ref-findings.md`) — so this default
+    /// unset (finding 79, `solr-ref/FINDINGS.md`) — so this default
     /// could not be verified hermetically against a real Solr max-request-size
     /// setting. 10MB is a deliberate, round headroom figure over the largest
     /// known captured fixture (~7KB in `solr-ref/responses/`), operator

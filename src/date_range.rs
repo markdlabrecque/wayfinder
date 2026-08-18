@@ -3,7 +3,7 @@
 //! predicates.
 //!
 //! Ground truth is `solr-ref/responses/dr341_*.json` and findings 179-186 in
-//! `docs/solr-ref-findings.md`. The four rules this module exists to enforce:
+//! `solr-ref/FINDINGS.md`. The four rules this module exists to enforce:
 //!
 //! - **166** every literal denotes the whole interval of its stated precision,
 //!   at millisecond resolution, end-INCLUSIVE — and that applies to interval

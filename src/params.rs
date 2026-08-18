@@ -379,7 +379,7 @@ mod tests {
 /// `StrUtils.parseBool`, not the stricter `== "true"`/`starts_with("true")`
 /// checks scattered through `src/lib.rs`/`src/facet.rs` today.
 ///
-/// Ground truth is `docs/solr-ref-findings.md`'s finding for this issue
+/// Ground truth is `solr-ref/FINDINGS.md`'s finding for this issue
 /// (captured against real `solr:9`, port 8996, 2026-08-01), not the ticket's
 /// own premise — the ticket claims Solr accepts `1`/`0`/`t`/`f`/`y`, which is
 /// wrong; measured behaviour is:
@@ -453,7 +453,7 @@ mod parse_bool_tests {
                 parse_bool(v),
                 None,
                 "expected `{v}` to be rejected -- Solr's real StrUtils.parseBool does NOT \
-                 accept 1/0/t/f/y (the ticket's premise is wrong; see docs/solr-ref-findings.md)"
+                 accept 1/0/t/f/y (the ticket's premise is wrong; see solr-ref/FINDINGS.md)"
             );
         }
     }

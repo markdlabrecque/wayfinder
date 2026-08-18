@@ -620,7 +620,7 @@ fn assert_cache_pass_behavior_is_actually_called_after_both_the_solr_cold_and_wa
 #[test]
 fn metrics_url_carries_a_recognized_response_writer_param() {
     // Round 3, item 3: `wt=json` alone on `admin/metrics` is documented
-    // (docs/solr-ref-findings.md, finding 119, live-verified against a real
+    // (solr-ref/FINDINGS.md, finding 119, live-verified against a real
     // solr:9 container) to return HTTP 200 with a type-signature body --
     // unquoted keys, values literally `int` -- which is not valid JSON and
     // carries no statistics. Any recognised response-writer param fixes it
@@ -648,7 +648,7 @@ fn metrics_url_carries_a_recognized_response_writer_param() {
     let recognized = ["indent=true", "indent=false", "json.nl=map"];
     assert!(
         recognized.iter().any(|p| metrics_line.contains(p)),
-        "docs/solr-ref-findings.md finding 119: Solr's admin/metrics endpoint with `wt=json` \
+        "solr-ref/FINDINGS.md finding 119: Solr's admin/metrics endpoint with `wt=json` \
          alone returns HTTP 200 but a type-signature body (unquoted keys, values literally \
          `int`/`float`) -- not valid JSON, no statistics -- so a recognised response-writer \
          param (`indent=true`, `indent=false`, or `json.nl=map`) must be present on the URL; \

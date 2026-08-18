@@ -1007,7 +1007,7 @@ async fn suggest_build_all_is_inert_and_does_not_leak_across_runs() {
 // --- issue #390: the two behaviours #384 left unpinned ------------------
 //
 // `suggest_q_dict_unknown.json` and `suggest_q_cfq_empty.json` are the two
-// fixtures captured against real Solr for this issue (docs/solr-ref-findings.md
+// fixtures captured against real Solr for this issue (solr-ref/FINDINGS.md
 // gets the corresponding findings appended in a later stage).
 
 /// An empty `suggest.cfq=` must match the captured fixture: numFound 3, with

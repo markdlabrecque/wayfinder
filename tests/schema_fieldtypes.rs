@@ -26,7 +26,7 @@
 //! constraint by *omitting* two languages Wayfinder really supports. These
 //! tests assert the verified 18, not the ticket's 16, and this doc comment is
 //! the flagged correction the working agreement calls for.
-//! (`docs/PRD.md` compatibility contract: "Don't paper over a wrong ticket
+//! (`docs/COMPATIBILITY.md` compatibility contract: "Don't paper over a wrong ticket
 //! premise ... flag the correction, not silently build to the wrong spec.")
 
 mod common;

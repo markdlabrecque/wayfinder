@@ -457,15 +457,15 @@ async fn unrecognised_local_params_type_400s_with_a_syntax_error_envelope() {
 // claim from its negation. Correctness of the wording is a review
 // responsibility; these assert the claim is still on the page.
 
-const PRD: &str = include_str!("../docs/PRD.md");
+const COMPATIBILITY: &str = include_str!("../docs/COMPATIBILITY.md");
 
-/// The blank-line-separated blocks of the PRD section starting at `heading`,
+/// The blank-line-separated blocks of the compatibility section starting at `heading`,
 /// up to (but not including) the next heading of the same level.
-fn prd_blocks(heading: &str) -> Vec<String> {
-    let start = PRD
-        .find(heading)
-        .unwrap_or_else(|| panic!("docs/PRD.md must still contain the `{heading}` section"));
-    let rest = &PRD[start..];
+fn compatibility_blocks(heading: &str) -> Vec<String> {
+    let start = COMPATIBILITY.find(heading).unwrap_or_else(|| {
+        panic!("docs/COMPATIBILITY.md must still contain the `{heading}` section")
+    });
+    let rest = &COMPATIBILITY[start..];
     let level: String = format!("\n{} ", heading.split_whitespace().next().unwrap());
     let end = rest[1..].find(&level).map(|i| i + 1).unwrap_or(rest.len());
     rest[..end]
@@ -476,8 +476,8 @@ fn prd_blocks(heading: &str) -> Vec<String> {
 }
 
 #[test]
-fn prd_records_the_shape_b_bug_compatible_decision() {
-    let blocks = prd_blocks("### v1 exception — edismax");
+fn compatibility_records_the_shape_b_bug_compatible_decision() {
+    let blocks = compatibility_blocks("## Edismax and function queries");
     let binding = blocks
         .iter()
         .find(|b| b.contains("#137") && b.contains("numfound: 0"))
@@ -522,8 +522,8 @@ fn prd_records_the_shape_b_bug_compatible_decision() {
 }
 
 #[test]
-fn prd_records_the_hard_400_on_unsupported_local_params_types() {
-    let blocks = prd_blocks("### v1 exception — edismax");
+fn compatibility_records_the_hard_400_on_unsupported_local_params_types() {
+    let blocks = compatibility_blocks("## Edismax and function queries");
     let entry = blocks
         .iter()
         .find(|b| b.contains("{!lucene}") && b.contains("400"))

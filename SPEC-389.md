@@ -166,7 +166,7 @@ Fixtures to capture, each named `an389_*`:
   whose WDGF output makes the last token's end offset **not** the max end offset. Enough
   to re-derive the rule, since step 4 invalidates the current derivation.
 
-Also record a finding per learned Solr fact in `docs/solr-ref-findings.md` (append,
+Also record a finding per learned Solr fact in `solr-ref/FINDINGS.md` (append,
 numbered), and cite finding numbers in the tests.
 
 **Gate:** Phase 0 lands as its own commit (fixtures + capture.sh block + findings). No
@@ -182,7 +182,7 @@ numbered), and cite finding numbers in the tests.
 > Where this section and the PREMISE CHANGE section conflict, PREMISE CHANGE wins.
 
 82 fixtures `solr-ref/responses/an389_*.json`, findings **195-204** in
-`docs/solr-ref-findings.md`. In neither manifest; assert with the `fixture()` helper
+`solr-ref/FINDINGS.md`. In neither manifest; assert with the `fixture()` helper
 (`tests/common/mod.rs:465`), as `tests/select_fl_wildcard.rs` and `tests/suggest.rs` do.
 Corpus shape: every doc carries the same value in a `tm_X3b_en_*` (`text_en`) and
 `tm_X3b_und_*` (`text_und`) twin, so each `_en`/`_und` pair isolates one variable.
@@ -260,7 +260,7 @@ justified by **search quality**, not by parity, and they are to be implemented *
 rather than bug-compatibly.
 
 The compatibility contract itself (the project `CLAUDE.md` section, the framing of
-`docs/solr-ref-findings.md`, the differential harness) is being handled by **another ticket
+`solr-ref/FINDINGS.md`, the differential harness) is being handled by **another ticket
 currently in flight**. So in this branch:
 
 - **Do not** edit `CLAUDE.md`'s compatibility contract, or reframe the findings doc.

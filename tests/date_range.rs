@@ -5,7 +5,7 @@
 //!
 //! Ground truth is `solr-ref/responses/dr341_*.json`, captured against a
 //! dedicated `daterange` Solr core. Findings 165-172 in
-//! `docs/solr-ref-findings.md` are the authoritative prose; every assertion
+//! `solr-ref/FINDINGS.md` are the authoritative prose; every assertion
 //! below traces to one of them, cited per test.
 //!
 //! This file builds its own dedicated schema/corpus (named `content` so

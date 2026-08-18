@@ -12,7 +12,7 @@
 # collide with other branches' captures. It also never touches
 # solr-ref/responses/ or solr-ref/manifest.tsv.
 #
-# Version pins (recorded again in docs/reports/2026-07-29-search-api-capture.md):
+# Version pins for this historical capture:
 #   Drupal core:        11.3.2
 #   drupal/search_api:   1.41.0
 #   drupal/search_api_solr: 4.4.0

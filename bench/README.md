@@ -6,7 +6,7 @@ the root `wayfinder` package. It has two jobs:
 
 1. Generate a deterministic synthetic corpus (`src/corpus.rs`), so a
    benchmark run is reproducible byte-for-byte given the same seed and size.
-2. Turn raw measurements into the `docs/benchmarks.md` table
+2. Turn raw measurements into the `bench/RESULTS.md` table
    (`src/results.rs`), matching PRD §8's target table row-for-row.
 
 ## Running the 50k benchmark
@@ -27,7 +27,7 @@ Requires `docker`, `curl`, and `cargo` on `PATH`. One command:
   facet+filter+highlight query load, measures p95 latency, and measures
   on-disk index size,
 - does the same against a real Solr 9 container,
-- renders `docs/benchmarks.md` from the real measured numbers via
+- renders `bench/RESULTS.md` from the real measured numbers via
   `wayfinder_bench::results::render_markdown_table`.
 
 Environment variables:
@@ -63,7 +63,7 @@ estimate under sustained load at that scale.
 - `src/bin/gen_corpus.rs` -- writes a generated corpus as batched
   Solr-update-shaped JSON files plus a matching schema TOML.
 - `src/bin/render_report.rs` -- takes raw measurement scalars + latency
-  sample files and writes `docs/benchmarks.md`.
+  sample files and writes `bench/RESULTS.md`.
 - `run.sh` -- the end-to-end orchestration script described above.
 - `tests/` -- see each file's module doc for what it covers; `dockerfile_build.rs`
   is gated behind `WAYFINDER_BENCH_DOCKER=1` (mirrors

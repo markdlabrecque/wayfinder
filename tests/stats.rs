@@ -6,7 +6,7 @@
 //! `solr-ref/responses/`, captured against a dedicated `stats` Solr core
 //! (the dedicated Solr capture's issue-#5 block, container `wayfinder-solr-5`, port
 //! 8992) — never from what Wayfinder happens to produce. See
-//! `docs/solr-ref-findings.md` finding 51 for what that capture found.
+//! `solr-ref/FINDINGS.md` finding 51 for what that capture found.
 //!
 //! **Premise check (documented in the task spec):** issue #3's `facets` core
 //! (`views`/`created`, corpus `r1..r4`) has a value on *every* doc, so it
@@ -191,7 +191,7 @@ async fn stats_multi_fields_missing_is_per_field_not_shared() {
 /// exactly the kind of surprising, easy-to "normalise away" shape a less
 /// literal implementation could get wrong without a fixture diff catching it
 /// (a native `f64::NAN` serialises as JSON `null` via `serde_json`, not the
-/// string `"NaN"` -- see docs/solr-ref-findings.md finding 51).
+/// string `"NaN"` -- see solr-ref/FINDINGS.md finding 51).
 #[tokio::test]
 async fn stats_zero_matching_docs_matches_fixture() {
     let (app, _dir) = stats_app().await;

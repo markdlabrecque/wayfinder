@@ -1,7 +1,7 @@
 //! Issue #11 — Solr error shapes.
 //!
 //! Every expected value here comes from a committed fixture in
-//! `solr-ref/responses/` (`docs/solr-ref-findings.md` finding 10). Per the task
+//! `solr-ref/responses/` (`solr-ref/FINDINGS.md` finding 10). Per the task
 //! spec the comparison contract is deliberately narrow:
 //!
 //! - `error.code` and the HTTP status must match the fixture exactly;

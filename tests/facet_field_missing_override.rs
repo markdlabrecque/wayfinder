@@ -19,7 +19,7 @@
 //!
 //! Four fixtures captured against a one-off `solr:9` (port 8992, same schema
 //! and 5-doc corpus as the reference `content` core), documented in
-//! `docs/solr-ref-findings.md` finding 97, settle
+//! `solr-ref/FINDINGS.md` finding 97, settle
 //! the open precedence question: **`f.<field>.facet.missing` always wins over
 //! the global `facet.missing`, unconditionally** — not merely when the global
 //! is unset. The feature suite reads these fixtures directly; Wayfinder does

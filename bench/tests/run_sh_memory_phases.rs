@@ -97,7 +97,7 @@ fn render_report_receives_each_engine_memory_phases_in_order_then_corpus_and_out
   "$SOLR_STARTUP_IDLE_MB" "$SOLR_POST_INDEX_MB" "$SOLR_LOAD_MB" "$SOLR_COLD_MS" "$SOLR_IMAGE_MB" "$SOLR_INDEX_MB" "$SOLR_LATENCIES_WARM" "$SOLR_LATENCIES_COLD" \
   "$WF_STARTUP_IDLE_MB" "$WF_POST_INDEX_MB" "$WF_LOAD_MB" "$WF_COLD_MS" "$WF_IMAGE_MB" "$WF_INDEX_MB" "$WF_LATENCIES_WARM" "$WF_LATENCIES_COLD" \
   "$SIZE" \
-  "$ROOT/docs/benchmarks.md""#;
+  "$ROOT/bench/RESULTS.md""#;
 
     let source = run_sh_source();
     assert_eq!(

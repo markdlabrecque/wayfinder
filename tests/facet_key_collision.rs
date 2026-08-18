@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use common::key_order::KeyOrder;
 use common::{assert_matches_fixture, get, indexed_app};
 
-const PRD: &str = include_str!("../docs/PRD.md");
+const COMPATIBILITY: &str = include_str!("../docs/COMPATIBILITY.md");
 const FIELD_FLAT: &str = include_str!("../solr-ref/responses/facet_collision_field_flat.json");
 const FIELD_MAP: &str = include_str!("../solr-ref/responses/facet_collision_field_map.json");
 /// Finding 102's ground truth must stay raw: each field fixture has two
@@ -65,15 +65,15 @@ fn field_collision_fixtures_preserve_duplicate_outer_members_in_raw_text() {
     }
 }
 
-/// The field-collision fixtures and the PRD must continue to record why the
+/// The field-collision fixtures and compatibility guide must continue to record why the
 /// server rejects duplicate response labels: a JSON object model cannot retain
 /// Solr's two same-named members without silently choosing one.
 #[test]
 fn collision_fixture_documentation_records_the_deliberate_400_divergence() {
     assert!(
-        PRD.contains("Colliding `facet.field` response labels are a hard 400")
-            && PRD.contains("facet_collision_field_flat.json")
-            && PRD.contains("facet_collision_field_map.json"),
+        COMPATIBILITY.contains("Colliding `facet.field` response labels are a hard 400")
+            && COMPATIBILITY.contains("facet_collision_field_flat.json")
+            && COMPATIBILITY.contains("facet_collision_field_map.json"),
         "the deliberate 400 divergence must remain documented with both raw field fixtures"
     );
     for raw in [FIELD_FLAT, FIELD_MAP] {

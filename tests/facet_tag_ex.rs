@@ -1,6 +1,6 @@
 //! `{!tag=...}` on `fq` and `{!ex=...}` on `facet.field`/`facet.query` —
 //! multi-select faceting (issue #295). Findings 136-140 in
-//! `docs/solr-ref-findings.md` are the spec.
+//! `solr-ref/FINDINGS.md` are the spec.
 //!
 //! Every behaviour here also has a the captured fixture request set row, so the
 //! fixture comparison suite replays it verbatim against the committed fixture and

@@ -6,7 +6,7 @@
 //!
 //! Every expected value comes from a committed fixture in `solr-ref/responses/`
 //! (CLAUDE.md: fixtures are ground truth) — none is invented. Findings 56-59 in
-//! `docs/solr-ref-findings.md` are the annotated map of which fixture proves
+//! `solr-ref/FINDINGS.md` are the annotated map of which fixture proves
 //! which fact; the section headers below mirror that map.
 //!
 //! Two things here are NOT fixture comparisons:

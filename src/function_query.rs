@@ -3,7 +3,7 @@
 //!
 //! ## What this is, and what it is not
 //!
-//! Per finding 129 (`docs/solr-ref-findings.md`), the module emits the score
+//! Per finding 129 (`solr-ref/FINDINGS.md`), the module emits the score
 //! inline in `q` as `{!boost b=sum(boost_document,...)}` or
 //! `{!boost b=boost_document}` (`SearchApiSolrBackend.php:1953-1977`) — never
 //! as `bf=`. That makes a function-query *evaluator* the real dependency,

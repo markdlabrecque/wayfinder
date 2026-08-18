@@ -1,4 +1,4 @@
-//! Central error type -> Solr error envelope (`docs/solr-ref-findings.md`
+//! Central error type -> Solr error envelope (`solr-ref/FINDINGS.md`
 //! finding 10). Handlers construct a `WfError` and return it; nothing
 //! hand-rolls an error body.
 //!

@@ -1,4 +1,4 @@
-//! Turns raw measurements into the `docs/benchmarks.md` table (issue #13,
+//! Turns raw measurements into the `bench/RESULTS.md` table (issue #13,
 //! PRD §8). Pure formatting logic -- no measurement, no I/O.
 
 /// Nearest-rank percentile, 1-indexed: `sorted[ceil(0.95 * n) - 1]`.

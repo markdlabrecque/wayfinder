@@ -8,7 +8,7 @@
 //! `CoreIndex::highlight_field` is the Tantivy-facing primitive: it extracts
 //! distinct fragments for a doc/field up to the `hl.snippets` cap this module
 //! resolves and hands it. Facts pinned by fixtures in
-//! `solr-ref/responses/hl_*.json` (`docs/solr-ref-findings.md` findings
+//! `solr-ref/responses/hl_*.json` (`solr-ref/FINDINGS.md` findings
 //! 52-55, 81, and 110):
 //!
 //! - **finding 52**: `highlighting` is a top-level object keyed by the
