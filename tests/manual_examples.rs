@@ -115,6 +115,9 @@ mod unix {
                 && let Ok(mut stream) =
                     TcpStream::connect_timeout(&addr, Duration::from_millis(100))
             {
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(250)))
+                    .expect("bound readiness-probe read");
                 let _ = stream.write_all(
                     format!(
                         "GET /wayfinder/{CORE}/admin/ping?wt=json HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"

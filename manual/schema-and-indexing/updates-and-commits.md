@@ -9,12 +9,14 @@ successful no-op. Delete-by-query uses query analysis. Atomic field modifiers,
 optimistic concurrency, `versions=true`, and stale-write conflicts are
 unsupported—do not model partial document patches as updates.
 
-A malformed command rejects the command body rather than skipping its unknown
-or doc-less command. In a sequential body, the valid prefix can already be in
-the writer: this is a **partial valid prefix**, not a transaction. A following
-commit/autocommit may make that accepted prefix visible even when the request
-returns 400. Retrying an ambiguous batch can duplicate or replace data; use
-idempotent whole documents, inspect the result, and retry only deliberately.
+Invalid JSON and malformed unknown or doc-less commands reject the complete body
+before the execution loop, so they leave no partial prefix. Once document
+indexing begins, a schema-invalid later document can fail after an earlier valid
+prefix reached the writer: this is a **partial valid prefix**, not a transaction.
+Autocommit may make that prefix visible and durable even when the request returns
+400. Reconcile IDs/counts first, then retry only the corrected remainder; use
+idempotent whole documents because an ambiguous transport failure can still
+duplicate or replace data.
 
 ## Commit modes
 

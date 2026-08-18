@@ -29,13 +29,14 @@ there is no undo endpoint.
 
 ## Commit and partial valid prefixes
 
-Updates are processed as a sequence. A malformed later document can yield a
-failure after an earlier valid prefix has been accepted; do not assume batch
-atomicity. A commit exposes and durably persists accepted pending writes. On a
-failed upload, inspect the JSON error envelope, query/commit to establish the
-accepted prefix, then retry only the remainder after correction. Validate using
-a deterministic ID/count query; restore saved source documents if the accepted
-prefix was unintended. The [response/error inventory](../reference/response-errors.md)
+Invalid JSON and malformed command objects fail before document indexing starts,
+so those parse-time failures cannot leave a partial prefix. Once indexing has
+started, however, a schema-invalid later document can fail after an earlier
+valid prefix reached the writer; do not assume batch atomicity. Autocommit can
+make that prefix visible and durable. For an indexing failure, inspect the JSON
+error envelope, query and explicitly commit to establish the accepted prefix,
+then retry only the corrected remainder. Validate with deterministic ID/count
+queries; restore saved source documents if the accepted prefix was unintended. The [response/error inventory](../reference/response-errors.md)
 defines the HTTP and JSON failure shape.
 
 Autocommit document/time thresholds are supported server settings; unset means

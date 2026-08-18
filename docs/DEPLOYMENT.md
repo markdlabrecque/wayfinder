@@ -82,22 +82,25 @@ The repository `Dockerfile` builds a static `scratch` image. Its `/tmp` is stick
 world-writable (`01777`) so runtime UID/GID `65532` can stage multipart extraction. Publish its
 port on host loopback only, or omit `ports` when clients share an internal container network.
 Before `docker compose up`, make both bind-mounted configurations readable by
-the container's numeric identity and fail closed by testing as exact UID/GID
-`65532:65532`. This Linux preflight uses util-linux `setpriv` so it does not
-depend on a passwd entry or inherit the invoking user's groups:
+the container's numeric identity. On Linux, fail closed on exact owner/group/mode
+metadata; unlike a host-side read attempt as UID 65532, this does not incorrectly
+require that UID to traverse repository parent directories before the container
+runtime installs the bind mounts:
 
 ```sh
 sudo chown 65532:65532 ./deploy/content-schema.toml ./deploy/content.toml
 sudo chmod 0444 ./deploy/content-schema.toml
 sudo chmod 0400 ./deploy/content.toml
-if ! sudo setpriv --reuid=65532 --regid=65532 --clear-groups \
-       /usr/bin/test -r ./deploy/content-schema.toml ||
-   ! sudo setpriv --reuid=65532 --regid=65532 --clear-groups \
-       /usr/bin/test -r ./deploy/content.toml; then
-  echo "Compose configuration is unreadable by UID/GID 65532:65532" >&2
+if [ "$(stat -c '%u:%g:%a' ./deploy/content-schema.toml)" != 65532:65532:444 ] ||
+   [ "$(stat -c '%u:%g:%a' ./deploy/content.toml)" != 65532:65532:400 ]; then
+  echo "Compose configuration owner/group/mode preflight failed" >&2
   exit 1
 fi
 ```
+
+With rootless Docker, the daemon's host UID must separately be able to traverse
+the source directories and open the bind-mount paths. Treat container startup
+failure as a failed preflight; do not broaden the secret beyond mode `0400`.
 
 ```yaml
 services:
