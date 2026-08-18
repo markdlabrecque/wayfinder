@@ -15,9 +15,16 @@ wayfinder <schema.toml> <data-dir> [bind-addr]
 ```
 
 The bind address defaults to `127.0.0.1:8983`. `WAYFINDER_CONFIG` optionally names the server
-configuration file; an unset variable or nonexistent path selects all defaults. Run Wayfinder as
-a dedicated unprivileged user with exclusive read/write access to its data directory. Protect the
-server configuration because it may contain Basic-auth credentials.
+configuration file; an unset variable or nonexistent path selects all defaults. That current
+behavior means operators that intend to configure authentication must fail closed before startup:
+
+```sh
+test -r "$WAYFINDER_CONFIG" || { echo "WAYFINDER_CONFIG is missing or unreadable" >&2; exit 1; }
+wayfinder <schema.toml> <data-dir> [bind-addr]
+```
+
+Run Wayfinder as a dedicated unprivileged user with exclusive read/write access to its data
+directory. Protect the server configuration because it may contain Basic-auth credentials.
 
 A conventional layout is:
 
@@ -43,6 +50,7 @@ User=wayfinder
 Group=wayfinder
 Environment=WAYFINDER_CONFIG=/etc/wayfinder/content.toml
 Environment=RUST_LOG=info
+ExecStartPre=/usr/bin/test -r /etc/wayfinder/content.toml
 ExecStart=/usr/local/bin/wayfinder /etc/wayfinder/content-schema.toml /var/lib/wayfinder/content 127.0.0.1:8983
 Restart=on-failure
 RestartSec=2s
@@ -70,8 +78,29 @@ SIGKILL for recovery from an unresponsive process.
 
 ## Docker Compose
 
-The repository `Dockerfile` builds a static `scratch` image. Publish its port on host loopback only,
-or omit `ports` when clients share an internal container network.
+The repository `Dockerfile` builds a static `scratch` image. Its `/tmp` is sticky and
+world-writable (`01777`) so runtime UID/GID `65532` can stage multipart extraction. Publish its
+port on host loopback only, or omit `ports` when clients share an internal container network.
+Before `docker compose up`, make both bind-mounted configurations readable by
+the container's numeric identity. On Linux, fail closed on exact owner/group/mode
+metadata; unlike a host-side read attempt as UID 65532, this does not incorrectly
+require that UID to traverse repository parent directories before the container
+runtime installs the bind mounts:
+
+```sh
+sudo chown 65532:65532 ./deploy/content-schema.toml ./deploy/content.toml
+sudo chmod 0444 ./deploy/content-schema.toml
+sudo chmod 0400 ./deploy/content.toml
+if [ "$(stat -c '%u:%g:%a' ./deploy/content-schema.toml)" != 65532:65532:444 ] ||
+   [ "$(stat -c '%u:%g:%a' ./deploy/content.toml)" != 65532:65532:400 ]; then
+  echo "Compose configuration owner/group/mode preflight failed" >&2
+  exit 1
+fi
+```
+
+With rootless Docker, the daemon's host UID must separately be able to traverse
+the source directories and open the bind-mount paths. Treat container startup
+failure as a failed preflight; do not broaden the secret beyond mode `0400`.
 
 ```yaml
 services:
@@ -95,7 +124,8 @@ services:
     stop_grace_period: 60s
 ```
 
-Create `./data/content` for UID/GID 65532 before first start.
+Create the writable data directory before first start with
+`sudo install -d -o 65532 -g 65532 -m 0750 ./data/content`.
 
 ## TLS and authentication
 
@@ -122,7 +152,7 @@ curl -u operator 'https://search.example.com/wayfinder/content/select?q=*:*&rows
 A complete backup contains the data directory, schema, server configuration, and preferably the
 binary version or image digest.
 
-### Online snapshot
+### Online index snapshot (not a complete backup)
 
 The destination must not exist and should be on the same filesystem as its parent:
 
@@ -136,18 +166,22 @@ sudo cp -a /etc/wayfinder/content.toml "$backup/wayfinder.toml"
 sudo sh -c "cd '$backup' && find . -type f ! -path ./SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS"
 ```
 
-The command selects one committed Tantivy generation and atomically publishes a validated copy.
+`wayfinder snapshot` selects one committed Tantivy generation and atomically publishes a validated
+copy of the **index, persisted schema, and analyzer contract only**. It is not a complete backup:
+it intentionally omits `<data-dir>/synonyms.txt`, whose durable groups affect future query analysis.
 Writes and queries continue during the snapshot; uncommitted updates belong to a later snapshot.
 
 Do not use `cp`, `rsync`, or `tar` against a running writable data directory. Tantivy can replace
 metadata and remove merged segments while those tools traverse it, producing an unrestorable copy.
 A storage snapshot is suitable only when it is atomic across the whole directory and restore-tested.
 
-### Portable stopped backup
+### Complete backup: graceful stopped whole-directory copy
 
-Where online snapshot publication is unsupported, stop Wayfinder gracefully, copy the entire data
-directory and both configuration files, then restart and verify ping. Keep the outage limited to the
-local copy; upload the completed backup after restart.
+Use this as the safe complete method: stop Wayfinder gracefully, copy the **entire** data directory
+(including `synonyms.txt`) and both configuration files, then restart and verify ping. Keep the
+outage limited to the local copy; upload the completed backup after restart. Do not substitute
+`wayfinder snapshot` for this complete backup because its deliberate omission of `synonyms.txt`
+would lose durable query-synonym state.
 
 Periodically restore and query backups. A successful copy command is not a restore test.
 

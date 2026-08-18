@@ -1,0 +1,33 @@
+[core]
+name = "getting-started"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+fast = true
+
+[[fields]]
+name = "title"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+
+[[fields]]
+name = "category"
+type = "string"
+stored = true
+fast = true
+
+[[fields]]
+name = "rank"
+type = "int"
+stored = true
+fast = true

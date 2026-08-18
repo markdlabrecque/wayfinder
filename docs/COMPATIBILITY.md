@@ -22,7 +22,11 @@ or aim to become a general Solr replacement.
 | `/wayfinder/{core}/admin/luke` | Schema/index metadata |
 | `/wayfinder/{core}/admin/mbeans` | Selected runtime metrics |
 
-Wayfinder also serves its own read-only `/ui` pages. Those are not part of the retained wire.
+Wayfinder also serves its own UI outside the retained wire. `GET /ui`, `/ui/query`,
+`/ui/schema`, `/ui/stats`, and `/ui/ping` are read-only. `GET /ui/synonyms` reads
+query synonym groups; `POST /ui/synonyms` atomically replaces the durable
+`<data-dir>/synonyms.txt` groups used for future query analysis. See the
+[manual route inventory](../manual/reference/wire-routes.md).
 
 ## Frozen baseline
 
@@ -67,7 +71,7 @@ Notable details:
 | Presentation | Highlighting, stats, grouping, and supported spatial/date-range responses |
 | Updates | Whole-document add, delete by ID/query, commit, `commitWithin`, `softCommit`, and `overwrite` |
 | Helpers | MoreLikeThis, terms, spellcheck, suggest, ping, and selected admin metadata |
-| Extraction | In-process multipart extraction and indexing for shipped formats |
+| Extraction | In-process multipart extraction and indexing for shipped formats; generic XML dispatch is unsupported |
 
 The source allowlists in `src/lib.rs` are the exhaustive authority for accepted parameter names.
 `strict_params` validates against those per-route allowlists; acceptance does not imply general

@@ -6,6 +6,7 @@ general Solr replacement or an ongoing parity project.
 
 ## Documentation
 
+- [User manual](manual/README.md) — executable quickstart, task guides, operations, and checked references
 - [Configuration](docs/CONFIGURATION.md) — schema, analyzers, server settings, defaults, and live knobs
 - [Compatibility](docs/COMPATIBILITY.md) — supported wire, capabilities, divergences, and boundaries
 - [Deployment](docs/DEPLOYMENT.md) — systemd, containers, TLS, backup, restore, reindex, and upgrades
@@ -25,8 +26,9 @@ Wayfinder takes two deliberately separate TOML files:
 | `schema.toml` | One core: fields, types, and unique key | First CLI argument |
 | `wayfinder.toml` | Process tuning and security | `WAYFINDER_CONFIG` environment variable |
 
-Both are optional beyond the required schema path: a missing server configuration selects all
-defaults. Unknown server-config keys are errors; unknown request parameters are ignored unless
+The schema path and data directory are required. The server configuration is optional: an unset
+variable or missing path selects all defaults. Unknown server-config keys are errors; unknown
+request parameters are ignored unless
 `strict_params` is enabled. See [CONFIGURATION.md](docs/CONFIGURATION.md) for the complete reference.
 
 ## Security
