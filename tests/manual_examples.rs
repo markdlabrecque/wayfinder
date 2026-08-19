@@ -7,7 +7,10 @@
 #[cfg(unix)]
 mod unix {
     use std::net::{SocketAddr, TcpListener};
-    use std::process::Command;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Output, Stdio};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use serde_json::{Value, json};
 
@@ -41,6 +44,53 @@ mod unix {
             .expect("read reserved loopback address");
         drop(listener);
         addr
+    }
+
+    fn run_workflow_with_timeout(workflow: &str) -> (Output, bool) {
+        let mut child = Command::new("sh")
+            .args(["-eu", "-c", workflow])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env_remove("WAYFINDER_CONFIG")
+            .env("WAYFINDER", env!("CARGO_BIN_EXE_wayfinder"))
+            .env("WAYFINDER_LISTENER", unused_loopback_addr().to_string())
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run the documented quickstart shell commands");
+
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            if child
+                .try_wait()
+                .expect("poll documented quickstart")
+                .is_some()
+            {
+                return (
+                    child.wait_with_output().expect("collect quickstart output"),
+                    false,
+                );
+            }
+            if Instant::now() >= deadline {
+                let process_group = format!("-{}", child.id());
+                let _ = Command::new("kill")
+                    .args(["-TERM", &process_group])
+                    .status();
+                thread::sleep(Duration::from_secs(2));
+                if matches!(child.try_wait(), Ok(None)) {
+                    let _ = Command::new("kill")
+                        .args(["-KILL", &process_group])
+                        .status();
+                }
+                return (
+                    child
+                        .wait_with_output()
+                        .expect("collect timed-out quickstart output"),
+                    true,
+                );
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 
     #[test]
@@ -96,17 +146,11 @@ mod unix {
             "the manual corpus is a deterministic worked example"
         );
 
-        let output = Command::new("sh")
-            .args(["-eu", "-c", &workflow])
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .env_remove("WAYFINDER_CONFIG")
-            .env("WAYFINDER", env!("CARGO_BIN_EXE_wayfinder"))
-            .env("WAYFINDER_LISTENER", unused_loopback_addr().to_string())
-            .output()
-            .expect("run the documented quickstart shell commands");
+        let (output, timed_out) = run_workflow_with_timeout(&workflow);
         assert!(
-            output.status.success(),
-            "documented quickstart commands failed (status {}):\nstdout:\n{}\nstderr:\n{}",
+            !timed_out && output.status.success(),
+            "documented quickstart commands failed{} (status {}):\nstdout:\n{}\nstderr:\n{}",
+            if timed_out { " after 90 seconds" } else { "" },
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),

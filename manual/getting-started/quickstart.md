@@ -25,11 +25,9 @@ if [ "${WAYFINDER_CONFIG+x}" = x ]; then
   exit 1
 fi
 assert_response() {
-  response=$1
-  expected=$2
-  if ! printf '%s\n' "$response" | grep -F -- "$expected" >/dev/null; then
-    echo "Response did not contain $expected:" >&2
-    printf '%s\n' "$response" >&2
+  if ! printf '%s\n' "$1" | grep -F -- "$2" >/dev/null; then
+    echo "Response did not contain $2:" >&2
+    printf '%s\n' "$1" >&2
     return 1
   fi
 }
@@ -37,11 +35,17 @@ DATA_DIR=$(mktemp -d "${TMPDIR:-/tmp}/wayfinder-getting-started.XXXXXX")
 LOG=$DATA_DIR/server.log
 WAYFINDER_PID=
 cleanup() {
+  status=$?
   if [ -n "$WAYFINDER_PID" ] && kill -0 "$WAYFINDER_PID" 2>/dev/null; then
     kill -TERM "$WAYFINDER_PID"
-    wait "$WAYFINDER_PID"
+    wait "$WAYFINDER_PID" || true
+  fi
+  if [ "$status" -ne 0 ] && [ -s "$LOG" ]; then
+    echo "--- wayfinder log ---" >&2
+    cat "$LOG" >&2
   fi
   rm -rf -- "$DATA_DIR"
+  return "$status"
 }
 trap cleanup EXIT INT TERM
 assert_listener_free() {
