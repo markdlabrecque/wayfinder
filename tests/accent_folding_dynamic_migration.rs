@@ -96,9 +96,10 @@ fn unmarked_pre_v3_static_text_presets_refuse_startup_and_require_reindex() {
             .schema(serde_json::from_value(persisted).expect("legacy Tantivy schema parses"))
             .create_in_dir(&data_dir)
             .expect("create real pre-v3 Tantivy index");
-        std::fs::write(schema::snapshot_path(&data_dir), &toml).expect("write schema snapshot");
+        std::fs::write(data_dir.join("wayfinder-schema.toml"), &toml)
+            .expect("write schema snapshot");
         assert!(
-            !schema::analyzer_contract_path(&data_dir).exists(),
+            !data_dir.join("wayfinder-analyzer-contract").exists(),
             "test setup must model an unmarked pre-v3 index"
         );
 
@@ -122,8 +123,8 @@ fn v4_static_text_presets_refuse_startup_for_uax29_reindexing() {
         ("text_de", "wayfinder_text_de_v4"),
     ] {
         for marker in [
-            schema::ANALYZER_CONTRACT_V4,
-            schema::ANALYZER_CONTRACT_V4_LEGACY_DYNAMIC_TEXT,
+            "text_presets_accent_folding_v4",
+            "text_presets_accent_folding_v4_legacy_dynamic_text",
         ] {
             let toml = static_preset_schema(type_name);
             let dir = TempDir::new().expect("temp dir");
@@ -141,8 +142,9 @@ fn v4_static_text_presets_refuse_startup_for_uax29_reindexing() {
                 .schema(serde_json::from_value(persisted).expect("legacy Tantivy schema parses"))
                 .create_in_dir(&data_dir)
                 .expect("create legacy index");
-            std::fs::write(schema::snapshot_path(&data_dir), &toml).expect("write schema snapshot");
-            std::fs::write(schema::analyzer_contract_path(&data_dir), marker)
+            std::fs::write(data_dir.join("wayfinder-schema.toml"), &toml)
+                .expect("write schema snapshot");
+            std::fs::write(data_dir.join("wayfinder-analyzer-contract"), marker)
                 .expect("write v4 analyzer contract");
 
             let err = app_with_schema(dir.path(), &toml)

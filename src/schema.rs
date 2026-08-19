@@ -10,7 +10,7 @@
 //! similarity.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -239,49 +239,6 @@ const SUGGEST_MAX_TOKEN_LEN: usize = 100;
 /// no stemmer for.
 const SUGGEST_UNDEFINED_DICTIONARY: &str = "und";
 
-/// The on-disk analyzer contract for built-in text and dynamic analyzers using
-/// UAX #29 segmentation. This is separate from Tantivy's schema: it lets
-/// startup identify old term formats before their tokenizer identity can be
-/// adopted.
-pub const ANALYZER_CONTRACT: &str = "text_presets_static_length_v7";
-/// A safely adopted index whose unused `_dynamic_text` catch-all still has an
-/// older tokenizer identity. It is not full v7 certification: a later rule
-/// that starts writing analyzed dynamic values must reindex.
-pub const ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT: &str =
-    "text_presets_static_length_v7_legacy_dynamic_text";
-/// The Phase 4 word-delimiter contract, superseded by v7's static text length
-/// bound. It is retained to distinguish the changed static presets from every
-/// unaffected v6 path during migration.
-pub const ANALYZER_CONTRACT_V6: &str = "text_presets_uax29_word_delimiter_v6";
-pub const ANALYZER_CONTRACT_V6_LEGACY_DYNAMIC_TEXT: &str =
-    "text_presets_uax29_word_delimiter_v6_legacy_dynamic_text";
-/// Phase 3's UAX #29 contract, superseded by Phase 4 word-delimiter terms.
-pub const ANALYZER_CONTRACT_V5: &str = "text_presets_uax29_v5";
-pub const ANALYZER_CONTRACT_V5_LEGACY_DYNAMIC_TEXT: &str =
-    "text_presets_uax29_v5_legacy_dynamic_text";
-/// Phase 2's accent-folding contract, superseded by UAX #29 segmentation in
-/// v5. It is recognized only to fail closed or safely adopt raw-only indexes.
-pub const ANALYZER_CONTRACT_V4: &str = "text_presets_accent_folding_v4";
-pub const ANALYZER_CONTRACT_V4_LEGACY_DYNAMIC_TEXT: &str =
-    "text_presets_accent_folding_v4_legacy_dynamic_text";
-/// The first folding contract changed static built-in text terms but left the
-/// dynamic catch-all unchanged. Its marker is recognized so static-only and
-/// raw-only indexes can upgrade safely while analyzed dynamic indexes reindex.
-pub const ANALYZER_CONTRACT_V3: &str = "text_en_solr_length_case_v3";
-/// Retained for indexes created by pre-release Phase 2 builds.
-pub const ANALYZER_CONTRACT_V3_LEGACY_DYNAMIC_TEXT: &str =
-    "text_en_porter_compatible_v3_legacy_dynamic_text";
-/// The pre-folding Porter-compatible contract.
-pub const ANALYZER_CONTRACT_V2: &str = "text_en_porter_compatible_v2";
-pub const ANALYZER_CONTRACT_V2_LEGACY_DYNAMIC_TEXT: &str =
-    "text_en_porter_compatible_v2_legacy_dynamic_text";
-/// The v1 marker is recognized explicitly during upgrade, rather than treated
-/// as an unknown marker, so raw-only indexes can be adopted safely while
-/// indexes whose terms may use the old English analyzer fail closed.
-pub const ANALYZER_CONTRACT_V1: &str = "text_en_stopwords_v1";
-pub const ANALYZER_CONTRACT_V1_LEGACY_DYNAMIC_TEXT: &str =
-    "text_en_stopwords_v1_legacy_dynamic_text";
-
 #[derive(Debug, Deserialize)]
 struct SchemaFile {
     core: CoreConfig,
@@ -411,7 +368,7 @@ pub struct WayfinderSchema {
     ///
     /// Only the index identity is ever written into the Tantivy schema, so an
     /// entry here changes query-time analysis only and never a term on disk
-    /// (which is why `ANALYZER_CONTRACT` does not move).
+    /// (which is why the persisted analyzer contract does not move).
     pub query_tokenizers: TokenizerManager,
     field_handles: HashMap<String, Field>,
     /// Static `location`/`location_rpt` fields' two synthetic f64 columns,
@@ -557,21 +514,16 @@ impl WayfinderSchema {
     /// Whether this schema can contain static `text_en` or `text_general`
     /// terms from the v6 chain whose 40-byte cutoff v7 replaces with an
     /// inclusive Unicode-scalar-value bound.
-    pub fn uses_changed_static_text(&self) -> bool {
+    pub(crate) fn uses_changed_static_text(&self) -> bool {
         self.fields
             .iter()
             .any(|field| matches!(field.type_.as_str(), "text_en" | "text_general"))
     }
 
-    /// Whether the schema can contain static `text_en` terms from a pre-v2 chain.
-    pub fn uses_static_text_en(&self) -> bool {
-        self.fields.iter().any(|field| field.type_ == "text_en")
-    }
-
     /// Whether a static built-in text preset has indexed terms subject to
     /// Phase 2 accent folding. Custom and dynamic chains are not included:
     /// neither receives this built-in filter.
-    pub fn uses_static_accent_folded_text(&self) -> bool {
+    pub(crate) fn uses_static_accent_folded_text(&self) -> bool {
         self.fields.iter().any(|field| {
             field.type_ == "text_general"
                 || field.type_ == "text_en"
@@ -585,7 +537,7 @@ impl WayfinderSchema {
     /// `_dynamic_text`. This path changed before analyzer contract v1, but it
     /// deliberately retains v1 Snowball semantics in v2 for the captured
     /// Search API configset.
-    pub fn uses_analyzed_dynamic_path(&self) -> bool {
+    pub(crate) fn uses_analyzed_dynamic_path(&self) -> bool {
         self.dynamic_fields.iter().any(|field| {
             matches!(
                 resolve_type(&field.type_, &self.field_types),
@@ -597,7 +549,7 @@ impl WayfinderSchema {
     /// Whether this schema has the `_dynamic_text` catch-all. Before analyzer
     /// contract v1, every dynamic schema created it with Tantivy's `en_stem`,
     /// even if all configured rules were raw.
-    pub fn has_dynamic_fields(&self) -> bool {
+    pub(crate) fn has_dynamic_fields(&self) -> bool {
         !self.dynamic_fields.is_empty()
     }
 
@@ -824,8 +776,8 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
 }
 
 /// The catch-all JSON fields that `rules` causes to exist in the Tantivy schema.
-/// The single source of truth for that decision, shared by `parse` (which adds
-/// them) and `check_compatible` (which refuses a change to the set).
+/// The single source of truth for that decision, shared by `parse`, which adds
+/// them, and the persisted schema contract, which refuses a change to the set.
 fn catch_all_fields(rules: &[DynamicFieldConfig]) -> &'static [&'static str] {
     if rules.is_empty() {
         &[]
@@ -2890,7 +2842,7 @@ fn parse_with_synonyms(raw: &str, synonyms: SynonymResource) -> Result<Wayfinder
     // The catch-all JSON fields backing `[[dynamic_fields]]`. Present only when
     // there is at least one rule, which is why toggling a schema between "no
     // dynamic rules" and "some dynamic rules" changes the Tantivy schema and so
-    // needs a reindex — see `check_compatible`.
+    // needs a reindex. The persisted schema contract checks this at startup.
     for name in catch_all_fields(&parsed.dynamic_fields) {
         // ponytail: Tantivy gives this shared JSON catch-all one analyzer for
         // every analyzed dynamic rule. Keep the captured Search API configset's
@@ -3040,103 +2992,26 @@ fn parse_with_synonyms(raw: &str, synonyms: SynonymResource) -> Result<Wayfinder
     })
 }
 
-/// Where the schema an index was built with is kept, next to the index itself.
-pub fn snapshot_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("wayfinder-schema.toml")
+/// Structural facts from a schema file that the on-disk schema contract
+/// compares. Analyzer and migration policy stays out of the general schema
+/// representation.
+pub(crate) struct CompatibilityFacts {
+    pub(crate) fields: Vec<FieldConfig>,
+    pub(crate) dynamic_rule_count: usize,
+    pub(crate) has_catch_all_fields: bool,
 }
 
-/// Where the internal analyzer contract for an index is kept. It is separate
-/// from the operator-owned schema snapshot because analyzer semantics can
-/// change while a TOML field type name remains `text_en`.
-pub fn analyzer_contract_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("wayfinder-analyzer-contract")
-}
-
-/// Compares the schema an existing index was built with against the configured
-/// one, and refuses any change that would make the index and the schema
-/// disagree (PRD open question 4 — refuse and require a reindex).
-///
-/// Two things alter the Tantivy schema and are therefore checked: `[[fields]]`,
-/// and whether `[[dynamic_fields]]` is empty — the catch-all JSON fields exist
-/// only when there is at least one rule, so adding the first rule or removing
-/// the last one changes the schema even though editing rules in between does
-/// not.
-///
-/// `[[copy_fields]]` and `[[field_types]]` never alter the Tantivy schema (they
-/// govern index-time content and analysis), so changing them affects only
-/// documents indexed from then on.
-pub fn check_compatible(previous: &str, current: &str) -> Result<()> {
-    let prev: SchemaFile = toml::from_str(previous).context("parsing the index's stored schema")?;
-    let cur: SchemaFile = toml::from_str(current).context("parsing the configured schema")?;
-
-    for old in &prev.fields {
-        match cur.fields.iter().find(|f| f.name == old.name) {
-            None => bail!(
-                "field `{}` was removed from the schema; the existing index still contains it — \
-                 reindex into a fresh data directory",
-                old.name
-            ),
-            Some(new) if new.type_ != old.type_ => bail!(
-                "field `{}` changed type from `{}` to `{}`; the existing index was built with the \
-                 old type — reindex into a fresh data directory",
-                old.name,
-                old.type_,
-                new.type_
-            ),
-            // `required` is a validation rule, not part of the Tantivy schema,
-            // so toggling it does not invalidate the index.
-            Some(new)
-                if (new.stored, new.fast, new.multi_valued)
-                    != (old.stored, old.fast, old.multi_valued) =>
-            {
-                bail!(
-                    "field `{}` changed options (stored/fast/multi_valued); the existing index \
-                     was built with the old options — reindex into a fresh data directory",
-                    old.name
-                )
-            }
-            Some(_) => {}
-        }
-    }
-
-    // PRD open question 4 calls an added field "compatible". Tantivy disagrees:
-    // a schema is fixed when the index is created and cannot be extended in
-    // place, so a new field still needs a reindex. Say that plainly instead of
-    // letting Tantivy fail later with "schema does not match".
-    for new in &cur.fields {
-        if !prev.fields.iter().any(|f| f.name == new.name) {
-            bail!(
-                "field `{}` was added to the schema; Tantivy cannot add a field to an existing \
-                 index — reindex into a fresh data directory",
-                new.name
-            );
-        }
-    }
-
-    // The catch-all JSON fields exist only when at least one dynamic rule does,
-    // so crossing that boundary changes the Tantivy schema. Without this check
-    // the index would be reopened with its old schema — missing `_dynamic`, or
-    // carrying a stray one — which is exactly the silent-stale-schema failure
-    // this whole check exists to prevent.
-    let (before, after) = (
-        catch_all_fields(&prev.dynamic_fields),
-        catch_all_fields(&cur.dynamic_fields),
-    );
-    if before != after {
-        let detail = if before.is_empty() {
-            "the existing index has no catch-all field to hold their values"
-        } else {
-            "the existing index still carries the catch-all fields they created"
-        };
-        bail!(
-            "[[dynamic_fields]] went from {} rule(s) to {}; {detail} — reindex into a fresh data \
-             directory",
-            prev.dynamic_fields.len(),
-            cur.dynamic_fields.len()
-        );
-    }
-
-    Ok(())
+pub(crate) fn compatibility_facts(raw: &str, stored: bool) -> Result<CompatibilityFacts> {
+    let parsed: SchemaFile = toml::from_str(raw).context(if stored {
+        "parsing the index's stored schema"
+    } else {
+        "parsing the configured schema"
+    })?;
+    Ok(CompatibilityFacts {
+        fields: parsed.fields,
+        dynamic_rule_count: parsed.dynamic_fields.len(),
+        has_catch_all_fields: !catch_all_fields(&parsed.dynamic_fields).is_empty(),
+    })
 }
 
 #[cfg(test)]

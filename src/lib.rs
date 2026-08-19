@@ -45,6 +45,7 @@ mod local_params;
 mod params;
 mod query;
 pub mod schema;
+mod schema_contract;
 pub mod snapshot;
 mod stats;
 mod synonyms;
@@ -979,8 +980,8 @@ async fn synonyms_ui_post(
 /// Renders the core's declared fields (name, type, and the
 /// `stored`/`fast`/`multi_valued`/`required` flags), its dynamic-field rules,
 /// and its copy-field pairs, straight off the in-process `WayfinderSchema`
-/// `CoreIndex::open` loaded at startup — the same struct
-/// `schema::check_compatible` validates against. Re-reading the TOML per
+/// `CoreIndex::open` loaded at startup, the same parsed schema the persisted
+/// schema contract validates against. Re-reading the TOML per
 /// request would introduce a second parsing path that could disagree with the
 /// index actually being served.
 ///

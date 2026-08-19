@@ -94,11 +94,11 @@ fn legacy_raw_dynamic_index() -> TempDir {
         .schema(serde_json::from_value(persisted).expect("parse legacy schema"))
         .create_in_dir(&data_dir)
         .expect("create legacy index");
-    std::fs::write(schema::snapshot_path(&data_dir), RAW_DYNAMIC_SCHEMA)
+    std::fs::write(data_dir.join("wayfinder-schema.toml"), RAW_DYNAMIC_SCHEMA)
         .expect("write schema snapshot");
     std::fs::write(
-        schema::analyzer_contract_path(&data_dir),
-        schema::ANALYZER_CONTRACT_V3,
+        data_dir.join("wayfinder-analyzer-contract"),
+        "text_en_solr_length_case_v3",
     )
     .expect("write legacy analyzer contract");
     dir
@@ -112,9 +112,9 @@ fn old_empty_dynamic_indexes_retain_a_legacy_marker_until_reindexed() {
         .expect("empty raw-only dynamic index can be adopted");
     drop(app);
     assert_eq!(
-        std::fs::read_to_string(schema::analyzer_contract_path(&dir.path().join("data")))
+        std::fs::read_to_string(dir.path().join("data/wayfinder-analyzer-contract"))
             .expect("read adopted contract"),
-        schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT,
+        "text_presets_static_length_v7_legacy_dynamic_text",
         "an old physical catch-all identity must not be certified as v6"
     );
 
