@@ -4,9 +4,13 @@
 //! every layer, kept and iterated on rather than a spike: TOML schema ->
 //! Tantivy schema, `/update` (JSON add + commit), `/select` (`q`, `fq`,
 //! `fl`, `rows`, `start`, and the `facet.*` family — see `crate::facet`),
-//! and `/admin/ping`.
+//! and `/admin/ping`. The whole `/select` workflow — parse, plan, collect,
+//! post-process, render — lives in `crate::select_workflow`; this module is
+//! its Axum adapter, owning routing, the parameter allowlists, and envelope
+//! plumbing.
 //!
-//! `sort` was out of the tracer-bullet scope and has since landed (issue #2),
+//! `sort` was out of the tracer-bullet scope and has since landed (issue #2,
+//! spec parsing in `crate::sort`, shared with grouping's `group.sort`),
 //! as has `stats` (issue #5) and highlighting (`hl`/`hl.fl` — see
 //! `crate::highlight`, issue #4). Deliberately out of scope here (PRD §7):
 //! edismax, MLT. Multi-core: out of scope too — `app()` serves exactly one

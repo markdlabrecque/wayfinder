@@ -2,10 +2,10 @@
 //! (repeatable) over numeric/date fast fields -> the `stats.stats_fields.<field>`
 //! response block.
 //!
-//! Mirrors `crate::facet`'s structure and wiring in `src/lib.rs`'s `select`
-//! handler: gated on `stats=true`, computed against the real base query (`q`
-//! plus every `fq`), reusing `facet::BaseClauses`/`facet::narrowed` rather
-//! than a second base-query-building pathway.
+//! Mirrors `crate::facet`'s structure and wiring in the select workflow
+//! (`src/select_workflow.rs`): gated on `stats=true`, computed against the real
+//! base query (`q` plus every `fq`), reusing `facet::BaseClauses`/
+//! `facet::narrowed` rather than a second base-query-building pathway.
 //!
 //! Every expected value comes from a committed fixture in
 //! `solr-ref/responses/stats_*.json`, captured against a dedicated `stats`

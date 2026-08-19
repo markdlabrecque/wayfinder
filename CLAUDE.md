@@ -42,7 +42,8 @@ wants some of these, so assign ownership per branch before starting:
 
 | File | Who touches it | Notes |
 |---|---|---|
-| `src/lib.rs` | almost every issue | routing, handler bodies, `SELECT_PARAMS`/`UPDATE_PARAMS` |
+| `src/lib.rs` | almost every issue | routing, handler adapters, `SELECT_PARAMS`/`UPDATE_PARAMS` |
+| `src/select_workflow.rs` | every `/select` feature | the whole select workflow: parse, plan, collect, post-process, render |
 | `src/core_index.rs` | search/index features | the index-creation call is a repeat conflict site |
 | `tests/common/mod.rs` | every test suite | shared helpers; the `dead_code` allow lives here as an inner attribute — do not add a second one on `mod common;` |
 | `solr-ref/FINDINGS.md` | historical wire/client evidence | retain numbered findings; product scope lives in `docs/COMPATIBILITY.md` |
