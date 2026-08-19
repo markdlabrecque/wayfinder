@@ -37,6 +37,7 @@ mod date_range;
 pub mod edismax;
 mod error;
 pub mod extract;
+mod extract_workflow;
 mod facet;
 mod function_query;
 mod grouping;
@@ -55,6 +56,7 @@ pub mod snapshot;
 mod sort;
 mod stats;
 mod synonyms;
+mod update_policy;
 
 pub use config::ServerConfig;
 
@@ -2158,33 +2160,13 @@ async fn update(
     check_core(&state, &core, &params, Envelope::NoParams)?;
     check_params(&state, UPDATE_PARAMS, &params).map_err(|e| e.envelope(Envelope::NoParams))?;
 
-    // Every boolean this handler reads, validated at entry so an invalid value
-    // 400s here rather than being silently read as `false` later.
-    // `omitHeader` is NOT among them: `check_params` above already validated
-    // it, for every allowlist containing the name (issue #214).
-    let bool_param = |key: &str, default: bool| {
-        params
-            .bool_or(key, default)
-            .map_err(|e| e.envelope(Envelope::NoParams))
-    };
-    // Bound separately and *then* OR-ed: writing this as
-    // `bool_param("commit", false)? || bool_param("softCommit", false)?`
-    // short-circuits, so `commit=true&softCommit=nope` would never parse
-    // `softCommit` at all and would 200 on an invalid boolean -- the exact
-    // silent acceptance issue #187 exists to remove. Every boolean this
-    // handler accepts is validated, whatever the others say.
-    let commit = bool_param("commit", false)?;
-    let soft_commit = bool_param("softCommit", false)?;
-    let commit_requested = commit || soft_commit;
-    // `overwrite=false` skips the default replace-by-uniqueKey step
-    // (finding 48b); Solr's default is `overwrite=true`.
-    let overwrite = bool_param("overwrite", true)?;
+    let update_policy = update_policy::UpdatePolicy::from_params(&params)?;
 
     // GET carries no body (finding 47): it is not a method error, but a
     // *content-stream* one — 400 "missing content stream" unless the only
     // thing being asked is a commit, which really commits and answers 200.
     if method == Method::GET {
-        if !commit_requested {
+        if !update_policy.commit_requested {
             return Err(update_err(
                 "wayfinder::MissingContentStream",
                 "missing content stream".to_string(),
@@ -2211,7 +2193,7 @@ async fn update(
             if !pending_adds.is_empty() {
                 state
                     .index
-                    .add_documents(&pending_adds, overwrite)
+                    .add_documents(&pending_adds, update_policy.overwrite)
                     .map_err(|e| update_err("wayfinder::IndexError", e.to_string()))?;
                 pending_adds.clear();
             }
@@ -2255,30 +2237,11 @@ async fn update(
     }
     flush_adds!();
 
-    // `commit=true` (existing) and `softCommit=true` both mean "commit and
-    // reload now" — per the task spec's softCommit note, Tantivy has no
-    // in-memory-searchable segment for a real soft commit to leave
-    // uncommitted-but-visible, so Wayfinder's softCommit is a hard commit
-    // too (wire-visible behaviour matches Solr; durability is only ever
-    // stronger, never weaker). A `commit` key in the body does the same, but
-    // in body order, in the loop above.
-    if commit_requested {
-        state.index.commit().map_err(|e| {
-            WfError::internal("wayfinder::CommitError", e.to_string())
-                .with_params(&params)
-                .envelope(Envelope::NoParams)
-        })?;
-    }
-    // `commitWithin=<ms>` schedules a commit at most that many ms out — also
-    // a HARD commit (+ reload) in Wayfinder, same divergence note as
-    // `softCommit` above (task spec: "Same for commitWithin: it schedules a
-    // HARD commit, where Solr's default is soft").
-    if let Some(ms) = params
-        .get("commitWithin")
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        state.index.schedule_commit(ms);
-    }
+    update_policy.finish(&state.index).map_err(|error| {
+        WfError::internal("wayfinder::CommitError", error.to_string())
+            .with_params(&params)
+            .envelope(Envelope::NoParams)
+    })?;
 
     Ok(update_success(&params))
 }
@@ -2321,236 +2284,14 @@ impl extract::ChunkSource for FieldChunks<'_> {
     }
 }
 
-/// The default `Content-Type` for a part that declares none — Tika's own
-/// fallback, and what every captured no-`Content-Type` extract echoes back
-/// as `stream_content_type` (`extract_plain_text_xml.json`).
+/// The default `Content-Type` for a part that declares none.
 const OCTET_STREAM: &str = "application/octet-stream";
 
-/// The Search-API configset's `ExtractingRequestHandler` defaults (issue
-/// #259), hardcoded because they are the only evidenced config — the
-/// captured index/select pair was taken against exactly these. "Wire format
-/// only, never Solr's config format" (CLAUDE.md) means matching that
-/// configset's wire behaviour, not exposing its `solrconfig.xml`. Request
-/// params override and extend: a request `fmap.<from>` wins over the default
-/// on the same `<from>` and adds new mappings; `lowernames`/`uprefix`/
-/// `captureAttr` are overridden outright when sent.
-const EXTRACT_DEFAULT_FMAP: &[(&str, &str)] = &[("a", "links"), ("div", "ignored_")];
-const EXTRACT_DEFAULT_UPREFIX: &str = "ignored_";
-
-/// Builds the indexed document's field map from an extraction and the
-/// request's Solr-Cell params (#259), in Solr's order: `lowernames` → `fmap`
-/// rename → `uprefix`-drop → `literal.*` overlay, then keep only fields that
-/// resolve against the schema (declared or a dynamic rule).
+/// `POST /wayfinder/{core}/update/extract`.
 ///
-/// Returns `field_name -> Vec<Value>` in insertion order; the caller wraps it
-/// as a JSON object and indexes it through the normal `/update` path. A field
-/// that does not resolve against the schema is dropped when `uprefix` is set
-/// — reproducing the observable effect of the Search-API configset's catch-all
-/// `<dynamicField name="*" type="ignored">` (stored/indexed false), which is
-/// what makes `uprefix=ignored_` drop unmapped fields from selects. Without
-/// `uprefix`, the field passes through so `add_documents` errors on a
-/// genuinely unknown field exactly as strict Solr
-/// (`-Dupdate.autoCreateFields=false`) does.
-///
-/// ponytail: Wayfinder drops uprefix'd fields outright rather than indexing
-/// them into a catch-all ignored-type field. The observable result is
-/// identical (the field never appears in a select); reproducing the
-/// ignored-type field would need a schema change for no wire benefit. Trigger:
-/// a captured index whose select returns a value Solr stored under the
-/// catch-all but Wayfinder dropped.
-///
-/// The indexed `body`/`links` values come from Wayfinder's own extractors and
-/// so diverge from the captured select fixture (`extract_html_select.json`):
-/// Wayfinder does not replicate Tika's content-field whitespace, and PRD
-/// divergence 10 forbids fabricating `shape="rect"`, so `links` carries only
-/// the real attribute values. That divergence is recorded in the PRD and
-/// asserted by the route tests; this function is where it originates.
-fn extract_cell_fields(
-    doc: &extract::ExtractedDocument,
-    params: &Params,
-    schema: &schema::WayfinderSchema,
-) -> Result<Vec<(String, Vec<Value>)>, WfError> {
-    let lowernames = params.bool_or("lowernames", true)?;
-    let capture_attr = params.bool_or("captureAttr", true)?;
-    let uprefix = params.get("uprefix").unwrap_or(EXTRACT_DEFAULT_UPREFIX);
-    let uprefix_set = !uprefix.is_empty();
-
-    // `fmap`: defaults merged with request params (request wins on conflict).
-    let mut fmap: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
-    for (from, to) in EXTRACT_DEFAULT_FMAP {
-        fmap.insert(from, to);
-    }
-    for (from, to) in params.pairs_with_prefix("fmap.") {
-        fmap.insert(from, to);
-    }
-    let rename = |name: &str| -> String {
-        fmap.get(name)
-            .map(|s| (*s).to_string())
-            .unwrap_or_else(|| name.to_string())
-    };
-    let resolves = |name: &str| schema.is_static(name) || schema.match_dynamic(name).is_some();
-
-    // Source fields: extracted text/metadata, plus captured element
-    // attributes when `captureAttr` is on.
-    let mut source: Vec<(String, Vec<String>)> = doc.extract_source_fields();
-    if capture_attr {
-        for (element, value) in &doc.captured_attrs {
-            if let Some(entry) = source.iter_mut().find(|(name, _)| name == element) {
-                entry.1.push(value.clone());
-            } else {
-                source.push((element.clone(), vec![value.clone()]));
-            }
-        }
-    }
-
-    let mut fields: Vec<(String, Vec<Value>)> = Vec::new();
-    let push = |raw_name: String, values: Vec<String>, fields: &mut Vec<(String, Vec<Value>)>| {
-        let name = if lowernames {
-            raw_name.to_ascii_lowercase()
-        } else {
-            raw_name
-        };
-        let name = rename(&name);
-        if !resolves(&name) {
-            // With `uprefix` set, unknown fields are dropped — the observable
-            // effect of the Search-API configset's catch-all ignored-type
-            // dynamic field, which `uprefix=ignored_` relies on. Without it,
-            // the field passes through to `add_documents`, which errors on a
-            // genuinely unknown field as strict Solr does.
-            if uprefix_set {
-                return;
-            }
-        }
-        let vals: Vec<Value> = values.into_iter().map(Value::String).collect();
-        if let Some(entry) = fields.iter_mut().find(|(n, _)| *n == name) {
-            entry.1.extend(vals);
-        } else {
-            fields.push((name, vals));
-        }
-    };
-    for (name, values) in source {
-        push(name, values, &mut fields);
-    }
-    // `literal.*` overlay: explicit field values, added after extraction
-    // (Solr merges them into the document; a literal naming a field the
-    // extractor also produced multivalues). `lowernames` applies; `fmap` does
-    // not — `fmap` is for extracted/captured fields, and a literal is already
-    // the caller's chosen destination name.
-    for (field, value) in params.pairs_with_prefix("literal.") {
-        push(field.to_string(), vec![value.to_string()], &mut fields);
-    }
-    Ok(fields)
-}
-
-/// The indexing half of `/update/extract` (issue #259): takes the extraction
-/// and the request's Solr-Cell params, builds the document through
-/// [`extract_cell_fields`], and indexes it through the same commit path `/update`
-/// uses — `add_documents` then the `commit`/`softCommit`/`commitWithin`
-/// semantics, answering the bare `responseHeader` envelope
-/// (`extract_html_index.json`).
-///
-/// Every boolean is validated at entry (issue #187), so `commit=maybe`
-/// 400s here rather than being silently read as `false` — exactly as `/update`
-/// does. The bound-then-OR pattern is copied from there for the same reason:
-/// short-circuiting would let an invalid `softCommit` hide behind a true
-/// `commit`.
-async fn extract_cell_index(
-    state: &AppState,
-    params: &Params,
-    doc: &extract::ExtractedDocument,
-) -> Result<Response, WfError> {
-    let no_params = |class: &'static str, msg: String| {
-        WfError::bad_request(class, msg)
-            .with_params(params)
-            .envelope(Envelope::NoParams)
-    };
-    let commit = params
-        .bool_or("commit", false)
-        .map_err(|e| e.envelope(Envelope::NoParams))?;
-    let soft_commit = params
-        .bool_or("softCommit", false)
-        .map_err(|e| e.envelope(Envelope::NoParams))?;
-    let overwrite = params
-        .bool_or("overwrite", true)
-        .map_err(|e| e.envelope(Envelope::NoParams))?;
-    let commit_requested = commit || soft_commit;
-
-    let fields = extract_cell_fields(doc, params, &state.index.wf_schema)
-        .map_err(|e| e.envelope(Envelope::NoParams))?;
-    let mut obj = Map::new();
-    for (name, values) in fields {
-        // Single value -> scalar, multi -> array, matching the JSON shape
-        // `/update` bodies use and `add_documents` expects.
-        let value = if values.len() == 1 {
-            values.into_iter().next().expect("len == 1")
-        } else {
-            Value::Array(values)
-        };
-        obj.insert(name, value);
-    }
-    state
-        .index
-        .add_documents(&[Value::Object(obj)], overwrite)
-        .map_err(|e| no_params("wayfinder::IndexError", e.to_string()))?;
-    if commit_requested {
-        state.index.commit().map_err(|e| {
-            WfError::internal("wayfinder::CommitError", e.to_string())
-                .with_params(params)
-                .envelope(Envelope::NoParams)
-        })?;
-    }
-    if let Some(ms) = params
-        .get("commitWithin")
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        state.index.schedule_commit(ms);
-    }
-    Ok(update_success(params))
-}
-
-/// `POST /wayfinder/{core}/update/extract` (issues #258 and #259).
-///
-/// Two modes share this one handler, selected by the resolved `extractOnly`
-/// boolean:
-///
-/// - **`extractOnly=true`** (#258): extract the document and return Tika's
-///   `{responseHeader, file, file_metadata}` envelope, never indexing it.
-/// - **`extractOnly` absent/false** (#259, Solr Cell indexing): apply the
-///   extracted content to the index through the same commit path `/update`
-///   uses, answering the bare `responseHeader` envelope
-///   (`extract_html_index.json`). See [`extract_cell_index`].
-///
-/// #258 shipped requiring `extractOnly=true` (PRD divergence 10): indexing was
-/// out of v1 scope, so a 200 that silently indexed nothing was the worse
-/// failure. #259 retires that half of the divergence — the indexing path now
-/// exists — while keeping the other halves (no `X-Parsed-By`, no fabricated
-/// `shape="rect"`, 415 for unsupported formats).
-///
-/// Shape of the work, in the order the budgets need it:
-///
-/// 1. Params and core, exactly as `/update` validates them (`Envelope::NoParams` —
-///    this is an `/update` path and Solr never echoes params on one).
-/// 2. In-flight-upload admission (issue #273): an `ExtractionRuntime`
-///    in-flight slot is acquired *before* any of the body is consumed and
-///    held across steps 3–4 (intake, read-back, and parse — the window the
-///    uploaded bytes are resident), then released. This — not the parse
-///    permit — is what bounds total resident upload memory
-///    (`max_inflight_uploads × max_body_bytes`).
-/// 3. Multipart intake: the **first part with a non-empty filename** is the
-///    document. Streamed to a temp file through `stream_to_tempfile`, which
-///    fails with `BodyTooLarge` at the first chunk that crosses
-///    `extraction.max_body_bytes` — before the whole body is buffered, and
-///    without trusting `Content-Length`.
-/// 4. The parse, and only the parse, runs under an `ExtractionRuntime` permit.
-///    Holding a concurrency slot across the body read would let a slow client
-///    occupy an extraction slot without extracting anything, which is a
-///    trivially cheap way to hold the pool down.
-/// 5. Rendering, back on the request task.
-///
-/// The `Budget` is constructed *inside* the closure because it is `!Sync` by
-/// design (its counters are `Cell`s) — it must never be held across an
-/// `.await`, and building it on the pool thread makes that unrepresentable
-/// rather than merely discouraged.
+/// Axum-specific multipart parsing stays here. Admission, byte accounting,
+/// temporary storage, extraction, field mapping, rendering, and indexing all
+/// live behind [`extract_workflow::Workflow`].
 async fn update_extract(
     State(state): State<Arc<AppState>>,
     AxPath(core): AxPath<String>,
@@ -2568,91 +2309,33 @@ async fn update_extract(
     check_core(&state, &core, &params, Envelope::NoParams)?;
     check_params(&state, EXTRACT_PARAMS, &params).map_err(|e| e.envelope(Envelope::NoParams))?;
 
-    // `extractOnly` selects the two modes this handler serves: #258's
-    // extract-only response, and #259's Solr-Cell indexing. The resolved
-    // boolean, not the param's presence: `extractOnly=false` asks for
-    // indexing just as plainly as omitting it does.
-    let extract_only = params
-        .bool_or("extractOnly", false)
-        .map_err(|e| e.envelope(Envelope::NoParams))?;
-    // `extractFormat` is only meaningful to the extractOnly response; on the
-    // indexing path it is accepted-and-ignored (it remains in the allowlist).
-    let as_text = if extract_only {
-        match params.get("extractFormat") {
-            None | Some("xml") => false,
-            Some("text") => true,
-            Some(other) => {
-                return Err(extract_err(
-                    "wayfinder::InvalidParam",
-                    format!("invalid extractFormat value: {other}"),
-                ));
-            }
-        }
-    } else {
-        false
-    };
-
+    let workflow = extract_workflow::Workflow::new(
+        &state.extraction,
+        &state.index,
+        state.extract_limits,
+        &params,
+    )?;
     let mut multipart = multipart.map_err(|e| {
         extract_err(
             "wayfinder::BadContentStream",
             format!("expected a multipart/form-data upload: {e}"),
         )
     })?;
+    let mut intake = workflow.begin()?;
 
-    let mut temp = tempfile::NamedTempFile::new().map_err(|e| {
-        WfError::internal(
-            "wayfinder::ExtractionIo",
-            format!("creating upload temp file: {e}"),
-        )
-        .with_params(&params)
-        .envelope(Envelope::NoParams)
-    })?;
-
-    // Every byte the handler consumes is charged against one request-wide
-    // total, file part or not. Skipping a non-file field without counting it
-    // is what made this route unbounded: `next_field()` drains the skipped
-    // field to completion, so an arbitrarily long (or endless chunked) stream
-    // of non-file parts was read in full and then answered
-    // `MissingContentStream`. The route-level `DefaultBodyLimit`
-    // (`route_body_ceiling`) is the backstop for the part *headers* this
-    // counter cannot see; this counter is what produces the captured 413.
-    let max_body_bytes = state.extract_limits.max_body_bytes;
     let body_ceiling = state.extract_limits.route_body_ceiling() as u64;
     let body_limit_hit = Arc::new(AtomicBool::new(false));
-    let mut consumed: u64 = 0;
-    // A transport-cap 413 outranks whatever `ChunkSource` managed to report:
-    // see `FieldChunks::body_limit_hit`.
     let body_error = |e: extract::ExtractError| {
-        let e = if body_limit_hit.load(Ordering::Relaxed) {
+        let error = if body_limit_hit.load(Ordering::Relaxed) {
             extract::ExtractError::BodyTooLarge {
                 limit: body_ceiling,
             }
         } else {
             e
         };
-        WfError::from(e).with_params(&params)
+        WfError::from(error).with_params(&params)
     };
 
-    // Issue #273: bound total resident upload memory, not just the parse
-    // slots. The extraction permit (`max_concurrency`) is acquired only
-    // around the parse — *after* this body has been streamed in and read
-    // back resident — so without an intake bound the resident-RAM ceiling is
-    // `max_body_bytes × HTTP concurrency`, set by the (unbounded) connection
-    // count. This separate admission count is acquired *before* any of the
-    // body is consumed and held across the multipart intake, the resident
-    // read-back, and the parse (the uploaded `bytes` stay resident for all
-    // three), so total resident upload memory is `max_inflight_uploads ×
-    // max_body_bytes`. Released by `Drop` at every return path below,
-    // including the indexing-path early return. See
-    // `ExtractionRuntime::try_acquire_inflight` and
-    // `ExtractLimits::max_inflight_uploads`.
-    let inflight = state.extraction.try_acquire_inflight().ok_or_else(|| {
-        WfError::from(extract::ExtractError::InflightUploadsBusy)
-            .with_params(&params)
-            .envelope(Envelope::NoParams)
-    })?;
-
-    let mut found: Option<(String, String, String, u64)> = None;
     loop {
         let field = multipart.next_field().await.map_err(|e| {
             if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
@@ -2666,148 +2349,37 @@ async fn update_extract(
                 format!("malformed multipart body: {e}"),
             )
         })?;
-        let Some(field) = field else { break };
-        // An empty `filename=""` is a form field that happens to carry the
-        // parameter, not an uploaded document — treated as "no file part"
-        // rather than as a document named "".
+        let Some(field) = field else {
+            return Err(extract_err(
+                "wayfinder::MissingContentStream",
+                "multipart body carries no file part to extract".to_string(),
+            ));
+        };
+
         let file_name = field.file_name().unwrap_or_default().to_string();
         if file_name.is_empty() {
             let mut chunks = FieldChunks::new(field, Arc::clone(&body_limit_hit));
-            extract::drain_counted(&mut chunks, max_body_bytes, &mut consumed)
-                .await
-                .map_err(body_error)?;
+            intake.drain(&mut chunks).await.map_err(body_error)?;
             continue;
         }
-        let part_name = field.name().unwrap_or_default().to_string();
-        // The raw header, not `Field::content_type()`: the latter goes through
-        // the `mime` crate, which lowercases parameter values, and the
-        // captured response echoes the client's `Content-Type` **verbatim**
-        // (`extract_declared_charset_text.json` keeps `charset=ISO-8859-1`
-        // uppercase in both `Content-Type` and `stream_content_type`).
-        let declared_type = field
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string)
-            .unwrap_or_else(|| OCTET_STREAM.to_string());
+
+        let metadata = extract_workflow::UploadMetadata {
+            part_name: field.name().unwrap_or_default().to_string(),
+            file_name,
+            // Read the raw header. `Field::content_type()` lowercases MIME
+            // parameter values, but the wire echoes the declaration verbatim.
+            declared_type: field
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+                .unwrap_or_else(|| OCTET_STREAM.to_string()),
+        };
         let mut chunks = FieldChunks::new(field, Arc::clone(&body_limit_hit));
-        let written = extract::stream_to_tempfile_counted(
-            &mut chunks,
-            &mut temp,
-            max_body_bytes,
-            &mut consumed,
-        )
-        .await
-        .map_err(body_error)?;
-        found = Some((part_name, file_name, declared_type, written));
-        break;
+        let upload = intake.store(&mut chunks).await.map_err(body_error)?;
+        let body = workflow.finish(upload, metadata).await?;
+        return Ok(axum::Json(body).into_response());
     }
-    let Some((part_name, file_name, declared_type, stream_size)) = found else {
-        return Err(extract_err(
-            "wayfinder::MissingContentStream",
-            "multipart body carries no file part to extract".to_string(),
-        ));
-    };
-
-    // `resource.name` overrides the part's filename for detection and for the
-    // echoed `resourceName` (that is what the param is for); the filename is
-    // still reported separately as `stream_source_info`.
-    let resource_name = params
-        .get("resource.name")
-        .unwrap_or(&file_name)
-        .to_string();
-
-    // ponytail: the document is streamed to a temp file and then read back
-    // whole, because `Extractor::extract` takes `&[u8]`. Bounded by
-    // `extraction.max_body_bytes` (32 MiB by default), so it is a real
-    // ceiling per request rather than an unbounded one — and bounded across
-    // requests by the in-flight-upload count acquired above (issue #273), so
-    // total resident bytes are `max_inflight_uploads × max_body_bytes`, not
-    // `max_body_bytes × HTTP concurrency`. The `_inflight` slot is held
-    // across this read and the parse because the `bytes` it bounds stay
-    // resident for both.
-    //
-    // What remains is that this is still a *full copy* in RAM, and the temp
-    // file is currently only buying the streaming *count*. Trigger: the
-    // first extractor that can work incrementally (the phase-2a ZIP walker,
-    // per `ZipBudget`'s documented call sequence) wants a reader, at which
-    // point `ExtractInput` grows a stream variant and this read goes away.
-    let bytes = std::fs::read(temp.path()).map_err(|e| {
-        WfError::internal(
-            "wayfinder::ExtractionIo",
-            format!("reading upload temp file: {e}"),
-        )
-        .with_params(&params)
-        .envelope(Envelope::NoParams)
-    })?;
-
-    let limits = state.extract_limits;
-    let job_type = declared_type.clone();
-    let job_resource = resource_name.clone();
-    let doc = state
-        .extraction
-        .spawn_extraction(limits.deadline, move || {
-            let budget = extract::Budget::new(limits);
-            extract::extract_document(Some(&job_type), &job_resource, &bytes, &budget)
-        })
-        .await
-        .and_then(|inner| inner)
-        .map_err(|e| WfError::from(e).with_params(&params))?;
-
-    // The in-flight slot bounds resident *upload* bytes, and the parse above
-    // is the last thing that holds them — `bytes` is moved into the closure
-    // and freed once it resolves. Release the slot here, before indexing or
-    // rendering, so an intake slot is not held across the (potentially slow)
-    // commit on the indexing path while the upload's bytes are already gone.
-    drop(inflight);
-
-    if !extract_only {
-        // Indexing path (issue #259): apply Solr-Cell field mapping to the
-        // extraction and index through the normal `/update` commit path.
-        return extract_cell_index(&state, &params, &doc).await;
-    }
-
-    let render = extract::ExtractRender {
-        part_name: &part_name,
-        resource_name: &resource_name,
-        stream_source_info: &file_name,
-        declared_type: &declared_type,
-        stream_size,
-        doc: &doc,
-    };
-    let file = if as_text {
-        render.text()
-    } else {
-        render.xhtml()
-    };
-    // Solr renders `file_metadata` as a flat NamedList: `[key, [values], ...]`,
-    // which is what every captured extract shows and what `json.nl=flat`
-    // (the default) means for this writer. Issue #274 made the handler honour
-    // `json.nl` rather than allowlisting it and ignoring it: `file_metadata`
-    // is a plain (not `SimpleOrderedMap`) NamedList, so it reshapes per the
-    // param exactly as a facet bucket list does (finding 128).
-    let entries: Vec<(String, Value)> = render
-        .file_metadata()
-        .into_iter()
-        .map(|(key, values)| {
-            (
-                key,
-                Value::Array(values.into_iter().map(Value::String).collect()),
-            )
-        })
-        .collect();
-    let metadata = facet::render_named_list(&entries, facet::JsonNl::from_params(&params));
-
-    let mut body = Map::new();
-    if !params.omit_header() {
-        body.insert(
-            "responseHeader".to_string(),
-            json!({"status": 0, "QTime": 0}),
-        );
-    }
-    body.insert("file".to_string(), Value::String(file));
-    body.insert("file_metadata".to_string(), metadata);
-    Ok(axum::Json(Value::Object(body)).into_response())
 }
 
 /// Builds a request's [`Params`] from its query string, and -- only when the
