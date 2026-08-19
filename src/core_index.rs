@@ -3236,9 +3236,9 @@ impl CoreIndex {
     /// ponytail: `fused_bucket_limit`'s `n * MAX_FACET_TERMS` is the right
     /// budget only while every aggregation handed in is a
     /// [`terms_aggregation`] — `size == MAX_FACET_TERMS`, no sub-aggregations
-    /// — which is exactly what `facet::plan_facet_fields` builds and all this
-    /// method has any caller for today. It is `pub` and takes arbitrary
-    /// `Aggregations` though, and the equivalence breaks for anything else: a
+    /// which is exactly what the facet module's private planner builds and all
+    /// this method has any caller for today. It takes arbitrary `Aggregations`,
+    /// though, and the equivalence breaks for anything else: a
     /// sub-aggregation makes one entry's `get_bucket_count` `1 +
     /// sub.get_bucket_count()` *per bucket*
     /// (`agg_result.rs`/`intermediate_agg_result.rs`), far past its own
@@ -3247,7 +3247,7 @@ impl CoreIndex {
     /// headroom. Revisit this sizing (sum each agg's own worst-case bucket
     /// count instead of assuming a flat `size`) before fusing in any
     /// aggregation that is not a flat terms agg.
-    pub fn search_top_with_aggs(
+    pub(crate) fn search_top_with_aggs(
         &self,
         query: &dyn Query,
         filter_queries: &[Box<dyn Query>],
@@ -3268,8 +3268,8 @@ impl CoreIndex {
         // guards actual process memory, so multiplying it turns a fixed server
         // ceiling into an unbounded, request-controlled one — the fused pass
         // really would be holding N * 500MB. The divergence is handled at the
-        // other end instead: `select` recognises the aggregation-class error
-        // (`is_aggregation_error`) and re-runs the request unfused, where the
+        // other end instead: the facet module recognises the aggregation-class
+        // error and re-runs the request unfused, where the
         // sequential per-pass budgets apply exactly as they always did and the
         // response — status, error class, envelope, or a 200 with real counts
         // — is whatever the old path would have produced.
@@ -5151,27 +5151,10 @@ fn fused_bucket_limit(agg_count: usize) -> u32 {
     MAX_FACET_TERMS.saturating_mul(count)
 }
 
-/// Whether `error` is Tantivy's own aggregation error class (a bucket-limit
-/// or memory-limit refusal, or a malformed aggregation request).
-///
-/// `select` uses this to fall back from the fused pass to the unfused one
-/// (issue #246): on the unfused path the identical Tantivy error surfaces out
-/// of `term_facet` -> `facet_fields` -> `facet_counts` and is rendered as a
-/// 400 `wayfinder::FacetError` carrying the `response` block, whereas out of
-/// the fused search it would become a 500 `wayfinder::SearchError`. Re-running
-/// the search unfused costs a wasted pass on a request that is already
-/// failing, and keeps status, error code, message and envelope bit-identical.
-pub(crate) fn is_aggregation_error(error: &anyhow::Error) -> bool {
-    matches!(
-        error.downcast_ref::<tantivy::TantivyError>(),
-        Some(tantivy::TantivyError::AggregationError(_))
-    )
-}
-
 /// The `TermsAggregation` request one `facet.field` needs, over the Tantivy
 /// column `field_name`. Shared by [`CoreIndex::term_facet`]'s own standalone
-/// pass and by `facet::plan_facet_fields`, which folds one of these per
-/// requested field into a single fused aggregation request (issue #246), so
+/// pass and by the facet module's private planner, which folds one of these
+/// per requested field into a single fused aggregation request, so
 /// the two can never ask for different shapes.
 pub(crate) fn terms_aggregation(field_name: &str) -> Aggregation {
     Aggregation {
@@ -5197,8 +5180,8 @@ pub(crate) fn terms_aggregation(field_name: &str) -> Aggregation {
 
 /// Turns one named terms-aggregation result into `term_facet`'s
 /// `(rendered term, sort key, count)` triples. Shared by
-/// [`CoreIndex::term_facet`]'s standalone pass and by `facet::render_facet_fields`,
-/// which reads the same buckets back out of the fused `/select` pass (issue
+/// [`CoreIndex::term_facet`]'s standalone pass and by the facet module's
+/// private renderer, which reads the buckets from the fused `/select` pass (issue
 /// #246) -- the rendering rules below are wire contract, so both paths have to
 /// go through the one copy of them.
 pub(crate) fn render_term_facet_buckets(
@@ -6690,437 +6673,6 @@ fast = true
             .expect("bounded filtered search");
         assert_eq!(outcome.num_found, expected.len());
         assert_eq!(outcome.top, expected[..5.min(expected.len())]);
-    }
-
-    // -----------------------------------------------------------------
-    // Issue #246: fuse the facet.field terms aggregation into the main
-    // /select pass via a new `search_top_with_aggs` entry point.
-    //
-    // These tests pin the premises the task spec asks to verify before
-    // building anything (premise 1 was verified separately by a throwaway
-    // scratch probe -- tantivy 0.26.1's tuple `impl Collector for (Left,
-    // Right)` compiles and runs fine over `(TopScoredHits,
-    // AggregationCollector)`, so no `MultiCollector` fallback is needed):
-    // premise 2 (fused terms-agg buckets over the composed query, `fq`
-    // included, are identical to today's separate `term_facet` pass over
-    // `BaseClauses`) and premise 3 (multiple terms aggregations folded into
-    // one `Aggregations` map do not interfere with each other's counts).
-    //
-    // `search_top_with_aggs` does not exist yet -- this whole block is a
-    // compile-error red until issue #246 adds it.
-    // -----------------------------------------------------------------
-
-    const FACET_FUSION_SCHEMA_TOML: &str = r#"
-[core]
-name = "content"
-unique_key = "id"
-default_field = "body"
-
-[[fields]]
-name = "id"
-type = "string"
-stored = true
-required = true
-fast = true
-
-[[fields]]
-name = "body"
-type = "text_en"
-stored = true
-
-[[fields]]
-name = "category"
-type = "string"
-stored = true
-fast = true
-
-[[fields]]
-name = "views"
-type = "int"
-stored = true
-fast = true
-"#;
-
-    /// Two commits (two segments), a string fast field (`category`) and a
-    /// numeric fast field (`views`), and every fourth doc missing both --
-    /// enough shape for the fused terms aggregation to have to merge across
-    /// segment boundaries and to have real zero/missing buckets to get
-    /// wrong.
-    fn open_facet_fusion_corpus() -> (TempDir, CoreIndex) {
-        let dir = TempDir::new().expect("create temp dir");
-        let schema_path = dir.path().join("schema.toml");
-        std::fs::write(&schema_path, FACET_FUSION_SCHEMA_TOML).expect("write schema.toml");
-        let data_dir = dir.path().join("data");
-        std::fs::create_dir_all(&data_dir).expect("create data dir");
-        let index = CoreIndex::open(&schema_path, &data_dir, &ServerConfig::default())
-            .expect("open test index");
-
-        for (batch, ids) in [(0, 0..15), (1, 15..30)] {
-            let docs: Vec<Value> = ids
-                .map(|i: i32| {
-                    let body = if i % 4 == 0 {
-                        "quick brown fox".to_string()
-                    } else {
-                        "quick fox jumps".to_string()
-                    };
-                    let mut doc = json!({"id": format!("doc{i:02}"), "body": body});
-                    if i % 4 != 0 {
-                        doc["category"] = json!(["animals", "birds", "fish"][(i % 3) as usize]);
-                        doc["views"] = json!((i % 5) as i64 * 10);
-                    }
-                    doc
-                })
-                .collect();
-            index.add_documents(&docs, true).expect("add_documents");
-            index.commit().expect("commit");
-            let _ = batch;
-        }
-        (dir, index)
-    }
-
-    /// The exact `TermsAggregation` shape `CoreIndex::term_facet` builds
-    /// today (`size`/`segment_size` = `MAX_FACET_TERMS`, `min_doc_count:
-    /// 0`), so a raw-bucket comparison against the fused path is comparing
-    /// like with like rather than two different aggregation requests.
-    fn single_terms_aggregations(agg_name: &str, field: &str) -> Aggregations {
-        let mut aggs = Aggregations::default();
-        aggs.insert(
-            agg_name.to_string(),
-            Aggregation {
-                agg: AggregationVariants::Terms(TermsAggregation {
-                    field: field.to_string(),
-                    size: Some(MAX_FACET_TERMS),
-                    segment_size: Some(MAX_FACET_TERMS),
-                    min_doc_count: Some(0),
-                    ..TermsAggregation::default()
-                }),
-                sub_aggregation: Aggregations::default(),
-            },
-        );
-        aggs
-    }
-
-    /// Projects one named terms-bucket result down to `(rendered key,
-    /// doc_count)` pairs, sorted by key so segment-merge order (which is not
-    /// part of what premise 2 claims) cannot cause a spurious mismatch.
-    fn terms_buckets(
-        results: &tantivy::aggregation::agg_result::AggregationResults,
-        agg_name: &str,
-    ) -> Vec<(String, u64)> {
-        let Some(AggregationResult::BucketResult(BucketResult::Terms { buckets, .. })) =
-            results.0.get(agg_name)
-        else {
-            panic!("expected a terms bucket result for `{agg_name}`");
-        };
-        let mut out: Vec<(String, u64)> = buckets
-            .iter()
-            .map(|bucket| {
-                let key = match (&bucket.key_as_string, &bucket.key) {
-                    (Some(s), _) => s.clone(),
-                    (None, Key::Str(s)) => s.clone(),
-                    (None, Key::I64(v)) => v.to_string(),
-                    (None, Key::U64(v)) => v.to_string(),
-                    (None, Key::F64(v)) => v.to_string(),
-                };
-                (key, bucket.doc_count)
-            })
-            .collect();
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        out
-    }
-
-    /// Premise 1 + the additive-API shape: `search_top_with_aggs`'s
-    /// `TopOutcome` half must be byte-identical to plain `search_top` over
-    /// the exact same query/filter_queries/sort/limit -- fusing the
-    /// aggregation in must not change the hit list at all.
-    #[test]
-    fn search_top_with_aggs_top_half_matches_plain_search_top() {
-        let (_dir, index) = open_facet_fusion_corpus();
-        let query = index.parse_query("quick", "body").expect("parse_query");
-        let fq = index
-            .parse_query("category:animals", "body")
-            .expect("parse fq");
-
-        let plain = index
-            .search_top(query.as_ref(), &[fq.box_clone()], &[], 5)
-            .expect("search_top");
-
-        let aggs = single_terms_aggregations("wf_category", "category");
-        let (fused_top, _agg_results) = index
-            .search_top_with_aggs(query.as_ref(), &[fq], &[], 5, aggs)
-            .expect("search_top_with_aggs");
-
-        assert_eq!(
-            fused_top, plain,
-            "fusing the terms aggregation in must not change search_top's own TopOutcome"
-        );
-    }
-
-    /// Premise 2, string field, no `fq`: the fused pass's terms-agg buckets
-    /// must be identical to `term_facet`'s own pass over the same base
-    /// query.
-    #[test]
-    fn search_top_with_aggs_buckets_match_term_facet_for_a_string_field_without_fq() {
-        use tantivy::aggregation::agg_result::AggregationResults;
-
-        let (_dir, index) = open_facet_fusion_corpus();
-        let query = index.parse_query("quick", "body").expect("parse_query");
-
-        let expected = index
-            .term_facet("category", Some(ValueKind::Text), query.as_ref())
-            .expect("term_facet");
-        let mut expected: Vec<(String, u64)> =
-            expected.into_iter().map(|(term, _, n)| (term, n)).collect();
-        expected.sort_by(|a, b| a.0.cmp(&b.0));
-
-        let aggs = single_terms_aggregations("wf_category", "category");
-        let (_top, agg_results): (TopOutcome, AggregationResults) = index
-            .search_top_with_aggs(query.as_ref(), &[], &[], 5, aggs)
-            .expect("search_top_with_aggs");
-        let fused = terms_buckets(&agg_results, "wf_category");
-
-        assert_eq!(
-            fused, expected,
-            "fused terms buckets over `q` alone must match term_facet's own pass exactly"
-        );
-    }
-
-    /// Premise 2, string field, *with* `fq`: `search_top`'s query
-    /// composition wraps each `fq` as a scoreless `ConstScoreQuery(0.0)`
-    /// `Must` clause, while `term_facet`'s caller (`facet::facet_fields`)
-    /// composes `fq` as a plain `Must` clause with no `ConstScoreQuery` --
-    /// two different `BooleanQuery` trees over the same doc set. The whole
-    /// point of premise 2 is that the *aggregation* does not care about that
-    /// difference, so this must still match term-for-term, count-for-count.
-    /// A fused implementation that silently dropped or mis-scoped the `fq`
-    /// (e.g. aggregated only over `q`) would fail this test, not just return
-    /// something plausible.
-    #[test]
-    fn search_top_with_aggs_buckets_match_term_facet_for_a_string_field_with_fq() {
-        use tantivy::aggregation::agg_result::AggregationResults;
-
-        let (_dir, index) = open_facet_fusion_corpus();
-        let query = index.parse_query("quick", "body").expect("parse_query");
-        let fq_for_base = index
-            .parse_query("category:animals", "body")
-            .expect("parse fq");
-        let fq_for_fused = index
-            .parse_query("category:animals", "body")
-            .expect("parse fq");
-
-        // The exact base-query shape `facet::facet_fields` builds today:
-        // `q` and every `fq` as plain `Must` clauses (see `narrowed`/`base`
-        // in `src/facet.rs` and `src/select_workflow.rs`'s `execute`).
-        let base_query = BooleanQuery::from(vec![
-            (Occur::Must, query.box_clone()),
-            (Occur::Must, fq_for_base),
-        ]);
-        let expected = index
-            .term_facet("category", Some(ValueKind::Text), &base_query)
-            .expect("term_facet");
-        let mut expected: Vec<(String, u64)> =
-            expected.into_iter().map(|(term, _, n)| (term, n)).collect();
-        expected.sort_by(|a, b| a.0.cmp(&b.0));
-        assert!(
-            expected.iter().any(|(_, n)| *n > 0),
-            "precondition: the fq must actually match something, or this test is vacuous"
-        );
-
-        let aggs = single_terms_aggregations("wf_category", "category");
-        let (_top, agg_results): (TopOutcome, AggregationResults) = index
-            .search_top_with_aggs(query.as_ref(), &[fq_for_fused], &[], 5, aggs)
-            .expect("search_top_with_aggs");
-        let fused = terms_buckets(&agg_results, "wf_category");
-
-        assert_eq!(
-            fused, expected,
-            "fused terms buckets over `q` AND `fq` must match term_facet's own pass exactly, \
-             despite the two code paths composing the fq into the query differently"
-        );
-    }
-
-    /// Premise 2, numeric field: the same equivalence, but on a Points-based
-    /// column, where `term_facet` only ever sees the buckets the hit set
-    /// produced (no zero-count dictionary walk) -- a different enough branch
-    /// internally that it needs its own coverage rather than assuming the
-    /// string-field test proves it.
-    #[test]
-    fn search_top_with_aggs_buckets_match_term_facet_for_a_numeric_field_with_fq() {
-        use tantivy::aggregation::agg_result::AggregationResults;
-
-        let (_dir, index) = open_facet_fusion_corpus();
-        let query = index.parse_query("quick", "body").expect("parse_query");
-        let fq_for_base = index
-            .parse_query("category:animals", "body")
-            .expect("parse fq");
-        let fq_for_fused = index
-            .parse_query("category:animals", "body")
-            .expect("parse fq");
-
-        let base_query = BooleanQuery::from(vec![
-            (Occur::Must, query.box_clone()),
-            (Occur::Must, fq_for_base),
-        ]);
-        let expected = index
-            .term_facet("views", Some(ValueKind::I64), &base_query)
-            .expect("term_facet");
-        let mut expected: Vec<(String, u64)> =
-            expected.into_iter().map(|(term, _, n)| (term, n)).collect();
-        expected.sort_by(|a, b| a.0.cmp(&b.0));
-
-        let aggs = single_terms_aggregations("wf_views", "views");
-        let (_top, agg_results): (TopOutcome, AggregationResults) = index
-            .search_top_with_aggs(query.as_ref(), &[fq_for_fused], &[], 5, aggs)
-            .expect("search_top_with_aggs");
-        let fused = terms_buckets(&agg_results, "wf_views");
-
-        assert_eq!(
-            fused, expected,
-            "fused terms buckets on a numeric column must match term_facet's own pass exactly"
-        );
-    }
-
-    /// Premise 3: multiple `facet.field` values folding into one
-    /// `Aggregations` map (one entry per field) must not let one field's
-    /// terms leak into or otherwise disturb the other's counts -- each
-    /// field's fused buckets must independently match its own `term_facet`
-    /// pass, in the same single search.
-    #[test]
-    fn search_top_with_aggs_multiple_fields_do_not_interfere() {
-        use tantivy::aggregation::agg_result::AggregationResults;
-
-        let (_dir, index) = open_facet_fusion_corpus();
-        let query = index.parse_query("quick", "body").expect("parse_query");
-        let fq_for_category_expected = index
-            .parse_query("category:animals", "body")
-            .expect("parse fq");
-        let fq_for_views_expected = index
-            .parse_query("category:animals", "body")
-            .expect("parse fq");
-        let fq_for_fused = index
-            .parse_query("category:animals", "body")
-            .expect("parse fq");
-
-        let base_query_for_category = BooleanQuery::from(vec![
-            (Occur::Must, query.box_clone()),
-            (Occur::Must, fq_for_category_expected),
-        ]);
-        let base_query_for_views = BooleanQuery::from(vec![
-            (Occur::Must, query.box_clone()),
-            (Occur::Must, fq_for_views_expected),
-        ]);
-        let mut expected_category: Vec<(String, u64)> = index
-            .term_facet("category", Some(ValueKind::Text), &base_query_for_category)
-            .expect("term_facet category")
-            .into_iter()
-            .map(|(term, _, n)| (term, n))
-            .collect();
-        expected_category.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut expected_views: Vec<(String, u64)> = index
-            .term_facet("views", Some(ValueKind::I64), &base_query_for_views)
-            .expect("term_facet views")
-            .into_iter()
-            .map(|(term, _, n)| (term, n))
-            .collect();
-        expected_views.sort_by(|a, b| a.0.cmp(&b.0));
-
-        let mut aggs = single_terms_aggregations("wf_category", "category");
-        aggs.extend(single_terms_aggregations("wf_views", "views"));
-        assert_eq!(aggs.len(), 2, "both fields must share one Aggregations map");
-
-        let (_top, agg_results): (TopOutcome, AggregationResults) = index
-            .search_top_with_aggs(query.as_ref(), &[fq_for_fused], &[], 5, aggs)
-            .expect("search_top_with_aggs");
-
-        assert_eq!(
-            terms_buckets(&agg_results, "wf_category"),
-            expected_category,
-            "the `category` aggregation must be unaffected by sharing the request with `views`"
-        );
-        assert_eq!(
-            terms_buckets(&agg_results, "wf_views"),
-            expected_views,
-            "the `views` aggregation must be unaffected by sharing the request with `category`"
-        );
-    }
-
-    /// Review round 1 (issue #246): Tantivy's bucket limit is a *per-request*
-    /// budget compared against the sum of every top-level aggregation's
-    /// buckets (`intermediate_agg_result.rs:158-167` +
-    /// `agg_result.rs:24-30`), not a per-aggregation one. The unfused path
-    /// gave each `facet.field` its own `AggregationCollector` and therefore
-    /// its own fresh guard, so a field capped at `MAX_FACET_TERMS` buckets by
-    /// its own `size` could never trip the equal default limit. Fusing N
-    /// fields into one request under the *default* guard would have failed
-    /// any two fields whose dictionaries sum past it -- e.g.
-    /// `facet.field=id&facet.field=category` over ~65k docs, since
-    /// `min_doc_count: 0` makes each field's bucket count its whole
-    /// cardinality.
-    ///
-    /// Asserted as a function of the aggregation count rather than by
-    /// building 65001 real buckets, which would not stay hermetic or fast.
-    /// That leaves a gap this test cannot close on its own: it never observes
-    /// the limit `search_top_with_aggs` actually constructs, since Tantivy's
-    /// `get_bucket_limit` is crate-private to Tantivy. `-D warnings` catches
-    /// only the crudest regression -- `fused_bucket_limit` has exactly one
-    /// production caller, so *deleting* that call (reverting to
-    /// `AggregationLimitsGuard::default()`) fails CI's clippy line with
-    /// `function `fused_bucket_limit` is never used` (verified by doing it).
-    /// It does **not** catch the more likely regression: hardcoding
-    /// `fused_bucket_limit(1)` at the call site keeps the function "used",
-    /// keeps every assertion here green, and silently reinstates the round-1
-    /// bug for two or more facet fields. What actually closes that is the
-    /// end-to-end
-    /// `two_facet_fields_over_a_dictionary_larger_than_one_fields_budget`
-    /// below, which fails on both mutations.
-    #[test]
-    fn the_fused_bucket_limit_scales_with_the_number_of_aggregations() {
-        assert_eq!(
-            fused_bucket_limit(1),
-            MAX_FACET_TERMS,
-            "one aggregation must get exactly the headroom a standalone term_facet pass had"
-        );
-        for count in 2..=8usize {
-            assert_eq!(
-                fused_bucket_limit(count),
-                MAX_FACET_TERMS * count as u32,
-                "{count} fused aggregations must each keep a standalone pass's own headroom, \
-                 because Tantivy sums their bucket counts against this one limit"
-            );
-        }
-        assert_eq!(
-            fused_bucket_limit(0),
-            MAX_FACET_TERMS,
-            "an empty request keeps one field's budget rather than a zero-bucket trap"
-        );
-        assert_eq!(
-            fused_bucket_limit(usize::MAX),
-            u32::MAX,
-            "the scaling must saturate rather than wrap into a tiny limit"
-        );
-    }
-
-    /// The other half of the same round-1 must-fix: an aggregation-class
-    /// Tantivy error has to be recognisable, because `select` answers it by
-    /// falling back to the unfused path (which renders it as the 400
-    /// `wayfinder::FacetError` it has always been) instead of letting it
-    /// escape the fused search as a 500. A non-aggregation error must not be
-    /// caught by that net.
-    #[test]
-    fn aggregation_errors_are_distinguishable_from_other_search_errors() {
-        let bucket_limit = anyhow::Error::from(tantivy::TantivyError::AggregationError(
-            tantivy::aggregation::AggregationError::BucketLimitExceeded {
-                limit: MAX_FACET_TERMS,
-                current: MAX_FACET_TERMS + 1,
-            },
-        ));
-        assert!(is_aggregation_error(&bucket_limit));
-
-        let other = anyhow::Error::from(tantivy::TantivyError::InvalidArgument("nope".to_string()));
-        assert!(!is_aggregation_error(&other));
-        assert!(!is_aggregation_error(&anyhow!(
-            "not a tantivy error at all"
-        )));
     }
 
     /// `as_location` parses Solr's `lat,lon` point form and rejects the shapes

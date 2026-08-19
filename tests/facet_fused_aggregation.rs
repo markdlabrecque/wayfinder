@@ -5,12 +5,9 @@
 //! present, so a fused implementation has something concrete to match --
 //! not a "the fused path returns something plausible" check.
 //!
-//! This file is deliberately a *characterization* test: it is green against
-//! today's implementation, and its job is to stay green across the #246
-//! refactor. The tests that actually drive the new API red (`search_top_with_aggs`,
-//! `plan_facet_fields`, `render_facet_fields`) live in `src/core_index.rs`
-//! and `src/facet.rs`'s own `#[cfg(test)]` modules, where they can reach
-//! into the aggregation internals directly.
+//! These tests cross the same `/select` seam as real clients. Aggregation
+//! planning, collection, fallback, and rendering remain private to the facet
+//! module.
 
 mod common;
 
@@ -148,24 +145,23 @@ const BUCKET_BUDGET_DOCS: usize = 33_000;
 /// aggregations over it.
 ///
 /// What this pins, measured by reverting each half of the fix and re-running:
-/// reverting **both** `fused_bucket_limit` and `is_aggregation_error` (i.e.
-/// the state the fusion landed in before review round 1) fails here with a
+/// reverting both fused bucket sizing and aggregation-refusal fallback from
+/// the state the fusion landed in before review round 1 fails here with a
 /// 500 `wayfinder::SearchError`, "bucket limit was exceeded. Limit: 65000,
 /// Current: 66000". Reverting either half *alone* still passes, and that is
 /// the design working rather than a gap in the assertion:
 ///
 /// - without `fused_bucket_limit`, Tantivy refuses the fused request and
-///   `is_aggregation_error` answers it on the unfused path, whose wire output
+///   the facet module answers it on the unfused path, whose wire output
 ///   is byte-identical by construction — a correctness-preserving fallback is
 ///   not observable from the wire, only from the lost performance;
-/// - without `is_aggregation_error`, the sized guard means no aggregation
+/// - without aggregation-refusal fallback, the sized guard means no aggregation
 ///   error is raised in the first place. Each terms agg is itself capped at
 ///   `size = MAX_FACET_TERMS` buckets, so N aggs can never sum past
 ///   `N * MAX_FACET_TERMS`, and the bucket limit becomes unreachable by
 ///   construction. The fallback's remaining job is the shared memory counter
 ///   (500 MB, not hermetically reachable) and defence in depth; the error
-///   classification itself is unit-tested in `core_index`'s
-///   `aggregation_errors_are_distinguishable_from_other_search_errors`.
+///   classification and retry are tested through the facet module's search seam.
 #[tokio::test]
 async fn two_facet_fields_over_a_dictionary_larger_than_one_fields_budget() {
     let dir = TempDir::new().expect("create temp dir");
