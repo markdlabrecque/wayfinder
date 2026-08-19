@@ -680,7 +680,7 @@ stored = true
     assert_eq!(
         std::fs::read_to_string(&marker).expect("read upgraded analyzer contract"),
         "text_presets_static_length_v7",
-        "safe v2 adoption must persist the current (v3) analyzer contract"
+        "safe v2 adoption must persist the current (v7) analyzer contract"
     );
 
     // A raw-only schema still has `[[dynamic_fields]]`, so `catch_all_fields`
@@ -1115,7 +1115,7 @@ async fn v2_marker_on_all_raw_dynamic_schema_adopts_rewrites_and_writes() {
     // moved), so a genuinely pre-#388 all-raw-dynamic index carries the same
     // on-disk `wayfinder_text_en_v1` identity under either marker -- only the
     // marker file's own contents differ, exercising the v2 arm in
-    // `src/core_index.rs` instead of the v1 one.
+    // `src/schema_contract.rs` instead of the v1 one.
     std::fs::write(&marker, "text_en_porter_compatible_v2").expect("write v2 analyzer contract");
 
     // 1. the index adopts (open succeeds).

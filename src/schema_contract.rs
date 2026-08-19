@@ -30,8 +30,8 @@ const V2_LEGACY_DYNAMIC: &str = "text_en_porter_compatible_v2_legacy_dynamic_tex
 const V1: &str = "text_en_stopwords_v1";
 const V1_LEGACY_DYNAMIC: &str = "text_en_stopwords_v1_legacy_dynamic_text";
 
-/// Schema state accepted for one startup. The marker is durable before this
-/// value exists; the schema snapshot is delayed until Tantivy opens cleanly.
+/// Schema state accepted for one startup. Any marker write completes before
+/// this value exists; the schema snapshot is delayed until Tantivy opens cleanly.
 pub(crate) struct Accepted {
     snapshot_path: PathBuf,
     current_schema: String,
@@ -341,6 +341,7 @@ mod tests {
                 ),
             ),
             (Some(V6), raw, Migration::Advance(CURRENT)),
+            (Some(V6), dynamic_changed, Migration::Advance(CURRENT)),
             (
                 Some(V6),
                 changed,
@@ -368,6 +369,13 @@ mod tests {
                 ),
             ),
             (Some(V5), raw, Migration::Adopt),
+            (
+                Some(V5),
+                dynamic_changed,
+                Migration::Refuse(
+                    "uses the pre-word-delimiter text analyzer contract; reindex into a fresh data directory",
+                ),
+            ),
             (
                 Some(V5),
                 changed,
