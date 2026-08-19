@@ -1,5 +1,7 @@
 //! Request-level update options shared by JSON updates and extracted documents.
 
+use serde_json::{Value, json};
+
 use crate::core_index::CoreIndex;
 use crate::error::{Envelope, WfError};
 use crate::params::Params;
@@ -43,4 +45,32 @@ impl UpdatePolicy {
         }
         Ok(())
     }
+}
+
+/// The bare `{"responseHeader":{"status":0,"QTime":0}}` envelope every
+/// `/update` success answers with, for every command shape (finding 46) —
+/// never a `params` echo, never per-command keys. Shared by JSON updates and
+/// by an extracted document that was indexed rather than rendered, so the
+/// envelope has one owner.
+///
+/// Under `omitHeader=true` that leaves `{}`: the bare envelope has no other
+/// key to survive the header's removal.
+///
+/// ponytail: unfixtured for `/update` specifically. `search_api_solr` only
+/// ever sends `omitHeader=false` here (`solr-ref/search-api/trace/00001.json`),
+/// so no capture shows `/update` under `omitHeader=true`. This generalizes
+/// from `/select`/`/mlt`/`/terms`, which all gate on the same param and are
+/// fixture-pinned; the alternative reading ("`/update` never suppresses") is
+/// possible but has nothing behind it. A capture of a real `solr:9`
+/// `/update?commit=true&omitHeader=true` settles it.
+pub(crate) fn success_body(params: &Params) -> Value {
+    if params.omit_header() {
+        return json!({});
+    }
+    json!({
+        "responseHeader": {
+            "status": 0,
+            "QTime": 0,
+        }
+    })
 }

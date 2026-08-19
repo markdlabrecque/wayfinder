@@ -19,7 +19,7 @@ use crate::extract::{
 use crate::facet;
 use crate::params::Params;
 use crate::schema::WayfinderSchema;
-use crate::update_policy::UpdatePolicy;
+use crate::update_policy::{UpdatePolicy, success_body};
 
 const EXTRACT_DEFAULT_FMAP: &[(&str, &str)] = &[("a", "links"), ("div", "ignored_")];
 const EXTRACT_DEFAULT_UPREFIX: &str = "ignored_";
@@ -47,14 +47,16 @@ impl Intake {
     pub(crate) fn new(
         runtime: &ExtractionRuntime,
         limits: ExtractLimits,
-    ) -> Result<Self, ExtractError> {
+        params: &Params,
+    ) -> Result<Self, WfError> {
         // Preserve the old route's order: allocate the temporary file, then
         // claim intake capacity, and consume no body until both succeed.
-        let temp = NamedTempFile::new()
-            .map_err(|error| ExtractError::Io(format!("creating upload temp file: {error}")))?;
+        let temp = NamedTempFile::new().map_err(|error| {
+            extraction_io(params, format!("creating upload temp file: {error}"))
+        })?;
         let inflight = runtime
             .try_acquire_inflight()
-            .ok_or(ExtractError::InflightUploadsBusy)?;
+            .ok_or_else(|| WfError::from(ExtractError::InflightUploadsBusy).with_params(params))?;
         Ok(Self {
             temp,
             consumed: 0,
@@ -147,8 +149,7 @@ impl<'a> Workflow<'a> {
     }
 
     pub(crate) fn begin(&self) -> Result<Intake, WfError> {
-        Intake::new(self.runtime, self.limits)
-            .map_err(|error| WfError::from(error).with_params(self.params))
+        Intake::new(self.runtime, self.limits, self.params)
     }
 
     /// Parses the upload and either renders the extract-only document or
@@ -169,13 +170,24 @@ impl<'a> Workflow<'a> {
             stream_size,
             inflight,
         } = upload;
+        // ponytail: the document is streamed to a temp file and then read back
+        // whole, because `Extractor::extract` takes `&[u8]`. Bounded by
+        // `extraction.max_body_bytes` (32 MiB by default), so it is a real
+        // ceiling per request rather than an unbounded one -- and bounded across
+        // requests by the in-flight-upload count `Intake` acquired (issue #273),
+        // so total resident bytes are `max_inflight_uploads x max_body_bytes`,
+        // not `max_body_bytes x HTTP concurrency`. The `inflight` slot is held
+        // across this read and the parse because the `bytes` it bounds stay
+        // resident for both, which is why it moves into the extraction closure
+        // below rather than being dropped here.
+        //
+        // What remains is that this is still a *full copy* in RAM, and the temp
+        // file is currently only buying the streaming *count*. Trigger: the
+        // first extractor that can work incrementally (the phase-2a ZIP walker,
+        // per `ZipBudget`'s documented call sequence) wants a reader, at which
+        // point `ExtractInput` grows a stream variant and this read goes away.
         let bytes = std::fs::read(temp.path()).map_err(|error| {
-            WfError::internal(
-                "wayfinder::ExtractionIo",
-                format!("reading upload temp file: {error}"),
-            )
-            .with_params(self.params)
-            .envelope(Envelope::NoParams)
+            extraction_io(self.params, format!("reading upload temp file: {error}"))
         })?;
 
         let job_type = metadata.declared_type.clone();
@@ -275,22 +287,45 @@ impl<'a> Workflow<'a> {
     }
 }
 
+/// The one owner of the temporary-file I/O error class. Both halves of that
+/// file's lifetime -- creating it during intake and reading it back before the
+/// parse -- report `wayfinder::ExtractionIo`.
+fn extraction_io(params: &Params, message: String) -> WfError {
+    WfError::internal("wayfinder::ExtractionIo", message)
+        .with_params(params)
+        .envelope(Envelope::NoParams)
+}
+
 fn bad_request(params: &Params, class: &'static str, message: String) -> WfError {
     WfError::bad_request(class, message)
         .with_params(params)
         .envelope(Envelope::NoParams)
 }
 
-fn success_body(params: &Params) -> Value {
-    if params.omit_header() {
-        json!({})
-    } else {
-        json!({"responseHeader": {"status": 0, "QTime": 0}})
-    }
-}
-
 /// Applies Solr Cell's `lowernames`, `fmap`, `uprefix`, and `literal.*`
 /// sequence to extracted fields.
+///
+/// A field that does not resolve against the schema is dropped when `uprefix`
+/// is set -- reproducing the observable effect of the Search-API configset's
+/// catch-all `<dynamicField name="*" type="ignored">` (stored/indexed false),
+/// which is what makes `uprefix=ignored_` drop unmapped fields from selects.
+/// Without `uprefix`, the field passes through so `add_documents` errors on a
+/// genuinely unknown field exactly as strict Solr
+/// (`-Dupdate.autoCreateFields=false`) does.
+///
+/// ponytail: Wayfinder drops uprefix'd fields outright rather than indexing
+/// them into a catch-all ignored-type field. The observable result is
+/// identical (the field never appears in a select); reproducing the
+/// ignored-type field would need a schema change for no wire benefit. Trigger:
+/// a captured index whose select returns a value Solr stored under the
+/// catch-all but Wayfinder dropped.
+///
+/// The indexed `body`/`links` values come from Wayfinder's own extractors and
+/// so diverge from the captured select fixture (`extract_html_select.json`):
+/// Wayfinder does not replicate Tika's content-field whitespace, and PRD
+/// divergence 10 forbids fabricating `shape="rect"`, so `links` carries only
+/// the real attribute values. That divergence is recorded in the PRD and
+/// asserted by the route tests; this function is where it originates.
 fn extract_cell_fields(
     doc: &ExtractedDocument,
     params: &Params,
@@ -476,18 +511,22 @@ stored = true
             .await
             .expect("index document");
 
-        let query = state
-            .index
-            .parse_query("id:direct", "body")
-            .expect("parse id query");
-        assert_eq!(
+        let matches = |query_str: &str| {
+            let query = state
+                .index
+                .parse_query(query_str, "body")
+                .expect("parse query");
             state
                 .index
                 .search(query.as_ref(), &[], &[])
                 .expect("search")
-                .len(),
-            1
-        );
+                .len()
+        };
+        // The `literal.*` leg, and then the extracted-content leg: dropping the
+        // `extract_source_fields` mapping still indexes `{"id":"direct"}`, so
+        // only the mapped `body` catches a bypassed content mapping.
+        assert_eq!(matches("id:direct"), 1);
+        assert_eq!(matches("body:\"indexed workflow text\""), 1);
     }
 
     #[tokio::test]
@@ -517,7 +556,8 @@ stored = true
     async fn intake_counts_all_parts_against_one_request_budget() {
         let limits = limits(100, 1);
         let runtime = ExtractionRuntime::new(&limits);
-        let mut intake = Intake::new(&runtime, limits).expect("admit intake");
+        let params = Params::parse("");
+        let mut intake = Intake::new(&runtime, limits, &params).expect("admit intake");
 
         intake
             .drain(&mut Chunks(vec![Bytes::from(vec![b'm'; 60])]))
@@ -537,7 +577,8 @@ stored = true
     async fn resident_upload_keeps_the_intake_permit() {
         let limits = limits(100, 1);
         let runtime = ExtractionRuntime::new(&limits);
-        let intake = Intake::new(&runtime, limits).expect("admit intake");
+        let params = Params::parse("");
+        let intake = Intake::new(&runtime, limits, &params).expect("admit intake");
         let upload = intake
             .store(&mut Chunks(vec![Bytes::from_static(b"document")]))
             .await
@@ -555,7 +596,8 @@ stored = true
     async fn intake_permit_returns_on_error_paths() {
         let limits = limits(4, 1);
         let runtime = ExtractionRuntime::new(&limits);
-        let intake = Intake::new(&runtime, limits).expect("admit intake");
+        let params = Params::parse("");
+        let intake = Intake::new(&runtime, limits, &params).expect("admit intake");
         let result = intake
             .store(&mut Chunks(vec![Bytes::from_static(b"too large")]))
             .await;

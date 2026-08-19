@@ -2114,31 +2114,10 @@ fn parse_update_commands(body: &[u8]) -> Result<Vec<UpdateCommand>, String> {
     Ok(commands)
 }
 
-/// The bare `{"responseHeader":{"status":0,"QTime":0}}` envelope every
-/// `/update` success answers with, for every command shape (finding 46) —
-/// never a `params` echo, never per-command keys.
-///
-/// Under `omitHeader=true` that leaves `{}`: the bare envelope has no other
-/// key to survive the header's removal.
-///
-/// ponytail: unfixtured for `/update` specifically. `search_api_solr` only
-/// ever sends `omitHeader=false` here (`solr-ref/search-api/trace/00001.json`),
-/// so no capture shows `/update` under `omitHeader=true`. This generalizes
-/// from `/select`/`/mlt`/`/terms`, which all gate on the same param and are
-/// fixture-pinned; the alternative reading ("`/update` never suppresses") is
-/// possible but has nothing behind it. A capture of a real `solr:9`
-/// `/update?commit=true&omitHeader=true` settles it.
+/// Renders the shared `/update` success envelope
+/// ([`update_policy::success_body`]) as an HTTP response.
 fn update_success(params: &Params) -> Response {
-    if params.omit_header() {
-        return axum::Json(json!({})).into_response();
-    }
-    axum::Json(json!({
-        "responseHeader": {
-            "status": 0,
-            "QTime": 0,
-        }
-    }))
-    .into_response()
+    axum::Json(update_policy::success_body(params)).into_response()
 }
 
 async fn update(
