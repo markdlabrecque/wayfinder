@@ -11,17 +11,28 @@ Build the checked-out source, or set `WAYFINDER` to an obtained compatible
 binary. The commands below use the canonical files in this directory exactly.
 
 ```sh
-cargo build --locked --release
-WAYFINDER=target/release/wayfinder
+if [ -z "${WAYFINDER:-}" ]; then
+  cargo build --locked --release
+  WAYFINDER=target/release/wayfinder
+fi
 SCHEMA=manual/getting-started/schema.toml
 CORPUS=manual/getting-started/corpus.json
 CORE=getting-started
-LISTENER=127.0.0.1:8983
+LISTENER=${WAYFINDER_LISTENER:-127.0.0.1:8983}
 BASE=http://$LISTENER/wayfinder/$CORE
 if [ "${WAYFINDER_CONFIG+x}" = x ]; then
   echo "Unset WAYFINDER_CONFIG before running this default quickstart." >&2
   exit 1
 fi
+assert_response() {
+  response=$1
+  expected=$2
+  if ! printf '%s\n' "$response" | grep -F -- "$expected" >/dev/null; then
+    echo "Response did not contain $expected:" >&2
+    printf '%s\n' "$response" >&2
+    return 1
+  fi
+}
 DATA_DIR=$(mktemp -d "${TMPDIR:-/tmp}/wayfinder-getting-started.XXXXXX")
 LOG=$DATA_DIR/server.log
 WAYFINDER_PID=
@@ -75,13 +86,16 @@ wait_for_wayfinder
 ```
 
 **Request:** `GET`; **Content-Type:** none (no request body); **core:**
-`getting-started`; **visibility:** loopback only; **expected status:** `200`
-JSON.
+`getting-started`; **visibility:** loopback only.
 
 ```sh
-curl --fail --silent --show-error --request GET \
-  --write-out '\nHTTP %{http_code}\n' \
-  "$BASE/admin/ping?wt=json"
+response=$(curl --fail --silent --show-error --request GET \
+  --write-out '\nWAYFINDER_HTTP_STATUS:%{http_code}\nWAYFINDER_CONTENT_TYPE:%{content_type}' \
+  "$BASE/admin/ping?wt=json")
+printf '%s\n' "$response"
+assert_response "$response" 'WAYFINDER_HTTP_STATUS:200'
+assert_response "$response" 'WAYFINDER_CONTENT_TYPE:application/json'
+assert_response "$response" '"status":"OK"'
 ```
 
 ## Index and commit the canonical corpus
@@ -89,15 +103,18 @@ curl --fail --silent --show-error --request GET \
 `commit=true` makes this HTTP update visible and durable for the later restart.
 
 **Request:** `POST`; **Content-Type:** `application/json`; **core:**
-`getting-started`; **visibility:** loopback only; **expected status:** `200`
-JSON.
+`getting-started`; **visibility:** loopback only.
 
 ```sh
-curl --fail --silent --show-error --request POST \
+response=$(curl --fail --silent --show-error --request POST \
   --header 'Content-Type: application/json' \
   --data-binary "@$CORPUS" \
-  --write-out '\nHTTP %{http_code}\n' \
-  "$BASE/update?commit=true&wt=json"
+  --write-out '\nWAYFINDER_HTTP_STATUS:%{http_code}\nWAYFINDER_CONTENT_TYPE:%{content_type}' \
+  "$BASE/update?commit=true&wt=json")
+printf '%s\n' "$response"
+assert_response "$response" 'WAYFINDER_HTTP_STATUS:200'
+assert_response "$response" 'WAYFINDER_CONTENT_TYPE:application/json'
+assert_response "$response" '"status":0'
 ```
 
 ## Query, filter, choose fields, sort, page, and facet
@@ -108,11 +125,10 @@ second result. It also requests the fast `category` field's classic facet.
 `--data-urlencode` keeps query syntax and commas correctly encoded.
 
 **Request:** `GET`; **Content-Type:** none (no request body); **core:**
-`getting-started`; **visibility:** loopback only; **expected status:** `200`
-JSON.
+`getting-started`; **visibility:** loopback only.
 
 ```sh
-curl --fail --silent --show-error --get \
+response=$(curl --fail --silent --show-error --get \
   --data-urlencode 'q=trail' \
   --data-urlencode 'fq=category:guides' \
   --data-urlencode 'fl=id,title,rank' \
@@ -122,12 +138,19 @@ curl --fail --silent --show-error --get \
   --data-urlencode 'facet=true' \
   --data-urlencode 'facet.field=category' \
   --data-urlencode 'wt=json' \
-  --write-out '\nHTTP %{http_code}\n' \
-  "$BASE/select"
+  --write-out '\nWAYFINDER_HTTP_STATUS:%{http_code}\nWAYFINDER_CONTENT_TYPE:%{content_type}' \
+  "$BASE/select")
+printf '%s\n' "$response"
+assert_response "$response" 'WAYFINDER_HTTP_STATUS:200'
+assert_response "$response" 'WAYFINDER_CONTENT_TYPE:application/json'
+assert_response "$response" '"numFound":2'
+assert_response "$response" '"start":1'
+assert_response "$response" '{"id":"filters","title":"Trail filter guide","rank":20}'
+assert_response "$response" '"category":["guides",2,"reference",0]'
 ```
 
-The response has one `filters` document in `response.docs`; `response.numFound`
-is `2`, and `facet_counts` includes the `guides` category.
+The assertions run with the request and check its stable document, paging, and
+facet results.
 
 ## Inspect the operator UI
 
@@ -136,36 +159,45 @@ routes. The separate `/ui/synonyms` page also has a POST action that replaces
 durable query synonyms; see the [UI route inventory](../reference/wire-routes.md#wayfinder-ui-routes).
 
 **Request:** `GET`; **Content-Type:** none (no request body); **core:**
-`getting-started` (this process's core); **visibility:** loopback only;
-**expected status:** `200` HTML.
+`getting-started` (this process's core); **visibility:** loopback only.
 
 ```sh
-curl --fail --silent --show-error --request GET \
-  --write-out '\nHTTP %{http_code}\n' \
-  "http://$LISTENER/ui"
+response=$(curl --fail --silent --show-error --request GET \
+  --write-out '\nWAYFINDER_HTTP_STATUS:%{http_code}\nWAYFINDER_CONTENT_TYPE:%{content_type}' \
+  "http://$LISTENER/ui")
+printf '%s\n' "$response"
+assert_response "$response" 'WAYFINDER_HTTP_STATUS:200'
+assert_response "$response" 'WAYFINDER_CONTENT_TYPE:text/html'
+assert_response "$response" 'getting-started'
 ```
 
 **Request:** `GET`; **Content-Type:** none (no request body); **core:**
-`getting-started` (this process's core); **visibility:** loopback only;
-**expected status:** `200` HTML.
+`getting-started` (this process's core); **visibility:** loopback only.
 
 ```sh
-curl --fail --silent --show-error --get \
+response=$(curl --fail --silent --show-error --get \
   --data-urlencode 'q=trail' \
   --data-urlencode 'rows=1' \
   --data-urlencode 'wt=json' \
-  --write-out '\nHTTP %{http_code}\n' \
-  "http://$LISTENER/ui/query"
+  --write-out '\nWAYFINDER_HTTP_STATUS:%{http_code}\nWAYFINDER_CONTENT_TYPE:%{content_type}' \
+  "http://$LISTENER/ui/query")
+printf '%s\n' "$response"
+assert_response "$response" 'WAYFINDER_HTTP_STATUS:200'
+assert_response "$response" 'WAYFINDER_CONTENT_TYPE:text/html'
+assert_response "$response" 'filters'
 ```
 
 **Request:** `GET`; **Content-Type:** none (no request body); **core:**
-`getting-started` (this process's core); **visibility:** loopback only;
-**expected status:** `200` HTML.
+`getting-started` (this process's core); **visibility:** loopback only.
 
 ```sh
-curl --fail --silent --show-error --request GET \
-  --write-out '\nHTTP %{http_code}\n' \
-  "http://$LISTENER/ui/stats"
+response=$(curl --fail --silent --show-error --request GET \
+  --write-out '\nWAYFINDER_HTTP_STATUS:%{http_code}\nWAYFINDER_CONTENT_TYPE:%{content_type}' \
+  "http://$LISTENER/ui/stats")
+printf '%s\n' "$response"
+assert_response "$response" 'WAYFINDER_HTTP_STATUS:200'
+assert_response "$response" 'WAYFINDER_CONTENT_TYPE:text/html'
+assert_response "$response" 'Documents'
 ```
 
 ## Stop gracefully and prove a restart uses the same data
@@ -187,24 +219,27 @@ wait_for_wayfinder
 ```
 
 **Request:** `GET`; **Content-Type:** none (no request body); **core:**
-`getting-started`; **visibility:** loopback only; **expected status:** `200`
-JSON.
+`getting-started`; **visibility:** loopback only.
 
 ```sh
-curl --fail --silent --show-error --get \
+response=$(curl --fail --silent --show-error --get \
   --data-urlencode 'q=*:*' \
   --data-urlencode 'rows=0' \
   --data-urlencode 'wt=json' \
-  --write-out '\nHTTP %{http_code}\n' \
-  "$BASE/select"
+  --write-out '\nWAYFINDER_HTTP_STATUS:%{http_code}\nWAYFINDER_CONTENT_TYPE:%{content_type}' \
+  "$BASE/select")
+printf '%s\n' "$response"
+assert_response "$response" 'WAYFINDER_HTTP_STATUS:200'
+assert_response "$response" 'WAYFINDER_CONTENT_TYPE:application/json'
+assert_response "$response" '"numFound":3'
 
 kill -TERM "$WAYFINDER_PID"
 wait "$WAYFINDER_PID"
 WAYFINDER_PID=
 ```
 
-The final response has `response.numFound: 3`, proving the committed corpus
-survives a graceful stop and restart.
+The final assertion proves that the committed corpus survives a graceful stop
+and restart.
 
 ## Security and backup minimum
 
