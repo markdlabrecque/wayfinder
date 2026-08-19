@@ -37,7 +37,7 @@ WAYFINDER_PID=
 cleanup() {
   status=$?
   if [ -n "$WAYFINDER_PID" ] && kill -0 "$WAYFINDER_PID" 2>/dev/null; then
-    kill -TERM "$WAYFINDER_PID"
+    kill -TERM "$WAYFINDER_PID" 2>/dev/null || true
     wait "$WAYFINDER_PID" || true
   fi
   if [ "$status" -ne 0 ] && [ -s "$LOG" ]; then
