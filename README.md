@@ -19,8 +19,9 @@ cargo test --test manual_examples documented_quickstart_commands_execute_and_che
 ```
 
 This executes the shell blocks in
-[`manual/getting-started/quickstart.md`](manual/getting-started/quickstart.md) with its canonical
-schema and corpus.
+[`manual/getting-started/quickstart.md`](manual/getting-started/quickstart.md) with the canonical
+[`schema.toml`](manual/getting-started/schema.toml) and
+[`corpus.json`](manual/getting-started/corpus.json).
 
 ## Running
 
