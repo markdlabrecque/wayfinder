@@ -439,20 +439,10 @@ pub(super) fn execute(state: &AppState, params: Params) -> Result<Value, WfError
         wants_score_group,
     )?;
 
-    // Fused faceting (issue #246): the `facet.field` terms aggregation runs
-    // over exactly the doc set the hit list iterates (`q` AND every `fq`), so
-    // planning it here lets the main search compute both in one pass instead
-    // of walking the same postings twice — ~5 ms of the 6.6 ms faceting cost
-    // at 2M docs was that second walk.
-    //
-    // A planning error is *discarded*, not reported: the request then takes
-    // today's unfused path, which re-derives the identical error at its
-    // original point in the request lifecycle, so its message, its
-    // `PreQueryFacetError` treatment and whether the envelope carries a
-    // `response` block all stay bit-identical. Double validation costs nothing
-    // on a request that is already failing.
-    let mut facet_field_plan: Option<facet::FacetFieldsPlan> = None;
-    let mut facet_field_aggs = None;
+    // The facet module owns fused field-facet collection and any fallback to
+    // the established unfused path. `/select` retains only its opaque result
+    // until the response block exists and facet errors can be attached to it.
+    let mut facet_collection = None;
     // A grouped request has no ungrouped hit list and no `response` block at
     // all: `grouped` stands where `response` would, and `highlighting` covers
     // the documents the doclists rendered instead of `response.docs` (issue
@@ -461,26 +451,6 @@ pub(super) fn execute(state: &AppState, params: Params) -> Result<Value, WfError
     let (response, page) = match &grouped {
         Some(outcome) => (None, outcome.rendered.clone()),
         None => {
-            facet_field_plan = if facet_requested {
-                facet::plan_facet_fields(&state.index, &params)
-                    .ok()
-                    .filter(|plan| !plan.fields.is_empty())
-            } else {
-                None
-            };
-            // #295: an excluded facet.field (`{!ex=...}`) counts against a reduced
-            // filter set, which the fused aggregation (over the full q+fq set) cannot
-            // produce. Drop the plan so the dispatch below takes the unfused path,
-            // which builds a per-facet base. Multi-select facet requests are rare and
-            // not the hot path, so forgoing fusing for them is a deliberate
-            // simplification (see `FacetFieldsPlan::exclusion_active`).
-            if facet_field_plan
-                .as_ref()
-                .is_some_and(|plan| plan.exclusion_active)
-            {
-                facet_field_plan = None;
-            }
-
             // Bounded search (issue #242): only the first `start + rows` hits are
             // materialised; `num_found` and `max_score` still cover every match.
             let outcome = match &parsed {
@@ -490,7 +460,22 @@ pub(super) fn execute(state: &AppState, params: Params) -> Result<Value, WfError
                     top: Vec::new(),
                 },
                 Some((query, filter_queries)) => {
-                    let unfused = || {
+                    if facet_requested {
+                        let (outcome, collected) = facet::search_top(
+                            &state.index,
+                            &params,
+                            query.as_ref(),
+                            filter_queries,
+                            &sort,
+                            start.saturating_add(rows),
+                        )
+                        .map_err(|e| {
+                            WfError::internal("wayfinder::SearchError", e.to_string())
+                                .with_params(&params)
+                        })?;
+                        facet_collection = Some(collected);
+                        outcome
+                    } else {
                         state
                             .index
                             .search_top(
@@ -502,40 +487,7 @@ pub(super) fn execute(state: &AppState, params: Params) -> Result<Value, WfError
                             .map_err(|e| {
                                 WfError::internal("wayfinder::SearchError", e.to_string())
                                     .with_params(&params)
-                            })
-                    };
-                    // Attempted, not borrowed-through, so the plan can be dropped
-                    // below without fighting the borrow checker.
-                    let attempt = facet_field_plan.as_ref().map(|plan| {
-                        state.index.search_top_with_aggs(
-                            query.as_ref(),
-                            filter_queries,
-                            &sort,
-                            start.saturating_add(rows),
-                            plan.aggregations.clone(),
-                        )
-                    });
-                    match attempt {
-                        Some(Ok((outcome, aggs))) => {
-                            facet_field_aggs = Some(aggs);
-                            outcome
-                        }
-                        // An aggregation-class refusal (bucket limit, memory limit,
-                        // a malformed aggregation) is exactly the error the unfused
-                        // path raises out of `facet_counts` as a 400
-                        // `wayfinder::FacetError` with the `response` block attached
-                        // -- not the 500 `wayfinder::SearchError` it would become
-                        // here. Un-fuse and let that path answer it, so the wire
-                        // output stays bit-identical whichever way the request went.
-                        Some(Err(e)) if crate::core_index::is_aggregation_error(&e) => {
-                            facet_field_plan = None;
-                            unfused()?
-                        }
-                        Some(Err(e)) => {
-                            return Err(WfError::internal("wayfinder::SearchError", e.to_string())
-                                .with_params(&params));
-                        }
-                        None => unfused()?,
+                            })?
                     }
                 }
             };
@@ -679,32 +631,15 @@ pub(super) fn execute(state: &AppState, params: Params) -> Result<Value, WfError
     // they are emitted in, so `warnings` has to be known before the object
     // literal is written.
     let facet_result = if facet_requested {
-        // Issue #246: when the plan phase succeeded above, `facet.field`'s
-        // buckets are already computed and only need shaping; otherwise this
-        // is the unchanged, unfused path.
-        let counts = match (group_facet, &facet_field_plan, &facet_field_aggs) {
-            // `group.facet=true` (issue #338) counts distinct groups, not
-            // documents, which the fused document-count aggregation cannot
-            // produce — and never coexists with a plan anyway, since the
-            // grouped path skips the planning phase entirely.
-            (Some(group), _, _) => facet::facet_counts_grouped(
-                &state.index,
-                &state.config,
-                &params,
-                &default_field,
-                &base,
-                group,
-            ),
-            (None, Some(plan), Some(aggs)) => facet::facet_counts_fused(
-                &state.index,
-                &state.config,
-                &params,
-                &default_field,
-                &base,
-                (plan, aggs),
-            ),
-            _ => facet::facet_counts(&state.index, &state.config, &params, &default_field, &base),
-        };
+        let counts = facet::facet_counts(
+            &state.index,
+            &state.config,
+            &params,
+            &default_field,
+            &base,
+            facet_collection.as_ref(),
+            group_facet,
+        );
         Some(counts.map_err(|e| {
             // Issue #35: `facet.range` is detected before the base
             // query ever runs (Solr's own `facet_err_range_single.json`
