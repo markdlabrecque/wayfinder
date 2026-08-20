@@ -92,13 +92,13 @@ fn spellcheck(index: &CoreIndex, params: &Params) -> anyhow::Result<Value> {
         return Ok(empty());
     };
     let field_name = format!("spellcheck_{dictionary}");
-    if !index.resolves_field_name(&field_name) || params.get("spellcheck.q").is_none() {
+    if !index.resolves_field_name(&field_name) {
         return Ok(empty());
     }
+    let Some(text) = params.get("spellcheck.q") else {
+        return Ok(empty());
+    };
     let terms = index.field_terms(&field_name)?;
-    let text = params
-        .get("spellcheck.q")
-        .expect("spellcheck.q presence was checked above");
     let mut corrections = Vec::new();
 
     // ponytail: this is deliberately not Solr's configurable spellcheck

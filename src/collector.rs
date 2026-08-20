@@ -60,7 +60,7 @@ pub struct SortClause {
     /// `Absent` arm (finding 36/37): an absent column carries no type
     /// information of its own, so the clause has to carry it in from the
     /// schema instead (`sort::parse_spec` resolves it via
-    /// `WayfinderSchema::value_kind`, which already folds in any custom
+    /// `WayfinderSchema::resolved_value_kind`, which already folds in any custom
     /// `[[field_types]]` — those only ever resolve to `Text`, so there is no
     /// numeric/date custom-type case this can miss). See `Absent`'s doc
     /// comment for when that arm is actually reached.
