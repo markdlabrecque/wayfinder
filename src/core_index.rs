@@ -881,6 +881,15 @@ impl CoreIndex {
         self.state.pending_docs.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_scheduled_commit(&self) -> bool {
+        self.state
+            .deadline
+            .lock()
+            .expect("commit deadline mutex poisoned")
+            .is_some()
+    }
+
     /// Ids deleted by `delete_by_ids` over this process's lifetime
     /// (`UPDATE.updateHandler.deletesById`).
     pub fn deletes_by_id(&self) -> u64 {

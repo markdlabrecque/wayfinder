@@ -550,6 +550,10 @@ async fn extract_rejects_a_multipart_body_with_no_file_part() {
         "a multipart body with no file part must 400, got {status}: {body}"
     );
     assert_eq!(body["error"]["code"].as_i64(), Some(400));
+    assert_eq!(
+        root_error_class(&body),
+        Some("wayfinder::MissingContentStream")
+    );
 }
 
 #[tokio::test]
@@ -675,6 +679,56 @@ fn multipart_parts(parts: &[(&str, &str, Vec<u8>)]) -> Vec<u8> {
     }
     body.extend_from_slice(format!("--{}--\r\n", common::MULTIPART_BOUNDARY).as_bytes());
     body
+}
+
+fn root_error_class(body: &Value) -> Option<&str> {
+    body["error"]["metadata"]
+        .as_array()?
+        .windows(2)
+        .find(|pair| pair[0] == "root-error-class")?
+        .get(1)?
+        .as_str()
+}
+
+#[tokio::test]
+async fn extract_drains_a_non_file_part_before_extracting_a_file() {
+    let (app, _dir) = default_app().await;
+    let parts = vec![
+        ("metadata", "", b"discard me".to_vec()),
+        ("file", "sample.txt", b"drain then extract".to_vec()),
+    ];
+
+    let (status, body) = request_multipart_with_raw_body(
+        &app,
+        &format!("{CORE}/update/extract?extractOnly=true&extractFormat=text&wt=json"),
+        &multipart_parts(&parts),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "got {status}: {body}");
+    assert!(
+        body["file"]
+            .as_str()
+            .is_some_and(|file| file.contains("drain then extract")),
+        "the file after the non-file part must be extracted: {body}"
+    );
+}
+
+#[tokio::test]
+async fn unsupported_extract_format_is_an_invalid_param_in_extract_only_mode() {
+    let (app, _dir) = default_app().await;
+    let (status, body) = request_multipart(
+        &app,
+        &format!("{CORE}/update/extract?extractOnly=true&extractFormat=yaml&wt=json"),
+        "file",
+        "sample.txt",
+        "text/plain",
+        b"format validation",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got {status}: {body}");
+    assert_eq!(root_error_class(&body), Some("wayfinder::InvalidParam"));
 }
 
 /// The hole the single-part 413 test walked straight past: parts the handler
@@ -894,6 +948,11 @@ async fn extract_inflight_uploads_over_configured_max_is_503() {
          (intake saturated) even though the parse pool is free, got {status}: {body}"
     );
     assert_eq!(body["error"]["code"].as_i64(), Some(503), "body: {body}");
+    assert!(
+        body["responseHeader"].get("params").is_none(),
+        "intake saturation must retain the update-style NoParams envelope: {body}"
+    );
+    assert_eq!(root_error_class(&body), Some("extraction-inflight-busy"));
 
     drop(inflight);
 
