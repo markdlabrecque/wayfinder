@@ -39,8 +39,7 @@ impl UpdatePolicy {
     pub(crate) fn finish(self, index: &CoreIndex) -> anyhow::Result<()> {
         if self.commit_requested {
             index.commit()?;
-        }
-        if let Some(ms) = self.commit_within_ms {
+        } else if let Some(ms) = self.commit_within_ms {
             index.schedule_commit(ms);
         }
         Ok(())
@@ -73,4 +72,58 @@ pub(crate) fn success_body(params: &Params) -> Value {
             "QTime": 0,
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use crate::config::ServerConfig;
+
+    use super::*;
+
+    const SCHEMA: &str = r#"
+[core]
+name = "content"
+unique_key = "id"
+default_field = "body"
+
+[[fields]]
+name = "id"
+type = "string"
+stored = true
+required = true
+
+[[fields]]
+name = "body"
+type = "text_en"
+stored = true
+"#;
+
+    fn test_server() -> (crate::AppServer, TempDir) {
+        let dir = TempDir::new().expect("temp dir");
+        let schema = dir.path().join("schema.toml");
+        std::fs::write(&schema, SCHEMA).expect("write schema");
+        let data = dir.path().join("data");
+        std::fs::create_dir(&data).expect("create data dir");
+        let server = crate::build(&schema, &data, ServerConfig::default()).expect("build app");
+        (server, dir)
+    }
+
+    #[test]
+    fn explicit_commit_absorbs_commit_within() {
+        for immediate in ["commit=true", "softCommit=true"] {
+            let (server, _dir) = test_server();
+            let index = &server.shutdown.0.index;
+            let params = Params::parse(&format!("{immediate}&commitWithin=60000"));
+            let policy = UpdatePolicy::from_params(&params).expect("parse update policy");
+
+            policy.finish(index).expect("finish update policy");
+
+            assert!(
+                !index.has_scheduled_commit(),
+                "{immediate} must absorb commitWithin instead of arming another deadline"
+            );
+        }
+    }
 }

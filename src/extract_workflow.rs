@@ -60,9 +60,11 @@ impl Intake {
         let temp = NamedTempFile::new().map_err(|error| {
             extraction_io(params, format!("creating upload temp file: {error}"))
         })?;
-        let inflight = runtime
-            .try_acquire_inflight()
-            .ok_or_else(|| WfError::from(ExtractError::InflightUploadsBusy).with_params(params))?;
+        let inflight = runtime.try_acquire_inflight().ok_or_else(|| {
+            WfError::from(ExtractError::InflightUploadsBusy)
+                .with_params(params)
+                .envelope(Envelope::NoParams)
+        })?;
         Ok(Self {
             temp,
             consumed: 0,
@@ -118,7 +120,7 @@ impl ResidentUpload {
     /// permit that bounds it. The temporary file is no longer needed once the
     /// bytes are resident, so it is removed here rather than at the end of the
     /// request.
-    fn read(self, params: &Params) -> Result<ResidentBytes, WfError> {
+    async fn read(self, params: &Params) -> Result<ResidentBytes, WfError> {
         // ponytail: the document is streamed to a temp file and then read back
         // whole, because `Extractor::extract` takes `&[u8]`. Bounded by
         // `extraction.max_body_bytes` (32 MiB by default), so it is a real
@@ -132,12 +134,21 @@ impl ResidentUpload {
         // first extractor that can work incrementally (the phase-2a ZIP walker,
         // per `ZipBudget`'s documented call sequence) wants a reader, at which
         // point `ExtractInput` grows a stream variant and this read goes away.
-        let bytes = std::fs::read(self.temp.path())
-            .map_err(|error| extraction_io(params, format!("reading upload temp file: {error}")))?;
-        Ok(ResidentBytes {
-            bytes,
-            _inflight: self.inflight,
+        let result = tokio::task::spawn_blocking(move || {
+            let bytes = std::fs::read(self.temp.path())?;
+            Ok::<_, std::io::Error>(ResidentBytes {
+                bytes,
+                _inflight: self.inflight,
+            })
         })
+        .await
+        .map_err(|error| {
+            extraction_io(
+                params,
+                format!("joining upload temp-file read task: {error}"),
+            )
+        })?;
+        result.map_err(|error| extraction_io(params, format!("reading upload temp file: {error}")))
     }
 }
 
@@ -220,7 +231,7 @@ impl<'a> Workflow<'a> {
             .unwrap_or(&metadata.file_name)
             .to_string();
         let stream_size = upload.stream_size();
-        let resident = upload.read(self.params)?;
+        let resident = upload.read(self.params).await?;
 
         let job_type = metadata.declared_type.clone();
         let job_resource = resource_name.clone();
@@ -248,8 +259,7 @@ impl<'a> Workflow<'a> {
         // Index-only params remain inert on `extractOnly=true`, and malformed
         // documents fail before these are validated, matching the old route.
         let update_policy = UpdatePolicy::from_params(self.params)?;
-        let fields = extract_cell_fields(doc, self.params, &self.index.wf_schema)
-            .map_err(|error| error.envelope(Envelope::NoParams))?;
+        let fields = extract_cell_fields(doc, self.params, &self.index.wf_schema)?;
         let mut object = Map::new();
         for (name, mut values) in fields {
             let value = if values.len() == 1 {
@@ -360,8 +370,13 @@ fn extract_cell_fields(
     params: &Params,
     schema: &WayfinderSchema,
 ) -> Result<Vec<(String, Vec<Value>)>, WfError> {
-    let lowernames = params.bool_or("lowernames", true)?;
-    let capture_attr = params.bool_or("captureAttr", true)?;
+    let bool_param = |key: &str, default: bool| {
+        params
+            .bool_or(key, default)
+            .map_err(|error| error.envelope(Envelope::NoParams))
+    };
+    let lowernames = bool_param("lowernames", true)?;
+    let capture_attr = bool_param("captureAttr", true)?;
     let uprefix = params.get("uprefix").unwrap_or(EXTRACT_DEFAULT_UPREFIX);
     let uprefix_set = !uprefix.is_empty();
 
@@ -419,14 +434,15 @@ fn extract_cell_fields(
 
 #[cfg(test)]
 mod tests {
-    use axum::body::Bytes;
+    use axum::body::{Bytes, to_bytes};
+    use axum::response::IntoResponse;
     use tempfile::TempDir;
 
     use crate::config::{Extraction, ServerConfig};
     use crate::extract::{ChunkSource, ExtractError, ExtractLimits, ExtractionRuntime};
     use crate::params::Params;
 
-    use super::{Intake, UploadMetadata, Workflow};
+    use super::{Intake, UploadMetadata, Workflow, extract_cell_fields};
 
     const SCHEMA: &str = r#"
 [core]
@@ -572,6 +588,36 @@ stored = true
     }
 
     #[tokio::test]
+    async fn workflow_releases_intake_after_a_successful_parse() {
+        let (server, _dir) = test_server(one_upload_slot());
+        let state = &server.shutdown.0;
+        let params = Params::parse("extractOnly=true").allow_omit_header();
+        let workflow = Workflow::new(
+            &state.extraction,
+            &state.index,
+            state.extract_limits,
+            &params,
+        )
+        .expect("build workflow");
+        let upload = stored_upload(&workflow, b"workflow text").await;
+
+        assert!(
+            state.extraction.try_acquire_inflight().is_none(),
+            "the resident upload must still own the only intake slot"
+        );
+
+        workflow
+            .finish(upload, metadata("sample.txt", "text/plain"))
+            .await
+            .expect("extract document");
+
+        assert!(
+            state.extraction.try_acquire_inflight().is_some(),
+            "a successful parse must hand the intake slot back"
+        );
+    }
+
+    #[tokio::test]
     async fn workflow_releases_intake_after_an_unsupported_document() {
         let (server, _dir) = test_server(one_upload_slot());
         let state = &server.shutdown.0;
@@ -601,6 +647,37 @@ stored = true
             state.extraction.try_acquire_inflight().is_some(),
             "a failed parse must hand the intake slot back"
         );
+    }
+
+    #[tokio::test]
+    async fn extract_cell_boolean_errors_own_the_no_params_envelope() {
+        let (server, _dir) = test_server(ServerConfig::default());
+        let state = &server.shutdown.0;
+        let limits = ExtractLimits::default();
+        let budget = crate::extract::Budget::new(limits);
+        let doc = crate::extract::extract_document(
+            Some("text/plain"),
+            "sample.txt",
+            b"workflow text",
+            &budget,
+        )
+        .expect("extract test document");
+
+        for query in ["lowernames=maybe", "captureAttr=maybe"] {
+            let params = Params::parse(query).allow_omit_header();
+            let response = extract_cell_fields(&doc, &params, &state.index.wf_schema)
+                .expect_err("invalid boolean must fail")
+                .into_response();
+            let bytes = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read error response");
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON error");
+
+            assert!(
+                body["responseHeader"].get("params").is_none(),
+                "{query} must use the update-style NoParams envelope: {body}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -373,6 +373,27 @@ async fn uprefix_unset_errors_on_an_unknown_field() {
     assert_eq!(body["error"]["code"].as_i64(), Some(400));
 }
 
+#[tokio::test]
+async fn indexing_mode_ignores_extract_format() {
+    let (app, _dir) = index_app().await;
+    let bytes = input_bytes("sample.txt");
+    let (status, body) = request_multipart(
+        &app,
+        "content/update/extract?extractFormat=yaml&literal.id=format-index&fmap.content=body&commit=true&wt=json",
+        "file",
+        "sample.txt",
+        "text/plain",
+        &bytes,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {status}: {body}");
+
+    let (status, selected) =
+        request(&app, "GET", "select?q=id:format-index&fl=id&wt=json", None).await;
+    assert_eq!(status, StatusCode::OK, "got {status}: {selected}");
+    assert_eq!(selected["response"]["numFound"], 1);
+}
+
 // --- commit semantics (same path as /update) --------------------------------
 
 /// Without `commit`/`softCommit`, the indexed document is pending and not yet
