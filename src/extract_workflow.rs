@@ -102,6 +102,54 @@ pub(crate) struct ResidentUpload {
     inflight: InflightUploadPermit,
 }
 
+impl ResidentUpload {
+    /// How many bytes the selected part actually streamed.
+    fn stream_size(&self) -> u64 {
+        self.stream_size
+    }
+
+    /// Reads the temporary file back into memory, pairing the buffer with the
+    /// permit that bounds it. The temporary file is no longer needed once the
+    /// bytes are resident, so it is removed here rather than at the end of the
+    /// request.
+    fn read(self, params: &Params) -> Result<ResidentBytes, WfError> {
+        // ponytail: the document is streamed to a temp file and then read back
+        // whole, because `Extractor::extract` takes `&[u8]`. Bounded by
+        // `extraction.max_body_bytes` (32 MiB by default), so it is a real
+        // ceiling per request rather than an unbounded one -- and bounded across
+        // requests by the in-flight-upload count `Intake` acquired (issue #273),
+        // so total resident bytes are `max_inflight_uploads x max_body_bytes`,
+        // not `max_body_bytes x HTTP concurrency`.
+        //
+        // What remains is that this is still a *full copy* in RAM, and the temp
+        // file is currently only buying the streaming *count*. Trigger: the
+        // first extractor that can work incrementally (the phase-2a ZIP walker,
+        // per `ZipBudget`'s documented call sequence) wants a reader, at which
+        // point `ExtractInput` grows a stream variant and this read goes away.
+        let bytes = std::fs::read(self.temp.path())
+            .map_err(|error| extraction_io(params, format!("reading upload temp file: {error}")))?;
+        Ok(ResidentBytes {
+            bytes,
+            _inflight: self.inflight,
+        })
+    }
+}
+
+/// The upload's resident bytes and the intake permit that bounds them, as one
+/// value. The permit is private and has no accessor, so upload capacity cannot
+/// be released while the buffer it accounts for is still readable: whatever
+/// owns the bytes through the parse owns the permit for exactly as long.
+pub(crate) struct ResidentBytes {
+    bytes: Vec<u8>,
+    _inflight: InflightUploadPermit,
+}
+
+impl ResidentBytes {
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 /// The extraction workflow. Callers supply multipart parts through
 /// [`Intake`], then hand the selected upload back through [`Self::finish`].
 pub(crate) struct Workflow<'a> {
@@ -165,30 +213,8 @@ impl<'a> Workflow<'a> {
             .get("resource.name")
             .unwrap_or(&metadata.file_name)
             .to_string();
-        let ResidentUpload {
-            temp,
-            stream_size,
-            inflight,
-        } = upload;
-        // ponytail: the document is streamed to a temp file and then read back
-        // whole, because `Extractor::extract` takes `&[u8]`. Bounded by
-        // `extraction.max_body_bytes` (32 MiB by default), so it is a real
-        // ceiling per request rather than an unbounded one -- and bounded across
-        // requests by the in-flight-upload count `Intake` acquired (issue #273),
-        // so total resident bytes are `max_inflight_uploads x max_body_bytes`,
-        // not `max_body_bytes x HTTP concurrency`. The `inflight` slot is held
-        // across this read and the parse because the `bytes` it bounds stay
-        // resident for both, which is why it moves into the extraction closure
-        // below rather than being dropped here.
-        //
-        // What remains is that this is still a *full copy* in RAM, and the temp
-        // file is currently only buying the streaming *count*. Trigger: the
-        // first extractor that can work incrementally (the phase-2a ZIP walker,
-        // per `ZipBudget`'s documented call sequence) wants a reader, at which
-        // point `ExtractInput` grows a stream variant and this read goes away.
-        let bytes = std::fs::read(temp.path()).map_err(|error| {
-            extraction_io(self.params, format!("reading upload temp file: {error}"))
-        })?;
+        let stream_size = upload.stream_size();
+        let resident = upload.read(self.params)?;
 
         let job_type = metadata.declared_type.clone();
         let job_resource = resource_name.clone();
@@ -196,12 +222,9 @@ impl<'a> Workflow<'a> {
         let doc = self
             .runtime
             .spawn_extraction(limits.deadline, move || {
-                // Tie intake admission to the resident byte buffer. The slot
-                // cannot be released before parsing without moving this guard
-                // out of the same closure that owns `bytes`.
-                let _inflight = inflight;
                 let budget = extract::Budget::new(limits);
-                extract::extract_document(Some(&job_type), &job_resource, &bytes, &budget)
+                let bytes = resident.as_slice();
+                extract::extract_document(Some(&job_type), &job_resource, bytes, &budget)
             })
             .await
             .and_then(|result| result)
@@ -393,7 +416,7 @@ mod tests {
     use axum::body::Bytes;
     use tempfile::TempDir;
 
-    use crate::config::ServerConfig;
+    use crate::config::{Extraction, ServerConfig};
     use crate::extract::{ChunkSource, ExtractError, ExtractLimits, ExtractionRuntime};
     use crate::params::Params;
 
@@ -437,14 +460,27 @@ stored = true
         }
     }
 
-    fn test_server() -> (crate::AppServer, TempDir) {
+    fn test_server(config: ServerConfig) -> (crate::AppServer, TempDir) {
         let dir = TempDir::new().expect("temp dir");
         let schema = dir.path().join("schema.toml");
         std::fs::write(&schema, SCHEMA).expect("write schema");
         let data = dir.path().join("data");
         std::fs::create_dir(&data).expect("create data dir");
-        let server = crate::build(&schema, &data, ServerConfig::default()).expect("build app");
+        let server = crate::build(&schema, &data, config).expect("build app");
         (server, dir)
+    }
+
+    /// One intake slot, so acquiring it is observable: with the default 8 a
+    /// permit that is leaked, or released too early, leaves a slot free either
+    /// way and nothing can be concluded from `try_acquire_inflight`.
+    fn one_upload_slot() -> ServerConfig {
+        ServerConfig {
+            extraction: Extraction {
+                max_inflight_uploads: 1,
+                ..Extraction::default()
+            },
+            ..ServerConfig::default()
+        }
     }
 
     async fn stored_upload(workflow: &Workflow<'_>, bytes: &'static [u8]) -> super::ResidentUpload {
@@ -466,7 +502,7 @@ stored = true
 
     #[tokio::test]
     async fn workflow_renders_extract_only_documents() {
-        let (server, _dir) = test_server();
+        let (server, _dir) = test_server(ServerConfig::default());
         let state = &server.shutdown.0;
         let params = Params::parse("extractOnly=true&extractFormat=text").allow_omit_header();
         let workflow = Workflow::new(
@@ -493,7 +529,7 @@ stored = true
 
     #[tokio::test]
     async fn workflow_maps_indexes_and_commits_extracted_documents() {
-        let (server, _dir) = test_server();
+        let (server, _dir) = test_server(ServerConfig::default());
         let state = &server.shutdown.0;
         let params =
             Params::parse("literal.id=direct&fmap.content=body&commit=true").allow_omit_header();
@@ -531,7 +567,7 @@ stored = true
 
     #[tokio::test]
     async fn workflow_releases_intake_after_an_unsupported_document() {
-        let (server, _dir) = test_server();
+        let (server, _dir) = test_server(one_upload_slot());
         let state = &server.shutdown.0;
         let params = Params::parse("extractOnly=true").allow_omit_header();
         let workflow = Workflow::new(
@@ -544,12 +580,21 @@ stored = true
         let upload = stored_upload(&workflow, b"\x89PNG\r\n\x1a\n").await;
 
         assert!(
+            state.extraction.try_acquire_inflight().is_none(),
+            "the resident upload must still own the only intake slot"
+        );
+
+        assert!(
             workflow
                 .finish(upload, metadata("image.png", "image/png"))
                 .await
                 .is_err()
         );
-        assert!(state.extraction.try_acquire_inflight().is_some());
+
+        assert!(
+            state.extraction.try_acquire_inflight().is_some(),
+            "a failed parse must hand the intake slot back"
+        );
     }
 
     #[tokio::test]
