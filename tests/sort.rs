@@ -563,7 +563,8 @@ async fn omitting_sort_keeps_the_deterministic_score_then_doc_order_tie_break() 
 async fn an_empty_sort_param_behaves_as_no_sort() {
     let (app, _dir) = indexed_app().await;
 
-    // No fixture: `check_sort` already treats an empty clause as a no-op, and
+    // No fixture: `sort::parse_spec` already treats an empty clause as a no-op,
+    // and
     // this pins that adding ordering does not turn it into a 400 or a reorder.
     let (status, body) = get(&app, "select?q=*:*&sort=&rows=10&wt=json").await;
 
@@ -903,7 +904,7 @@ async fn a_double_comma_glues_onto_the_next_token_and_is_a_field_error() {
 
 // --- B. multi-clause / whitespace `pos` (finding 35) -------------------------
 //
-// These are pins, not red cases: the arithmetic in `check_sort` was already
+// These are pins, not red cases: the arithmetic in `sort::parse_spec` was
 // right (finding 20's note). They must survive the grammar rewrite that fixes
 // section A.
 

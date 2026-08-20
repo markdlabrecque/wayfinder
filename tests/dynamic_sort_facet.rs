@@ -1,8 +1,8 @@
 //! Issue #66 — `sort` and `facet.field` must resolve a field that only exists
 //! via a `[[dynamic_fields]]` pattern match, not just a `[[fields]]` entry.
 //!
-//! Confirmed bug (read from source before writing these): `check_sort`
-//! (`src/lib.rs`) resolves the sort field via
+//! Confirmed bug (read from source before writing these): sort parsing (now
+//! `sort::parse_spec` in `src/sort.rs`) resolves the sort field via
 //! `state.index.wf_schema.fields.iter().find(|f| f.name == field_name)` —
 //! `wf_schema.fields` is only ever populated from `[[fields]]`, `match_dynamic`
 //! is never consulted. `check_facetable` (`src/facet.rs`) does the same thing

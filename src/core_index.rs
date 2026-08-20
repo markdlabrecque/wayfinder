@@ -6910,7 +6910,7 @@ fast = true
 
         // The exact base-query shape `facet::facet_fields` builds today:
         // `q` and every `fq` as plain `Must` clauses (see `narrowed`/`base`
-        // in `src/facet.rs` and `src/lib.rs`'s `select`).
+        // in `src/facet.rs` and `src/select_workflow.rs`'s `execute`).
         let base_query = BooleanQuery::from(vec![
             (Occur::Must, query.box_clone()),
             (Occur::Must, fq_for_base),
