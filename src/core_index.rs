@@ -3235,11 +3235,11 @@ impl CoreIndex {
     ///
     /// ponytail: `fused_bucket_limit`'s `n * MAX_FACET_TERMS` is the right
     /// budget only while every aggregation handed in is a
-    /// [`terms_aggregation`] — `size == MAX_FACET_TERMS`, no sub-aggregations
+    /// [`terms_aggregation`] — `size == MAX_FACET_TERMS`, no sub-aggregations —
     /// which is exactly what the facet module's private planner builds and all
-    /// this method has any caller for today. It takes arbitrary `Aggregations`,
-    /// though, and the equivalence breaks for anything else: a
-    /// sub-aggregation makes one entry's `get_bucket_count` `1 +
+    /// this method has any caller for today. It takes arbitrary `Aggregations`
+    /// though, and the equivalence breaks for anything else: a sub-aggregation
+    /// makes one entry's `get_bucket_count` `1 +
     /// sub.get_bucket_count()` *per bucket*
     /// (`agg_result.rs`/`intermediate_agg_result.rs`), far past its own
     /// `size`, so N such aggregations would blow a budget of `N *
@@ -3269,10 +3269,10 @@ impl CoreIndex {
         // ceiling into an unbounded, request-controlled one — the fused pass
         // really would be holding N * 500MB. The divergence is handled at the
         // other end instead: the facet module recognises the aggregation-class
-        // error and re-runs the request unfused, where the
-        // sequential per-pass budgets apply exactly as they always did and the
-        // response — status, error class, envelope, or a 200 with real counts
-        // — is whatever the old path would have produced.
+        // error and re-runs the request unfused, where the sequential per-pass
+        // budgets apply exactly as they always did and the response — status,
+        // error class, envelope, or a 200 with real counts — is whatever the
+        // old path would have produced.
         let limits = AggregationLimitsGuard::new(None, Some(fused_bucket_limit(aggs.len())));
         let collectors = (
             TopScoredHits::new(sort.to_vec(), limit),
@@ -5154,8 +5154,8 @@ fn fused_bucket_limit(agg_count: usize) -> u32 {
 /// The `TermsAggregation` request one `facet.field` needs, over the Tantivy
 /// column `field_name`. Shared by [`CoreIndex::term_facet`]'s own standalone
 /// pass and by the facet module's private planner, which folds one of these
-/// per requested field into a single fused aggregation request, so
-/// the two can never ask for different shapes.
+/// per requested field into a single fused aggregation request (issue #246),
+/// so the two can never ask for different shapes.
 pub(crate) fn terms_aggregation(field_name: &str) -> Aggregation {
     Aggregation {
         agg: AggregationVariants::Terms(TermsAggregation {
@@ -5181,9 +5181,9 @@ pub(crate) fn terms_aggregation(field_name: &str) -> Aggregation {
 /// Turns one named terms-aggregation result into `term_facet`'s
 /// `(rendered term, sort key, count)` triples. Shared by
 /// [`CoreIndex::term_facet`]'s standalone pass and by the facet module's
-/// private renderer, which reads the buckets from the fused `/select` pass (issue
-/// #246) -- the rendering rules below are wire contract, so both paths have to
-/// go through the one copy of them.
+/// private renderer, which reads the buckets from the fused `/select` pass
+/// (issue #246) -- the rendering rules below are wire contract, so both paths
+/// have to go through the one copy of them.
 pub(crate) fn render_term_facet_buckets(
     field_name: &str,
     kind: Option<ValueKind>,

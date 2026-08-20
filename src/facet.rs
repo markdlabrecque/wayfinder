@@ -246,7 +246,7 @@ fn facet_counts_inner(
     // placed into the `json!` object in the unchanged key order.
     //
     // `fused` carries issue #246's already-computed `facet.field` buckets when
-    // `select` was able to plan them before the main search; `None` is the
+    // `search_top` was able to plan them before the main search; `None` is the
     // unfused path, which runs `facet_fields`' own aggregation passes here.
     let facet_ranges = facet_ranges(index, params, base, nl, group)
         .map_err(|e| anyhow::Error::new(PreQueryFacetError(e)))?;
@@ -578,8 +578,8 @@ struct FacetFieldsPlan {
     warnings: Vec<String>,
     /// True when any planned facet.field carries a non-empty `{!ex=...}`
     /// (#295): such a facet counts a reduced filter set the fused `/select`
-    /// aggregation (against the full q+fq set) cannot provide, so `select`
-    /// falls back to the unfused path rather than fusing.
+    /// aggregation (against the full q+fq set) cannot provide, so
+    /// [`search_top`] falls back to the unfused path rather than fusing.
     exclusion_active: bool,
 }
 
