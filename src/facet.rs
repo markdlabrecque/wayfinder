@@ -134,7 +134,17 @@ impl JsonNl {
 /// Opaque facet data retained from the main search. Aggregation plans and
 /// results stay private to this module.
 pub(crate) struct FacetCollection {
-    fused: Option<FusedFacetFields>,
+    fields: FacetFieldCollection,
+}
+
+enum FacetFieldCollection {
+    /// Planning failed, so rendering must re-plan at the established point in
+    /// the request lifecycle and surface the original facet error there.
+    Unplanned,
+    /// Planning succeeded, but field counts must run as standalone passes.
+    Planned(FacetFieldsPlan),
+    /// Planning and fused collection both succeeded.
+    Fused(FusedFacetFields),
 }
 
 struct FusedFacetFields {
@@ -154,15 +164,28 @@ pub(crate) fn search_top(
     sort: &[SortClause],
     limit: usize,
 ) -> Result<(TopOutcome, FacetCollection)> {
-    let plan = plan_facet_fields(index, params)
-        .ok()
-        .filter(|plan| !plan.fields.is_empty() && !plan.exclusion_active);
-
-    execute_search(
-        plan,
-        |aggregations| index.search_top_with_aggs(query, filter_queries, sort, limit, aggregations),
-        || index.search_top(query, filter_queries, sort, limit),
-    )
+    let plan = plan_facet_fields(index, params).ok();
+    if plan
+        .as_ref()
+        .is_some_and(|plan| !plan.fields.is_empty() && !plan.exclusion_active)
+    {
+        execute_search(
+            plan,
+            |aggregations| {
+                index.search_top_with_aggs(query, filter_queries, sort, limit, aggregations)
+            },
+            || index.search_top(query, filter_queries, sort, limit),
+        )
+    } else {
+        let fields = plan.map_or(
+            FacetFieldCollection::Unplanned,
+            FacetFieldCollection::Planned,
+        );
+        Ok((
+            index.search_top(query, filter_queries, sort, limit)?,
+            FacetCollection { fields },
+        ))
+    }
 }
 
 fn execute_search<Fused, Unfused>(
@@ -180,21 +203,29 @@ where
     Unfused: FnOnce() -> Result<TopOutcome>,
 {
     if let Some(plan) = plan {
-        match fused(plan.aggregations.clone()) {
-            Ok((top, results)) => {
-                return Ok((
-                    top,
-                    FacetCollection {
-                        fused: Some(FusedFacetFields { plan, results }),
-                    },
-                ));
-            }
-            Err(error) if is_aggregation_error(&error) => {}
-            Err(error) => return Err(error),
-        }
+        return match fused(plan.aggregations.clone()) {
+            Ok((top, results)) => Ok((
+                top,
+                FacetCollection {
+                    fields: FacetFieldCollection::Fused(FusedFacetFields { plan, results }),
+                },
+            )),
+            Err(error) if is_aggregation_error(&error) => Ok((
+                unfused()?,
+                FacetCollection {
+                    fields: FacetFieldCollection::Planned(plan),
+                },
+            )),
+            Err(error) => Err(error),
+        };
     }
 
-    Ok((unfused()?, FacetCollection { fused: None }))
+    Ok((
+        unfused()?,
+        FacetCollection {
+            fields: FacetFieldCollection::Unplanned,
+        },
+    ))
 }
 
 fn is_aggregation_error(error: &anyhow::Error) -> bool {
@@ -216,10 +247,15 @@ pub fn facet_counts(
     collection: Option<&FacetCollection>,
     group: Option<&crate::grouping::GroupFacet>,
 ) -> Result<(Value, Vec<String>)> {
-    let fused = collection
-        .and_then(|collection| collection.fused.as_ref())
-        .map(|fused| (&fused.plan, &fused.results));
-    facet_counts_inner(index, config, params, default_field, base, fused, group)
+    facet_counts_inner(
+        index,
+        config,
+        params,
+        default_field,
+        base,
+        collection.map(|collection| &collection.fields),
+        group,
+    )
 }
 
 fn facet_counts_inner(
@@ -228,10 +264,7 @@ fn facet_counts_inner(
     params: &Params,
     default_field: &str,
     base: &BaseClauses,
-    fused: Option<(
-        &FacetFieldsPlan,
-        &tantivy::aggregation::agg_result::AggregationResults,
-    )>,
+    collected: Option<&FacetFieldCollection>,
     group: Option<&crate::grouping::GroupFacet>,
 ) -> Result<(Value, Vec<String>)> {
     let nl = JsonNl::from_params(params);
@@ -245,9 +278,9 @@ fn facet_counts_inner(
     // results are hoisted into bindings here, evaluated range-first, and only
     // placed into the `json!` object in the unchanged key order.
     //
-    // `fused` carries issue #246's already-computed `facet.field` buckets when
-    // `search_top` was able to plan them before the main search; `None` is the
-    // unfused path, which runs `facet_fields`' own aggregation passes here.
+    // `collected` carries either issue #246's already-computed field buckets
+    // or the validated plan retained when fusion was ineligible or refused.
+    // Requests that did not traverse [`search_top`] still plan here.
     let facet_ranges = facet_ranges(index, params, base, nl, group)
         .map_err(|e| anyhow::Error::new(PreQueryFacetError(e)))?;
     // #295: the `{!tag=...}` each `fq` carries, so a facet's `{!ex=...}` can
@@ -266,11 +299,16 @@ fn facet_counts_inner(
     // `facet.field`/`facet.query` errors, matching Solr's
     // `heatmap_unknown_field.json` (which carries `response` + `error`).
     let facet_heatmaps = crate::heatmap::facet_heatmaps(index, params, base)?;
-    let (facet_fields, warnings) = match fused {
-        Some((plan, agg_results)) => {
-            render_facet_fields(index, config, params, base, plan, agg_results)?
+    let (facet_fields, warnings) = match collected {
+        Some(FacetFieldCollection::Fused(fused)) => {
+            render_facet_fields(index, config, params, base, &fused.plan, &fused.results)?
         }
-        None => facet_fields(index, config, params, base, nl, &fq_tags, group)?,
+        Some(FacetFieldCollection::Planned(plan)) => {
+            facet_fields_from_plan(index, config, base, nl, &fq_tags, group, plan)?
+        }
+        Some(FacetFieldCollection::Unplanned) | None => {
+            facet_fields(index, config, params, base, nl, &fq_tags, group)?
+        }
     };
     let mut counts = Map::new();
     counts.insert("facet_queries".to_string(), facet_queries);
@@ -467,6 +505,18 @@ fn facet_fields(
     group: Option<&crate::grouping::GroupFacet>,
 ) -> Result<(Value, Vec<String>)> {
     let plan = plan_facet_fields(index, params)?;
+    facet_fields_from_plan(index, config, base, nl, fq_tags, group, &plan)
+}
+
+fn facet_fields_from_plan(
+    index: &CoreIndex,
+    config: &ServerConfig,
+    base: &BaseClauses,
+    nl: JsonNl,
+    fq_tags: &[Vec<String>],
+    group: Option<&crate::grouping::GroupFacet>,
+    plan: &FacetFieldsPlan,
+) -> Result<(Value, Vec<String>)> {
     if plan.fields.is_empty() {
         return Ok((json!({}), Vec::new()));
     }
@@ -1635,6 +1685,54 @@ fast = true
         }
     }
 
+    #[test]
+    fn exclusion_driven_standalone_counting_reuses_the_retained_plan() {
+        let (_dir, index) = open_plan_render_corpus();
+        let config = ServerConfig::default();
+        let params =
+            Params::parse("facet.field={!ex=selected}category&fq={!tag=selected}category:animals");
+        let query = index.parse_query("quick", "body").expect("parse query");
+        let filter_queries: Vec<Box<dyn Query>> = params
+            .get_all("fq")
+            .into_iter()
+            .map(|fq| index.parse_query(fq, "body").expect("parse fq"))
+            .collect();
+        let base: BaseClauses = std::iter::once((Occur::Must, query.box_clone()))
+            .chain(
+                filter_queries
+                    .iter()
+                    .map(|fq| (Occur::Must, fq.box_clone())),
+            )
+            .collect();
+
+        let (_top, collection) =
+            search_top(&index, &params, query.as_ref(), &filter_queries, &[], 5)
+                .expect("excluded facet search");
+        let FacetFieldCollection::Planned(mut plan) = collection.fields else {
+            panic!("an excluded facet must retain its ineligible fused plan");
+        };
+        plan.warnings = vec!["retained plan".to_string()];
+        let collection = FacetCollection {
+            fields: FacetFieldCollection::Planned(plan),
+        };
+
+        let (_, warnings) = facet_counts(
+            &index,
+            &config,
+            &params,
+            "body",
+            &base,
+            Some(&collection),
+            None,
+        )
+        .expect("standalone facet counts");
+        assert_eq!(
+            warnings,
+            vec!["retained plan"],
+            "standalone counting must consume the retained plan rather than planning again"
+        );
+    }
+
     /// Fusing the `facet.field` counts into the main search is an execution
     /// strategy, not a wire-format change: the same request rendered through
     /// the retained fused collection and through the standalone counting
@@ -1684,7 +1782,7 @@ fast = true
                     search_top(&index, &params, query.as_ref(), &filter_queries, &[], 5)
                         .unwrap_or_else(|e| panic!("facet search for `{qs}`: {e}"));
                 assert!(
-                    collection.fused.is_some(),
+                    matches!(&collection.fields, FacetFieldCollection::Fused(_)),
                     "`{qs}` must fuse, or the comparison below is unfused against unfused"
                 );
 
@@ -1736,8 +1834,8 @@ fast = true
 
         assert_eq!(top.num_found, 30);
         assert!(
-            collection.fused.is_none(),
-            "the refused aggregation must not reach facet rendering"
+            matches!(&collection.fields, FacetFieldCollection::Planned(_)),
+            "the refused aggregation must retain its plan for standalone counting"
         );
     }
 
