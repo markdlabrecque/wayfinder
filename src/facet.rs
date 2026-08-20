@@ -1635,6 +1635,85 @@ fast = true
         }
     }
 
+    /// Fusing the `facet.field` counts into the main search is an execution
+    /// strategy, not a wire-format change: the same request rendered through
+    /// the retained fused collection and through the standalone counting
+    /// passes must produce byte-identical `facet_counts` and warnings. The
+    /// aggregation-refusal fallback (and every `{!ex=...}`, grouped or
+    /// unplannable request that lands unfused) depends on that equivalence,
+    /// so it is asserted here across string, numeric, multi-field and
+    /// filter-query cases rather than assumed.
+    #[test]
+    fn fused_and_unfused_collection_render_identical_facet_counts() {
+        let (_dir, index) = open_plan_render_corpus();
+        let config = ServerConfig::default();
+        let query = index.parse_query("quick", "body").expect("parse query");
+
+        for query_string in [
+            "facet.field=category",
+            "facet.field=views",
+            "facet.field=category&facet.field=views",
+            "facet.field=category&facet.mincount=2",
+            "facet.field=category&facet.limit=1",
+            "facet.field=category&facet.sort=index",
+            "facet.field=category&facet.missing=true",
+            "facet.field=views&facet.missing=true&facet.limit=-1",
+            "facet.field={!key=mylabel}category",
+        ] {
+            for with_fq in [false, true] {
+                let qs = if with_fq {
+                    format!("{query_string}&fq=category:animals")
+                } else {
+                    query_string.to_string()
+                };
+                let params = Params::parse(&qs);
+                let filter_queries: Vec<Box<dyn Query>> = params
+                    .get_all("fq")
+                    .into_iter()
+                    .map(|fq| index.parse_query(fq, "body").expect("parse fq"))
+                    .collect();
+                let base: BaseClauses = std::iter::once((Occur::Must, query.box_clone()))
+                    .chain(
+                        filter_queries
+                            .iter()
+                            .map(|fq| (Occur::Must, fq.box_clone())),
+                    )
+                    .collect();
+
+                let (_top, collection) =
+                    search_top(&index, &params, query.as_ref(), &filter_queries, &[], 5)
+                        .unwrap_or_else(|e| panic!("facet search for `{qs}`: {e}"));
+                assert!(
+                    collection.fused.is_some(),
+                    "`{qs}` must fuse, or the comparison below is unfused against unfused"
+                );
+
+                let (fused_counts, fused_warnings) = facet_counts(
+                    &index,
+                    &config,
+                    &params,
+                    "body",
+                    &base,
+                    Some(&collection),
+                    None,
+                )
+                .unwrap_or_else(|e| panic!("fused facet counts for `{qs}`: {e}"));
+                let (unfused_counts, unfused_warnings) =
+                    facet_counts(&index, &config, &params, "body", &base, None, None)
+                        .unwrap_or_else(|e| panic!("unfused facet counts for `{qs}`: {e}"));
+
+                assert_eq!(
+                    fused_counts, unfused_counts,
+                    "facet_counts JSON diverged between the fused and unfused paths for `{qs}`"
+                );
+                assert_eq!(
+                    fused_warnings, unfused_warnings,
+                    "facet warnings diverged between the fused and unfused paths for `{qs}`"
+                );
+            }
+        }
+    }
+
     #[test]
     fn aggregation_refusal_retries_unfused_through_the_facet_seam() {
         let (_dir, index) = open_plan_render_corpus();
