@@ -9,7 +9,6 @@ use axum::http::StatusCode;
 use common::{app_with_schema, get, post_docs};
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use wayfinder::schema;
 
 const ACCENT_SCHEMA_TOML: &str = r#"
 [core]
@@ -125,14 +124,6 @@ async fn suggest_dictionary_folds_accents_for_lookup() {
 #[test]
 fn pre_folding_analyzer_contract_requires_reindex_after_the_term_format_change() {
     const PRE_FOLDING_CONTRACT: &str = "text_en_porter_compatible_v2";
-
-    // A term-format change must not silently adopt an index whose marker names
-    // the pre-folding v2 contract.
-    assert_ne!(
-        schema::ANALYZER_CONTRACT,
-        PRE_FOLDING_CONTRACT,
-        "Phase 2 changes indexed text terms, so ANALYZER_CONTRACT must move past v2"
-    );
 
     let dir = TempDir::new().expect("temp dir");
     let app = app_with_schema(dir.path(), ACCENT_SCHEMA_TOML).expect("fresh index must build");

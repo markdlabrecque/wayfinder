@@ -51,6 +51,7 @@ use crate::local_params;
 use crate::params::Params;
 use crate::query::{self, QueryError};
 use crate::schema::{self, ValueKind, WayfinderSchema};
+use crate::schema_contract;
 use crate::synonyms::SynonymResource;
 
 /// Ceiling on how many distinct terms one `facet.field` enumerates. Tantivy's
@@ -233,34 +234,6 @@ fn dir_size_bytes(dir: &Path) -> u64 {
         }
     }
     total
-}
-
-/// Whether a legacy index's shared analyzed-dynamic catch-all has any
-/// persisted inverted-index terms. Schema snapshots describe only the latest
-/// configuration, so an earlier, historically allowed analyzed rule can have
-/// populated this field before a later raw-only snapshot replaced it.
-///
-/// This deliberately inspects raw term dictionaries rather than searching live
-/// documents: a deleted posting remains an on-disk old-analyzer term until a
-/// merge, and treating it as harmless would certify a v3 marker without proof
-/// that the persisted catch-all is empty.
-fn legacy_dynamic_text_has_indexed_terms(data_dir: &Path) -> Result<bool> {
-    let index = Index::open_in_dir(data_dir).with_context(|| {
-        format!(
-            "opening legacy index in {} to verify its _dynamic_text postings",
-            data_dir.display()
-        )
-    })?;
-    let Ok(field) = index.schema().get_field(schema::DYNAMIC_TEXT_FIELD) else {
-        return Ok(false);
-    };
-    let reader = index.reader().context("opening legacy index reader")?;
-    for segment in reader.searcher().segment_readers() {
-        if segment.inverted_index(field)?.terms().num_terms() != 0 {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// Renders one stored Tantivy value as the JSON Solr would return for it.
@@ -828,238 +801,9 @@ impl CoreIndex {
         let synonyms = SynonymResource::open(data_dir)?;
         let wf_schema = schema::load_with_synonyms(schema_path, synonyms.clone())?;
 
-        // Startup schema check (PRD §3 / open question 4): an index carries the
-        // schema it was built with, and an incompatible change must refuse to
-        // start rather than silently return wrong results — which is what
-        // falling through to `open_in_dir` with the *old* schema would do.
-        let snapshot = schema::snapshot_path(data_dir);
-        // A snapshot is Wayfinder's durable proof that an existing index
-        // predates this open. `app_with_schema` legitimately pre-creates an
-        // empty data directory, so directory existence alone must never turn
-        // a fresh index into a legacy one.
-        let has_snapshot = snapshot.exists();
-        let (
-            previous_static_text_length_bounded,
-            previous_static_accent_folded_text,
-            previous_analyzed_dynamic,
-            previous_has_dynamic_fields,
-        ) = if has_snapshot {
-            let previous = std::fs::read_to_string(&snapshot)
-                .with_context(|| format!("reading stored schema {}", snapshot.display()))?;
-            schema::check_compatible(&previous, &schema_toml).with_context(|| {
-                format!(
-                    "the index in {} was built with an incompatible schema",
-                    data_dir.display()
-                )
-            })?;
-            let previous_schema = schema::parse(&previous)
-                .context("parsing the index's stored schema for its analyzer contract")?;
-            (
-                previous_schema.uses_changed_static_text(),
-                previous_schema.uses_static_accent_folded_text(),
-                previous_schema.uses_analyzed_dynamic_path(),
-                previous_schema.has_dynamic_fields(),
-            )
-        } else {
-            (false, false, false, false)
-        };
-
-        // The v3/v4 folding releases changed built-in and dynamic text terms;
-        // v5 replaces their tokenizer with UAX #29 word segmentation; and v7
-        // changes only static `text_en`/`text_general` length filtering. A
-        // marker or tokenizer identity from an earlier contract must never be
-        // adopted for a path that can contain changed terms.
-        let analyzer_contract = schema::analyzer_contract_path(data_dir);
-        let uses_static_text_length_bounded =
-            wf_schema.uses_changed_static_text() || previous_static_text_length_bounded;
-        let uses_static_accent_folded_text =
-            wf_schema.uses_static_accent_folded_text() || previous_static_accent_folded_text;
-        let uses_analyzed_dynamic =
-            wf_schema.uses_analyzed_dynamic_path() || previous_analyzed_dynamic;
-        let uses_changed_analyzed_path = uses_static_accent_folded_text || uses_analyzed_dynamic;
-        let adopt_legacy_index = || -> Result<&'static str> {
-            if has_snapshot && legacy_dynamic_text_has_indexed_terms(data_dir)? {
-                bail!(
-                    "the index in {} has legacy _dynamic_text postings; reindex into a fresh data directory for the current analyzer contract",
-                    data_dir.display()
-                );
-            }
-            Ok(if previous_has_dynamic_fields {
-                schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT
-            } else {
-                schema::ANALYZER_CONTRACT
-            })
-        };
-        let marker_to_write = if analyzer_contract.exists() {
-            let persisted = std::fs::read_to_string(&analyzer_contract).with_context(|| {
-                format!(
-                    "reading analyzer contract marker {}",
-                    analyzer_contract.display()
-                )
-            })?;
-            match persisted.trim() {
-                schema::ANALYZER_CONTRACT => None,
-                schema::ANALYZER_CONTRACT_V6 if uses_static_text_length_bounded => {
-                    bail!(
-                        "the index in {} uses the v6 static text analyzer contract; reindex into a fresh data directory for the current length bound",
-                        data_dir.display()
-                    );
-                }
-                // v7 changes neither dynamic text nor non-English static
-                // presets, so a complete v6 contract can be advanced without
-                // treating those unaffected paths as stale.
-                schema::ANALYZER_CONTRACT_V6 => Some(schema::ANALYZER_CONTRACT),
-                schema::ANALYZER_CONTRACT_V6_LEGACY_DYNAMIC_TEXT
-                    if uses_static_text_length_bounded =>
-                {
-                    bail!(
-                        "the index in {} uses the v6 static text analyzer contract; reindex into a fresh data directory for the current length bound",
-                        data_dir.display()
-                    );
-                }
-                // The legacy-dynamic marker records a pre-v6 dynamic identity.
-                // It remains unsafe only for a configured analyzed-dynamic
-                // path; v7's static length change does not affect anything
-                // else covered by this marker.
-                schema::ANALYZER_CONTRACT_V6_LEGACY_DYNAMIC_TEXT if uses_analyzed_dynamic => {
-                    bail!(
-                        "the index in {} has a legacy _dynamic_text analyzer contract; reindex into a fresh data directory",
-                        data_dir.display()
-                    );
-                }
-                schema::ANALYZER_CONTRACT_V6_LEGACY_DYNAMIC_TEXT => {
-                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
-                }
-                schema::ANALYZER_CONTRACT_V5 if uses_changed_analyzed_path => {
-                    bail!(
-                        "the index in {} uses the pre-word-delimiter text analyzer contract; reindex into a fresh data directory",
-                        data_dir.display()
-                    );
-                }
-                schema::ANALYZER_CONTRACT_V5 => Some(adopt_legacy_index()?),
-                schema::ANALYZER_CONTRACT_V5_LEGACY_DYNAMIC_TEXT if uses_changed_analyzed_path => {
-                    bail!(
-                        "the index in {} uses the pre-word-delimiter text analyzer contract; reindex into a fresh data directory",
-                        data_dir.display()
-                    );
-                }
-                schema::ANALYZER_CONTRACT_V5_LEGACY_DYNAMIC_TEXT => {
-                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
-                }
-                schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT
-                    if uses_static_text_length_bounded =>
-                {
-                    bail!(
-                        "the index in {} uses a static text analyzer contract older than v7; reindex into a fresh data directory for the current length bound",
-                        data_dir.display()
-                    );
-                }
-                schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT if uses_analyzed_dynamic => {
-                    bail!(
-                        "the index in {} predates the current UAX #29 text analyzer contract; reindex into a fresh data directory",
-                        data_dir.display()
-                    );
-                }
-                schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT => None,
-                schema::ANALYZER_CONTRACT_V4 if uses_changed_analyzed_path => {
-                    bail!(
-                        "the index in {} uses the pre-UAX #29 text analyzer contract; reindex into a fresh data directory",
-                        data_dir.display()
-                    );
-                }
-                schema::ANALYZER_CONTRACT_V4 => Some(adopt_legacy_index()?),
-                schema::ANALYZER_CONTRACT_V4_LEGACY_DYNAMIC_TEXT if uses_changed_analyzed_path => {
-                    bail!(
-                        "the index in {} uses the pre-UAX #29 text analyzer contract; reindex into a fresh data directory",
-                        data_dir.display()
-                    );
-                }
-                schema::ANALYZER_CONTRACT_V4_LEGACY_DYNAMIC_TEXT => {
-                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
-                }
-                schema::ANALYZER_CONTRACT_V3 if uses_changed_analyzed_path => {
-                    bail!(
-                        "the index in {} uses the pre-UAX #29 text analyzer contract; reindex into a fresh data directory",
-                        data_dir.display()
-                    );
-                }
-                schema::ANALYZER_CONTRACT_V3 => Some(adopt_legacy_index()?),
-                schema::ANALYZER_CONTRACT_V3_LEGACY_DYNAMIC_TEXT if uses_changed_analyzed_path => {
-                    bail!(
-                        "the index in {} uses the pre-UAX #29 text analyzer contract; reindex into a fresh data directory",
-                        data_dir.display()
-                    );
-                }
-                schema::ANALYZER_CONTRACT_V3_LEGACY_DYNAMIC_TEXT => {
-                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
-                }
-                schema::ANALYZER_CONTRACT_V2 if uses_changed_analyzed_path => {
-                    bail!(
-                        "the index in {} uses a pre-folding text_en/text preset analyzer contract; reindex into a fresh data directory for accent folding",
-                        data_dir.display()
-                    );
-                }
-                schema::ANALYZER_CONTRACT_V2 => Some(adopt_legacy_index()?),
-                schema::ANALYZER_CONTRACT_V2_LEGACY_DYNAMIC_TEXT if uses_changed_analyzed_path => {
-                    bail!(
-                        "the index in {} uses a pre-folding text_en/text preset analyzer contract; reindex into a fresh data directory for accent folding",
-                        data_dir.display()
-                    );
-                }
-                schema::ANALYZER_CONTRACT_V2_LEGACY_DYNAMIC_TEXT => {
-                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
-                }
-                schema::ANALYZER_CONTRACT_V1 if uses_changed_analyzed_path => {
-                    bail!(
-                        "the index in {} uses a pre-folding text_en/text preset analyzer contract; reindex into a fresh data directory for accent folding",
-                        data_dir.display()
-                    );
-                }
-                schema::ANALYZER_CONTRACT_V1 => Some(adopt_legacy_index()?),
-                schema::ANALYZER_CONTRACT_V1_LEGACY_DYNAMIC_TEXT if uses_changed_analyzed_path => {
-                    bail!(
-                        "the index in {} predates the current text_en/text preset/dynamic-text analyzer contract; reindex into a fresh data directory",
-                        data_dir.display()
-                    );
-                }
-                schema::ANALYZER_CONTRACT_V1_LEGACY_DYNAMIC_TEXT => {
-                    Some(schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT)
-                }
-                other => {
-                    bail!(
-                        "the index in {} has unsupported analyzer contract `{other}`; reindex into a fresh data directory",
-                        data_dir.display()
-                    );
-                }
-            }
-        } else if has_snapshot && uses_changed_analyzed_path {
-            bail!(
-                "the index in {} predates the current text_en/text preset/dynamic-text analyzer contract; reindex into a fresh data directory",
-                data_dir.display()
-            );
-        } else if has_snapshot {
-            Some(adopt_legacy_index()?)
-        } else {
-            Some(schema::ANALYZER_CONTRACT)
-        };
-
-        // Write the marker before opening or creating the Tantivy index. A
-        // marker-write failure now leaves no newly-created versioned index
-        // behind, so a retry cannot mistake it for a pre-contract index. A
-        // real legacy index has a snapshot and was rejected above before any
-        // marker write; a legacy marker is rewritten only after its configured
-        // paths and (where applicable) persisted `_dynamic_text` terms prove
-        // safe to adopt. A legacy dynamic schema retains a distinct state
-        // because its unused `_dynamic_text` catch-all still carries an older
-        // identity.
-        if let Some(marker) = marker_to_write {
-            std::fs::write(&analyzer_contract, marker).with_context(|| {
-                format!(
-                    "writing analyzer contract marker {}",
-                    analyzer_contract.display()
-                )
-            })?;
-        }
+        // The schema contract accepts compatible persisted state and writes any
+        // required analyzer marker before Tantivy can create a versioned index.
+        let accepted_contract = schema_contract::accept(data_dir, &schema_toml, &wf_schema)?;
 
         // `settings` only apply to a newly created index; re-opening an
         // existing one keeps the doc-store settings it was built with, which
@@ -1097,8 +841,7 @@ impl CoreIndex {
             .try_into()
             .context("creating index reader")?;
 
-        std::fs::write(&snapshot, &schema_toml)
-            .with_context(|| format!("writing stored schema {}", snapshot.display()))?;
+        accepted_contract.persist_schema()?;
 
         let state = Arc::new(CommitState {
             writer: Mutex::new(writer),
