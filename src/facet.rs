@@ -63,8 +63,8 @@ use crate::schema::{ValueKind, WayfinderSchema};
 /// and friends) carry no `response` block, while a `facet.query`/
 /// `facet.field` error is detected *after* the base query has already run and
 /// does carry one. This wraps the original error rather than replacing it —
-/// `Display` forwards to it verbatim — so `select` in `src/lib.rs` can tell
-/// the two apart via `downcast_ref` without changing the message any
+/// `Display` forwards to it verbatim — so the select workflow can tell the two
+/// apart via `downcast_ref` without changing the message any
 /// existing test or fixture comparison sees.
 #[derive(Debug)]
 pub struct PreQueryFacetError(anyhow::Error);

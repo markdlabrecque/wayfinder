@@ -10,7 +10,8 @@
 //! contain.
 //!
 //! Note: issue #66 (already landed, in this branch's history) made
-//! `check_sort` (`src/lib.rs`) and `check_facetable` (`src/facet.rs`) resolve
+//! `sort::parse_spec` (`src/sort.rs`) and `check_facetable` (`src/facet.rs`)
+//! resolve
 //! a field name via `WayfinderSchema::resolved_fast`, which correctly
 //! consults `[[dynamic_fields]]` matches (not just statically declared
 //! `[[fields]]`). The facet/sort round-trip assertions below now exercise

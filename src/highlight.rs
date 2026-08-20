@@ -100,9 +100,9 @@ use crate::schema::{ValueKind, WayfinderSchema};
 
 /// Marks a `highlighting` error as a request-input problem -- an undefined or
 /// non-text `hl.fl` field -- rather than a genuine internal failure, so
-/// `select` in `src/lib.rs` can render it as Solr's own 400 via
-/// `downcast_ref`, matching `check_sort`'s undefined-field error and
-/// `facet::check_facetable`'s undefined/unfacetable field, instead of
+/// the select workflow (`src/select_workflow.rs`) can render it as Solr's own
+/// 400 via `downcast_ref`, matching `sort::parse_spec`'s undefined-field error
+/// and `facet::check_facetable`'s undefined/unfacetable field, instead of
 /// treating it as a 500. Wraps the original error rather than replacing it --
 /// `Display` forwards to it verbatim.
 #[derive(Debug)]
@@ -403,7 +403,7 @@ fn resolve_hl_fl<'a>(schema: &'a WayfinderSchema, fl_raw: &'a str) -> Result<Vec
             }
         } else {
             // Validated before touching Tantivy at all: Solr's own
-            // `check_sort` / `facet::check_facetable` precedent for telling a
+            // `sort::parse_spec` / `facet::check_facetable` precedent for telling a
             // request-input problem from an internal failure.
             check_highlightable(schema, token)
                 .map_err(|e| anyhow::Error::new(InvalidHlField(e)))?;

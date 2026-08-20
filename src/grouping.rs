@@ -160,7 +160,7 @@ pub(crate) fn grouping(
     // `group.sort` -- pinned by `group_sort`, whose group order is unchanged
     // from `group_basic` even though within-group order is `id desc`.
     let within_sort = match params.get("group.sort") {
-        Some(spec) => crate::parse_sort_spec(&index.wf_schema, params, spec)?,
+        Some(spec) => crate::sort::parse_spec(&index.wf_schema, params, spec)?,
         None => main_sort.to_vec(),
     };
     // Both #338 flags are gated exactly like `group`/`facet`/`stats`/`hl`: only
