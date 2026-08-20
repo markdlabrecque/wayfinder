@@ -21,6 +21,12 @@ use crate::params::Params;
 use crate::schema::WayfinderSchema;
 use crate::update_policy::{UpdatePolicy, success_body};
 
+/// The Search-API configset's `ExtractingRequestHandler` defaults, hardcoded
+/// because they are the only evidenced config -- the captured index/select pair
+/// was taken against exactly these. Request params override and extend them: a
+/// request `fmap.<from>` wins over the default on the same `<from>` and adds
+/// new mappings, while `lowernames`/`uprefix`/`captureAttr` are overridden
+/// outright when sent.
 const EXTRACT_DEFAULT_FMAP: &[(&str, &str)] = &[("a", "links"), ("div", "ignored_")];
 const EXTRACT_DEFAULT_UPREFIX: &str = "ignored_";
 

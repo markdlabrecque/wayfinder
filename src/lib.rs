@@ -2263,7 +2263,9 @@ impl extract::ChunkSource for FieldChunks<'_> {
     }
 }
 
-/// The default `Content-Type` for a part that declares none.
+/// The default `Content-Type` for a part that declares none -- Tika's own
+/// fallback, and what every captured no-`Content-Type` extract echoes back as
+/// `stream_content_type` (`extract_plain_text_xml.json`).
 const OCTET_STREAM: &str = "application/octet-stream";
 
 /// `POST /wayfinder/{core}/update/extract`.
