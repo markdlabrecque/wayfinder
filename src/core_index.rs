@@ -6675,6 +6675,91 @@ fast = true
         assert_eq!(outcome.top, expected[..5.min(expected.len())]);
     }
 
+    /// Fusing a terms aggregation into the collector must leave the hit list
+    /// completely alone: `search_top_with_aggs`'s `TopOutcome` half has to be
+    /// identical to plain `search_top` over the same query, filter queries,
+    /// sort and limit. Every faceted `/select` request now goes through the
+    /// fused collector, so a fused pass that mis-ordered, mis-counted or
+    /// truncated `top` would otherwise be invisible.
+    #[test]
+    fn fusing_an_aggregation_leaves_the_hit_list_identical_to_plain_search_top() {
+        let (_dir, index) = open_bounded_corpus();
+        let query = index.parse_query("quick", "body").expect("parse_query");
+        let sorts: Vec<Vec<SortClause>> = vec![
+            vec![], // implicit score desc
+            vec![SortClause::new(
+                SortKey::Field("extra_s".to_string()),
+                false,
+                Some(ValueKind::Text),
+            )],
+        ];
+
+        for with_fq in [false, true] {
+            let filter_queries: Vec<Box<dyn Query>> = if with_fq {
+                vec![index.parse_query("extra_s:tag1", "body").expect("parse fq")]
+            } else {
+                Vec::new()
+            };
+            for sort in &sorts {
+                for limit in [0usize, 1, 7, 100] {
+                    let plain = index
+                        .search_top(query.as_ref(), &filter_queries, sort, limit)
+                        .expect("search_top");
+                    assert!(
+                        plain.num_found >= 7,
+                        "the match set must out-run the smaller limits or the \
+                         comparison is vacuous"
+                    );
+
+                    let mut aggs = Aggregations::default();
+                    aggs.insert("wf_id".to_string(), terms_aggregation("id"));
+                    let (fused, _results) = index
+                        .search_top_with_aggs(query.as_ref(), &filter_queries, sort, limit, aggs)
+                        .expect("search_top_with_aggs");
+
+                    assert_eq!(
+                        fused, plain,
+                        "fusing the terms aggregation changed the hit list \
+                         (fq {with_fq}, sort {sort:?}, limit {limit})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Tantivy's bucket limit is per *request*, not per aggregation, so the
+    /// fused pass has to hand every aggregation the headroom a standalone
+    /// `term_facet` pass used to get on its own. Nothing downstream can see a
+    /// sizing regression: an under-sized limit makes Tantivy refuse the fused
+    /// request, the facet module falls back to the unfused path, and the wire
+    /// output is byte-identical -- only the fused-path performance is lost.
+    #[test]
+    fn the_fused_bucket_limit_scales_with_the_number_of_aggregations() {
+        assert_eq!(
+            fused_bucket_limit(1),
+            MAX_FACET_TERMS,
+            "one aggregation must get exactly the headroom a standalone term_facet pass had"
+        );
+        for count in 2..=8usize {
+            assert_eq!(
+                fused_bucket_limit(count),
+                MAX_FACET_TERMS * count as u32,
+                "{count} fused aggregations must each keep a standalone pass's own headroom, \
+                 because Tantivy sums their bucket counts against this one limit"
+            );
+        }
+        assert_eq!(
+            fused_bucket_limit(0),
+            MAX_FACET_TERMS,
+            "an empty request keeps one field's budget rather than a zero-bucket trap"
+        );
+        assert_eq!(
+            fused_bucket_limit(usize::MAX),
+            u32::MAX,
+            "the scaling must saturate rather than wrap into a tiny limit"
+        );
+    }
+
     /// `as_location` parses Solr's `lat,lon` point form and rejects the shapes
     /// that are not one. It is the input boundary for a `location` field, so a
     /// wrong parse would silently mis-place every document (#331).
