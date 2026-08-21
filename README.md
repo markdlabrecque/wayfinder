@@ -12,6 +12,17 @@ general Solr replacement or an ongoing parity project.
 - [Deployment](docs/DEPLOYMENT.md) — systemd, containers, TLS, backup, restore, reindex, and upgrades
 - [Development](docs/DEVELOPMENT.md) — architecture, tests, benchmarks, and contribution workflow
 
+Run the manual's documented quickstart end to end against the built Wayfinder binary:
+
+```sh
+cargo test --test manual_examples documented_quickstart_commands_execute_and_check_their_own_results
+```
+
+This executes the shell blocks in
+[`manual/getting-started/quickstart.md`](manual/getting-started/quickstart.md) with the canonical
+[`schema.toml`](manual/getting-started/schema.toml) and
+[`corpus.json`](manual/getting-started/corpus.json).
+
 ## Running
 
 ```sh

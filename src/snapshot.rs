@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use tantivy::Index;
 use tantivy::directory::{Directory, META_LOCK, MmapDirectory};
 
-use crate::schema;
+use crate::schema_contract;
 
 const META_FILE: &str = "meta.json";
 const MANAGED_FILE: &str = ".managed.json";
@@ -130,14 +130,12 @@ fn copy_generation(source: &Path, destination: &Path) -> Result<()> {
         "writing snapshot Tantivy managed-file list",
     )?;
 
-    copy_file(
-        &schema::snapshot_path(source),
-        &schema::snapshot_path(destination),
-    )?;
-    copy_file(
-        &schema::analyzer_contract_path(source),
-        &schema::analyzer_contract_path(destination),
-    )?;
+    for (source_artifact, destination_artifact) in schema_contract::artifacts(source)
+        .into_iter()
+        .zip(schema_contract::artifacts(destination))
+    {
+        copy_file(&source_artifact, &destination_artifact)?;
+    }
     Ok(())
 }
 

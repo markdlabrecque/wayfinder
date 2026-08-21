@@ -10,7 +10,7 @@
 //!   - `[[copy_fields]]` source/dest pairs.
 //!
 //! Data must come from the `WayfinderSchema` already loaded in-process by
-//! `CoreIndex::open` (the same struct `check_compatible` uses at startup) —
+//! `CoreIndex::open` (the same struct the schema contract uses at startup) —
 //! no new parsing path, no new on-disk read. `schema_page_does_not_reread_the_schema_file_from_disk`
 //! below is the regression test for that: it deletes the on-disk schema file
 //! *after* the app is built and asserts the page still renders correctly, which
@@ -572,7 +572,7 @@ async fn schema_page_is_idempotent_and_does_not_mutate_the_index() {
 
 /// The schema view must be sourced from the `WayfinderSchema` already loaded
 /// in-process by `CoreIndex::open` at startup -- the same struct
-/// `schema::check_compatible` uses -- not a new parsing path that reads the
+/// the persisted schema contract uses -- not a new parsing path that reads the
 /// TOML file again per request. Proof: delete the on-disk schema file after
 /// the app is built, then hit the page and confirm it still renders the full,
 /// correct schema. A handler that re-parsed the file per request would fail

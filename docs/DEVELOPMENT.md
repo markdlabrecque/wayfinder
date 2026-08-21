@@ -16,13 +16,16 @@ The server defaults to `127.0.0.1:8983`. Set `WAYFINDER_CONFIG` to exercise a se
 
 | Path | Purpose |
 |---|---|
-| `src/lib.rs` | Axum routes, handlers, parameter allowlists, and response assembly |
+| `src/lib.rs` | Axum routes, handler adapters, and parameter allowlists |
+| `src/select_workflow.rs` | The `/select` workflow: parsing, planning, collection, post-processing, and rendering |
 | `src/core_index.rs` | Tantivy index lifecycle, updates, commits, and query execution |
+| `src/update_policy.rs` | Shared `commit`/`softCommit`/`commitWithin`/`overwrite` policy and the `/update` success envelope |
 | `src/schema.rs` | Schema TOML, field types, analyzers, and dynamic fields |
 | `src/config.rs` | Server configuration and defaults |
-| `src/query.rs`, `src/edismax.rs`, `src/function_query.rs` | Query parsing and scoring |
+| `src/query.rs`, `src/edismax.rs`, `src/function_query.rs`, `src/sort.rs` | Query parsing, scoring, and sort specs |
 | `src/facet.rs`, `src/json_facet.rs`, `src/stats.rs` | Aggregation paths |
 | `src/extract.rs` | In-process document extraction and resource budgets |
+| `src/extract_workflow.rs` | The `/update/extract` workflow: upload admission, byte accounting, Solr Cell mapping, and the extract-or-index decision |
 | `tests/` | Hermetic integration tests |
 | `solr-ref/responses/` | Frozen wire fixtures |
 | `presets/` | Shipped schema presets |

@@ -222,7 +222,7 @@ async fn hl_no_field_match_matches_fixture_and_has_empty_object_shape() {
 // --- hl.fl error handling (review round 1 must-fix) --------------------
 //
 // An undefined or non-text `hl.fl` field is a request-input problem, the
-// same class as `check_sort`'s undefined-field error and
+// same class as `sort::parse_spec`'s undefined-field error and
 // `facet::check_facetable`'s undefined/unfacetable field -- both of which
 // are Solr 400s, not 500s. Neither case is pinned by a captured `hl_*`
 // fixture (no such request was captured against the reference container),

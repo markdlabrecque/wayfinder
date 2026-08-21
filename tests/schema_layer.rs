@@ -114,7 +114,8 @@ fn create_older_analyzer_index(dir: &std::path::Path, toml: &str, tokenizer: &st
         .schema(serde_json::from_str(&schema_json).expect("legacy Tantivy schema parses"))
         .create_in_dir(&data_dir)
         .expect("create legacy Tantivy index");
-    std::fs::write(schema::snapshot_path(&data_dir), toml).expect("write legacy schema snapshot");
+    std::fs::write(data_dir.join("wayfinder-schema.toml"), toml)
+        .expect("write legacy schema snapshot");
 }
 
 /// Materializes an index produced before #51's analyzer-contract marker.
@@ -485,26 +486,19 @@ fn dynamic_text_catch_all_enforces_the_configsets_length_bounds_and_simple_case_
 // --- issue #388: analyzer contract v3 (text_en/text_general length+case
 // bounds and simple case folding, and _dynamic_text's length+case fix) ------
 //
-// Changing the three chains above changes the terms already written to disk,
-// so `src/core_index.rs`'s existing startup machinery (the same machinery
-// that gated v1 -> v2 above) must refuse an incompatible existing index
-// rather than silently return wrong results. `ANALYZER_CONTRACT` becomes the
-// v3 marker; the v2 value moves to a new `ANALYZER_CONTRACT_V2` const (not
-// referenced by name here -- these tests write its literal value directly, so
-// they fail on an observed VALUE today rather than a missing symbol).
+// Changing these chains changes terms already written to disk. The schema
+// contract must refuse incompatible existing indexes rather than silently
+// return wrong results. Tests use persisted marker literals as fixture data.
 
-/// A marker already at the CURRENT contract must open normally and stay
-/// untouched. Read through the live `schema::ANALYZER_CONTRACT` symbol
-/// (never a literal) so this test tracks whatever the current contract value
-/// is, both before and after #388 lands -- it is an invariant of every
-/// contract version, not a value newly introduced by this issue.
+/// A marker already at the current contract must open normally and stay
+/// untouched.
 #[test]
 fn current_analyzer_contract_marker_opens_normally() {
     let dir = TempDir::new().expect("temp dir");
     let data_dir = dir.path().join("data");
     std::fs::create_dir_all(&data_dir).expect("create data dir");
     let marker = data_dir.join("wayfinder-analyzer-contract");
-    std::fs::write(&marker, schema::ANALYZER_CONTRACT)
+    std::fs::write(&marker, "text_presets_static_length_v7")
         .expect("write current analyzer contract marker");
 
     let _app = common::app_with_schema(dir.path(), FULL_SCHEMA_TOML).expect(
@@ -512,16 +506,57 @@ fn current_analyzer_contract_marker_opens_normally() {
     );
     assert_eq!(
         std::fs::read_to_string(&marker).expect("read analyzer contract marker"),
-        schema::ANALYZER_CONTRACT,
+        "text_presets_static_length_v7",
         "a marker already at the current contract must be left untouched"
     );
 }
 
-/// A v2 marker (today's `ANALYZER_CONTRACT` value, to become
-/// `ANALYZER_CONTRACT_V2`) on a schema with a static `text_en` field -- which
-/// v3 changes -- must require reindexing. Predicted RED: today's code treats
-/// this literal as the CURRENT contract (nothing has bumped to v3 yet), so it
-/// opens fine and `.expect_err` panics.
+#[test]
+fn current_index_with_a_missing_snapshot_reopens_and_restores_it() {
+    let dir = TempDir::new().expect("temp dir");
+    {
+        let app = common::app_with_schema(dir.path(), FULL_SCHEMA_TOML)
+            .expect("fresh current index opens");
+        drop(app);
+    }
+    let snapshot = dir.path().join("data/wayfinder-schema.toml");
+    std::fs::remove_file(&snapshot).expect("remove stored schema");
+
+    let app = common::app_with_schema(dir.path(), FULL_SCHEMA_TOML)
+        .expect("a current marked index can restore its missing snapshot");
+    drop(app);
+    assert_eq!(
+        std::fs::read_to_string(snapshot).expect("read restored schema"),
+        FULL_SCHEMA_TOML
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn marker_persistence_failure_happens_before_tantivy_index_creation() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().expect("temp dir");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir(&data_dir).expect("create data dir");
+    symlink(
+        data_dir.join("missing-parent/marker"),
+        data_dir.join("wayfinder-analyzer-contract"),
+    )
+    .expect("create dangling marker symlink");
+
+    let error = common::app_with_schema(dir.path(), FULL_SCHEMA_TOML)
+        .expect_err("an unwritable marker must refuse startup");
+    assert!(
+        format!("{error:#}").contains("writing analyzer contract marker"),
+        "failure must name marker persistence: {error:#}"
+    );
+    assert!(
+        !data_dir.join("meta.json").exists(),
+        "marker failure must not leave a newly created Tantivy index"
+    );
+}
+
 #[test]
 fn v2_marker_on_static_text_en_field_refuses_startup_requiring_reindex() {
     let dir = TempDir::new().expect("temp dir");
@@ -544,9 +579,7 @@ fn v2_marker_on_static_text_en_field_refuses_startup_requiring_reindex() {
     );
 }
 
-/// As above, but the affected field is static `text_general` -- new ground
-/// for #388, since `text_general` did not change between v1 and v2 at all.
-/// Predicted RED for the same reason as the text_en case.
+/// The v2 contract also predates the changed static `text_general` analysis.
 #[test]
 fn v2_marker_on_static_text_general_field_refuses_startup_requiring_reindex() {
     let text_general_only = r#"
@@ -587,9 +620,7 @@ stored = true
     );
 }
 
-/// As above, but the affected path is an analyzed `[[dynamic_fields]]` rule
-/// (which flows through `_dynamic_text`) rather than a static field.
-/// Predicted RED for the same reason.
+/// An analyzed dynamic rule writes through the changed `_dynamic_text` path.
 #[test]
 fn v2_marker_on_analyzed_dynamic_rule_refuses_startup_requiring_reindex() {
     let dir = TempDir::new().expect("temp dir");
@@ -612,15 +643,7 @@ fn v2_marker_on_analyzed_dynamic_rule_refuses_startup_requiring_reindex() {
     );
 }
 
-/// A v2 marker on a schema that can hold NO affected data (raw/string fields
-/// only, no analyzed dynamic rule) must be silently upgraded to the current
-/// (v3) contract rather than bailing -- mirroring `v1_raw_only_analyzer_
-/// contract_is_upgraded_without_reindex` above, one version later. This is an
-/// invariant that already holds today (a marker equal to the live
-/// `ANALYZER_CONTRACT` symbol always opens fine, regardless of schema
-/// content), so it is not expected to be red on its own -- it guards against
-/// the v2-affected-data tests above being satisfied by a change that makes
-/// EVERY v2 marker bail unconditionally, which would break raw-only adoption.
+/// A v2 marker on a raw-only schema remains safe to adopt.
 #[tokio::test]
 async fn v2_marker_on_raw_only_schema_is_upgraded_without_reindex() {
     let raw_only = r#"
@@ -656,8 +679,8 @@ stored = true
         .expect("a v2 index with no changed analyzer path must remain adoptable");
     assert_eq!(
         std::fs::read_to_string(&marker).expect("read upgraded analyzer contract"),
-        schema::ANALYZER_CONTRACT,
-        "safe v2 adoption must persist the current (v3) analyzer contract"
+        "text_presets_static_length_v7",
+        "safe v2 adoption must persist the current (v7) analyzer contract"
     );
 
     // A raw-only schema still has `[[dynamic_fields]]`, so `catch_all_fields`
@@ -782,7 +805,7 @@ fn v1_marker_with_old_dynamic_postings_hidden_by_raw_snapshot_refuses_reindex() 
     // This evolution was historically allowed: its latest persisted snapshot
     // says every dynamic rule is raw, even though the physical index above
     // already contains an old analyzed `_dynamic_text` posting.
-    std::fs::write(schema::snapshot_path(&data_dir), &raw_dynamic)
+    std::fs::write(data_dir.join("wayfinder-schema.toml"), &raw_dynamic)
         .expect("overwrite snapshot with evolved raw schema");
     std::fs::write(
         data_dir.join("wayfinder-analyzer-contract"),
@@ -832,7 +855,7 @@ stored = true
         .expect("a v1 index with no changed analyzer path must remain adoptable");
     assert_eq!(
         std::fs::read_to_string(marker).expect("read upgraded analyzer contract"),
-        schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT,
+        "text_presets_static_length_v7_legacy_dynamic_text",
         "safe v1 adoption must retain the legacy dynamic analyzer contract"
     );
 
@@ -940,7 +963,7 @@ stored = true
             .expect("an unused legacy dynamic catch-all remains safe to open");
         assert_eq!(
             std::fs::read_to_string(&marker).expect("read upgraded legacy marker"),
-            schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT,
+            "text_presets_static_length_v7_legacy_dynamic_text",
             "v1 legacy-dynamic state must remain distinguished after upgrade"
         );
 
@@ -1044,7 +1067,7 @@ async fn v1_marker_on_all_raw_dynamic_schema_adopts_rewrites_and_writes() {
     // rules must fail closed instead of falsely claiming the current chain.
     assert_eq!(
         std::fs::read_to_string(&marker).expect("read upgraded analyzer contract"),
-        schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT,
+        "text_presets_static_length_v7_legacy_dynamic_text",
         "safe v1 adoption of an all-raw-dynamic-rule index must retain the legacy dynamic \
          analyzer contract"
     );
@@ -1092,7 +1115,7 @@ async fn v2_marker_on_all_raw_dynamic_schema_adopts_rewrites_and_writes() {
     // moved), so a genuinely pre-#388 all-raw-dynamic index carries the same
     // on-disk `wayfinder_text_en_v1` identity under either marker -- only the
     // marker file's own contents differ, exercising the v2 arm in
-    // `src/core_index.rs` instead of the v1 one.
+    // `src/schema_contract.rs` instead of the v1 one.
     std::fs::write(&marker, "text_en_porter_compatible_v2").expect("write v2 analyzer contract");
 
     // 1. the index adopts (open succeeds).
@@ -1104,7 +1127,7 @@ async fn v2_marker_on_all_raw_dynamic_schema_adopts_rewrites_and_writes() {
     // 2. the marker retains the persisted catch-all's legacy identity.
     assert_eq!(
         std::fs::read_to_string(&marker).expect("read upgraded analyzer contract"),
-        schema::ANALYZER_CONTRACT_LEGACY_DYNAMIC_TEXT,
+        "text_presets_static_length_v7_legacy_dynamic_text",
         "safe v2 adoption of an all-raw-dynamic-rule index must retain the legacy dynamic \
          analyzer contract"
     );
@@ -1249,7 +1272,8 @@ stored = true
             )
             .create_in_dir(&data_dir)
             .expect("create legacy Tantivy index");
-        std::fs::write(schema::snapshot_path(&data_dir), raw_only).expect("write legacy snapshot");
+        std::fs::write(data_dir.join("wayfinder-schema.toml"), raw_only)
+            .expect("write legacy snapshot");
         drop(legacy_index);
     };
     materialize_legacy(dir.path());
@@ -1701,18 +1725,6 @@ tokenizer = "{index_tok}"
             "the error must not point at the other side ({forbidden}), got: {msg}"
         );
     }
-}
-
-/// `ANALYZER_CONTRACT` guards on-disk term compatibility. Issue #393 adds
-/// terms above the old 40-byte cutoff, so its contract must advance past v6.
-#[test]
-fn analyzer_contract_is_v7_after_static_text_length_fix() {
-    assert_eq!(
-        schema::ANALYZER_CONTRACT,
-        "text_presets_static_length_v7",
-        "issue #393 changes indexed static text_en/text_general terms, so the analyzer \
-         contract must identify v7"
-    );
 }
 
 #[test]
@@ -2921,114 +2933,6 @@ async fn doc_field_matching_a_dynamic_pattern_is_indexed_and_returned() {
 
 // --- startup schema compatibility check -------------------------------------
 
-#[test]
-fn schema_compatibility_check_accepts_an_identical_schema() {
-    schema::check_compatible(FULL_SCHEMA_TOML, FULL_SCHEMA_TOML)
-        .expect("an unchanged schema must be compatible");
-}
-
-#[test]
-fn schema_compatibility_check_refuses_a_removed_field_naming_it() {
-    let without_rating = FULL_SCHEMA_TOML.replace(
-        r#"
-[[fields]]
-name = "rating"
-type = "double"
-stored = true
-fast = true
-"#,
-        "\n",
-    );
-    let err = schema::check_compatible(FULL_SCHEMA_TOML, &without_rating)
-        .expect_err("removing a field must be refused");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("rating"),
-        "refusal must name the removed field, got: {msg}"
-    );
-}
-
-#[test]
-fn schema_compatibility_check_allows_toggling_required() {
-    // `required` is an input-validation rule, not part of the Tantivy schema, so
-    // it must not force a reindex.
-    let now_required = FULL_SCHEMA_TOML.replace(
-        r#"name = "title"
-type = "text_en"
-stored = true"#,
-        r#"name = "title"
-type = "text_en"
-stored = true
-required = true"#,
-    );
-    assert_ne!(
-        now_required, FULL_SCHEMA_TOML,
-        "test setup: the `required` toggle must actually change the schema"
-    );
-    schema::check_compatible(FULL_SCHEMA_TOML, &now_required)
-        .expect("toggling `required` must not require a reindex");
-}
-
-#[test]
-fn schema_compatibility_check_refuses_a_changed_field_option_naming_it() {
-    let now_fast = FULL_SCHEMA_TOML.replace(
-        r#"name = "title"
-type = "text_en"
-stored = true"#,
-        r#"name = "title"
-type = "text_en"
-stored = true
-fast = true"#,
-    );
-    let err = schema::check_compatible(FULL_SCHEMA_TOML, &now_fast)
-        .expect_err("making a field fast changes the Tantivy schema");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("title"),
-        "refusal must name the changed field, got: {msg}"
-    );
-}
-
-#[test]
-fn schema_compatibility_check_refuses_a_retyped_field_naming_it() {
-    let retyped = FULL_SCHEMA_TOML.replace(
-        r#"name = "views"
-type = "int""#,
-        r#"name = "views"
-type = "double""#,
-    );
-    let err = schema::check_compatible(FULL_SCHEMA_TOML, &retyped)
-        .expect_err("retyping a field must be refused");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("views"),
-        "refusal must name the retyped field, got: {msg}"
-    );
-}
-
-#[test]
-fn schema_compatibility_check_reports_an_added_field_as_needing_a_reindex() {
-    let with_extra = format!(
-        r#"{FULL_SCHEMA_TOML}
-[[fields]]
-name = "summary"
-type = "text_en"
-stored = true
-"#
-    );
-    // PRD open question 4 calls an added field "compatible", but Tantivy cannot
-    // extend the schema of an existing index in place, so v1 still requires a
-    // reindex — the refusal must say so, and name the field, rather than
-    // failing with Tantivy's opaque "schema does not match".
-    let err = schema::check_compatible(FULL_SCHEMA_TOML, &with_extra)
-        .expect_err("adding a field still needs a reindex under Tantivy");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("summary") && msg.to_lowercase().contains("reindex"),
-        "refusal must name the added field and say a reindex is needed, got: {msg}"
-    );
-}
-
 /// `FULL_SCHEMA_TOML` with the whole `[[dynamic_fields]]` block removed.
 fn schema_without_dynamic_fields() -> String {
     let start = FULL_SCHEMA_TOML
@@ -3043,46 +2947,6 @@ fn schema_without_dynamic_fields() -> String {
         "test setup: only the dynamic_fields block must be removed"
     );
     stripped
-}
-
-#[test]
-fn schema_compatibility_check_refuses_adding_the_first_or_removing_the_last_dynamic_rule() {
-    // The catch-all JSON fields backing dynamic fields exist only when at least
-    // one rule does, so crossing that boundary changes the Tantivy schema even
-    // though editing rules in between does not.
-    let none = schema_without_dynamic_fields();
-
-    let err = schema::check_compatible(&none, FULL_SCHEMA_TOML)
-        .expect_err("adding the first dynamic rule changes the Tantivy schema");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("dynamic_fields") && msg.to_lowercase().contains("reindex"),
-        "refusal must name dynamic_fields and say a reindex is needed, got: {msg}"
-    );
-
-    let err = schema::check_compatible(FULL_SCHEMA_TOML, &none)
-        .expect_err("removing the last dynamic rule changes the Tantivy schema");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("dynamic_fields") && msg.to_lowercase().contains("reindex"),
-        "refusal must name dynamic_fields and say a reindex is needed, got: {msg}"
-    );
-}
-
-#[test]
-fn schema_compatibility_check_allows_editing_dynamic_rules_without_emptying_them() {
-    // Rule set stays non-empty: no catch-all field appears or disappears, so no
-    // reindex is needed.
-    let extra_rule = format!(
-        r#"{FULL_SCHEMA_TOML}
-[[dynamic_fields]]
-pattern = "*_s"
-type = "string"
-stored = true
-"#
-    );
-    schema::check_compatible(FULL_SCHEMA_TOML, &extra_rule)
-        .expect("adding a further dynamic rule must not require a reindex");
 }
 
 #[tokio::test]

@@ -350,7 +350,7 @@ fn resolve_aggregation_column(
 /// aggregation request that computes all of it. `next` numbers the
 /// aggregations by position rather than by response key, so two members naming
 /// the same column under different keys cannot share one bucket list — the
-/// same reasoning as `facet::plan_facet_fields`' `wf_facet_{i}`.
+/// same reasoning as the classic facet planner's `wf_facet_{i}`.
 fn resolve_entries(
     schema: &WayfinderSchema,
     parsed: &[ParsedEntry],

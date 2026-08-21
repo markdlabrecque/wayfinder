@@ -59,8 +59,8 @@ pub struct SortClause {
     /// to pick the *type* of a segment-wide missing default in the defensive
     /// `Absent` arm (finding 36/37): an absent column carries no type
     /// information of its own, so the clause has to carry it in from the
-    /// schema instead (`check_sort` resolves it via
-    /// `WayfinderSchema::value_kind`, which already folds in any custom
+    /// schema instead (`sort::parse_spec` resolves it via
+    /// `WayfinderSchema::resolved_value_kind`, which already folds in any custom
     /// `[[field_types]]` — those only ever resolve to `Text`, so there is no
     /// numeric/date custom-type case this can miss). See `Absent`'s doc
     /// comment for when that arm is actually reached.
@@ -226,8 +226,8 @@ enum SegmentSortColumn {
     Function(function_query::FunctionColumns),
     /// Live and reachable via dynamic-only fields (issue #66): a
     /// dynamic-only column (e.g. Drupal's `its_`/`ds_` classes matched only
-    /// through `check_sort`'s dynamic-field fallback, not a schema-declared
-    /// static field) is a JSON-path column that Tantivy only materialises in
+    /// through `sort::parse_spec`'s dynamic-field fallback, not a
+    /// schema-declared static field) is a JSON-path column that Tantivy only materialises in
     /// segments where *some* document actually carried that key. A segment
     /// built entirely from a batch of docs that never used the key has no
     /// column for it at all — unlike a schema-declared fast field, which
@@ -283,7 +283,7 @@ impl SegmentSortColumn {
             // Dates collapse into `I64` timestamps elsewhere in this module
             // (see `SortValue`'s doc comment); the epoch is timestamp 0.
             Some(ValueKind::Date) => Some(SortValue::I64(0)),
-            // `date_range` never reaches here: `parse_sort_spec` refuses to
+            // `date_range` never reaches here: `sort::parse_spec` refuses to
             // sort on one at all (finding 186's `Sorting not supported on
             // SpatialField`), so no `SortClause` can carry the kind.
             Some(ValueKind::Text)

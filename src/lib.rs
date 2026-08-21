@@ -4,9 +4,13 @@
 //! every layer, kept and iterated on rather than a spike: TOML schema ->
 //! Tantivy schema, `/update` (JSON add + commit), `/select` (`q`, `fq`,
 //! `fl`, `rows`, `start`, and the `facet.*` family — see `crate::facet`),
-//! and `/admin/ping`.
+//! and `/admin/ping`. The whole `/select` workflow — parse, plan, collect,
+//! post-process, render — lives in `crate::select_workflow`; this module is
+//! its Axum adapter, owning routing, the parameter allowlists, and envelope
+//! plumbing.
 //!
-//! `sort` was out of the tracer-bullet scope and has since landed (issue #2),
+//! `sort` was out of the tracer-bullet scope and has since landed (issue #2,
+//! spec parsing in `crate::sort`, shared with grouping's `group.sort`),
 //! as has `stats` (issue #5) and highlighting (`hl`/`hl.fl` — see
 //! `crate::highlight`, issue #4). Deliberately out of scope here (PRD §7):
 //! edismax, MLT. Multi-core: out of scope too — `app()` serves exactly one
@@ -33,6 +37,7 @@ mod date_range;
 pub mod edismax;
 mod error;
 pub mod extract;
+mod extract_workflow;
 mod facet;
 mod function_query;
 mod grouping;
@@ -45,9 +50,13 @@ mod local_params;
 mod params;
 mod query;
 pub mod schema;
+mod schema_contract;
+mod select_workflow;
 pub mod snapshot;
+mod sort;
 mod stats;
 mod synonyms;
+mod update_policy;
 
 pub use config::ServerConfig;
 
@@ -65,12 +74,10 @@ use axum::routing::{any, get};
 use http_body_util::BodyExt;
 use serde_json::{Map, Value, json};
 use tantivy::Score;
-use tantivy::query::{EmptyQuery, Occur, Query, QueryClone};
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::TraceLayer;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use collector::{SortClause, SortKey};
 use config::AuthConfig;
 use core_index::CoreIndex;
 use error::{Envelope, WfError};
@@ -979,8 +986,8 @@ async fn synonyms_ui_post(
 /// Renders the core's declared fields (name, type, and the
 /// `stored`/`fast`/`multi_valued`/`required` flags), its dynamic-field rules,
 /// and its copy-field pairs, straight off the in-process `WayfinderSchema`
-/// `CoreIndex::open` loaded at startup — the same struct
-/// `schema::check_compatible` validates against. Re-reading the TOML per
+/// `CoreIndex::open` loaded at startup, the same parsed schema the persisted
+/// schema contract validates against. Re-reading the TOML per
 /// request would introduce a second parsing path that could disagree with the
 /// index actually being served.
 ///
@@ -1262,257 +1269,6 @@ fn check_update_method(method: &Method) -> Result<(), WfError> {
         .envelope(Envelope::Bare));
     }
     Ok(())
-}
-
-/// Parses and validates the `sort` parameter, returning the clauses to order by
-/// (empty means "no sort", i.e. Solr's default `score desc`).
-///
-/// Three hard 400s, all captured:
-///
-/// - Sorting on an undefined field.
-/// - Sorting on a field that is not `fast`: a hard 400 in Solr (finding 11,
-///   `err_bad_sort.json`), never a silent fallback.
-/// - A clause whose direction token is missing or is not `asc`/`desc`
-///   (`err_sort_no_direction.json`, `err_sort_bad_direction.json`).
-///
-/// The *order* of those checks is itself captured behaviour (finding 18), and it
-/// has two independent halves, each with its own fixture — they are separate
-/// claims and only one fixture each can establish them:
-///
-/// - **Across clauses:** left to right, stopping at the first bad clause, so one
-///   bad clause rejects the whole spec rather than sorting on the valid prefix
-///   (`err_sort_bad_clause_among_good.json`, and
-///   `err_sort_field_before_direction.json` where an earlier clause's field error
-///   beats a later clause's direction error).
-/// - **Within a clause:** the direction is checked **before** the field is
-///   resolved. Only `err_sort_direction_before_field.json` shows this —
-///   `sort=body sideways` is bad in both ways at once, and Solr answers the
-///   direction error. Every other captured spec is identical under either
-///   within-clause order, so nothing else can be cited for it.
-///
-/// `score` is special-cased out of field resolution entirely. Note what
-/// establishes what: `err_sort_score_bad_direction.json` shows only that `score`
-/// is **not exempt from the direction check** — under direction-first, a bad
-/// direction errors whether or not `score` is special-cased, so that fixture
-/// says nothing about resolution. The special-casing itself is established by
-/// `select_sort_score_{all,asc,desc}` returning 200 and ranking by score, which
-/// an unresolvable field could not do.
-fn check_sort(state: &AppState, params: &Params) -> Result<Vec<SortClause>, WfError> {
-    match params.get("sort") {
-        None => Ok(Vec::new()),
-        Some(spec) => parse_sort_spec(&state.index.wf_schema, params, spec),
-    }
-}
-
-/// Parses a Solr sort spec string into clauses. Shared by `check_sort` (the
-/// `sort` param) and grouping's `group.sort` (issue #290) so both speak the
-/// same field-direction grammar — comma does not delimit the field token,
-/// direction is checked before the field resolves, and a dynamic-only match
-/// sorts on its catch-all fast column (findings 18/34/35, issue #66).
-pub(crate) fn parse_sort_spec(
-    schema: &crate::schema::WayfinderSchema,
-    params: &Params,
-    spec: &str,
-) -> Result<Vec<SortClause>, WfError> {
-    // Rewritten clause grammar (finding 34/35, issue #32). Scanned with an
-    // absolute cursor into `spec` rather than `split(',')`: a comma does NOT
-    // delimit the field token (`,id` is one token, which is exactly how the
-    // leading/doubled-comma fixtures end up as *field* errors — the glued
-    // token simply fails field resolution), and everything after the field
-    // token up to the next comma (or end of spec) is the direction, checked
-    // as a single trimmed chunk rather than split further — which is what
-    // makes `sort=id asc garbage` a direction error instead of a silently
-    // dropped extra token.
-    let mut clauses = Vec::new();
-    let mut pos = 0usize;
-    loop {
-        // Skip whitespace between clauses. Also the mechanism for "no more
-        // clauses": an empty or all-whitespace spec, or a trailing comma
-        // followed only by whitespace/end, lands here with nothing left.
-        let ws = spec[pos..]
-            .find(|c: char| !c.is_whitespace())
-            .unwrap_or(spec.len() - pos);
-        pos += ws;
-        if pos >= spec.len() {
-            break;
-        }
-
-        // FIELD: the next whitespace-delimited token, starting at `pos`. A
-        // comma does not delimit it.
-        let field_len = spec[pos..]
-            .find(char::is_whitespace)
-            .unwrap_or(spec.len() - pos);
-        let field_end = pos + field_len;
-        let field_name = &spec[pos..field_end];
-
-        // DIRECTION: from just past the field token to the next comma or end
-        // of spec, trimmed, checked as one chunk against `asc`/`desc`.
-        let dir_start = field_end;
-        let comma_rel = spec[dir_start..].find(',');
-        let dir_end = dir_start + comma_rel.unwrap_or(spec.len() - dir_start);
-        let direction_raw = &spec[dir_start..dir_end];
-
-        // Direction first, field second (finding 18/34).
-        //
-        // `pos` mirrors Solr's parser position — the *absolute* offset within
-        // the whole spec just past this clause's field token, leading
-        // whitespace included (finding 35): `pos=2` for `'id sideways'`
-        // (`err_sort_bad_direction.json`), `pos=9` for the second clause of
-        // `'id asc,id sideways'` (`err_sort_second_clause_bad_direction.json`),
-        // `pos=15` — past the *whole* second field token — for
-        // `'id asc,category'` (`err_sort_second_clause_no_direction.json`),
-        // and `pos=4` with leading spaces preserved for `'  id sideways'`
-        // (`err_sort_leading_whitespace.json`).
-        let descending = match direction_raw.trim() {
-            "asc" => false,
-            "desc" => true,
-            _ => {
-                return Err(WfError::bad_request(
-                    "wayfinder::BadSort",
-                    format!(
-                        "Can't determine a Sort Order (asc or desc) in sort spec '{spec}', pos={dir_start}"
-                    ),
-                )
-                .with_params(params));
-            }
-        };
-
-        let key = if field_name == "score" {
-            SortKey::Score
-        } else if field_name == "geodist()" {
-            // #332: `sort=geodist() asc` ranks by ascending haversine distance.
-            // The argless `geodist()` reads `sfield`/`pt` from the request
-            // params (finding 133), exactly like `fl=dist:geodist()`; `sfield`
-            // must name a declared `location` field. Direction-first still
-            // holds (a bad direction 400s before this), matching `score`'s
-            // special-casing.
-            SortKey::Function(geodist_sort_func(schema, params)?)
-        } else {
-            // Resolved with the same static-before-dynamic precedence
-            // indexing already uses (issue #66): a declared `[[fields]]`
-            // entry wins over a `[[dynamic_fields]]` pattern that would also
-            // match it, and a dynamic-only match sorts on the catch-all JSON
-            // column it is actually indexed into (mirrors
-            // `CoreIndex::rewrite_dynamic_fields`'s resolution for the query
-            // path), not the bare field name.
-            // #341/finding 186: a `date_range` field is a spatial field in
-            // Solr's type hierarchy, and Solr refuses to sort on one with its
-            // own message -- checked BEFORE the fast/docValues check, since the
-            // refusal does not depend on whether the field has fast values
-            // (the dynamic path's catch-all column does).
-            if schema.resolved_value_kind(field_name) == Some(schema::ValueKind::DateRange) {
-                return Err(WfError::bad_request(
-                    "wayfinder::BadSort",
-                    format!(
-                        "Sorting not supported on SpatialField: {field_name}, instead try sorting by query."
-                    ),
-                )
-                .with_params(params));
-            }
-            match schema.resolved_fast(field_name) {
-                None => {
-                    return Err(WfError::bad_request(
-                        "wayfinder::BadSort",
-                        format!("can not sort on undefined field: {field_name}"),
-                    )
-                    .with_params(params));
-                }
-                Some(false) => {
-                    return Err(WfError::bad_request(
-                        "wayfinder::BadSort",
-                        format!(
-                            "can not sort on a field w/o fast values (docValues): {field_name}"
-                        ),
-                    )
-                    .with_params(params));
-                }
-                Some(true) => {
-                    let column = schema
-                        .resolved_fast_column(field_name)
-                        .expect("resolved_fast confirmed this name resolves");
-                    SortKey::Field(column)
-                }
-            }
-        };
-
-        // The schema's declared value kind travels with the clause so the
-        // collector can materialise a segment-wide-absent column's missing
-        // value as the right *type* (finding 36/37) — `score` has none, it is
-        // never missing. `resolved_value_kind` already resolves any custom
-        // `[[field_types]]`, which only ever produce `Text`, so there is no
-        // numeric/date custom-type case this can miss. Resolved from the
-        // original `field_name`, not the (possibly rewritten) column in
-        // `key`, since a dynamic column's own name carries no schema entry.
-        let value_kind = match &key {
-            SortKey::Score | SortKey::Function(_) => None,
-            SortKey::Field(_) => schema.resolved_value_kind(field_name),
-        };
-        clauses.push(SortClause::new(key, descending, value_kind));
-
-        // Consume at most one comma after a valid clause. A trailing comma
-        // (no more clauses after it) is fine; anything else — a second
-        // consecutive comma, more text with no comma — starts the next loop
-        // iteration as a new clause, whose field token then starts with a
-        // comma and fails field resolution (the leading/doubled-comma cases).
-        match comma_rel {
-            Some(rel) => pos = dir_start + rel + 1,
-            None => break,
-        }
-    }
-    Ok(clauses)
-}
-
-/// Resolves the argless `geodist()` a `sort=geodist() ...` clause ranks by,
-/// reading `sfield`/`pt` from the request params (finding 133) exactly as
-/// `computed_fl_fields` does for `fl=dist:geodist()`. `sfield` must name a
-/// declared `location` field; `pt` is `lat,lon`. The missing-/bad-param paths
-/// carry no fixture (the capture always sends both), so they are the correct
-/// 400 rather than a panic.
-fn geodist_sort_func(
-    schema: &schema::WayfinderSchema,
-    params: &Params,
-) -> Result<function_query::FuncQuery, WfError> {
-    let sfield = params.get("sfield").ok_or_else(|| {
-        WfError::bad_request(
-            "wayfinder::BadSort",
-            "geodist() sort requires the `sfield` request param".to_string(),
-        )
-    })?;
-    if schema.location_fields(sfield).is_none() {
-        return Err(WfError::bad_request(
-            "wayfinder::BadSort",
-            format!("geodist() sort sfield `{sfield}` is not a declared `location` field"),
-        )
-        .with_params(params));
-    }
-    let pt = params.get("pt").ok_or_else(|| {
-        WfError::bad_request(
-            "wayfinder::BadSort",
-            "geodist() sort requires the `pt` request param".to_string(),
-        )
-    })?;
-    let (lat_s, lon_s) = pt.split_once(',').ok_or_else(|| {
-        WfError::bad_request(
-            "wayfinder::BadSort",
-            format!("geodist() sort pt `{pt}` is not a `lat,lon` point"),
-        )
-    })?;
-    let lat: f64 = lat_s.trim().parse().map_err(|_| {
-        WfError::bad_request(
-            "wayfinder::BadSort",
-            format!("geodist() sort pt `{pt}` has a non-numeric latitude"),
-        )
-    })?;
-    let lon: f64 = lon_s.trim().parse().map_err(|_| {
-        WfError::bad_request(
-            "wayfinder::BadSort",
-            format!("geodist() sort pt `{pt}` has a non-numeric longitude"),
-        )
-    })?;
-    Ok(function_query::FuncQuery::GeoDist {
-        sfield: sfield.to_string(),
-        pt: (lat, lon),
-    })
 }
 
 /// Under `strict_params`, rejects the first request param Wayfinder does not
@@ -2358,31 +2114,10 @@ fn parse_update_commands(body: &[u8]) -> Result<Vec<UpdateCommand>, String> {
     Ok(commands)
 }
 
-/// The bare `{"responseHeader":{"status":0,"QTime":0}}` envelope every
-/// `/update` success answers with, for every command shape (finding 46) —
-/// never a `params` echo, never per-command keys.
-///
-/// Under `omitHeader=true` that leaves `{}`: the bare envelope has no other
-/// key to survive the header's removal.
-///
-/// ponytail: unfixtured for `/update` specifically. `search_api_solr` only
-/// ever sends `omitHeader=false` here (`solr-ref/search-api/trace/00001.json`),
-/// so no capture shows `/update` under `omitHeader=true`. This generalizes
-/// from `/select`/`/mlt`/`/terms`, which all gate on the same param and are
-/// fixture-pinned; the alternative reading ("`/update` never suppresses") is
-/// possible but has nothing behind it. A capture of a real `solr:9`
-/// `/update?commit=true&omitHeader=true` settles it.
+/// Renders the shared `/update` success envelope
+/// ([`update_policy::success_body`]) as an HTTP response.
 fn update_success(params: &Params) -> Response {
-    if params.omit_header() {
-        return axum::Json(json!({})).into_response();
-    }
-    axum::Json(json!({
-        "responseHeader": {
-            "status": 0,
-            "QTime": 0,
-        }
-    }))
-    .into_response()
+    axum::Json(update_policy::success_body(params)).into_response()
 }
 
 async fn update(
@@ -2404,33 +2139,13 @@ async fn update(
     check_core(&state, &core, &params, Envelope::NoParams)?;
     check_params(&state, UPDATE_PARAMS, &params).map_err(|e| e.envelope(Envelope::NoParams))?;
 
-    // Every boolean this handler reads, validated at entry so an invalid value
-    // 400s here rather than being silently read as `false` later.
-    // `omitHeader` is NOT among them: `check_params` above already validated
-    // it, for every allowlist containing the name (issue #214).
-    let bool_param = |key: &str, default: bool| {
-        params
-            .bool_or(key, default)
-            .map_err(|e| e.envelope(Envelope::NoParams))
-    };
-    // Bound separately and *then* OR-ed: writing this as
-    // `bool_param("commit", false)? || bool_param("softCommit", false)?`
-    // short-circuits, so `commit=true&softCommit=nope` would never parse
-    // `softCommit` at all and would 200 on an invalid boolean -- the exact
-    // silent acceptance issue #187 exists to remove. Every boolean this
-    // handler accepts is validated, whatever the others say.
-    let commit = bool_param("commit", false)?;
-    let soft_commit = bool_param("softCommit", false)?;
-    let commit_requested = commit || soft_commit;
-    // `overwrite=false` skips the default replace-by-uniqueKey step
-    // (finding 48b); Solr's default is `overwrite=true`.
-    let overwrite = bool_param("overwrite", true)?;
+    let update_policy = update_policy::UpdatePolicy::from_params(&params)?;
 
     // GET carries no body (finding 47): it is not a method error, but a
     // *content-stream* one — 400 "missing content stream" unless the only
     // thing being asked is a commit, which really commits and answers 200.
     if method == Method::GET {
-        if !commit_requested {
+        if !update_policy.commit_requested {
             return Err(update_err(
                 "wayfinder::MissingContentStream",
                 "missing content stream".to_string(),
@@ -2457,7 +2172,7 @@ async fn update(
             if !pending_adds.is_empty() {
                 state
                     .index
-                    .add_documents(&pending_adds, overwrite)
+                    .add_documents(&pending_adds, update_policy.overwrite)
                     .map_err(|e| update_err("wayfinder::IndexError", e.to_string()))?;
                 pending_adds.clear();
             }
@@ -2501,30 +2216,11 @@ async fn update(
     }
     flush_adds!();
 
-    // `commit=true` (existing) and `softCommit=true` both mean "commit and
-    // reload now" — per the task spec's softCommit note, Tantivy has no
-    // in-memory-searchable segment for a real soft commit to leave
-    // uncommitted-but-visible, so Wayfinder's softCommit is a hard commit
-    // too (wire-visible behaviour matches Solr; durability is only ever
-    // stronger, never weaker). A `commit` key in the body does the same, but
-    // in body order, in the loop above.
-    if commit_requested {
-        state.index.commit().map_err(|e| {
-            WfError::internal("wayfinder::CommitError", e.to_string())
-                .with_params(&params)
-                .envelope(Envelope::NoParams)
-        })?;
-    }
-    // `commitWithin=<ms>` schedules a commit at most that many ms out — also
-    // a HARD commit (+ reload) in Wayfinder, same divergence note as
-    // `softCommit` above (task spec: "Same for commitWithin: it schedules a
-    // HARD commit, where Solr's default is soft").
-    if let Some(ms) = params
-        .get("commitWithin")
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        state.index.schedule_commit(ms);
-    }
+    update_policy.finish(&state.index).map_err(|error| {
+        WfError::internal("wayfinder::CommitError", error.to_string())
+            .with_params(&params)
+            .envelope(Envelope::NoParams)
+    })?;
 
     Ok(update_success(&params))
 }
@@ -2567,236 +2263,16 @@ impl extract::ChunkSource for FieldChunks<'_> {
     }
 }
 
-/// The default `Content-Type` for a part that declares none — Tika's own
-/// fallback, and what every captured no-`Content-Type` extract echoes back
-/// as `stream_content_type` (`extract_plain_text_xml.json`).
+/// The default `Content-Type` for a part that declares none -- Tika's own
+/// fallback, and what every captured no-`Content-Type` extract echoes back as
+/// `stream_content_type` (`extract_plain_text_xml.json`).
 const OCTET_STREAM: &str = "application/octet-stream";
 
-/// The Search-API configset's `ExtractingRequestHandler` defaults (issue
-/// #259), hardcoded because they are the only evidenced config — the
-/// captured index/select pair was taken against exactly these. "Wire format
-/// only, never Solr's config format" (CLAUDE.md) means matching that
-/// configset's wire behaviour, not exposing its `solrconfig.xml`. Request
-/// params override and extend: a request `fmap.<from>` wins over the default
-/// on the same `<from>` and adds new mappings; `lowernames`/`uprefix`/
-/// `captureAttr` are overridden outright when sent.
-const EXTRACT_DEFAULT_FMAP: &[(&str, &str)] = &[("a", "links"), ("div", "ignored_")];
-const EXTRACT_DEFAULT_UPREFIX: &str = "ignored_";
-
-/// Builds the indexed document's field map from an extraction and the
-/// request's Solr-Cell params (#259), in Solr's order: `lowernames` → `fmap`
-/// rename → `uprefix`-drop → `literal.*` overlay, then keep only fields that
-/// resolve against the schema (declared or a dynamic rule).
+/// `POST /wayfinder/{core}/update/extract`.
 ///
-/// Returns `field_name -> Vec<Value>` in insertion order; the caller wraps it
-/// as a JSON object and indexes it through the normal `/update` path. A field
-/// that does not resolve against the schema is dropped when `uprefix` is set
-/// — reproducing the observable effect of the Search-API configset's catch-all
-/// `<dynamicField name="*" type="ignored">` (stored/indexed false), which is
-/// what makes `uprefix=ignored_` drop unmapped fields from selects. Without
-/// `uprefix`, the field passes through so `add_documents` errors on a
-/// genuinely unknown field exactly as strict Solr
-/// (`-Dupdate.autoCreateFields=false`) does.
-///
-/// ponytail: Wayfinder drops uprefix'd fields outright rather than indexing
-/// them into a catch-all ignored-type field. The observable result is
-/// identical (the field never appears in a select); reproducing the
-/// ignored-type field would need a schema change for no wire benefit. Trigger:
-/// a captured index whose select returns a value Solr stored under the
-/// catch-all but Wayfinder dropped.
-///
-/// The indexed `body`/`links` values come from Wayfinder's own extractors and
-/// so diverge from the captured select fixture (`extract_html_select.json`):
-/// Wayfinder does not replicate Tika's content-field whitespace, and PRD
-/// divergence 10 forbids fabricating `shape="rect"`, so `links` carries only
-/// the real attribute values. That divergence is recorded in the PRD and
-/// asserted by the route tests; this function is where it originates.
-fn extract_cell_fields(
-    doc: &extract::ExtractedDocument,
-    params: &Params,
-    schema: &schema::WayfinderSchema,
-) -> Result<Vec<(String, Vec<Value>)>, WfError> {
-    let lowernames = params.bool_or("lowernames", true)?;
-    let capture_attr = params.bool_or("captureAttr", true)?;
-    let uprefix = params.get("uprefix").unwrap_or(EXTRACT_DEFAULT_UPREFIX);
-    let uprefix_set = !uprefix.is_empty();
-
-    // `fmap`: defaults merged with request params (request wins on conflict).
-    let mut fmap: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
-    for (from, to) in EXTRACT_DEFAULT_FMAP {
-        fmap.insert(from, to);
-    }
-    for (from, to) in params.pairs_with_prefix("fmap.") {
-        fmap.insert(from, to);
-    }
-    let rename = |name: &str| -> String {
-        fmap.get(name)
-            .map(|s| (*s).to_string())
-            .unwrap_or_else(|| name.to_string())
-    };
-    let resolves = |name: &str| schema.is_static(name) || schema.match_dynamic(name).is_some();
-
-    // Source fields: extracted text/metadata, plus captured element
-    // attributes when `captureAttr` is on.
-    let mut source: Vec<(String, Vec<String>)> = doc.extract_source_fields();
-    if capture_attr {
-        for (element, value) in &doc.captured_attrs {
-            if let Some(entry) = source.iter_mut().find(|(name, _)| name == element) {
-                entry.1.push(value.clone());
-            } else {
-                source.push((element.clone(), vec![value.clone()]));
-            }
-        }
-    }
-
-    let mut fields: Vec<(String, Vec<Value>)> = Vec::new();
-    let push = |raw_name: String, values: Vec<String>, fields: &mut Vec<(String, Vec<Value>)>| {
-        let name = if lowernames {
-            raw_name.to_ascii_lowercase()
-        } else {
-            raw_name
-        };
-        let name = rename(&name);
-        if !resolves(&name) {
-            // With `uprefix` set, unknown fields are dropped — the observable
-            // effect of the Search-API configset's catch-all ignored-type
-            // dynamic field, which `uprefix=ignored_` relies on. Without it,
-            // the field passes through to `add_documents`, which errors on a
-            // genuinely unknown field as strict Solr does.
-            if uprefix_set {
-                return;
-            }
-        }
-        let vals: Vec<Value> = values.into_iter().map(Value::String).collect();
-        if let Some(entry) = fields.iter_mut().find(|(n, _)| *n == name) {
-            entry.1.extend(vals);
-        } else {
-            fields.push((name, vals));
-        }
-    };
-    for (name, values) in source {
-        push(name, values, &mut fields);
-    }
-    // `literal.*` overlay: explicit field values, added after extraction
-    // (Solr merges them into the document; a literal naming a field the
-    // extractor also produced multivalues). `lowernames` applies; `fmap` does
-    // not — `fmap` is for extracted/captured fields, and a literal is already
-    // the caller's chosen destination name.
-    for (field, value) in params.pairs_with_prefix("literal.") {
-        push(field.to_string(), vec![value.to_string()], &mut fields);
-    }
-    Ok(fields)
-}
-
-/// The indexing half of `/update/extract` (issue #259): takes the extraction
-/// and the request's Solr-Cell params, builds the document through
-/// [`extract_cell_fields`], and indexes it through the same commit path `/update`
-/// uses — `add_documents` then the `commit`/`softCommit`/`commitWithin`
-/// semantics, answering the bare `responseHeader` envelope
-/// (`extract_html_index.json`).
-///
-/// Every boolean is validated at entry (issue #187), so `commit=maybe`
-/// 400s here rather than being silently read as `false` — exactly as `/update`
-/// does. The bound-then-OR pattern is copied from there for the same reason:
-/// short-circuiting would let an invalid `softCommit` hide behind a true
-/// `commit`.
-async fn extract_cell_index(
-    state: &AppState,
-    params: &Params,
-    doc: &extract::ExtractedDocument,
-) -> Result<Response, WfError> {
-    let no_params = |class: &'static str, msg: String| {
-        WfError::bad_request(class, msg)
-            .with_params(params)
-            .envelope(Envelope::NoParams)
-    };
-    let commit = params
-        .bool_or("commit", false)
-        .map_err(|e| e.envelope(Envelope::NoParams))?;
-    let soft_commit = params
-        .bool_or("softCommit", false)
-        .map_err(|e| e.envelope(Envelope::NoParams))?;
-    let overwrite = params
-        .bool_or("overwrite", true)
-        .map_err(|e| e.envelope(Envelope::NoParams))?;
-    let commit_requested = commit || soft_commit;
-
-    let fields = extract_cell_fields(doc, params, &state.index.wf_schema)
-        .map_err(|e| e.envelope(Envelope::NoParams))?;
-    let mut obj = Map::new();
-    for (name, values) in fields {
-        // Single value -> scalar, multi -> array, matching the JSON shape
-        // `/update` bodies use and `add_documents` expects.
-        let value = if values.len() == 1 {
-            values.into_iter().next().expect("len == 1")
-        } else {
-            Value::Array(values)
-        };
-        obj.insert(name, value);
-    }
-    state
-        .index
-        .add_documents(&[Value::Object(obj)], overwrite)
-        .map_err(|e| no_params("wayfinder::IndexError", e.to_string()))?;
-    if commit_requested {
-        state.index.commit().map_err(|e| {
-            WfError::internal("wayfinder::CommitError", e.to_string())
-                .with_params(params)
-                .envelope(Envelope::NoParams)
-        })?;
-    }
-    if let Some(ms) = params
-        .get("commitWithin")
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        state.index.schedule_commit(ms);
-    }
-    Ok(update_success(params))
-}
-
-/// `POST /wayfinder/{core}/update/extract` (issues #258 and #259).
-///
-/// Two modes share this one handler, selected by the resolved `extractOnly`
-/// boolean:
-///
-/// - **`extractOnly=true`** (#258): extract the document and return Tika's
-///   `{responseHeader, file, file_metadata}` envelope, never indexing it.
-/// - **`extractOnly` absent/false** (#259, Solr Cell indexing): apply the
-///   extracted content to the index through the same commit path `/update`
-///   uses, answering the bare `responseHeader` envelope
-///   (`extract_html_index.json`). See [`extract_cell_index`].
-///
-/// #258 shipped requiring `extractOnly=true` (PRD divergence 10): indexing was
-/// out of v1 scope, so a 200 that silently indexed nothing was the worse
-/// failure. #259 retires that half of the divergence — the indexing path now
-/// exists — while keeping the other halves (no `X-Parsed-By`, no fabricated
-/// `shape="rect"`, 415 for unsupported formats).
-///
-/// Shape of the work, in the order the budgets need it:
-///
-/// 1. Params and core, exactly as `/update` validates them (`Envelope::NoParams` —
-///    this is an `/update` path and Solr never echoes params on one).
-/// 2. In-flight-upload admission (issue #273): an `ExtractionRuntime`
-///    in-flight slot is acquired *before* any of the body is consumed and
-///    held across steps 3–4 (intake, read-back, and parse — the window the
-///    uploaded bytes are resident), then released. This — not the parse
-///    permit — is what bounds total resident upload memory
-///    (`max_inflight_uploads × max_body_bytes`).
-/// 3. Multipart intake: the **first part with a non-empty filename** is the
-///    document. Streamed to a temp file through `stream_to_tempfile`, which
-///    fails with `BodyTooLarge` at the first chunk that crosses
-///    `extraction.max_body_bytes` — before the whole body is buffered, and
-///    without trusting `Content-Length`.
-/// 4. The parse, and only the parse, runs under an `ExtractionRuntime` permit.
-///    Holding a concurrency slot across the body read would let a slow client
-///    occupy an extraction slot without extracting anything, which is a
-///    trivially cheap way to hold the pool down.
-/// 5. Rendering, back on the request task.
-///
-/// The `Budget` is constructed *inside* the closure because it is `!Sync` by
-/// design (its counters are `Cell`s) — it must never be held across an
-/// `.await`, and building it on the pool thread makes that unrepresentable
-/// rather than merely discouraged.
+/// Axum-specific multipart parsing stays here. Admission, byte accounting,
+/// temporary storage, extraction, field mapping, rendering, and indexing all
+/// live behind [`extract_workflow::Workflow`].
 async fn update_extract(
     State(state): State<Arc<AppState>>,
     AxPath(core): AxPath<String>,
@@ -2814,91 +2290,33 @@ async fn update_extract(
     check_core(&state, &core, &params, Envelope::NoParams)?;
     check_params(&state, EXTRACT_PARAMS, &params).map_err(|e| e.envelope(Envelope::NoParams))?;
 
-    // `extractOnly` selects the two modes this handler serves: #258's
-    // extract-only response, and #259's Solr-Cell indexing. The resolved
-    // boolean, not the param's presence: `extractOnly=false` asks for
-    // indexing just as plainly as omitting it does.
-    let extract_only = params
-        .bool_or("extractOnly", false)
-        .map_err(|e| e.envelope(Envelope::NoParams))?;
-    // `extractFormat` is only meaningful to the extractOnly response; on the
-    // indexing path it is accepted-and-ignored (it remains in the allowlist).
-    let as_text = if extract_only {
-        match params.get("extractFormat") {
-            None | Some("xml") => false,
-            Some("text") => true,
-            Some(other) => {
-                return Err(extract_err(
-                    "wayfinder::InvalidParam",
-                    format!("invalid extractFormat value: {other}"),
-                ));
-            }
-        }
-    } else {
-        false
-    };
-
+    let workflow = extract_workflow::Workflow::new(
+        &state.extraction,
+        &state.index,
+        state.extract_limits,
+        &params,
+    )?;
     let mut multipart = multipart.map_err(|e| {
         extract_err(
             "wayfinder::BadContentStream",
             format!("expected a multipart/form-data upload: {e}"),
         )
     })?;
+    let mut intake = workflow.begin()?;
 
-    let mut temp = tempfile::NamedTempFile::new().map_err(|e| {
-        WfError::internal(
-            "wayfinder::ExtractionIo",
-            format!("creating upload temp file: {e}"),
-        )
-        .with_params(&params)
-        .envelope(Envelope::NoParams)
-    })?;
-
-    // Every byte the handler consumes is charged against one request-wide
-    // total, file part or not. Skipping a non-file field without counting it
-    // is what made this route unbounded: `next_field()` drains the skipped
-    // field to completion, so an arbitrarily long (or endless chunked) stream
-    // of non-file parts was read in full and then answered
-    // `MissingContentStream`. The route-level `DefaultBodyLimit`
-    // (`route_body_ceiling`) is the backstop for the part *headers* this
-    // counter cannot see; this counter is what produces the captured 413.
-    let max_body_bytes = state.extract_limits.max_body_bytes;
     let body_ceiling = state.extract_limits.route_body_ceiling() as u64;
     let body_limit_hit = Arc::new(AtomicBool::new(false));
-    let mut consumed: u64 = 0;
-    // A transport-cap 413 outranks whatever `ChunkSource` managed to report:
-    // see `FieldChunks::body_limit_hit`.
     let body_error = |e: extract::ExtractError| {
-        let e = if body_limit_hit.load(Ordering::Relaxed) {
+        let error = if body_limit_hit.load(Ordering::Relaxed) {
             extract::ExtractError::BodyTooLarge {
                 limit: body_ceiling,
             }
         } else {
             e
         };
-        WfError::from(e).with_params(&params)
+        WfError::from(error).with_params(&params)
     };
 
-    // Issue #273: bound total resident upload memory, not just the parse
-    // slots. The extraction permit (`max_concurrency`) is acquired only
-    // around the parse — *after* this body has been streamed in and read
-    // back resident — so without an intake bound the resident-RAM ceiling is
-    // `max_body_bytes × HTTP concurrency`, set by the (unbounded) connection
-    // count. This separate admission count is acquired *before* any of the
-    // body is consumed and held across the multipart intake, the resident
-    // read-back, and the parse (the uploaded `bytes` stay resident for all
-    // three), so total resident upload memory is `max_inflight_uploads ×
-    // max_body_bytes`. Released by `Drop` at every return path below,
-    // including the indexing-path early return. See
-    // `ExtractionRuntime::try_acquire_inflight` and
-    // `ExtractLimits::max_inflight_uploads`.
-    let inflight = state.extraction.try_acquire_inflight().ok_or_else(|| {
-        WfError::from(extract::ExtractError::InflightUploadsBusy)
-            .with_params(&params)
-            .envelope(Envelope::NoParams)
-    })?;
-
-    let mut found: Option<(String, String, String, u64)> = None;
     loop {
         let field = multipart.next_field().await.map_err(|e| {
             if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
@@ -2912,400 +2330,37 @@ async fn update_extract(
                 format!("malformed multipart body: {e}"),
             )
         })?;
-        let Some(field) = field else { break };
-        // An empty `filename=""` is a form field that happens to carry the
-        // parameter, not an uploaded document — treated as "no file part"
-        // rather than as a document named "".
+        let Some(field) = field else {
+            return Err(extract_err(
+                "wayfinder::MissingContentStream",
+                "multipart body carries no file part to extract".to_string(),
+            ));
+        };
+
         let file_name = field.file_name().unwrap_or_default().to_string();
         if file_name.is_empty() {
             let mut chunks = FieldChunks::new(field, Arc::clone(&body_limit_hit));
-            extract::drain_counted(&mut chunks, max_body_bytes, &mut consumed)
-                .await
-                .map_err(body_error)?;
+            intake.drain(&mut chunks).await.map_err(body_error)?;
             continue;
         }
-        let part_name = field.name().unwrap_or_default().to_string();
-        // The raw header, not `Field::content_type()`: the latter goes through
-        // the `mime` crate, which lowercases parameter values, and the
-        // captured response echoes the client's `Content-Type` **verbatim**
-        // (`extract_declared_charset_text.json` keeps `charset=ISO-8859-1`
-        // uppercase in both `Content-Type` and `stream_content_type`).
-        let declared_type = field
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string)
-            .unwrap_or_else(|| OCTET_STREAM.to_string());
+
+        let metadata = extract_workflow::UploadMetadata {
+            part_name: field.name().unwrap_or_default().to_string(),
+            file_name,
+            // Read the raw header. `Field::content_type()` lowercases MIME
+            // parameter values, but the wire echoes the declaration verbatim.
+            declared_type: field
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+                .unwrap_or_else(|| OCTET_STREAM.to_string()),
+        };
         let mut chunks = FieldChunks::new(field, Arc::clone(&body_limit_hit));
-        let written = extract::stream_to_tempfile_counted(
-            &mut chunks,
-            &mut temp,
-            max_body_bytes,
-            &mut consumed,
-        )
-        .await
-        .map_err(body_error)?;
-        found = Some((part_name, file_name, declared_type, written));
-        break;
+        let upload = intake.store(&mut chunks).await.map_err(body_error)?;
+        let body = workflow.finish(upload, metadata).await?;
+        return Ok(axum::Json(body).into_response());
     }
-    let Some((part_name, file_name, declared_type, stream_size)) = found else {
-        return Err(extract_err(
-            "wayfinder::MissingContentStream",
-            "multipart body carries no file part to extract".to_string(),
-        ));
-    };
-
-    // `resource.name` overrides the part's filename for detection and for the
-    // echoed `resourceName` (that is what the param is for); the filename is
-    // still reported separately as `stream_source_info`.
-    let resource_name = params
-        .get("resource.name")
-        .unwrap_or(&file_name)
-        .to_string();
-
-    // ponytail: the document is streamed to a temp file and then read back
-    // whole, because `Extractor::extract` takes `&[u8]`. Bounded by
-    // `extraction.max_body_bytes` (32 MiB by default), so it is a real
-    // ceiling per request rather than an unbounded one — and bounded across
-    // requests by the in-flight-upload count acquired above (issue #273), so
-    // total resident bytes are `max_inflight_uploads × max_body_bytes`, not
-    // `max_body_bytes × HTTP concurrency`. The `_inflight` slot is held
-    // across this read and the parse because the `bytes` it bounds stay
-    // resident for both.
-    //
-    // What remains is that this is still a *full copy* in RAM, and the temp
-    // file is currently only buying the streaming *count*. Trigger: the
-    // first extractor that can work incrementally (the phase-2a ZIP walker,
-    // per `ZipBudget`'s documented call sequence) wants a reader, at which
-    // point `ExtractInput` grows a stream variant and this read goes away.
-    let bytes = std::fs::read(temp.path()).map_err(|e| {
-        WfError::internal(
-            "wayfinder::ExtractionIo",
-            format!("reading upload temp file: {e}"),
-        )
-        .with_params(&params)
-        .envelope(Envelope::NoParams)
-    })?;
-
-    let limits = state.extract_limits;
-    let job_type = declared_type.clone();
-    let job_resource = resource_name.clone();
-    let doc = state
-        .extraction
-        .spawn_extraction(limits.deadline, move || {
-            let budget = extract::Budget::new(limits);
-            extract::extract_document(Some(&job_type), &job_resource, &bytes, &budget)
-        })
-        .await
-        .and_then(|inner| inner)
-        .map_err(|e| WfError::from(e).with_params(&params))?;
-
-    // The in-flight slot bounds resident *upload* bytes, and the parse above
-    // is the last thing that holds them — `bytes` is moved into the closure
-    // and freed once it resolves. Release the slot here, before indexing or
-    // rendering, so an intake slot is not held across the (potentially slow)
-    // commit on the indexing path while the upload's bytes are already gone.
-    drop(inflight);
-
-    if !extract_only {
-        // Indexing path (issue #259): apply Solr-Cell field mapping to the
-        // extraction and index through the normal `/update` commit path.
-        return extract_cell_index(&state, &params, &doc).await;
-    }
-
-    let render = extract::ExtractRender {
-        part_name: &part_name,
-        resource_name: &resource_name,
-        stream_source_info: &file_name,
-        declared_type: &declared_type,
-        stream_size,
-        doc: &doc,
-    };
-    let file = if as_text {
-        render.text()
-    } else {
-        render.xhtml()
-    };
-    // Solr renders `file_metadata` as a flat NamedList: `[key, [values], ...]`,
-    // which is what every captured extract shows and what `json.nl=flat`
-    // (the default) means for this writer. Issue #274 made the handler honour
-    // `json.nl` rather than allowlisting it and ignoring it: `file_metadata`
-    // is a plain (not `SimpleOrderedMap`) NamedList, so it reshapes per the
-    // param exactly as a facet bucket list does (finding 128).
-    let entries: Vec<(String, Value)> = render
-        .file_metadata()
-        .into_iter()
-        .map(|(key, values)| {
-            (
-                key,
-                Value::Array(values.into_iter().map(Value::String).collect()),
-            )
-        })
-        .collect();
-    let metadata = facet::render_named_list(&entries, facet::JsonNl::from_params(&params));
-
-    let mut body = Map::new();
-    if !params.omit_header() {
-        body.insert(
-            "responseHeader".to_string(),
-            json!({"status": 0, "QTime": 0}),
-        );
-    }
-    body.insert("file".to_string(), Value::String(file));
-    body.insert("file_metadata".to_string(), metadata);
-    Ok(axum::Json(Value::Object(body)).into_response())
-}
-
-/// Maps a `CoreIndex::parse_query` failure to the right `WfError` shape:
-/// finding 59's one 500 (a regex that parses as a query but fails automaton
-/// compilation — `query::QueryError::RegexCompile`, carried through
-/// `parse_query`'s `anyhow::Error` via `From`) gets the trace-carrying,
-/// no-`metadata` envelope `err_regex_bad_class.json` pins; any other
-/// unexpected failure (`QueryError::Internal` — e.g. a term-dictionary I/O
-/// error) is a plain 500 with the ordinary `metadata` shape, not dressed up
-/// in the regex one; every other failure (unknown field, bad syntax, an
-/// unclosed regex, a prefix query on a numeric field) is an ordinary 400
-/// `wayfinder::SyntaxError`, as before this issue.
-fn query_parse_error(e: anyhow::Error, params: &Params) -> WfError {
-    match e.downcast_ref::<query::QueryError>() {
-        Some(query::QueryError::RegexCompile(_)) => {
-            WfError::internal("wayfinder::RegexCompileError", e.to_string())
-                .with_trace(e.to_string())
-                .with_params(params)
-        }
-        Some(query::QueryError::Internal(_)) => {
-            WfError::internal("wayfinder::QueryError", e.to_string()).with_params(params)
-        }
-        _ => WfError::bad_request("wayfinder::SyntaxError", e.to_string()).with_params(params),
-    }
-}
-
-/// Returns raw Unicode-alphanumeric runs with both Rust byte ranges (for
-/// slicing/collation) and Java UTF-16 code-unit offsets (for Solr's wire
-/// `startOffset`/`endOffset`; `spellcheck_unicode_offsets.json`).
-fn spellcheck_tokens(text: &str) -> Vec<(usize, usize, usize, usize, &str)> {
-    let mut tokens = Vec::new();
-    let mut start = None;
-    let mut utf16_offset = 0;
-    for (byte_offset, ch) in text.char_indices() {
-        if ch.is_alphanumeric() {
-            start.get_or_insert((byte_offset, utf16_offset));
-        } else if let Some((byte_start, utf16_start)) = start.take() {
-            tokens.push((
-                byte_start,
-                byte_offset,
-                utf16_start,
-                utf16_offset,
-                &text[byte_start..byte_offset],
-            ));
-        }
-        utf16_offset += ch.len_utf16();
-    }
-    if let Some((byte_start, utf16_start)) = start {
-        tokens.push((
-            byte_start,
-            text.len(),
-            utf16_start,
-            utf16_offset,
-            &text[byte_start..],
-        ));
-    }
-    tokens
-}
-
-/// Builds the narrow issue-#223 spellcheck component from one real Tantivy
-/// field dictionary. `dictionary` names `spellcheck_<dictionary>`, and the
-/// first repeated request value wins through `Params::get`.
-fn spellcheck(index: &CoreIndex, params: &Params) -> anyhow::Result<Value> {
-    let map = params.get("json.nl") == Some("map");
-    let empty = || {
-        let named_list = || {
-            if map {
-                Value::Object(Map::new())
-            } else {
-                Value::Array(Vec::new())
-            }
-        };
-        json!({ "suggestions": named_list(), "collations": named_list() })
-    };
-
-    let Some(dictionary) = params.get("spellcheck.dictionary") else {
-        return Ok(empty());
-    };
-    let field_name = format!("spellcheck_{dictionary}");
-    if !index.resolves_field_name(&field_name) || params.get("spellcheck.q").is_none() {
-        return Ok(empty());
-    }
-    let terms = index.field_terms(&field_name)?;
-    let text = params
-        .get("spellcheck.q")
-        .expect("spellcheck.q presence was checked above");
-    let mut corrections = Vec::new();
-
-    // ponytail: this is deliberately not Solr's configurable spellcheck
-    // analyzer or ranking pipeline. It only scans raw Unicode-alphanumeric
-    // query runs, matches exact dictionary terms verbatim, then chooses one
-    // Damerau candidate at edit distance <= 2 (term-ascending tie break).
-    // Extend it only with a captured analyzer/ranking contract.
-    for (byte_start, byte_end, offset_start, offset_end, token) in spellcheck_tokens(text) {
-        if terms.contains_key(token) {
-            continue;
-        }
-        let candidate = terms
-            .keys()
-            .filter_map(|term| {
-                let distance = query::levenshtein(token, term);
-                (distance <= 2).then_some((distance, term))
-            })
-            .min_by(|(distance_a, term_a), (distance_b, term_b)| {
-                distance_a.cmp(distance_b).then_with(|| term_a.cmp(term_b))
-            })
-            .map(|(_, term)| term.clone());
-        if let Some(candidate) = candidate {
-            corrections.push((
-                byte_start,
-                byte_end,
-                offset_start,
-                offset_end,
-                token,
-                candidate,
-            ));
-        }
-    }
-
-    let suggestions = if map {
-        let mut suggestions = Map::new();
-        for (_, _, start, end, token, candidate) in &corrections {
-            suggestions.insert(
-                (*token).to_string(),
-                json!({
-                    "numFound": 1,
-                    "startOffset": start,
-                    "endOffset": end,
-                    "suggestion": [candidate],
-                }),
-            );
-        }
-        Value::Object(suggestions)
-    } else {
-        let mut suggestions = Vec::with_capacity(corrections.len() * 2);
-        for (_, _, start, end, token, candidate) in &corrections {
-            suggestions.push(json!(token));
-            suggestions.push(json!({
-                "numFound": 1,
-                "startOffset": start,
-                "endOffset": end,
-                "suggestion": [candidate],
-            }));
-        }
-        Value::Array(suggestions)
-    };
-
-    let collations = if params.bool_or("spellcheck.collate", false)? && !corrections.is_empty() {
-        let mut corrected = String::with_capacity(text.len());
-        let mut cursor = 0;
-        for (byte_start, byte_end, _, _, _, candidate) in &corrections {
-            corrected.push_str(&text[cursor..*byte_start]);
-            corrected.push_str(candidate);
-            cursor = *byte_end;
-        }
-        corrected.push_str(&text[cursor..]);
-        if map {
-            json!({ "collation": corrected })
-        } else {
-            json!(["collation", corrected])
-        }
-    } else if map {
-        Value::Object(Map::new())
-    } else {
-        Value::Array(Vec::new())
-    };
-
-    Ok(json!({ "suggestions": suggestions, "collations": collations }))
-}
-
-/// Parses `fl` entries of the form `<alias>:geodist()` into computed fields,
-/// resolving the argless `geodist()` against the `sfield`/`pt` request params
-/// (the client-evidenced form, finding 133). Returns `(alias, FuncQuery)`
-/// pairs the `/select` handler evaluates per doc and appends after the stored
-/// fields -- Solr appends computed/transformer fields last (verified against
-/// the `fl=*,dist:geodist()` capture). `sfield` must name a declared
-/// `location` field (its two synthetic columns back the distance); every other
-/// `fl` shape (literal name, `*`, `score`, `<alias>:<other-func>`) is not a
-/// computed field and yields nothing here. (#331)
-fn computed_fl_fields(
-    fl: Option<&[String]>,
-    params: &Params,
-    schema: &schema::WayfinderSchema,
-) -> Result<Vec<(String, function_query::FuncQuery)>, WfError> {
-    let mut out = Vec::new();
-    let Some(fl) = fl else {
-        return Ok(out);
-    };
-    for entry in fl {
-        let Some((alias, body)) = entry.split_once(':') else {
-            continue;
-        };
-        let alias = alias.trim();
-        let body = body.trim();
-        if body != "geodist()" {
-            // Only argless `geodist()` is supported in this tracer; an unknown
-            // function or the explicit-args form is left for render_doc to treat
-            // as a non-matching fl entry (no field, no output), matching Solr's
-            // own handling of an unrecognised transformer name only loosely.
-            continue;
-        }
-        if alias.is_empty() {
-            return Err(WfError::bad_request(
-                "wayfinder::SyntaxError",
-                format!("fl entry `{entry}` needs an alias before `:geodist()`"),
-            ));
-        }
-        let sfield = params.get("sfield").ok_or_else(|| {
-            WfError::bad_request(
-                "wayfinder::InvalidParam",
-                "geodist() requires the `sfield` request param".to_string(),
-            )
-        })?;
-        if schema.location_fields(sfield).is_none() {
-            return Err(WfError::bad_request(
-                "wayfinder::InvalidParam",
-                format!("geodist() sfield `{sfield}` is not a declared `location` field"),
-            ));
-        }
-        let pt = params.get("pt").ok_or_else(|| {
-            WfError::bad_request(
-                "wayfinder::InvalidParam",
-                "geodist() requires the `pt` request param".to_string(),
-            )
-        })?;
-        let (lat_s, lon_s) = pt.split_once(',').ok_or_else(|| {
-            WfError::bad_request(
-                "wayfinder::InvalidParam",
-                format!("geodist() pt `{pt}` is not a `lat,lon` point"),
-            )
-        })?;
-        let lat: f64 = lat_s.trim().parse().map_err(|_| {
-            WfError::bad_request(
-                "wayfinder::InvalidParam",
-                format!("geodist() pt `{pt}` has a non-numeric latitude"),
-            )
-        })?;
-        let lon: f64 = lon_s.trim().parse().map_err(|_| {
-            WfError::bad_request(
-                "wayfinder::InvalidParam",
-                format!("geodist() pt `{pt}` has a non-numeric longitude"),
-            )
-        })?;
-        out.push((
-            alias.to_string(),
-            function_query::FuncQuery::GeoDist {
-                sfield: sfield.to_string(),
-                pt: (lat, lon),
-            },
-        ));
-    }
-    Ok(out)
 }
 
 /// Builds a request's [`Params`] from its query string, and -- only when the
@@ -3363,610 +2418,7 @@ async fn select(
         .allow_omit_header();
     check_core(&state, &core, &params, Envelope::WithParams)?;
     check_params(&state, SELECT_PARAMS, &params)?;
-    let sort = check_sort(&state, &params)?;
-
-    // Read *before* the base query runs, matching Solr's own timing: an
-    // invalid value here answers with the error-only envelope, no `response`
-    // block (`bool_facet_invalid.json`) -- unlike `facet.missing`, which
-    // `facet::facet_counts` reads after the query and whose error therefore
-    // carries one. `omitHeader` is not read here: `check_params` above already
-    // validated it (issue #214).
-    let facet_requested = params.bool_or("facet", false)?;
-    let stats_requested = params.bool_or("stats", false)?;
-    let hl_requested = params.bool_or("hl", false)?;
-    // Use the same strict Solr boolean parser as `hl`: only true enables the
-    // component; false and an absent param leave its key out of the envelope.
-    let spellcheck_requested = params.bool_or("spellcheck", false)?;
-
-    // `bf` and `boost` no longer need the #232 accept-and-warn treatment:
-    // function queries are implemented (issue #289), so a function-form
-    // `boost` and any `bf` are applied rather than ignored. `select_warnings`
-    // still collects facet warnings below.
-    let mut select_warnings = Vec::new();
-
-    let default_field = params
-        .get("df")
-        .unwrap_or(&state.index.wf_schema.core.default_field)
-        .to_string();
-
-    // No `q` matches nothing — it does *not* default to `*:*`. Solr answers 200
-    // with an empty result set (`err_missing_q.json`), which resolves
-    // tracer-bullet review follow-up 2 against the fixture.
-    let parsed = match params.get("q") {
-        None => None,
-        Some(q) => {
-            // `defType=edismax` (issue #7, PRD §5 v1 exception) switches only
-            // `q`'s own parser to the dismax-style qf/pf/mm/tie/boost/bq
-            // composition (`CoreIndex::parse_edismax_query`) — `fq` below is
-            // untouched, always the plain Solr query grammar, matching real
-            // Solr (`defType` only ever governs `q`). A `q` beginning with a
-            // function-query local-params block (`{!func}` / `{!boost b=}`)
-            // takes precedence over `defType` — those are query parsers in
-            // their own right (issue #289).
-            let query = if let Some(func_q) = state
-                .index
-                .parse_function_query_q(q, &default_field, Some(&params))
-                .map_err(|e| query_parse_error(anyhow::Error::from(e), &params))?
-            {
-                func_q
-            } else if params.get("defType") == Some("edismax") {
-                let qf = params.get("qf").unwrap_or("");
-                let pf = params.get("pf");
-                let mm = params.get("mm");
-                let tie: f32 = params
-                    .get("tie")
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0.0);
-                let bq: Vec<String> = params
-                    .get_all("bq")
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect();
-                // `boost` and `bf` are function-query params (issue #289): a
-                // plain number like `boost=2` is Solr's simplest constant
-                // function, a function form like `boost=product(rating,2)` or
-                // any `bf` is evaluated per document. Both are passed raw to
-                // `parse_edismax_query`, which applies them.
-                let boost = params.get("boost").map(str::to_string);
-                let bf: Vec<String> = params
-                    .get_all("bf")
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect();
-                state
-                    .index
-                    .parse_edismax_query(
-                        q,
-                        &default_field,
-                        qf,
-                        pf,
-                        mm,
-                        tie,
-                        &bq,
-                        boost.as_deref(),
-                        &bf,
-                    )
-                    .map_err(|e| query_parse_error(anyhow::Error::from(e), &params))?
-            } else {
-                state
-                    .index
-                    .parse_query(q, &default_field)
-                    .map_err(|e| query_parse_error(e, &params))?
-            };
-
-            let mut filter_queries = Vec::new();
-            for fq in params.get_all("fq") {
-                // `{!geofilt}`/`{!bbox}`/`{!func}`/`{!frange}`/`{!boost}` are
-                // position-0 query parsers in their own right (#289/#333/#332);
-                // like the `q` path above, try the function-query dispatcher
-                // (with request params, which the geo filters need) before the
-                // plain grammar. `parse_query` re-runs the same dispatcher with
-                // `None`, so a non-geo block costs one redundant `parse_block`
-                // here and nothing more.
-                let parsed = if let Some(g) = state
-                    .index
-                    .parse_function_query_q(fq, &default_field, Some(&params))
-                    .map_err(|e| query_parse_error(anyhow::Error::from(e), &params))?
-                {
-                    g
-                } else {
-                    state
-                        .index
-                        .parse_query(fq, &default_field)
-                        .map_err(|e| query_parse_error(e, &params))?
-                };
-                filter_queries.push(parsed);
-            }
-            Some((query, filter_queries))
-        }
-    };
-
-    let start: usize = params
-        .get("start")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    // `rows_limit` is a Wayfinder cap with no Solr equivalent, so an
-    // over-limit request is clamped rather than rejected — a clamp keeps a
-    // client that asks for too much working, a 400 breaks it.
-    let rows: usize = params
-        .get("rows")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10)
-        .min(state.config.query.rows_limit);
-
-    // Result grouping (issue #290, PRD §5 v3): `group=true` swaps the
-    // `response` doclist for a `grouped` envelope keyed by `group.field`. The
-    // collector buckets every match by the group field's fast value (a
-    // single-valued, non-text field — validated inside `grouping::grouping`,
-    // which 400s on undefined / non-fast / multiValued the way Solr does,
-    // finding 130). Running here, before the ungrouped top-N search, means a
-    // grouped request never materialises the hits it would then discard: the
-    // whole ungrouped middle section below is skipped, and everything after it
-    // (`facet_counts`, `stats`, `highlighting`, `spellcheck`, the header) is
-    // shared — a grouped response carries those blocks exactly as an ungrouped
-    // one does (issue #338, findings 160/161/162).
-    //
-    // `fl`/`wants_score` are derived the same way the ungrouped path derives
-    // them below; duplicated locally so this call is self-contained and leaves
-    // that path byte-identical.
-    let fl_group: Option<Vec<String>> = params
-        .get("fl")
-        .map(|fl| fl.split(',').map(|s| s.trim().to_string()).collect());
-    let wants_score_group = fl_group
-        .as_deref()
-        .is_some_and(|fl| fl.iter().any(|f| f == "score"));
-    let grouped = grouping::grouping(
-        &state.index,
-        &params,
-        parsed.as_ref().map(|(q, fqs)| (q.as_ref(), fqs.as_slice())),
-        &sort,
-        rows,
-        start,
-        fl_group.as_deref(),
-        wants_score_group,
-    )?;
-
-    // Fused faceting (issue #246): the `facet.field` terms aggregation runs
-    // over exactly the doc set the hit list iterates (`q` AND every `fq`), so
-    // planning it here lets the main search compute both in one pass instead
-    // of walking the same postings twice — ~5 ms of the 6.6 ms faceting cost
-    // at 2M docs was that second walk.
-    //
-    // A planning error is *discarded*, not reported: the request then takes
-    // today's unfused path, which re-derives the identical error at its
-    // original point in the request lifecycle, so its message, its
-    // `PreQueryFacetError` treatment and whether the envelope carries a
-    // `response` block all stay bit-identical. Double validation costs nothing
-    // on a request that is already failing.
-    let mut facet_field_plan: Option<facet::FacetFieldsPlan> = None;
-    let mut facet_field_aggs = None;
-    // A grouped request has no ungrouped hit list and no `response` block at
-    // all: `grouped` stands where `response` would, and `highlighting` covers
-    // the documents the doclists rendered instead of `response.docs` (issue
-    // #338). Skipping this whole section is what keeps the property that a
-    // grouped request never materialises the hits it would then discard.
-    let (response, page) = match &grouped {
-        Some(outcome) => (None, outcome.rendered.clone()),
-        None => {
-            facet_field_plan = if facet_requested {
-                facet::plan_facet_fields(&state.index, &params)
-                    .ok()
-                    .filter(|plan| !plan.fields.is_empty())
-            } else {
-                None
-            };
-            // #295: an excluded facet.field (`{!ex=...}`) counts against a reduced
-            // filter set, which the fused aggregation (over the full q+fq set) cannot
-            // produce. Drop the plan so the dispatch below takes the unfused path,
-            // which builds a per-facet base. Multi-select facet requests are rare and
-            // not the hot path, so forgoing fusing for them is a deliberate
-            // simplification (see `FacetFieldsPlan::exclusion_active`).
-            if facet_field_plan
-                .as_ref()
-                .is_some_and(|plan| plan.exclusion_active)
-            {
-                facet_field_plan = None;
-            }
-
-            // Bounded search (issue #242): only the first `start + rows` hits are
-            // materialised; `num_found` and `max_score` still cover every match.
-            let outcome = match &parsed {
-                None => crate::collector::TopOutcome {
-                    num_found: 0,
-                    max_score: None,
-                    top: Vec::new(),
-                },
-                Some((query, filter_queries)) => {
-                    let unfused = || {
-                        state
-                            .index
-                            .search_top(
-                                query.as_ref(),
-                                filter_queries,
-                                &sort,
-                                start.saturating_add(rows),
-                            )
-                            .map_err(|e| {
-                                WfError::internal("wayfinder::SearchError", e.to_string())
-                                    .with_params(&params)
-                            })
-                    };
-                    // Attempted, not borrowed-through, so the plan can be dropped
-                    // below without fighting the borrow checker.
-                    let attempt = facet_field_plan.as_ref().map(|plan| {
-                        state.index.search_top_with_aggs(
-                            query.as_ref(),
-                            filter_queries,
-                            &sort,
-                            start.saturating_add(rows),
-                            plan.aggregations.clone(),
-                        )
-                    });
-                    match attempt {
-                        Some(Ok((outcome, aggs))) => {
-                            facet_field_aggs = Some(aggs);
-                            outcome
-                        }
-                        // An aggregation-class refusal (bucket limit, memory limit,
-                        // a malformed aggregation) is exactly the error the unfused
-                        // path raises out of `facet_counts` as a 400
-                        // `wayfinder::FacetError` with the `response` block attached
-                        // -- not the 500 `wayfinder::SearchError` it would become
-                        // here. Un-fuse and let that path answer it, so the wire
-                        // output stays bit-identical whichever way the request went.
-                        Some(Err(e)) if crate::core_index::is_aggregation_error(&e) => {
-                            facet_field_plan = None;
-                            unfused()?
-                        }
-                        Some(Err(e)) => {
-                            return Err(WfError::internal("wayfinder::SearchError", e.to_string())
-                                .with_params(&params));
-                        }
-                        None => unfused()?,
-                    }
-                }
-            };
-
-            let num_found = outcome.num_found;
-
-            let fl: Option<Vec<String>> = params
-                .get("fl")
-                .map(|fl| fl.split(',').map(|s| s.trim().to_string()).collect());
-
-            let page = outcome
-                .top
-                .iter()
-                .skip(start)
-                .take(rows)
-                .copied()
-                .collect::<Vec<_>>();
-
-            // `fl=score` is what turns scoring output on at all (Solr), so this is
-            // the single check that gates both the per-doc `score` key and
-            // `response.maxScore` below.
-            let wants_score = fl
-                .as_deref()
-                .is_some_and(|fl| fl.iter().any(|f| f == "score"));
-
-            // #331: `<alias>:geodist()` fl entries are computed fields, resolved from
-            // the `sfield`/`pt` request params and evaluated per doc below. Built once
-            // here so the page loop only does the per-doc fast-field read.
-            let computed = computed_fl_fields(fl.as_deref(), &params, &state.index.wf_schema)?;
-
-            let mut docs = Vec::with_capacity(page.len());
-            for (score, addr) in page.iter().copied() {
-                let mut doc = state
-                    .index
-                    .render_doc(addr, fl.as_deref(), Some(score))
-                    .map_err(|e| {
-                        WfError::internal("wayfinder::DocError", e.to_string()).with_params(&params)
-                    })?;
-                // Computed fields append after the stored fields (Solr's transformer
-                // ordering; the `fl=*,dist:geodist()` capture places `dist` last).
-                for (alias, func) in &computed {
-                    let value = state.index.eval_function(addr, func).map_err(|e| {
-                        WfError::internal("wayfinder::DocError", e.to_string()).with_params(&params)
-                    })?;
-                    if let Value::Object(map) = &mut doc {
-                        map.insert(alias.clone(), json!(value));
-                    }
-                }
-                docs.push(doc);
-            }
-
-            // Key order in the fixtures is `numFound, start, maxScore, numFoundExact,
-            // docs` — `maxScore` sits between `start` and `numFoundExact`, which a
-            // `json!` object literal can't express conditionally, so this is built
-            // the same way `response_header` is below. Built *before* `facet_result`
-            // (issue #35): a `facet.query`/`facet.field` error is detected only after
-            // the base query has already run, so Solr's own fixtures for those errors
-            // (`facet_unknown_field.json`, `facet_err_query_single.json`) still carry
-            // this `response` block alongside `error` — it has to exist already so it
-            // can be attached to that error below.
-            let mut response = Map::new();
-            response.insert("numFound".to_string(), json!(num_found));
-            response.insert("start".to_string(), json!(start));
-            if wants_score {
-                // ponytail: computed as the max score across the *whole*
-                // (unpaginated) match set, not just the current page — an
-                // unverified choice, not a fixtured fact. Every scored fixture
-                // (`select_term_scored.json`, `select_quick_scored.json`) has
-                // `start=0` with the full result set on one page, so page-max and
-                // global-max are indistinguishable there; no fixture pages a scored
-                // query to tell them apart.
-                //
-                // Zero hits with `score` in `fl` still carries the key: Solr
-                // reports `"maxScore":0.0` alongside `numFound: 0` and
-                // `docs: []` rather than omitting it. Evidence is a single
-                // fixture, `pls_unmatched.json` (issue #340) — but it is the
-                // only one there is, being the only zero-hit capture with
-                // `score` in `fl` (every other empty response, `facet_zero`
-                // through `mlt_no_interesting_terms`, omits `maxScore` because
-                // it never asked for a score).
-                response.insert(
-                    "maxScore".to_string(),
-                    json!(outcome.max_score.unwrap_or(0.0)),
-                );
-            }
-            response.insert("numFoundExact".to_string(), json!(true));
-            response.insert("docs".to_string(), json!(docs));
-            (Some(response), page)
-        }
-    };
-
-    // Facet and stats counts are both aggregated over a *real* query (`q` AND
-    // every `fq`), not over `hits`: Solr enumerates the field's whole term
-    // dictionary / metric aggregation over the matching set, which the hit
-    // list cannot see (`search` filters post-hoc with `retain`, so the
-    // Boolean query is rebuilt here rather than reused). Shared between both
-    // features rather than built twice.
-    let mut base: facet::BaseClauses = match &parsed {
-        // No `q` matches nothing, so neither does any facet/stats block — but
-        // the term dictionary is still enumerated, at 0, exactly as
-        // `facet_zero` shows for a `q` that matches nothing, and `stats_zero`
-        // shows for stats.
-        None => vec![(Occur::Must, Box::new(EmptyQuery) as Box<dyn Query>)],
-        Some((query, filter_queries)) => std::iter::once((Occur::Must, query.box_clone()))
-            .chain(
-                filter_queries
-                    .iter()
-                    .map(|fq| (Occur::Must, fq.box_clone())),
-            )
-            .collect(),
-    };
-    // `group.truncate=true` (issue #338, finding 161): facets, `stats`,
-    // `facet.query` and `facet.range` are all computed over the *collapsed*
-    // group set rather than every matching document, so the restriction goes
-    // into the one base both components share — one place, and `stats` follows
-    // for free (`g338_truncate_stats`), which the ticket's facets-only premise
-    // missed. It is appended *after* the `fq` clauses so #295's positional
-    // `{!tag}`/`{!ex}` alignment is untouched, and (having no tag) no
-    // `{!ex=...}` can drop it.
-    if let Some(query) = grouped.as_ref().and_then(|g| g.truncate_query.as_ref()) {
-        base.push((Occur::Must, Box::new(query.clone()) as Box<dyn Query>));
-    }
-    let group_facet = grouped.as_ref().and_then(|g| g.group_facet.as_ref());
-    // ponytail: the ungrouped component code attaches the already-built
-    // `response` block to a facet/stats/hl 400 (issue #35's precedent). A
-    // grouped response has no `response` block to attach, and no fixture
-    // captures a grouped request with an invalid facet/stats/hl param, so the
-    // grouped path answers with the error envelope alone rather than inventing
-    // a shape. Capture one before relying on it either way.
-    let attach_response = |err: WfError| match &response {
-        Some(response) => err.with_response(Value::Object(response.clone())),
-        None => err,
-    };
-
-    // `facet=true` gates the whole block; `facet.field` alone does not turn
-    // faceting on and the key stays absent (findings fact 4). Computed *before*
-    // `responseHeader` is built, not after: Solr's own `responseHeader` key
-    // order is `warnings, status, QTime, params` — `warnings` leads, it does
-    // not trail (finding 29 / issue #24) — and `serde_json`'s `preserve_order`
-    // feature (issue #25) means the order keys are inserted in is now the order
-    // they are emitted in, so `warnings` has to be known before the object
-    // literal is written.
-    let facet_result = if facet_requested {
-        // Issue #246: when the plan phase succeeded above, `facet.field`'s
-        // buckets are already computed and only need shaping; otherwise this
-        // is the unchanged, unfused path.
-        let counts = match (group_facet, &facet_field_plan, &facet_field_aggs) {
-            // `group.facet=true` (issue #338) counts distinct groups, not
-            // documents, which the fused document-count aggregation cannot
-            // produce — and never coexists with a plan anyway, since the
-            // grouped path skips the planning phase entirely.
-            (Some(group), _, _) => facet::facet_counts_grouped(
-                &state.index,
-                &state.config,
-                &params,
-                &default_field,
-                &base,
-                group,
-            ),
-            (None, Some(plan), Some(aggs)) => facet::facet_counts_fused(
-                &state.index,
-                &state.config,
-                &params,
-                &default_field,
-                &base,
-                (plan, aggs),
-            ),
-            _ => facet::facet_counts(&state.index, &state.config, &params, &default_field, &base),
-        };
-        Some(counts.map_err(|e| {
-            // Issue #35: `facet.range` is detected before the base
-            // query ever runs (Solr's own `facet_err_range_single.json`
-            // has no `response` block), while `facet.query`/
-            // `facet.field` errors are detected after it (Solr's
-            // `facet_unknown_field.json` / `facet_err_query_single.json`
-            // do). `facet::facet_counts` marks the former with
-            // `PreQueryFacetError` so only the latter gets `response`
-            // attached here.
-            let err =
-                WfError::bad_request("wayfinder::FacetError", e.to_string()).with_params(&params);
-            if e.downcast_ref::<facet::PreQueryFacetError>().is_some() {
-                err
-            } else {
-                attach_response(err)
-            }
-        })?)
-    } else {
-        None
-    };
-    // Select-level warnings precede facet warnings because they describe
-    // request parameters ignored before facet processing begins.
-    if let Some((_, facet_warnings)) = &facet_result {
-        select_warnings.extend(facet_warnings.iter().cloned());
-    }
-
-    // `json.facet` (issue #343): self-gating on the param's presence — there is
-    // no `json.facet=true` switch, and `facet=true` is not sent alongside it, so
-    // it neither reads nor is read by `facet_requested`. It shares `base`, so
-    // its implicit `count` and every bucket count track `q` and `fq`.
-    //
-    // The error split is `facet_counts`' exactly: a `json.facet` *parse*
-    // failure is detectable before the base query runs, so Solr's own fixtures
-    // for it (`jf343_err_bad_json.json`, `jf343_err_bad_type.json`) carry no
-    // `response` block, while a field-resolution failure
-    // (`jf343_err_unknown_field.json`) does — `json_facet::json_facets` marks
-    // the former with the same `facet::PreQueryFacetError`.
-    let json_facet_result = json_facet::json_facets(&state.index, &params, &base).map_err(|e| {
-        let err =
-            WfError::bad_request("wayfinder::JsonFacetError", e.to_string()).with_params(&params);
-        if e.downcast_ref::<facet::PreQueryFacetError>().is_some() {
-            err
-        } else {
-            attach_response(err)
-        }
-    })?;
-
-    // `stats=true` gates the whole `stats` block the same way `facet=true`
-    // gates `facet_counts` — `stats.field` alone does not turn it on (mirrors
-    // `facet.field`'s own convention, and matches `stats_key_absent_without_stats_true`).
-    let stats_result = if stats_requested {
-        // Deliberately NOT group-aware: `group.facet=true` leaves `stats`
-        // reporting the full, ungrouped figures (`g338_groupfacet_stats`),
-        // unlike `group.truncate`, which reaches `stats` through `base` above.
-        Some(stats::stats(&state.index, &params, &base).map_err(|e| {
-            let err =
-                WfError::bad_request("wayfinder::StatsError", e.to_string()).with_params(&params);
-            // Same pre-/post-query split `facet_counts` makes just above: a
-            // refusal Solr raises before the base query runs carries no
-            // `response` block (`dr341_err_stats`, #341).
-            if e.downcast_ref::<stats::PreQueryStatsError>().is_some() {
-                err
-            } else {
-                attach_response(err)
-            }
-        })?)
-    } else {
-        None
-    };
-
-    // `hl=true` gates the whole `highlighting` block (finding 52); it is
-    // keyed by unique-key value over the docs actually returned on this
-    // page, matching `response.docs`'s own pagination — or, on the grouped
-    // path, the union of every rendered doclist (`page` is
-    // `GroupedOutcome::rendered` there, `g338_hl`).
-    let highlighting_result = if hl_requested {
-        let result = match &parsed {
-            Some((query, _)) => highlight::highlighting(
-                &state.index,
-                &params,
-                &default_field,
-                query.as_ref(),
-                &page,
-                &state.index.wf_schema.core.unique_key,
-            ),
-            // No `q` matches nothing, so `page` is always empty here too —
-            // an empty `highlighting` object, not an absent key.
-            None => Ok(Value::Object(Map::new())),
-        }
-        .map_err(|e| {
-            // An undefined/non-text `hl.fl` field is a request-input
-            // problem (`highlight::InvalidHlField`), rendered as Solr's own
-            // 400 -- mirroring `facet.field`'s own unknown-field handling
-            // just above, including carrying the base query's already-built
-            // `response` block alongside `error` (issue #35's precedent;
-            // unfixtured for `hl.fl` specifically, since no captured
-            // `hl_*` fixture exercises an invalid field, but the shape
-            // should be consistent with `facet_unknown_field.json`'s). A
-            // failure that isn't request-input (a genuine Tantivy/searcher
-            // error) stays a 500.
-            if e.downcast_ref::<highlight::InvalidHlField>().is_some() {
-                attach_response(
-                    WfError::bad_request("wayfinder::HighlightError", e.to_string())
-                        .with_params(&params),
-                )
-            } else {
-                WfError::internal("wayfinder::HighlightError", e.to_string()).with_params(&params)
-            }
-        })?;
-        Some(result)
-    } else {
-        None
-    };
-
-    // `responseHeader.warnings` is absent unless there is something to warn
-    // about (every fixture that isn't a Points-based `facet.field` at
-    // mincount 0 lacks the key) — never an empty array — and, when present,
-    // leads the object rather than trailing it.
-    let mut response_header = Map::new();
-    if !select_warnings.is_empty() {
-        response_header.insert("warnings".to_string(), json!(select_warnings));
-    }
-    response_header.insert("status".to_string(), json!(0));
-    response_header.insert("QTime".to_string(), json!(0));
-    response_header.insert("params".to_string(), json!(params.echo()));
-
-    // `omitHeader=true` drops the header and nothing else (issue #143); the
-    // `response`/`grouped` block and every optional block below are
-    // unaffected. See `Params::omit_header` for the ground truth and the
-    // error-path ceiling.
-    //
-    // A grouped response emits `grouped` where an ungrouped one emits
-    // `response`, in the same slot — hence the fixtures' top-level key order
-    // `responseHeader, grouped, facet_counts, stats, highlighting` (issue
-    // #338, `g338_all`).
-    let mut root = Map::new();
-    if !params.omit_header() {
-        root.insert("responseHeader".to_string(), Value::Object(response_header));
-    }
-    match grouped {
-        Some(outcome) => {
-            root.insert("grouped".to_string(), outcome.block);
-        }
-        None => {
-            root.insert(
-                "response".to_string(),
-                Value::Object(response.expect("the ungrouped path always builds a response block")),
-            );
-        }
-    }
-    let mut body = Value::Object(root);
-
-    if let Some((facet_counts, _)) = facet_result {
-        body["facet_counts"] = facet_counts;
-    }
-    // `facets` sits between `facet_counts` and `stats`
-    // (`jf343_with_classic_stats.json`'s top-level order), and `serde_json`'s
-    // `preserve_order` makes this insertion order the wire order — so the slot
-    // is these three lines' position, nothing else (issue #343).
-    if let Some(facets) = json_facet_result {
-        body["facets"] = facets;
-    }
-    if let Some(stats) = stats_result {
-        body["stats"] = stats;
-    }
-
-    if let Some(highlighting) = highlighting_result {
-        body["highlighting"] = highlighting;
-    }
-    if spellcheck_requested {
-        body["spellcheck"] = spellcheck(&state.index, &params).map_err(|e| {
-            WfError::internal("wayfinder::SpellcheckError", e.to_string()).with_params(&params)
-        })?;
-    }
-
+    let body = select_workflow::execute(&state, params)?;
     Ok(axum::Json(body).into_response())
 }
 

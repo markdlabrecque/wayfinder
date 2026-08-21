@@ -1,12 +1,10 @@
 //! Solr faceting (PRD §5): `facet.*` request params -> the `facet_counts`
 //! response block.
 //!
-//! The Tantivy-facing primitives live on `CoreIndex` (`term_facet`, `count`);
-//! everything here is Solr wire semantics — which sub-objects exist, term
-//! ordering and truncation, the `json.nl=map` shape, and the `facet_ranges`
-//! envelope. It is a module of its own rather than more of `lib.rs` so the
-//! request-routing file stays small and concurrent branches keep merging
-//! mechanically.
+//! This module owns classic facet planning, fused field-facet collection,
+//! fallback to standalone counting, and Solr wire rendering. `/select` sees an
+//! opaque [`FacetCollection`], not Tantivy aggregation plans or results.
+//! `CoreIndex` supplies the low-level search and count operations.
 //!
 //! Facts pinned by fixtures in `solr-ref/responses/`:
 //!
@@ -51,6 +49,7 @@ use tantivy::time::format_description::well_known::Rfc3339;
 use tantivy::time::{Duration, OffsetDateTime};
 use tantivy::{DateTime, Term};
 
+use crate::collector::{SortClause, TopOutcome};
 use crate::config::ServerConfig;
 use crate::core_index::CoreIndex;
 use crate::local_params;
@@ -63,8 +62,8 @@ use crate::schema::{ValueKind, WayfinderSchema};
 /// and friends) carry no `response` block, while a `facet.query`/
 /// `facet.field` error is detected *after* the base query has already run and
 /// does carry one. This wraps the original error rather than replacing it —
-/// `Display` forwards to it verbatim — so `select` in `src/lib.rs` can tell
-/// the two apart via `downcast_ref` without changing the message any
+/// `Display` forwards to it verbatim — so the select workflow can tell the two
+/// apart via `downcast_ref` without changing the message any
 /// existing test or fixture comparison sees.
 #[derive(Debug)]
 pub struct PreQueryFacetError(anyhow::Error);
@@ -132,37 +131,121 @@ impl JsonNl {
     }
 }
 
-/// Builds the whole `facet_counts` block, plus any `responseHeader.warnings`
-/// it earned (issue #24 — Solr's own mincount-raise warning for a `facet.field`
-/// on a Points-based column). Every error is caused by the request (an
-/// unfacetable field, an unparseable `facet.query`, a bad range spec), so the
-/// caller renders them all as 400s.
+/// Opaque facet data retained from the main search. Aggregation plans and
+/// results stay private to this module.
+pub(crate) struct FacetCollection {
+    fields: FacetFieldCollection,
+}
+
+enum FacetFieldCollection {
+    /// Planning failed, so rendering must re-plan at the established point in
+    /// the request lifecycle and surface the original facet error there.
+    Unplanned,
+    /// Planning succeeded, but field counts must run as standalone passes.
+    Planned(FacetFieldsPlan),
+    /// Planning and fused collection both succeeded.
+    Fused(FusedFacetFields),
+}
+
+struct FusedFacetFields {
+    plan: FacetFieldsPlan,
+    results: tantivy::aggregation::agg_result::AggregationResults,
+}
+
+/// Runs the main search, fusing eligible `facet.field` counts into its
+/// collector. Planning failures and aggregation refusals retry the plain
+/// search so facet validation keeps its established timing and 400 envelope.
+/// Other search failures return directly and remain 500s at the route.
+pub(crate) fn search_top(
+    index: &CoreIndex,
+    params: &Params,
+    query: &dyn Query,
+    filter_queries: &[Box<dyn Query>],
+    sort: &[SortClause],
+    limit: usize,
+) -> Result<(TopOutcome, FacetCollection)> {
+    let plan = plan_facet_fields(index, params).ok();
+    if plan
+        .as_ref()
+        .is_some_and(|plan| !plan.fields.is_empty() && !plan.exclusion_active)
+    {
+        execute_search(
+            plan,
+            |aggregations| {
+                index.search_top_with_aggs(query, filter_queries, sort, limit, aggregations)
+            },
+            || index.search_top(query, filter_queries, sort, limit),
+        )
+    } else {
+        let fields = plan.map_or(
+            FacetFieldCollection::Unplanned,
+            FacetFieldCollection::Planned,
+        );
+        Ok((
+            index.search_top(query, filter_queries, sort, limit)?,
+            FacetCollection { fields },
+        ))
+    }
+}
+
+fn execute_search<Fused, Unfused>(
+    plan: Option<FacetFieldsPlan>,
+    fused: Fused,
+    unfused: Unfused,
+) -> Result<(TopOutcome, FacetCollection)>
+where
+    Fused: FnOnce(
+        tantivy::aggregation::agg_req::Aggregations,
+    ) -> Result<(
+        TopOutcome,
+        tantivy::aggregation::agg_result::AggregationResults,
+    )>,
+    Unfused: FnOnce() -> Result<TopOutcome>,
+{
+    if let Some(plan) = plan {
+        return match fused(plan.aggregations.clone()) {
+            Ok((top, results)) => Ok((
+                top,
+                FacetCollection {
+                    fields: FacetFieldCollection::Fused(FusedFacetFields { plan, results }),
+                },
+            )),
+            Err(error) if is_aggregation_error(&error) => Ok((
+                unfused()?,
+                FacetCollection {
+                    fields: FacetFieldCollection::Planned(plan),
+                },
+            )),
+            Err(error) => Err(error),
+        };
+    }
+
+    Ok((
+        unfused()?,
+        FacetCollection {
+            fields: FacetFieldCollection::Unplanned,
+        },
+    ))
+}
+
+fn is_aggregation_error(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<tantivy::TantivyError>(),
+        Some(tantivy::TantivyError::AggregationError(_))
+    )
+}
+
+/// Builds the whole `facet_counts` block. `collection` carries fused field counts
+/// when the main search could collect them. Grouped and exclusion-driven
+/// requests count unfused inside this module.
 pub fn facet_counts(
     index: &CoreIndex,
     config: &ServerConfig,
     params: &Params,
     default_field: &str,
     base: &BaseClauses,
-) -> Result<(Value, Vec<String>)> {
-    facet_counts_inner(index, config, params, default_field, base, None, None)
-}
-
-/// [`facet_counts`] with every count expressed in **distinct matching groups**
-/// instead of documents — Solr's `group.facet=true` (issue #338, finding 162).
-/// Applies to field facets, `facet.query` and `facet.range` alike (the ticket
-/// and Solr's own docs claim field-facet-only; `g338_groupfacet_blog` shows
-/// otherwise). `stats` is untouched, which is why this is a `facet` concern and
-/// not a shared one.
-///
-/// Never fused: the fused `/select` aggregation counts documents over the whole
-/// `q` AND `fq` set, which is by definition not what this computes.
-pub fn facet_counts_grouped(
-    index: &CoreIndex,
-    config: &ServerConfig,
-    params: &Params,
-    default_field: &str,
-    base: &BaseClauses,
-    group: &crate::grouping::GroupFacet,
+    collection: Option<&FacetCollection>,
+    group: Option<&crate::grouping::GroupFacet>,
 ) -> Result<(Value, Vec<String>)> {
     facet_counts_inner(
         index,
@@ -170,35 +253,8 @@ pub fn facet_counts_grouped(
         params,
         default_field,
         base,
-        None,
-        Some(group),
-    )
-}
-
-/// [`facet_counts`] with `facet.field` answered from the aggregation results
-/// the main `/select` pass already produced (issue #246), instead of from a
-/// second walk over the same doc set. Every other sub-object — `facet.query`,
-/// `facet.range` — keeps its own pass and its own error precedence, so the
-/// emitted block is byte-identical to [`facet_counts`]'s.
-pub fn facet_counts_fused(
-    index: &CoreIndex,
-    config: &ServerConfig,
-    params: &Params,
-    default_field: &str,
-    base: &BaseClauses,
-    fused: (
-        &FacetFieldsPlan,
-        &tantivy::aggregation::agg_result::AggregationResults,
-    ),
-) -> Result<(Value, Vec<String>)> {
-    facet_counts_inner(
-        index,
-        config,
-        params,
-        default_field,
-        base,
-        Some(fused),
-        None,
+        collection.map(|collection| &collection.fields),
+        group,
     )
 }
 
@@ -208,10 +264,7 @@ fn facet_counts_inner(
     params: &Params,
     default_field: &str,
     base: &BaseClauses,
-    fused: Option<(
-        &FacetFieldsPlan,
-        &tantivy::aggregation::agg_result::AggregationResults,
-    )>,
+    collected: Option<&FacetFieldCollection>,
     group: Option<&crate::grouping::GroupFacet>,
 ) -> Result<(Value, Vec<String>)> {
     let nl = JsonNl::from_params(params);
@@ -225,9 +278,9 @@ fn facet_counts_inner(
     // results are hoisted into bindings here, evaluated range-first, and only
     // placed into the `json!` object in the unchanged key order.
     //
-    // `fused` carries issue #246's already-computed `facet.field` buckets when
-    // `select` was able to plan them before the main search; `None` is the
-    // unfused path, which runs `facet_fields`' own aggregation passes here.
+    // `collected` carries either issue #246's already-computed field buckets
+    // or the validated plan retained when fusion was ineligible or refused.
+    // Requests that did not traverse [`search_top`] still plan here.
     let facet_ranges = facet_ranges(index, params, base, nl, group)
         .map_err(|e| anyhow::Error::new(PreQueryFacetError(e)))?;
     // #295: the `{!tag=...}` each `fq` carries, so a facet's `{!ex=...}` can
@@ -246,11 +299,16 @@ fn facet_counts_inner(
     // `facet.field`/`facet.query` errors, matching Solr's
     // `heatmap_unknown_field.json` (which carries `response` + `error`).
     let facet_heatmaps = crate::heatmap::facet_heatmaps(index, params, base)?;
-    let (facet_fields, warnings) = match fused {
-        Some((plan, agg_results)) => {
-            render_facet_fields(index, config, params, base, plan, agg_results)?
+    let (facet_fields, warnings) = match collected {
+        Some(FacetFieldCollection::Fused(fused)) => {
+            render_facet_fields(index, config, params, base, &fused.plan, &fused.results)?
         }
-        None => facet_fields(index, config, params, base, nl, &fq_tags, group)?,
+        Some(FacetFieldCollection::Planned(plan)) => {
+            facet_fields_from_plan(index, config, base, nl, &fq_tags, group, plan)?
+        }
+        Some(FacetFieldCollection::Unplanned) | None => {
+            facet_fields(index, config, params, base, nl, &fq_tags, group)?
+        }
     };
     let mut counts = Map::new();
     counts.insert("facet_queries".to_string(), facet_queries);
@@ -447,6 +505,18 @@ fn facet_fields(
     group: Option<&crate::grouping::GroupFacet>,
 ) -> Result<(Value, Vec<String>)> {
     let plan = plan_facet_fields(index, params)?;
+    facet_fields_from_plan(index, config, base, nl, fq_tags, group, &plan)
+}
+
+fn facet_fields_from_plan(
+    index: &CoreIndex,
+    config: &ServerConfig,
+    base: &BaseClauses,
+    nl: JsonNl,
+    fq_tags: &[Vec<String>],
+    group: Option<&crate::grouping::GroupFacet>,
+    plan: &FacetFieldsPlan,
+) -> Result<(Value, Vec<String>)> {
     if plan.fields.is_empty() {
         return Ok((json!({}), Vec::new()));
     }
@@ -513,54 +583,54 @@ fn facet_fields(
 /// no query runs — so the caller can build the aggregation request *before*
 /// the main `/select` search and fuse the two into one pass.
 #[derive(Debug)]
-pub struct FacetFieldPlan {
+struct FacetFieldPlan {
     /// The key this facet's buckets appear under in `facet_fields`, i.e. the
     /// `{!key=...}` label if there is one, otherwise the field name.
-    pub label: String,
+    label: String,
     /// The Tantivy column actually aggregated over: `field_name` itself, or a
     /// dynamic field's catch-all JSON path (issue #66).
-    pub column: String,
+    column: String,
     /// The schema-declared kind backing `column`, which decides the bucket
     /// key rendering (`ValueKind::F64`'s Java `Double.toString`, dates).
-    pub kind: Option<ValueKind>,
+    kind: Option<ValueKind>,
     /// This field's key inside the shared `Aggregations` map. Unique per
     /// requested value, not per field: `facet.field=category&
     /// facet.field={!key=other}category` is two aggregations over one column.
-    pub agg_name: String,
+    agg_name: String,
     /// The effective `facet.missing` for this facet, after the
     /// `f.<field>.facet.missing` override and the local-param form.
-    pub missing: bool,
+    missing: bool,
     /// The effective `facet.limit`/`facet.mincount`/`facet.sort` for this
     /// facet, after the same precedence (issue #296, finding 152). Per facet
     /// rather than per request: two `facet.field` values over one column may
     /// legitimately disagree, and only the local-param form can say so
     /// (finding 149).
-    pub settings: FacetSettings,
+    settings: FacetSettings,
     /// The `{!ex=...}` tag list on this facet.field (#295): count this facet
     /// against the filter set with the `fq` clauses carrying any of these
     /// tags dropped. Empty for a plain `facet.field`, which counts the full
     /// set.
-    pub ex: Vec<String>,
+    ex: Vec<String>,
     /// True for a `date_range` field (#341, finding 186): Solr answers 200 with
     /// an EMPTY bucket list rather than erroring, so this facet contributes no
     /// aggregation and renders no buckets. `column` is then the bare field name
     /// and is never read (`missing` is forced off).
-    pub date_range: bool,
+    date_range: bool,
 }
 
 /// The whole `facet.field` request, planned: one entry per requested value,
 /// the single `Aggregations` map that computes all of them in one pass, and
 /// the `responseHeader.warnings` the plan itself earned.
 #[derive(Debug)]
-pub struct FacetFieldsPlan {
-    pub fields: Vec<FacetFieldPlan>,
-    pub aggregations: tantivy::aggregation::agg_req::Aggregations,
-    pub warnings: Vec<String>,
+struct FacetFieldsPlan {
+    fields: Vec<FacetFieldPlan>,
+    aggregations: tantivy::aggregation::agg_req::Aggregations,
+    warnings: Vec<String>,
     /// True when any planned facet.field carries a non-empty `{!ex=...}`
     /// (#295): such a facet counts a reduced filter set the fused `/select`
-    /// aggregation (against the full q+fq set) cannot provide, so `select`
-    /// falls back to the unfused path rather than fusing.
-    pub exclusion_active: bool,
+    /// aggregation (against the full q+fq set) cannot provide, so
+    /// [`search_top`] falls back to the unfused path rather than fusing.
+    exclusion_active: bool,
 }
 
 /// One facet's `facet.limit`/`facet.mincount`/`facet.sort`, resolved for that
@@ -568,15 +638,15 @@ pub struct FacetFieldsPlan {
 /// `query.facet_limit_max` clamping — clamping needs the server config, which
 /// the plan phase does not have.
 #[derive(Debug)]
-pub struct FacetSettings {
+struct FacetSettings {
     /// `facet.limit`, negative meaning "as many as the server allows".
-    pub limit: i64,
+    limit: i64,
     /// `facet.mincount`.
-    pub mincount: u64,
+    mincount: u64,
     /// `facet.sort`: `Some(true)` is `index`, `Some(false)` is `count`, `None`
     /// is unset — which Solr resolves against this facet's own limit, not the
     /// global one (see [`BucketShaping::for_field`]).
-    pub by_index: Option<bool>,
+    by_index: Option<bool>,
 }
 
 /// The value of one facet setting for one facet, taking Solr's *addressed*
@@ -672,15 +742,14 @@ impl FacetSettings {
 /// Plan/validate phase of `facet.field` (issue #246): resolves every requested
 /// value to its label, column and `ValueKind`, applies the collision and
 /// facetability checks, earns the Points-based `mincount` warning, and builds
-/// the terms aggregations — all without executing a single query, so `select`
-/// can attach the aggregations to the main search pass instead of paying for a
-/// second walk over the same doc set.
+/// the terms aggregations without executing a query, so [`search_top`] can
+/// attach them to the main pass instead of walking the same doc set twice.
 ///
 /// Every error this returns is one `facet_fields` itself would have returned,
-/// with the same wording: `select` discards a failed plan and falls back to
-/// the unfused path, which re-derives the identical error at its original
+/// with the same wording. [`search_top`] discards a failed plan and the
+/// unfused path re-derives the error at its original
 /// point in the request lifecycle.
-pub fn plan_facet_fields(index: &CoreIndex, params: &Params) -> Result<FacetFieldsPlan> {
+fn plan_facet_fields(index: &CoreIndex, params: &Params) -> Result<FacetFieldsPlan> {
     let values = params.get_all("facet.field");
     if values.is_empty() {
         return Ok(FacetFieldsPlan {
@@ -846,7 +915,7 @@ pub fn plan_facet_fields(index: &CoreIndex, params: &Params) -> Result<FacetFiel
 /// `facet.sort` / `facet.limit` / `facet.missing` to them, producing exactly
 /// the `facet_fields` object — and the same warnings — the unfused
 /// `facet_fields` would have produced from its own separate passes.
-pub fn render_facet_fields(
+fn render_facet_fields(
     index: &CoreIndex,
     config: &ServerConfig,
     params: &Params,
@@ -1482,39 +1551,6 @@ mod tests {
 
     use super::*;
 
-    // -----------------------------------------------------------------
-    // Issue #246: split `facet_fields` into a pure plan/validate phase
-    // (`plan_facet_fields`) and a render phase (`render_facet_fields`) that
-    // takes aggregation buckets back. Neither exists yet -- every test below
-    // is a compile-error red until issue #246 adds them.
-    //
-    // Contract these tests pin (additive, chosen by stage 1 since the task
-    // spec describes the shape but not the exact signature):
-    //
-    //   pub struct FacetFieldPlan {
-    //       pub label: String,
-    //       pub field_name: String,
-    //       pub column: String,       // `resolved_fast_column`'s output
-    //       pub kind: Option<ValueKind>,
-    //       pub agg_name: String,     // key inside `aggregations`
-    //       pub missing: bool,
-    //   }
-    //   pub struct FacetFieldsPlan {
-    //       pub fields: Vec<FacetFieldPlan>,
-    //       pub aggregations: tantivy::aggregation::agg_req::Aggregations,
-    //       pub warnings: Vec<String>,
-    //   }
-    //   pub fn plan_facet_fields(index: &CoreIndex, params: &Params) -> Result<FacetFieldsPlan>;
-    //   pub fn render_facet_fields(
-    //       index: &CoreIndex,
-    //       config: &ServerConfig,
-    //       params: &Params,
-    //       base: &BaseClauses,
-    //       plan: &FacetFieldsPlan,
-    //       agg_results: &tantivy::aggregation::agg_result::AggregationResults,
-    //   ) -> Result<(Value, Vec<String>)>;
-    // -----------------------------------------------------------------
-
     const PLAN_RENDER_SCHEMA_TOML: &str = r#"
 [core]
 name = "content"
@@ -1586,132 +1622,130 @@ fast = true
         (dir, index)
     }
 
-    /// The plan phase resolves label/field/column/kind purely from `params` +
-    /// schema, with no search executed at all -- proven here by succeeding
-    /// against an index with zero committed segments, which a query-executing
-    /// implementation would have no principled reason to special-case.
+    /// The facet module's external seam performs the main search and retains
+    /// everything needed to render field facets. Callers do not plan Tantivy
+    /// aggregations or decide whether exclusions require an unfused count.
     #[test]
-    fn plan_facet_fields_does_not_require_any_committed_data() {
-        let (_dir, index) = open_plan_render_index();
-        let params = Params::parse("facet.field=category");
-
-        let plan = plan_facet_fields(&index, &params)
-            .expect("the plan phase must succeed with zero committed segments");
-        assert_eq!(plan.fields.len(), 1);
-        assert_eq!(plan.fields[0].label, "category");
-        // `column` and `kind` are the two resolutions the render phase
-        // actually consumes (the aggregated Tantivy column, and the bucket-key
-        // rendering rule), so a plan that "succeeded" without resolving them
-        // would satisfy the label assertion alone while being useless.
-        assert_eq!(plan.fields[0].column, "category");
-        assert_eq!(plan.fields[0].kind, Some(ValueKind::Text));
-    }
-
-    /// The `TermsAggregation` the plan phase builds must be the exact shape
-    /// `CoreIndex::term_facet` builds today: full-dictionary `size`/
-    /// `segment_size` and `min_doc_count: 0`. A plan that requested a smaller
-    /// size, or a nonzero `min_doc_count`, would silently truncate or drop
-    /// zero-count buckets the unfused path never drops.
-    #[test]
-    fn plan_facet_fields_terms_aggregation_matches_term_facets_shape() {
-        use tantivy::aggregation::DEFAULT_BUCKET_LIMIT;
-        use tantivy::aggregation::agg_req::AggregationVariants;
-
-        let (_dir, index) = open_plan_render_corpus();
-        let params = Params::parse("facet.field=category");
-
-        let plan = plan_facet_fields(&index, &params).expect("plan_facet_fields");
-        assert_eq!(plan.fields.len(), 1);
-        let agg = plan
-            .aggregations
-            .get(&plan.fields[0].agg_name)
-            .expect("the plan's Aggregations map must carry an entry for its own field");
-        let AggregationVariants::Terms(terms) = &agg.agg else {
-            panic!("expected a Terms aggregation, got {:?}", agg.agg);
-        };
-        assert_eq!(terms.field, "category");
-        assert_eq!(terms.size, Some(DEFAULT_BUCKET_LIMIT));
-        assert_eq!(terms.segment_size, Some(DEFAULT_BUCKET_LIMIT));
-        assert_eq!(terms.min_doc_count, Some(0));
-    }
-
-    /// Issue #24's Points-based mincount warning is a plan-time fact (it
-    /// depends only on the field's declared kind and the requested
-    /// `facet.mincount`, never on the hit set), so the plan phase must
-    /// surface it exactly as `facet_fields` does today, verbatim wording
-    /// included.
-    #[test]
-    fn plan_facet_fields_warns_on_points_based_field_at_mincount_zero() {
-        let (_dir, index) = open_plan_render_corpus();
-        let params = Params::parse("facet.field=views");
-
-        let plan = plan_facet_fields(&index, &params).expect("plan_facet_fields");
-        assert_eq!(
-            plan.warnings,
-            vec![
-                "Raising facet.mincount from 0 to 1, because field views is Points-based."
-                    .to_string()
-            ]
-        );
-
-        let params_string_field = Params::parse("facet.field=category");
-        let plan_string =
-            plan_facet_fields(&index, &params_string_field).expect("plan_facet_fields");
-        assert!(
-            plan_string.warnings.is_empty(),
-            "a string field must never earn the Points-based warning"
-        );
-    }
-
-    /// Error wording is part of the wire contract (it lands verbatim in the
-    /// JSON `error` block), so the plan phase's errors must match
-    /// `facet_fields`'s own errors byte-for-byte, not just "also fail".
-    #[test]
-    fn plan_facet_fields_errors_match_facet_fields_errors() {
+    fn facet_search_seam_handles_fused_and_excluded_field_facets() {
         let (_dir, index) = open_plan_render_corpus();
         let config = ServerConfig::default();
-        let query = index.parse_query("quick", "body").expect("parse_query");
-        let base: BaseClauses = vec![(Occur::Must, query.box_clone())];
+        let query = index.parse_query("quick", "body").expect("parse query");
 
-        for query_string in [
-            "facet.field=nosuchfield",
-            "facet.field=category&facet.field={!key=category}views",
-            "facet.field=body",
+        for (query_string, expected_fields, expected_warnings) in [
+            (
+                "facet.field=category&facet.field=views&fq=category:animals",
+                json!({
+                    "category": ["animals", 7, "birds", 0, "fish", 0],
+                    "views": ["10", 2, "30", 2, "0", 1, "20", 1, "40", 1]
+                }),
+                vec![
+                    "Raising facet.mincount from 0 to 1, because field views is Points-based."
+                        .to_string(),
+                ],
+            ),
+            (
+                "facet.field={!ex=selected}category&fq={!tag=selected}category:animals",
+                json!({"category": ["fish", 8, "animals", 7, "birds", 7]}),
+                Vec::new(),
+            ),
         ] {
             let params = Params::parse(query_string);
-            let nl = JsonNl::from_params(&params);
+            let filter_queries: Vec<Box<dyn Query>> = params
+                .get_all("fq")
+                .into_iter()
+                .map(|fq| index.parse_query(fq, "body").expect("parse fq"))
+                .collect();
+            let base: BaseClauses = std::iter::once((Occur::Must, query.box_clone()))
+                .chain(
+                    filter_queries
+                        .iter()
+                        .map(|fq| (Occur::Must, fq.box_clone())),
+                )
+                .collect();
 
-            let plan_err = plan_facet_fields(&index, &params)
-                .expect_err(&format!("`{query_string}` must be a plan-time error"))
-                .to_string();
-            let facet_fields_err = facet_fields(&index, &config, &params, &base, nl, &[], None)
-                .expect_err(&format!(
-                    "`{query_string}` must still error out of facet_fields"
-                ))
-                .to_string();
-
+            let (top, collection) =
+                search_top(&index, &params, query.as_ref(), &filter_queries, &[], 5)
+                    .unwrap_or_else(|e| panic!("facet search for `{query_string}`: {e}"));
+            let (actual, actual_warnings) = facet_counts(
+                &index,
+                &config,
+                &params,
+                "body",
+                &base,
+                Some(&collection),
+                None,
+            )
+            .unwrap_or_else(|e| panic!("facet counts for `{query_string}`: {e}"));
+            assert_eq!(top.num_found, 7);
             assert_eq!(
-                plan_err, facet_fields_err,
-                "plan_facet_fields and facet_fields must disagree on nothing for `{query_string}`"
+                actual["facet_fields"], expected_fields,
+                "field-facet wire output for `{query_string}`"
             );
+            assert_eq!(actual_warnings, expected_warnings);
         }
     }
 
-    /// The whole point of the split: plan then fuse then render must produce
-    /// byte-identical `facet_fields` output (and the same warnings) to
-    /// today's single-pass `facet_fields`, across mincount/limit/sort/missing
-    /// combinations, single and multiple `facet.field`, and with and without
-    /// `fq` -- proving the render phase's key-rendering rules (F64
-    /// `Double.toString`, date keys, `key_as_string`) moved rather than
-    /// changed, and that the fused aggregation ran over the right doc set
-    /// (identical counts, not just identical shape).
     #[test]
-    fn plan_then_render_matches_facet_fields_across_param_combinations() {
-        use tantivy::aggregation::agg_result::AggregationResults;
-
+    fn exclusion_driven_standalone_counting_reuses_the_retained_plan() {
         let (_dir, index) = open_plan_render_corpus();
         let config = ServerConfig::default();
-        let query = index.parse_query("quick", "body").expect("parse_query");
+        let params =
+            Params::parse("facet.field={!ex=selected}category&fq={!tag=selected}category:animals");
+        let query = index.parse_query("quick", "body").expect("parse query");
+        let filter_queries: Vec<Box<dyn Query>> = params
+            .get_all("fq")
+            .into_iter()
+            .map(|fq| index.parse_query(fq, "body").expect("parse fq"))
+            .collect();
+        let base: BaseClauses = std::iter::once((Occur::Must, query.box_clone()))
+            .chain(
+                filter_queries
+                    .iter()
+                    .map(|fq| (Occur::Must, fq.box_clone())),
+            )
+            .collect();
+
+        let (_top, collection) =
+            search_top(&index, &params, query.as_ref(), &filter_queries, &[], 5)
+                .expect("excluded facet search");
+        let FacetFieldCollection::Planned(mut plan) = collection.fields else {
+            panic!("an excluded facet must retain its ineligible fused plan");
+        };
+        plan.warnings = vec!["retained plan".to_string()];
+        let collection = FacetCollection {
+            fields: FacetFieldCollection::Planned(plan),
+        };
+
+        let (_, warnings) = facet_counts(
+            &index,
+            &config,
+            &params,
+            "body",
+            &base,
+            Some(&collection),
+            None,
+        )
+        .expect("standalone facet counts");
+        assert_eq!(
+            warnings,
+            vec!["retained plan"],
+            "standalone counting must consume the retained plan rather than planning again"
+        );
+    }
+
+    /// Fusing the `facet.field` counts into the main search is an execution
+    /// strategy, not a wire-format change: the same request rendered through
+    /// the retained fused collection and through the standalone counting
+    /// passes must produce byte-identical `facet_counts` and warnings. The
+    /// aggregation-refusal fallback (and every `{!ex=...}`, grouped or
+    /// unplannable request that lands unfused) depends on that equivalence,
+    /// so it is asserted here across string, numeric, multi-field and
+    /// filter-query cases rather than assumed.
+    #[test]
+    fn fused_and_unfused_collection_render_identical_facet_counts() {
+        let (_dir, index) = open_plan_render_corpus();
+        let config = ServerConfig::default();
+        let query = index.parse_query("quick", "body").expect("parse query");
 
         for query_string in [
             "facet.field=category",
@@ -1731,7 +1765,6 @@ fast = true
                     query_string.to_string()
                 };
                 let params = Params::parse(&qs);
-
                 let filter_queries: Vec<Box<dyn Query>> = params
                     .get_all("fq")
                     .into_iter()
@@ -1744,37 +1777,89 @@ fast = true
                             .map(|fq| (Occur::Must, fq.box_clone())),
                     )
                     .collect();
-                let nl = JsonNl::from_params(&params);
 
-                let (expected_fields, expected_warnings) =
-                    facet_fields(&index, &config, &params, &base, nl, &[], None)
-                        .unwrap_or_else(|e| panic!("facet_fields for `{qs}`: {e}"));
+                let (_top, collection) =
+                    search_top(&index, &params, query.as_ref(), &filter_queries, &[], 5)
+                        .unwrap_or_else(|e| panic!("facet search for `{qs}`: {e}"));
+                assert!(
+                    matches!(&collection.fields, FacetFieldCollection::Fused(_)),
+                    "`{qs}` must fuse, or the comparison below is unfused against unfused"
+                );
 
-                let plan = plan_facet_fields(&index, &params)
-                    .unwrap_or_else(|e| panic!("plan_facet_fields for `{qs}`: {e}"));
-                let (_top, agg_results): (crate::collector::TopOutcome, AggregationResults) = index
-                    .search_top_with_aggs(
-                        query.as_ref(),
-                        &filter_queries,
-                        &[],
-                        5,
-                        plan.aggregations.clone(),
-                    )
-                    .unwrap_or_else(|e| panic!("search_top_with_aggs for `{qs}`: {e}"));
-                let (fused_fields, fused_warnings) =
-                    render_facet_fields(&index, &config, &params, &base, &plan, &agg_results)
-                        .unwrap_or_else(|e| panic!("render_facet_fields for `{qs}`: {e}"));
+                let (fused_counts, fused_warnings) = facet_counts(
+                    &index,
+                    &config,
+                    &params,
+                    "body",
+                    &base,
+                    Some(&collection),
+                    None,
+                )
+                .unwrap_or_else(|e| panic!("fused facet counts for `{qs}`: {e}"));
+                let (unfused_counts, unfused_warnings) =
+                    facet_counts(&index, &config, &params, "body", &base, None, None)
+                        .unwrap_or_else(|e| panic!("unfused facet counts for `{qs}`: {e}"));
 
                 assert_eq!(
-                    fused_fields, expected_fields,
-                    "facet_fields JSON diverged between the fused and unfused paths for `{qs}`"
+                    fused_counts, unfused_counts,
+                    "facet_counts JSON diverged between the fused and unfused paths for `{qs}`"
                 );
                 assert_eq!(
-                    fused_warnings, expected_warnings,
+                    fused_warnings, unfused_warnings,
                     "facet warnings diverged between the fused and unfused paths for `{qs}`"
                 );
             }
         }
+    }
+
+    #[test]
+    fn aggregation_refusal_retries_unfused_through_the_facet_seam() {
+        let (_dir, index) = open_plan_render_corpus();
+        let params = Params::parse("facet.field=category");
+        let query = index.parse_query("quick", "body").expect("parse query");
+        let plan = plan_facet_fields(&index, &params).expect("plan facets");
+        let refusal = tantivy::TantivyError::AggregationError(
+            tantivy::aggregation::AggregationError::BucketLimitExceeded {
+                limit: 1,
+                current: 2,
+            },
+        );
+
+        let (top, collection) = execute_search(
+            Some(plan),
+            |_| Err(anyhow::Error::from(refusal)),
+            || index.search_top(query.as_ref(), &[], &[], 5),
+        )
+        .expect("aggregation refusal must retry the plain search");
+
+        assert_eq!(top.num_found, 30);
+        assert!(
+            matches!(&collection.fields, FacetFieldCollection::Planned(_)),
+            "the refused aggregation must retain its plan for standalone counting"
+        );
+    }
+
+    #[test]
+    fn non_aggregation_search_failure_is_not_retried_as_a_facet_error() {
+        let (_dir, index) = open_plan_render_corpus();
+        let params = Params::parse("facet.field=category");
+        let plan = plan_facet_fields(&index, &params).expect("plan facets");
+        let error = tantivy::TantivyError::InvalidArgument("broken search".to_string());
+
+        let result = execute_search(
+            Some(plan),
+            |_| Err(anyhow::Error::from(error)),
+            || -> Result<TopOutcome> { panic!("a non-aggregation failure must not retry") },
+        );
+
+        let error = match result {
+            Ok(_) => panic!("non-aggregation failure must escape"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "An invalid argument was passed: 'broken search'"
+        );
     }
 
     /// Mutation-test gap closed here (issue #138): replacing `parse_block` with
