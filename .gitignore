@@ -14,3 +14,6 @@
 
 # Python bytecode from the solr-ref input generators
 __pycache__/
+
+# ignore git worktrees
+work/
