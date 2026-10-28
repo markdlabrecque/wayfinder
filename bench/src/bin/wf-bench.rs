@@ -19,6 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use wayfinder_bench::check::check;
+use wayfinder_bench::terms::{self, Pools};
 use wayfinder_bench::wiki::{self, WikiDoc};
 
 // ponytail: fixed core set and memory cap for both engines. Phase 6 of
@@ -32,10 +33,13 @@ const CORE: &str = "content";
 // Per-request byte cap for indexing. Article sizes vary a lot, so batches
 // are cut by size, not count. Under Wayfinder's 10 MB default body limit.
 const BATCH_BYTES: usize = 4_000_000;
-// Warm-up per query: at least this many requests and this long, so Solr's
-// JIT has compiled the hot path before anything is timed.
-const WARMUP_MIN: usize = 200;
-const WARMUP_TIME: Duration = Duration::from_secs(2);
+// Warm-up requests per query shape, so Solr's JIT has compiled the hot path
+// before anything is timed. A fixed count, not a duration: both engines must
+// see exactly the same request sequence.
+const WARMUP: u64 = 300;
+// Same-URL repeats per shape for the separate cache-hit metric.
+const REPEAT: usize = 100;
+const TERM_SEED: u64 = 42;
 // Pinned so a re-run measures the same Solr and the same Wayfinder runtime.
 const SOLR_IMAGE: &str =
     "solr@sha256:9ab3185bfc8e18e1a0c0d20083f783ec3ef2833b8add196bd0ebddc929525970";
@@ -85,8 +89,19 @@ fast = true
 struct Query {
     name: String,
     mode: String,
-    /// Already percent-encoded, ready to append to `/select?`.
-    params: String,
+    /// `(key, template)` pairs; templates are filled per request by `Pools::fill`.
+    params: Vec<(String, String)>,
+}
+
+impl Query {
+    fn url(&self, base: &str, pools: &Pools, i: u64) -> String {
+        let params: Vec<String> = self
+            .params
+            .iter()
+            .map(|(k, v)| format!("{k}={}", encode(&pools.fill(v, i))))
+            .collect();
+        format!("{base}/select?{}&wt=json", params.join("&"))
+    }
 }
 
 fn encode(v: &str) -> String {
@@ -119,10 +134,9 @@ fn queries(path: &Path) -> Vec<Query> {
                 .split('&')
                 .map(|kv| {
                     let (k, v) = kv.split_once('=').expect("key=value");
-                    format!("{k}={}", encode(v))
+                    (k.to_string(), v.to_string())
                 })
-                .collect::<Vec<_>>()
-                .join("&");
+                .collect();
             Query { name, mode, params }
         })
         .collect()
@@ -261,24 +275,34 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
     sorted[((sorted.len() - 1) as f64 * p).round() as usize]
 }
 
-/// Measures every query on one engine. Returns per-query stats plus the
-/// answer from the first (cold) request, for the correctness check.
-fn measure(engine: &Engine, queries: &[Query], iters: usize) -> Vec<Value> {
-    queries
+/// Measures every query shape on one engine. Request `i` of shape `n` is
+/// filled with seed `n * 1e6 + i`, so both engines get the identical sequence
+/// and no timed request repeats an earlier one. Returns per-shape stats plus
+/// every timed answer, for the correctness check.
+fn measure(
+    engine: &Engine,
+    qs: &[Query],
+    pools: &Pools,
+    iters: usize,
+) -> (Vec<Value>, Vec<Vec<Value>>) {
+    let mut answers = Vec::new();
+    let stats = qs
         .iter()
-        .map(|q| {
-            let url = format!("{}/select?{}&wt=json", engine.base, q.params);
-            let (cold_ms, answer) = get(&url);
-            let t0 = Instant::now();
-            let mut n = 0;
-            while n < WARMUP_MIN || t0.elapsed() < WARMUP_TIME {
-                get(&url);
-                n += 1;
+        .enumerate()
+        .map(|(n, q)| {
+            let url = |i: u64| q.url(&engine.base, pools, n as u64 * 1_000_000 + i);
+            let (cold_ms, _) = get(&url(0));
+            for i in 1..=WARMUP {
+                get(&url(i));
             }
             let cpu0 = cgroup_u64(engine, "cpu.stat", Some("usage_usec"));
-            let mut lat: Vec<f64> = (0..iters).map(|_| get(&url).0).collect();
+            let (mut lat, ans): (Vec<f64>, Vec<Value>) =
+                (0..iters as u64).map(|i| get(&url(WARMUP + 1 + i))).unzip();
             let cpu_us = cgroup_u64(engine, "cpu.stat", Some("usage_usec")) - cpu0;
+            let mut rep: Vec<f64> = (0..REPEAT).map(|_| get(&url(0)).0).collect();
             lat.sort_by(f64::total_cmp);
+            rep.sort_by(f64::total_cmp);
+            answers.push(ans);
             json!({
                 "query": q.name,
                 "cold_ms": cold_ms,
@@ -286,10 +310,11 @@ fn measure(engine: &Engine, queries: &[Query], iters: usize) -> Vec<Value> {
                 "p95": pct(&lat, 0.95),
                 "p99": pct(&lat, 0.99),
                 "cpu_ms_per_1k": cpu_us as f64 / iters as f64,
-                "answer": answer,
+                "repeat_p50": pct(&rep, 0.50),
             })
         })
-        .collect()
+        .collect();
+    (stats, answers)
 }
 
 fn run_engine(
@@ -297,13 +322,14 @@ fn run_engine(
     startup_ms: f64,
     docs: &[WikiDoc],
     qs: &[Query],
+    pools: &Pools,
     iters: usize,
-) -> Value {
+) -> (Value, Vec<Vec<Value>>) {
     let idle_rss = cgroup_u64(&engine, "memory.current", None);
     let docs_per_s = index(&engine, docs);
     let post_index_rss = cgroup_u64(&engine, "memory.current", None);
-    let queries = measure(&engine, qs, iters);
-    json!({
+    let (queries, answers) = measure(&engine, qs, pools, iters);
+    let stats = json!({
         "engine": engine.name,
         "startup_ms": startup_ms,
         "index_docs_per_s": docs_per_s,
@@ -311,10 +337,16 @@ fn run_engine(
         "mem_post_index_mb": post_index_rss as f64 / 1048576.0,
         "mem_peak_mb": cgroup_u64(&engine, "memory.peak", None) as f64 / 1048576.0,
         "queries": queries,
-    })
+    });
+    (stats, answers)
 }
 
-fn run_solr(docs: &[WikiDoc], qs: &[Query], iters: usize) -> Value {
+fn run_solr(
+    docs: &[WikiDoc],
+    qs: &[Query],
+    pools: &Pools,
+    iters: usize,
+) -> (Value, Vec<Vec<Value>>) {
     let port_env = format!("SOLR_PORT={SOLR_PORT}");
     let heap_env = format!("SOLR_HEAP={SOLR_HEAP}");
     let (engine, startup_ms) = start(
@@ -343,10 +375,17 @@ fn run_solr(docs: &[WikiDoc], qs: &[Query], iters: usize) -> Value {
              "docValues": true},
         ]}),
     );
-    run_engine(engine, startup_ms, docs, qs, iters)
+    run_engine(engine, startup_ms, docs, qs, pools, iters)
 }
 
-fn run_wayfinder(root: &Path, work: &Path, docs: &[WikiDoc], qs: &[Query], iters: usize) -> Value {
+fn run_wayfinder(
+    root: &Path,
+    work: &Path,
+    docs: &[WikiDoc],
+    qs: &[Query],
+    pools: &Pools,
+    iters: usize,
+) -> (Value, Vec<Vec<Value>>) {
     let bin = root.join("target/release/wayfinder");
     assert!(bin.exists(), "build first: cargo build --release");
     std::fs::write(work.join("schema.toml"), WF_SCHEMA).expect("write schema");
@@ -376,7 +415,7 @@ fn run_wayfinder(root: &Path, work: &Path, docs: &[WikiDoc], qs: &[Query], iters
         format!("http://{bind}/wayfinder/{CORE}"),
         "admin/ping?wt=json",
     );
-    run_engine(engine, startup_ms, docs, qs, iters)
+    run_engine(engine, startup_ms, docs, qs, pools, iters)
 }
 
 fn docker_id(flag: &str) -> String {
@@ -410,8 +449,9 @@ fn main() {
         .map(|cols| cols[0].clone())
         .collect();
     let docs = wiki::load(&bench_dir.join("data"), n_docs);
-    let solr = run_solr(&docs, &qs, iters);
-    let wf = run_wayfinder(&root, &work, &docs, &qs, iters);
+    let pools = terms::pools(&docs, TERM_SEED);
+    let (solr, solr_answers) = run_solr(&docs, &qs, &pools, iters);
+    let (wf, wf_answers) = run_wayfinder(&root, &work, &docs, &qs, &pools, iters);
     let _ = std::fs::remove_dir_all(&work);
 
     let mut failures = Vec::new();
@@ -420,9 +460,25 @@ fn main() {
     let mut p99 = Vec::new();
     let mut cpu = Vec::new();
     let pairs = wf["queries"].as_array().unwrap().iter();
-    for ((qw, qsolr), q) in pairs.zip(solr["queries"].as_array().unwrap()).zip(&qs) {
-        if let Err(why) = check(&q.mode, &qw["answer"], &qsolr["answer"]) {
-            let line = format!("{}: {why}", q.name);
+    for (n, ((qw, qsolr), q)) in pairs
+        .zip(solr["queries"].as_array().unwrap())
+        .zip(&qs)
+        .enumerate()
+    {
+        let bad: Vec<(usize, String)> = wf_answers[n]
+            .iter()
+            .zip(&solr_answers[n])
+            .enumerate()
+            .filter_map(|(i, (w, s))| check(&q.mode, w, s).err().map(|e| (i, e)))
+            .collect();
+        if let Some((i, why)) = bad.first() {
+            // Show the first failing request so it can be replayed by hand.
+            let url = q.url("", &pools, n as u64 * 1_000_000 + WARMUP + 1 + *i as u64);
+            let line = format!(
+                "{}: {}/{iters} wrong, e.g. {why} [{url}]",
+                q.name,
+                bad.len()
+            );
             if allowed.contains(&q.name) {
                 waived.push(line);
             } else {

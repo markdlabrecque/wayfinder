@@ -6,4 +6,5 @@
 pub mod check;
 pub mod corpus;
 pub mod results;
+pub mod terms;
 pub mod wiki;

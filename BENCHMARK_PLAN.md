@@ -76,8 +76,8 @@ Known gaps for this goal:
   - [x] grouping
   - [x] stats
   - [x] `*:*` match-all with rows
-- [ ] Query terms sampled from the corpus with a fixed seed: common, mid, and rare terms.
-      (Today: fixed hand-picked terms in `queries.tsv`.)
+- [ ] Query terms sampled from the corpus with a fixed seed. **Committed, not yet run end to end**
+      (see "Handoff" below).
 
 ### Phase 3: Correctness gate
 
@@ -143,6 +143,10 @@ Known gaps for this goal:
 
 - **Machine:** the dedicated Linux desktop (16 cores, 60 GB). Hill-climb runs happen when it is quiet.
 - **Wins:** the loop stacks wins as commits on one branch. One PR at the end.
+- **Warm = varied queries** (option 1, 2026-10-28). Every timed request is a query the engine
+  has not seen before, filled from pools of real corpus terms. This stops Solr's
+  queryResultCache from turning the warm test into a cache lookup. The same URL repeated is
+  kept as a separate `repeat_p50` metric that is reported, not scored.
 - **Data:** real (Wikipedia slice), not synthetic.
 - **Toolchain:** rustup installed in `~/.cargo` (no Rust was on the machine). Use
   `export PATH=$HOME/.cargo/bin:$PATH`.
@@ -179,15 +183,9 @@ Detail lands in `bench/out/<ts>.json` (gitignored).
   wf=2696 solr=2693. Likely analyzer differences (`text_en` stemming/tokenizing). Find the
   extra doc ids, then either fix Wayfinder or list them in `allowed-diffs.tsv` with the
   `docs/COMPATIBILITY.md` section that covers it.
-- **Warm runs repeat one identical URL**, so Solr answers from its queryResultCache
-  (~0.08 ms) while Wayfinder has no result cache. See open questions.
-
 ## Open questions
 
-- **What does "warm" mean for scoring?** Today it is the same URL repeated, which is the best
-  case for Solr's result cache. Real traffic varies. Option: warm = rotate through many
-  different terms per query shape (caches warm, results not reused), and keep the repeated
-  URL as a separate "cache hit" metric.
+- (none right now)
 
 ## First full-suite findings (20k docs, 2026-10-28)
 
@@ -198,6 +196,37 @@ Biggest gaps (Wayfinder / Solr, warm p50): `match_all` sorted by `id` 1972x (140
 scan by field values, so they share a likely root cause. Wayfinder wins every cold first query
 and uses ~7x less memory.
 
+## Handoff: varied warm queries (committed on `440-perf-bench`)
+
+Committed and passing fmt/clippy/tests, but **not run end to end yet**:
+
+- `bench/src/terms.rs` (new): scans the first 20k docs and builds two pools with a fixed seed:
+  2,000 terms and 2,000 adjacent word pairs. Each has doc frequency between 3 and 20% of the
+  sample, with stopwords removed. `Pools::fill(template, i)` fills the placeholders `{t}`,
+  `{t2}`, `{bigram}`, `{start}`, `{lo}`, `{hi}`, always the same way for the same `i`.
+- `bench/src/lib.rs`: adds `pub mod terms;`.
+- `bench/queries.tsv`: now 15 templates using those placeholders. `term_common` and
+  `term_rare` merged into `term`. `match_all` pages from a random `{start}`. `deep_page` is a
+  term query at `start=1000`. `range_query` uses `len:[{lo} TO {hi}]`.
+- `bench/src/bin/wf-bench.rs`:
+  - `Query` holds raw `(key, template)` pairs, and `Query::url(base, pools, i)` fills and encodes.
+  - Request `i` of shape `n` uses seed `n * 1_000_000 + i`.
+  - Sequence per shape: request 0 is cold, requests 1..=300 are warm-up (fixed count, so both
+    engines see the same sequence), then `--iters` timed requests, then 100 repeats of
+    request 0 for `repeat_p50`.
+  - Every timed answer is checked, not just one. A failing shape reports `k/iters wrong`
+    plus the first failing URL so it can be replayed.
+  - The last `cargo build --release --bin wf-bench` after these edits was clean.
+- `bench/tests/terms.rs` (new): one test that filled queries are stable across runs, have no
+  placeholders left, and actually vary. Passes (fixture uses 12 words so terms stay
+  under the 20% doc-frequency cap).
+
+Next steps:
+1. `./target/release/wf-bench --docs 20000 --iters 200`. Check that correctness holds across
+   the varied requests. Expect more mismatches than before, because many more queries are
+   now compared.
+2. Go on to the count mismatches under "Known issues" and Phase 4.
+
 ## Session log
 
 - 2026-10-28: plan written. Issues #440 / #441 filed. Phase 0 done: `bench/src/bin/wf-bench.rs`
@@ -207,3 +236,5 @@ and uses ~7x less memory.
   `score 0.194 | p50 0.45 p99 0.18 cpu 0.12 mem 0.15 | correct 1/1 | PASS`.
 - 2026-10-28: Phases 2 and 3 mostly done. 16-query suite, `src/check.rs` gate (tests in
   `tests/check.rs`, all 10 mutations caught), `allowed-diffs.tsv` (empty).
+- 2026-10-28: Chose varied warm queries (option 1). Implementation started, handed off
+  (see "Handoff" above). Committed and pushed.
