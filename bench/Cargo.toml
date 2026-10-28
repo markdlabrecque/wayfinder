@@ -6,9 +6,9 @@ publish = false
 
 # Benchmark tooling. Standalone crate, not a workspace member of the root
 # `wayfinder` package: this tooling is not part of the served product and has
-# no business linking against it. The corpus generator and results renderer
-# (issue #13) stay std-only; the `wf-bench` driver (issue #440) needs an HTTP
-# client and a JSON parser to compare answers, hence the two dependencies.
+# no business linking against it. The `wf-bench` driver (issue #440) needs an
+# HTTP client and a JSON parser to compare answers, and a parquet reader for
+# the Wikipedia corpus.
 
 [lib]
 name = "wayfinder_bench"

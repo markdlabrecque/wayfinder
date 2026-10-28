@@ -517,7 +517,7 @@ fn run_solr(
     let data = work.join("solr");
     std::fs::create_dir_all(&data).expect("create Solr home");
     let solr_mount = format!("{}:/var/solr", data.display());
-    // Lucene's index only, not the tlog, as `run.sh` measures it (#253).
+    // Lucene's index only, not the tlog (#253).
     let index = data.join(format!("data/{CORE}/data/index"));
     let user = host_user();
     let (engine, startup_ms) = start(
