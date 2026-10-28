@@ -3,6 +3,7 @@
 //! crate, `std`-only, no dependency on the `wayfinder` crate itself -- see
 //! `Cargo.toml` for why.
 
+pub mod baseline;
 pub mod check;
 pub mod cold;
 pub mod corpus;
