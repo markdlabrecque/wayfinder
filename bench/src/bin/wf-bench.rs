@@ -13,6 +13,9 @@
 //! container, evict its data dir from the page cache with `posix_fadvise`
 //! (no root needed), start it again, and time the first request of each shape.
 //!
+//! Footprint (issue #451): `startup_ms` runs from container start to the first
+//! 200 from `/select`, and `index_size_mb` sums the index dir on disk.
+//!
 //! Usage: `wf-bench [--docs N] [--iters N] [--cold N]`
 //! Requires: docker, a release build at `target/release/wayfinder`, and the
 //! corpus from `bench/fetch-wiki.sh`.
@@ -24,6 +27,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use wayfinder_bench::check::check;
 use wayfinder_bench::cold::{evict_page_cache, summarize};
+use wayfinder_bench::footprint::{dir_size_bytes, time_to_first_search};
 use wayfinder_bench::terms::{self, Pools};
 use wayfinder_bench::wiki::{self, WikiDoc};
 
@@ -160,6 +164,8 @@ struct Engine {
     /// Host dir holding the engine's index, bind-mounted and owned by the
     /// host user, so cold runs can evict it from the page cache without root.
     data: PathBuf,
+    /// The index files alone, inside `data`, for the size on disk.
+    index: PathBuf,
 }
 
 impl Drop for Engine {
@@ -190,6 +196,7 @@ fn start(
     base: String,
     ping: &str,
     data: PathBuf,
+    index: PathBuf,
 ) -> (Engine, f64) {
     let container = format!("wf-bench-{name}");
     let _ = Command::new("docker")
@@ -219,9 +226,14 @@ fn start(
         base,
         ping: ping.to_string(),
         data,
+        index,
     };
-    wait_ready(&engine, t0);
-    (engine, t0.elapsed().as_secs_f64() * 1000.0)
+    // Start-up ends at the first answered search, not the first ping: a
+    // ping can pass before the core is ready to serve queries.
+    let select = format!("{}/select?q=*:*&wt=json", engine.base);
+    let startup_ms = time_to_first_search(&select, t0, Duration::from_secs(120))
+        .unwrap_or_else(|e| panic!("{}: {e}", engine.name));
+    (engine, startup_ms)
 }
 
 fn wait_ready(engine: &Engine, t0: Instant) {
@@ -387,9 +399,14 @@ fn run_engine(
     // Peak memory is read before the cold runs: a restart resets it.
     let mem_peak = cgroup_u64(&engine, "memory.peak", None);
     let cold = measure_cold(&engine, qs, pools, cold_runs);
+    // Read last, well after the final commit, so any merge the engine runs by
+    // default after it has landed.
+    let index_bytes = dir_size_bytes(&engine.index)
+        .unwrap_or_else(|e| panic!("size {}: {e}", engine.index.display()));
     let stats = json!({
         "engine": engine.name,
         "startup_ms": startup_ms,
+        "index_size_mb": index_bytes as f64 / 1048576.0,
         "index_docs_per_s": docs_per_s,
         "mem_idle_mb": idle_rss as f64 / 1048576.0,
         "mem_post_index_mb": post_index_rss as f64 / 1048576.0,
@@ -416,6 +433,8 @@ fn run_solr(
     let data = work.join("solr");
     std::fs::create_dir_all(&data).expect("create Solr home");
     let solr_mount = format!("{}:/var/solr", data.display());
+    // Lucene's index only, not the tlog, as `run.sh` measures it (#253).
+    let index = data.join(format!("data/{CORE}/data/index"));
     let user = host_user();
     let (engine, startup_ms) = start(
         "solr",
@@ -435,6 +454,7 @@ fn run_solr(
         format!("http://127.0.0.1:{SOLR_PORT}/solr/{CORE}"),
         "admin/ping?wt=json",
         data,
+        index,
     );
     post(
         &format!("{}/schema", engine.base),
@@ -484,6 +504,7 @@ fn run_wayfinder(
         ],
         format!("http://{bind}/wayfinder/{CORE}"),
         "admin/ping?wt=json",
+        work.join("data"),
         work.join("data"),
     );
     run_engine(engine, startup_ms, docs, qs, pools, iters, cold_runs)
