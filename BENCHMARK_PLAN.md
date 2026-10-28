@@ -140,9 +140,12 @@ Known gaps for this goal:
 
 ### Phase 8: Cleanup
 
-- [ ] Retire or fold in the old `bench/run.sh` and `bench/RESULTS.md` once the new driver
-      covers their metrics.
-- [ ] Update `bench/README.md`.
+- [x] Retire or fold in the old `bench/run.sh` and `bench/RESULTS.md` once the new driver
+      covers their metrics. Removed (#459) with the pipeline only they used (`gen_corpus`,
+      `render_report`, `corpus.rs`, `results.rs`, `query_result_cache_stat.py`). Every old
+      metric has a `wf-bench` equivalent except image size, which `wf-bench` does not build;
+      `bench/tests/dockerfile_build.rs` still checks it.
+- [x] Update `bench/README.md`.
 
 ## Decisions
 

@@ -1,19 +1,16 @@
-//! Benchmark tooling for issue #13: a deterministic corpus generator plus a
-//! results-table renderer used to produce `bench/RESULTS.md`. Standalone
-//! crate, `std`-only, no dependency on the `wayfinder` crate itself -- see
+//! Library behind `wf-bench`, the Wayfinder vs Solr benchmark (issue #440).
+//! Standalone crate with no dependency on the `wayfinder` crate itself -- see
 //! `Cargo.toml` for why.
 
 pub mod baseline;
 pub mod check;
 pub mod cold;
-pub mod corpus;
 pub mod footprint;
 pub mod freshness;
 pub mod index_stats;
 pub mod load;
 pub mod machine;
 pub mod memory;
-pub mod results;
 pub mod score;
 pub mod terms;
 pub mod wiki;

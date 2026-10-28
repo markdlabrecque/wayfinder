@@ -78,21 +78,18 @@ Schema changes need startup-compatibility coverage; Tantivy cannot add fields to
 
 ## Benchmarks
 
-The benchmark harness is a separate dependency-free Rust crate and requires Docker and `curl`:
+The benchmark is `wf-bench`, a separate Rust crate in `bench/` that requires Docker:
 
 ```sh
-bash bench/run.sh             # seed 42, 50,000 documents
-bash bench/run.sh 42 2000000  # full corpus; long-running
+bench/fetch-wiki.sh
+cargo build --release
+cargo run --release --manifest-path bench/Cargo.toml --bin wf-bench -- --docs 10000
 ```
 
-It generates a deterministic corpus, measures native Wayfinder against a Solr 9 container, and
-writes [`bench/RESULTS.md`](../bench/RESULTS.md). `N_QUERIES` controls the load-test count and
-`SOLR_HOST_PORT` avoids host-port collisions. Benchmarks are manual and non-hermetic; they are not
-part of `cargo test`.
-
-Current measured results are retained in `bench/RESULTS.md`. RSS includes mmap-backed index pages,
-so it does not isolate allocator memory from the OS page cache; compare environments and cache
-conditions before drawing conclusions from absolute values.
+It runs Wayfinder and Solr 9 in identically limited containers, checks Wayfinder's answers against
+Solr's, prints a one-line score, and writes full detail to `bench/out/`. See
+[`bench/README.md`](../bench/README.md). Benchmarks are manual and non-hermetic; they are not part
+of `cargo test`.
 
 ## Pull requests
 
