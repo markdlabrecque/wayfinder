@@ -24,12 +24,16 @@
 //! each level run for `LOAD_SECS` on the warm engine. Every user walks the same
 //! varied URL sequence, which repeats no warm or cold seed.
 //!
+//! Before anything is measured, the repo's `cargo test` must pass. A build
+//! that breaks the tests is never scored: the run prints `FAIL tests` and
+//! exits non-zero.
+//!
 //! Usage: `wf-bench [--docs N] [--iters N] [--cold N] [--force]`
 //! Requires: docker, a release build at `target/release/wayfinder`, and the
 //! corpus from `bench/fetch-wiki.sh`.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -604,6 +608,17 @@ fn arg(args: &[String], flag: &str, default: usize) -> usize {
         .map_or(default, |v| v.parse().expect("numeric flag"))
 }
 
+/// Runs the repo's `cargo test`. Its output goes to stderr, so stdout stays
+/// the single line the hill-climb loop reads.
+fn tests_pass(root: &Path) -> bool {
+    Command::new("cargo")
+        .arg("test")
+        .current_dir(root)
+        .stdout(Stdio::from(std::io::stderr()))
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n_docs = arg(&args, "--docs", 10_000);
@@ -629,6 +644,10 @@ fn main() {
 
     let bench_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = bench_dir.parent().expect("repo root").to_path_buf();
+    if !tests_pass(&root) {
+        println!("FAIL tests");
+        std::process::exit(1);
+    }
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock")
