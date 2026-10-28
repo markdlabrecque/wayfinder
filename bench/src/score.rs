@@ -45,7 +45,11 @@ pub fn ratio(wf: f64, solr: f64, higher_is_better: bool) -> Result<f64, String> 
             return Err(format!("{engine} measured {v}, need a positive number"));
         }
     }
-    Ok(if higher_is_better { solr / wf } else { wf / solr })
+    Ok(if higher_is_better {
+        solr / wf
+    } else {
+        wf / solr
+    })
 }
 
 /// One ratio per metric, in order of first appearance: the plain geometric

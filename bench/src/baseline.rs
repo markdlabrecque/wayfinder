@@ -88,7 +88,12 @@ pub fn load_solr(path: &Path, key: &SolrKey) -> Result<Option<Vec<(String, f64)>
     let Some(v) = load_solr_json(path, key)? else {
         return Ok(None);
     };
-    let bad = || format!("{}: solr results are not [name, number] pairs", path.display());
+    let bad = || {
+        format!(
+            "{}: solr results are not [name, number] pairs",
+            path.display()
+        )
+    };
     v.as_array()
         .ok_or_else(bad)?
         .iter()
@@ -120,7 +125,10 @@ pub fn load_wf(path: &Path) -> Result<Option<f64>, String> {
 /// better, so an improvement shows as a negative percent.
 pub fn delta_line(accepted: Option<f64>, score: f64) -> String {
     match accepted {
-        Some(base) => format!("vs accepted {base:.3}: {:+.1}%", (score - base) / base * 100.0),
+        Some(base) => format!(
+            "vs accepted {base:.3}: {:+.1}%",
+            (score - base) / base * 100.0
+        ),
         None => "no accepted baseline".to_string(),
     }
 }

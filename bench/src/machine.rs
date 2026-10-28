@@ -21,7 +21,9 @@ pub fn parse_cpu_list(list: &str) -> Result<Vec<usize>, String> {
             None => (num(part)?, num(part)?),
         };
         if lo > hi {
-            return Err(format!("bad cpu list {list:?}: range {part:?} runs backwards"));
+            return Err(format!(
+                "bad cpu list {list:?}: range {part:?} runs backwards"
+            ));
         }
         cpus.extend(lo..=hi);
     }
@@ -58,7 +60,9 @@ pub fn check_busy(load: f64, threshold: f64, force: bool) -> Result<Option<Strin
     }
     let busy = format!("machine is busy: 1-min load average {load:.2} is over {threshold:.2}");
     if force {
-        Ok(Some(format!("{busy}; running anyway (--force), results may be noisy")))
+        Ok(Some(format!(
+            "{busy}; running anyway (--force), results may be noisy"
+        )))
     } else {
         Err(format!("{busy}; wait for it to settle or pass --force"))
     }
@@ -76,7 +80,9 @@ pub fn parse_cpu_model(cpuinfo: &str) -> Option<String> {
 /// `lucene.solr-spec-version` from Solr's `admin/info/system` response.
 pub fn parse_solr_version(info: &str) -> Option<String> {
     let v: Value = serde_json::from_str(info).ok()?;
-    v["lucene"]["solr-spec-version"].as_str().map(str::to_string)
+    v["lucene"]["solr-spec-version"]
+        .as_str()
+        .map(str::to_string)
 }
 
 /// What a result needs to be compared fairly with another one.

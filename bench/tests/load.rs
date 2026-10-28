@@ -55,7 +55,11 @@ fn serve(status: u16) -> Server {
             });
         }
     });
-    Server { base: format!("http://{addr}"), peak, hits }
+    Server {
+        base: format!("http://{addr}"),
+        peak,
+        hits,
+    }
 }
 
 fn urls(base: &str) -> Vec<String> {
@@ -76,7 +80,11 @@ fn level_runs_that_many_searches_at_once() {
     let r = run_level(&urls(&s.base), 8, Duration::from_millis(600));
     assert_eq!(r.concurrency, 8);
     assert!(r.requests > 0 && r.errors == 0, "{r:?}");
-    assert_eq!(s.peak.load(Ordering::SeqCst), 8, "exactly 8 in flight at peak");
+    assert_eq!(
+        s.peak.load(Ordering::SeqCst),
+        8,
+        "exactly 8 in flight at peak"
+    );
 }
 
 #[test]

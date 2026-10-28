@@ -23,7 +23,10 @@ fn cpu_lists_expand_ranges_and_commas() {
 fn engines_and_driver_must_not_share_a_core() {
     assert!(validate_cores("2-5", "0-1").is_ok());
     let err = validate_cores("2-5", "5,6").unwrap_err();
-    assert!(err.contains('5'), "error should name the shared core: {err}");
+    assert!(
+        err.contains('5'),
+        "error should name the shared core: {err}"
+    );
 }
 
 #[test]
@@ -37,7 +40,10 @@ fn busy_machine_is_refused_unless_forced_then_warned() {
     assert_eq!(check_busy(0.2, 1.0, false), Ok(None));
     assert!(check_busy(3.5, 1.0, false).is_err());
     let warning = check_busy(3.5, 1.0, true).unwrap().expect("a warning");
-    assert!(warning.contains("3.5"), "warning should show the load: {warning}");
+    assert!(
+        warning.contains("3.5"),
+        "warning should show the load: {warning}"
+    );
 }
 
 #[test]

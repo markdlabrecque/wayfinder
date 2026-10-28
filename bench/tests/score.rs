@@ -112,5 +112,8 @@ fn shipped_weights_file_parses_and_favours_tail_latency_and_cpu() {
     let k = names.len() as f64;
     let unweighted = (((k - 2.0) * 2f64.ln() + 2.0 * 0.5f64.ln()) / k).exp();
     let s = weighted_geomean(&ratios, &w).unwrap();
-    assert!(s < unweighted, "key metrics count more: {s} vs {unweighted}");
+    assert!(
+        s < unweighted,
+        "key metrics count more: {s} vs {unweighted}"
+    );
 }

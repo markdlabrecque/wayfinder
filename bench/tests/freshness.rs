@@ -79,7 +79,13 @@ fn handle(mut stream: TcpStream, seen: &Mutex<Seen>) {
             .find_map(|kv| kv.strip_prefix("q="))
             .map(decode)
             .unwrap_or_default();
-        let token = q.trim_matches('"').rsplit(':').next().unwrap().trim_matches('"').to_string();
+        let token = q
+            .trim_matches('"')
+            .rsplit(':')
+            .next()
+            .unwrap()
+            .trim_matches('"')
+            .to_string();
         let mut s = seen.lock().unwrap();
         if !s.queries.contains(&q) {
             s.queries.push(q);
@@ -92,7 +98,9 @@ fn handle(mut stream: TcpStream, seen: &Mutex<Seen>) {
     } else {
         0
     };
-    let json = format!(r#"{{"responseHeader":{{"status":0}},"response":{{"numFound":{num_found},"docs":[]}}}}"#);
+    let json = format!(
+        r#"{{"responseHeader":{{"status":0}},"response":{{"numFound":{num_found},"docs":[]}}}}"#
+    );
     let _ = write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",

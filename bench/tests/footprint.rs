@@ -69,7 +69,10 @@ fn first_search_time_is_measured_from_the_given_start_instant() {
     let since = Instant::now() - Duration::from_millis(500);
     let ms = time_to_first_search(&url, since, Duration::from_secs(5)).expect("first search");
     assert!(ms >= 500.0, "must include time before the call, got {ms}");
-    assert!(ms < 5_000.0, "an immediately-ready server is fast, got {ms}");
+    assert!(
+        ms < 5_000.0,
+        "an immediately-ready server is fast, got {ms}"
+    );
 }
 
 #[test]
@@ -94,14 +97,13 @@ fn first_search_retries_while_nothing_is_listening_then_succeeds() {
             let mut stream = stream.unwrap();
             let mut buf = [0u8; 2048];
             let _ = stream.read(&mut buf);
-            let _ = stream.write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
-            );
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
         }
     });
     let url = format!("http://127.0.0.1:{port}/select?q=*:*");
-    let ms = time_to_first_search(&url, Instant::now(), Duration::from_secs(10))
-        .expect("first search");
+    let ms =
+        time_to_first_search(&url, Instant::now(), Duration::from_secs(10)).expect("first search");
     assert!(ms >= 300.0, "cannot beat the server's own start, got {ms}");
 }
 
@@ -117,7 +119,12 @@ fn wf_bench_records_index_size_and_search_startup_for_each_engine() {
     // run_engine is shared by Solr and Wayfinder, so one record covers both.
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let src = fs::read_to_string(root.join("src/bin/wf-bench.rs")).expect("read wf-bench.rs");
-    for key in ["\"index_size_mb\"", "\"startup_ms\"", "dir_size_bytes", "time_to_first_search"] {
+    for key in [
+        "\"index_size_mb\"",
+        "\"startup_ms\"",
+        "dir_size_bytes",
+        "time_to_first_search",
+    ] {
         assert!(src.contains(key), "wf-bench must record/use {key}");
     }
 }
