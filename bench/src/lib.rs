@@ -10,6 +10,7 @@ pub mod footprint;
 pub mod freshness;
 pub mod load;
 pub mod machine;
+pub mod memory;
 pub mod results;
 pub mod terms;
 pub mod wiki;

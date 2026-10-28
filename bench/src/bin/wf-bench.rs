@@ -28,6 +28,10 @@
 //! that breaks the tests is never scored: the run prints `FAIL tests` and
 //! exits non-zero.
 //!
+//! Memory (issue #448): idle and post-index memory are `anon` from the cgroup's
+//! `memory.stat`, so the disk cache doesn't count; `file` is reported apart.
+//! Peak is `memory.peak`.
+//!
 //! Usage: `wf-bench [--docs N] [--iters N] [--cold N] [--force]`
 //! Requires: docker, a release build at `target/release/wayfinder`, and the
 //! corpus from `bench/fetch-wiki.sh`.
@@ -42,6 +46,7 @@ use wayfinder_bench::cold::{evict_page_cache, summarize};
 use wayfinder_bench::footprint::{dir_size_bytes, time_to_first_search};
 use wayfinder_bench::freshness;
 use wayfinder_bench::load::{self, LEVELS, run_levels};
+use wayfinder_bench::memory::{self, MemStat, parse_memory_stat};
 use wayfinder_bench::machine::{self, EnvInfo};
 use wayfinder_bench::terms::{self, Pools};
 use wayfinder_bench::wiki::{self, WikiDoc};
@@ -300,6 +305,14 @@ fn cgroup_u64(engine: &Engine, file: &str, key: Option<&str>) -> u64 {
     }
 }
 
+/// Anonymous memory and disk cache from `memory.stat`; `memory.current` would
+/// lump the two together.
+fn mem_stat(engine: &Engine) -> MemStat {
+    let text =
+        std::fs::read_to_string(engine.cgroup.join("memory.stat")).expect("read memory.stat");
+    parse_memory_stat(&text).expect("memory.stat anon and file")
+}
+
 fn doc_json(d: &WikiDoc) -> Value {
     json!({
         "id": d.id, "title": d.title, "body": d.body,
@@ -433,9 +446,9 @@ fn run_engine(
     iters: usize,
     cold_runs: usize,
 ) -> (Value, Vec<Vec<Value>>) {
-    let idle_rss = cgroup_u64(&engine, "memory.current", None);
+    let idle_mem = mem_stat(&engine);
     let docs_per_s = index(&engine, docs);
-    let post_index_rss = cgroup_u64(&engine, "memory.current", None);
+    let post_index_mem = mem_stat(&engine);
     let (queries, answers) = measure(&engine, qs, pools, iters);
     // After the queries, so the extra docs never show up in compared answers.
     let add_to_searchable = freshness::measure(&engine.base, FRESHNESS_RUNS, commit_settings);
@@ -449,20 +462,19 @@ fn run_engine(
     // default after it has landed.
     let index_bytes = dir_size_bytes(&engine.index)
         .unwrap_or_else(|e| panic!("size {}: {e}", engine.index.display()));
-    let stats = json!({
+    let mut stats = json!({
         "engine": engine.name,
         "startup_ms": startup_ms,
         "index_size_mb": index_bytes as f64 / 1048576.0,
         "index_docs_per_s": docs_per_s,
-        "mem_idle_mb": idle_rss as f64 / 1048576.0,
-        "mem_post_index_mb": post_index_rss as f64 / 1048576.0,
-        "mem_peak_mb": mem_peak as f64 / 1048576.0,
         "queries": queries,
         "load": load,
         "cold_runs": cold_runs,
         "cold": cold,
         "add_to_searchable": add_to_searchable,
     });
+    let mem = memory::to_json(&idle_mem, &post_index_mem, mem_peak);
+    stats.as_object_mut().unwrap().extend(mem.as_object().unwrap().clone());
     (stats, answers)
 }
 
