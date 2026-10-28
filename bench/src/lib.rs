@@ -6,6 +6,7 @@
 pub mod check;
 pub mod cold;
 pub mod corpus;
+pub mod footprint;
 pub mod results;
 pub mod terms;
 pub mod wiki;
