@@ -154,7 +154,10 @@ const TEXT_GENERAL_TOKENIZER_LEGACY: &str = "default";
 /// and stemming.
 /// It intentionally does not override Tantivy's `en_stem`, which remains
 /// available for custom analyzer chains and upstream defaults.
-const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v7";
+const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v8";
+/// The v7 predecessor, whose Porter `y` rule saw only a terminal `y` (#443),
+/// remains registered only so a legacy Tantivy schema can be diagnosed safely.
+const TEXT_EN_TOKENIZER_V7: &str = "wayfinder_text_en_v7";
 /// The v6 predecessor remains registered only so a legacy Tantivy schema
 /// can be diagnosed safely; no newly-built field records this identity.
 const TEXT_EN_TOKENIZER_V6: &str = "wayfinder_text_en_v6";
@@ -520,6 +523,12 @@ impl WayfinderSchema {
             .any(|field| matches!(field.type_.as_str(), "text_en" | "text_general"))
     }
 
+    /// Whether this schema can contain static `text_en` terms from the v7
+    /// chain, whose Porter `y` rule v8 extends to `-ys`, `-yed` and `-ying`.
+    pub(crate) fn uses_static_text_en(&self) -> bool {
+        self.fields.iter().any(|field| field.type_ == "text_en")
+    }
+
     /// Whether a static built-in text preset has indexed terms subject to
     /// Phase 2 accent folding. Custom and dynamic chains are not included:
     /// neither receives this built-in filter.
@@ -816,13 +825,63 @@ impl TokenFilter for PorterTerminalYFilter {
     type Tokenizer<T: Tokenizer> = PorterTerminalYTokenizer<T>;
 
     fn transform<T: Tokenizer>(self, tokenizer: T) -> Self::Tokenizer<T> {
-        PorterTerminalYTokenizer { inner: tokenizer }
+        PorterTerminalYTokenizer {
+            inner: tokenizer,
+            rewrite: porter_terminal_y,
+        }
     }
+}
+
+/// [`PorterTerminalYFilter`] plus the Porter step 1a/1b inflections it misses
+/// (#443): a vowel + `y` before a final `s`, `ed` or `ing` also becomes `i`
+/// with the suffix dropped, so `days`, `played` and `playing` reach Snowball
+/// as `dai` and `plai`, the same stems `day` and `play` get.
+#[derive(Clone)]
+struct PorterInflectedYFilter;
+
+impl TokenFilter for PorterInflectedYFilter {
+    type Tokenizer<T: Tokenizer> = PorterTerminalYTokenizer<T>;
+
+    fn transform<T: Tokenizer>(self, tokenizer: T) -> Self::Tokenizer<T> {
+        PorterTerminalYTokenizer {
+            inner: tokenizer,
+            rewrite: porter_inflected_y,
+        }
+    }
+}
+
+fn is_ascii_vowel(byte: u8) -> bool {
+    matches!(byte, b'a' | b'e' | b'i' | b'o' | b'u')
+}
+
+fn porter_terminal_y(text: &mut String) {
+    if text.is_ascii() && text.ends_with('y') && text[..text.len() - 1].bytes().any(is_ascii_vowel)
+    {
+        text.pop();
+        text.push('i');
+    }
+}
+
+fn porter_inflected_y(text: &mut String) {
+    if !text.is_ascii() {
+        return;
+    }
+    for suffix in ["ys", "yed", "ying"] {
+        if let Some(stem) = text.strip_suffix(suffix)
+            && stem.bytes().last().is_some_and(is_ascii_vowel)
+        {
+            text.truncate(stem.len());
+            text.push('i');
+            return;
+        }
+    }
+    porter_terminal_y(text);
 }
 
 #[derive(Clone)]
 struct PorterTerminalYTokenizer<T> {
     inner: T,
+    rewrite: fn(&mut String),
 }
 
 impl<T: Tokenizer> Tokenizer for PorterTerminalYTokenizer<T> {
@@ -831,12 +890,14 @@ impl<T: Tokenizer> Tokenizer for PorterTerminalYTokenizer<T> {
     fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
         PorterTerminalYTokenStream {
             tail: self.inner.token_stream(text),
+            rewrite: self.rewrite,
         }
     }
 }
 
 struct PorterTerminalYTokenStream<T> {
     tail: T,
+    rewrite: fn(&mut String),
 }
 
 impl<T: TokenStream> TokenStream for PorterTerminalYTokenStream<T> {
@@ -844,16 +905,7 @@ impl<T: TokenStream> TokenStream for PorterTerminalYTokenStream<T> {
         if !self.tail.advance() {
             return false;
         }
-        let text = &mut self.tail.token_mut().text;
-        if text.is_ascii()
-            && text.ends_with('y')
-            && text[..text.len() - 1]
-                .bytes()
-                .any(|byte| matches!(byte, b'a' | b'e' | b'i' | b'o' | b'u'))
-        {
-            text.pop();
-            text.push('i');
-        }
+        (self.rewrite)(&mut self.tail.token_mut().text);
         true
     }
 
@@ -1871,13 +1923,14 @@ pub fn is_configured_suggester(dictionary: &str) -> bool {
 }
 
 /// Whether an on-disk tokenizer identity uses issue #389's built-in token graph.
-/// v6 static identities remain graph analyzers for legacy-index diagnosis.
+/// v6 and v7 static identities remain graph analyzers for legacy-index diagnosis.
 pub fn is_current_builtin_graph_tokenizer(tokenizer: &str) -> bool {
     matches!(
         tokenizer,
         TEXT_GENERAL_TOKENIZER
             | TEXT_GENERAL_TOKENIZER_V6
             | TEXT_EN_TOKENIZER
+            | TEXT_EN_TOKENIZER_V7
             | TEXT_EN_TOKENIZER_V6
             | DYNAMIC_TEXT_TOKENIZER
     ) || LANGUAGES
@@ -2158,7 +2211,7 @@ fn build_tokenizers(
             .build(),
     );
     // Kept for opening and diagnosing legacy schemas; new text_en fields use
-    // the v7 identity below.
+    // the v8 identity below.
     register_both(
         TEXT_EN_TOKENIZER_V2,
         TextAnalyzer::builder(SimpleTokenizer::default())
@@ -2226,7 +2279,7 @@ fn build_tokenizers(
             .build(),
     );
     register_split(
-        TEXT_EN_TOKENIZER,
+        TEXT_EN_TOKENIZER_V7,
         TextAnalyzer::builder(Uax29Tokenizer)
             .filter_dynamic(AccentFoldingFilter)
             .filter_dynamic(LengthFilter {
@@ -2252,6 +2305,36 @@ fn build_tokenizers(
                 resource: synonyms.clone(),
             })
             .filter(PorterTerminalYFilter)
+            .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    register_split(
+        TEXT_EN_TOKENIZER,
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter_dynamic(LengthFilter {
+                min: 1,
+                max: STATIC_TEXT_MAX_TOKEN_LEN,
+            })
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter_dynamic(WordDelimiterFilter::search())
+            .filter(PorterInflectedYFilter)
+            .filter(Stemmer::new(Language::English))
+            .build(),
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter_dynamic(LengthFilter {
+                min: 1,
+                max: STATIC_TEXT_MAX_TOKEN_LEN,
+            })
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter_dynamic(WordDelimiterFilter::search())
+            .filter_dynamic(SynonymFilter {
+                resource: synonyms.clone(),
+            })
+            .filter(PorterInflectedYFilter)
             .filter(Stemmer::new(Language::English))
             .build(),
     );
@@ -2566,6 +2649,7 @@ fn parse_with_synonyms(raw: &str, synonyms: SynonymResource) -> Result<Wayfinder
             TEXT_GENERAL_TOKENIZER_V4.to_string(),
             TEXT_GENERAL_TOKENIZER_V3.to_string(),
             TEXT_EN_TOKENIZER.to_string(),
+            TEXT_EN_TOKENIZER_V7.to_string(),
             TEXT_EN_TOKENIZER_V6.to_string(),
             TEXT_EN_TOKENIZER_V5.to_string(),
             TEXT_EN_TOKENIZER_V4.to_string(),
@@ -3132,6 +3216,25 @@ mod tests {
         assert!(is_current_builtin_graph_tokenizer(DYNAMIC_TEXT_TOKENIZER));
         assert!(!is_current_builtin_graph_tokenizer("operator_custom_v6"));
         assert!(!is_current_builtin_graph_tokenizer("wayfinder_text_en_v5"));
+    }
+
+    #[test]
+    fn inflected_y_forms_share_the_porter_stem_of_their_base_word() {
+        let mut analyzer = TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(PorterInflectedYFilter)
+            .filter(Stemmer::new(Language::English))
+            .build();
+        let mut stems = |text: &str| {
+            let mut stream = analyzer.token_stream(text);
+            let mut out = Vec::new();
+            while stream.advance() {
+                out.push(stream.token().text.clone());
+            }
+            out
+        };
+        assert_eq!(stems("day days"), ["dai", "dai"]);
+        assert_eq!(stems("play plays played playing"), ["plai"; 4]);
+        assert_eq!(stems("happy carrying dying"), ["happi", "carri", "die"]);
     }
 
     #[test]
