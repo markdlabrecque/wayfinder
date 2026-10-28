@@ -50,19 +50,28 @@ fn a_corrupt_noise_file_is_an_error() {
 
 #[test]
 fn a_drop_bigger_than_the_spread_is_a_win() {
-    let spread = Spread { min: 0.78, max: 0.82 }; // width 0.04
+    let spread = Spread {
+        min: 0.78,
+        max: 0.82,
+    }; // width 0.04
     assert_eq!(classify(0.80, 0.70, &spread), Verdict::Win);
 }
 
 #[test]
 fn a_rise_bigger_than_the_spread_is_a_loss() {
-    let spread = Spread { min: 0.78, max: 0.82 };
+    let spread = Spread {
+        min: 0.78,
+        max: 0.82,
+    };
     assert_eq!(classify(0.80, 0.90, &spread), Verdict::Loss);
 }
 
 #[test]
 fn a_change_within_the_spread_is_noise_in_both_directions() {
-    let spread = Spread { min: 0.78, max: 0.82 };
+    let spread = Spread {
+        min: 0.78,
+        max: 0.82,
+    };
     assert_eq!(classify(0.80, 0.77, &spread), Verdict::Noise);
     assert_eq!(classify(0.80, 0.83, &spread), Verdict::Noise);
     assert_eq!(classify(0.80, 0.80, &spread), Verdict::Noise);
@@ -70,7 +79,10 @@ fn a_change_within_the_spread_is_noise_in_both_directions() {
 
 #[test]
 fn with_no_spread_any_improvement_is_a_win() {
-    let spread = Spread { min: 0.80, max: 0.80 };
+    let spread = Spread {
+        min: 0.80,
+        max: 0.80,
+    };
     assert_eq!(classify(0.80, 0.79, &spread), Verdict::Win);
     assert_eq!(classify(0.80, 0.80, &spread), Verdict::Noise);
 }
