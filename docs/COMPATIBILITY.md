@@ -122,12 +122,15 @@ Wayfinder intentionally differs from captured Solr behavior in these areas:
 11. `suggest.highlight=false` disables server-side suggestion highlighting.
 12. Search API language dictionaries without Tantivy stemmers use their configured unstemmed
     analysis chain rather than being rejected or substituted.
-13. `text_en` matches more than Solr 9's `_default` `text_en`. Wayfinder's chain folds accents
-    and adds word-delimiter parts (`SKU-42` also indexes `sku`, `42`, and `sku42`) next to the
-    original token. Solr's chain (StandardTokenizer, stop, lowercase, possessive, Porter) does
-    neither. The extra forms only add matches, so a few documents match in Wayfinder and not in
-    Solr. On the 20,000-doc benchmark, the `bool_or` query found 1 more document and the
-    `edismax` query found 3 more. Both are waived in `bench/allowed-diffs.tsv`.
+13. `text_en` differs from Solr 9's `_default` `text_en` (StandardTokenizer, stop, lowercase,
+    possessive, Porter). Next to the original token, Wayfinder's chain also indexes accent-folded
+    forms (`café` also gives `cafe`), catenated forms (`SKU-42` also gives `sku42`; both engines
+    already split it into `sku` and `42`), and letter-digit parts (`wifi2000` also gives `wifi`
+    and `2000`). It also stems with
+    Snowball English instead of Porter and applies query-time synonyms. On the 20,000-doc
+    benchmark, the `bool_or` query found 1 more document and the `edismax` query found 3 more.
+    Both are waived in `bench/allowed-diffs.tsv`. Unconfirmed: the extra documents have not been
+    identified yet, so it is not known which of these differences makes them match.
 
 ## Permanent unsupported boundaries
 
