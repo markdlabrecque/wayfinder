@@ -15,8 +15,10 @@ use crate::schema::{self, WayfinderSchema};
 const SCHEMA_SNAPSHOT_FILE: &str = "wayfinder-schema.toml";
 const ANALYZER_MARKER_FILE: &str = "wayfinder-analyzer-contract";
 
-const CURRENT: &str = "text_presets_static_length_v7";
-const CURRENT_LEGACY_DYNAMIC: &str = "text_presets_static_length_v7_legacy_dynamic_text";
+const CURRENT: &str = "text_presets_inflected_y_v8";
+const CURRENT_LEGACY_DYNAMIC: &str = "text_presets_inflected_y_v8_legacy_dynamic_text";
+const V7: &str = "text_presets_static_length_v7";
+const V7_LEGACY_DYNAMIC: &str = "text_presets_static_length_v7_legacy_dynamic_text";
 const V6: &str = "text_presets_uax29_word_delimiter_v6";
 const V6_LEGACY_DYNAMIC: &str = "text_presets_uax29_word_delimiter_v6_legacy_dynamic_text";
 const V5: &str = "text_presets_uax29_v5";
@@ -134,6 +136,7 @@ fn marker_path(data_dir: &Path) -> PathBuf {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct AnalysisFacts {
+    uses_static_text_en: bool,
     uses_static_text_length_bounded: bool,
     uses_changed_analyzed_path: bool,
     uses_analyzed_dynamic: bool,
@@ -143,6 +146,8 @@ struct AnalysisFacts {
 impl AnalysisFacts {
     fn combine(current: &WayfinderSchema, previous: Option<&WayfinderSchema>) -> Self {
         Self {
+            uses_static_text_en: current.uses_static_text_en()
+                || previous.is_some_and(WayfinderSchema::uses_static_text_en),
             uses_static_text_length_bounded: current.uses_changed_static_text()
                 || previous.is_some_and(WayfinderSchema::uses_changed_static_text),
             uses_changed_analyzed_path: current.uses_static_accent_folded_text()
@@ -168,6 +173,17 @@ enum Migration {
 fn decide(marker: Option<&str>, has_snapshot: bool, facts: AnalysisFacts) -> Migration {
     match marker {
         Some(CURRENT) => Migration::Accept,
+        Some(V7) if facts.uses_static_text_en => Migration::Refuse(
+            "uses the v7 text_en analyzer contract; reindex into a fresh data directory for the current Porter y stems",
+        ),
+        Some(V7) => Migration::Advance(CURRENT),
+        Some(V7_LEGACY_DYNAMIC) if facts.uses_static_text_length_bounded => Migration::Refuse(
+            "uses a static text analyzer contract older than v7; reindex into a fresh data directory for the current length bound",
+        ),
+        Some(V7_LEGACY_DYNAMIC) if facts.uses_analyzed_dynamic => Migration::Refuse(
+            "predates the current UAX #29 text analyzer contract; reindex into a fresh data directory",
+        ),
+        Some(V7_LEGACY_DYNAMIC) => Migration::Advance(CURRENT_LEGACY_DYNAMIC),
         Some(V6) if facts.uses_static_text_length_bounded => Migration::Refuse(
             "uses the v6 static text analyzer contract; reindex into a fresh data directory for the current length bound",
         ),
@@ -312,12 +328,14 @@ mod tests {
     fn every_historical_marker_has_an_accept_advance_adopt_or_refuse_decision() {
         let raw = AnalysisFacts::default();
         let changed = AnalysisFacts {
+            uses_static_text_en: true,
             uses_static_text_length_bounded: true,
             uses_changed_analyzed_path: true,
             uses_analyzed_dynamic: true,
             previous_has_dynamic_fields: true,
         };
         let dynamic_changed = AnalysisFacts {
+            uses_static_text_en: false,
             uses_static_text_length_bounded: false,
             uses_changed_analyzed_path: true,
             uses_analyzed_dynamic: true,
@@ -335,6 +353,34 @@ mod tests {
             ),
             (
                 Some(CURRENT_LEGACY_DYNAMIC),
+                dynamic_changed,
+                Migration::Refuse(
+                    "predates the current UAX #29 text analyzer contract; reindex into a fresh data directory",
+                ),
+            ),
+            (Some(V7), raw, Migration::Advance(CURRENT)),
+            (Some(V7), dynamic_changed, Migration::Advance(CURRENT)),
+            (
+                Some(V7),
+                changed,
+                Migration::Refuse(
+                    "uses the v7 text_en analyzer contract; reindex into a fresh data directory for the current Porter y stems",
+                ),
+            ),
+            (
+                Some(V7_LEGACY_DYNAMIC),
+                raw,
+                Migration::Advance(CURRENT_LEGACY_DYNAMIC),
+            ),
+            (
+                Some(V7_LEGACY_DYNAMIC),
+                changed,
+                Migration::Refuse(
+                    "uses a static text analyzer contract older than v7; reindex into a fresh data directory for the current length bound",
+                ),
+            ),
+            (
+                Some(V7_LEGACY_DYNAMIC),
                 dynamic_changed,
                 Migration::Refuse(
                     "predates the current UAX #29 text analyzer contract; reindex into a fresh data directory",

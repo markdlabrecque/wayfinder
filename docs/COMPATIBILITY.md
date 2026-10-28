@@ -127,7 +127,7 @@ Wayfinder intentionally differs from captured Solr behavior in these areas:
     In a 20,000-doc `wf-bench` run on develop 84d7a34, 13 of 15 query shapes disagree on
     `numFound` in both directions, `bool_or` and `edismax` included; both are waived in
     `bench/allowed-diffs.tsv`. Three differences in the chain account for the sample failures:
-    - Stemming. Wayfinder runs Snowball English after a pre-stem Porter terminal-`y` rule; Solr
+    - Stemming. Wayfinder runs Snowball English after a pre-stem Porter `y` rule; Solr
       runs Porter. Snowball re-strips `-tional` after turning `-ally`/`-alism` into `-al`, uses
       different region rules for `-ly` and `-ive`, and keeps the final `s` of `-us` words that
       Porter strips. So `additionally` joins `additional` only in Wayfinder (`bool_and` `theming AND
@@ -143,9 +143,13 @@ Wayfinder intentionally differs from captured Solr behavior in these areas:
       (`wifi2000` gives `wifi` and `2000`).
 
     Folding and the word delimiter only add matches; stemming moves counts either way.
-    Known bug, not a deliberate difference: the terminal-`y` rule sees only the surface token,
-    so `day` indexes as `dai` but `days` and `played` as `day` and `play` (Porter gives `dai` and
-    `plai`). Searching `day` misses `days`, and `phrase` `"conventional way"` (3 vs 4) fits this.
+    Fixed in analyzer contract v8 (`wayfinder_text_en_v8`, marker `text_presets_inflected_y_v8`):
+    the pre-stem Porter `y` rule saw only a terminal `y`, so `day` indexed as `dai` but `days`
+    and `played` as `day` and `play`, and searching `day` missed `days`. v8 also maps a vowel +
+    `y` before a final `s`, `ed` or `ing` to `i`, so `days`, `played` and `playing` index as `dai`
+    and `plai` as Porter gives. `phrase` `"conventional way"` (3 vs 4) fits this bug. **An index
+    with a static `text_en` field built under v7 refuses to start; reindex into a fresh data
+    directory.**
     Unconfirmed: these attributions come from the analyzer code and the stemmer rules. The
     extra and missing doc ids have not been pulled from a live run.
 
