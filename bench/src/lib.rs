@@ -4,6 +4,7 @@
 //! `Cargo.toml` for why.
 
 pub mod check;
+pub mod cold;
 pub mod corpus;
 pub mod results;
 pub mod terms;
