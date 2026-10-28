@@ -30,7 +30,9 @@
 //!
 //! Memory (issue #448): idle and post-index memory are `anon` from the cgroup's
 //! `memory.stat`, so the disk cache doesn't count; `file` is reported apart.
-//! Peak is `memory.peak`.
+//! Peak is the highest `anon` sampled from idle through the load test, before
+//! the cold runs reset the cgroup; `memory.peak`, which counts the cache, is
+//! reported apart as the total.
 //!
 //! Usage: `wf-bench [--docs N] [--iters N] [--cold N] [--force]`
 //! Requires: docker, a release build at `target/release/wayfinder`, and the
@@ -46,7 +48,7 @@ use wayfinder_bench::cold::{evict_page_cache, summarize};
 use wayfinder_bench::footprint::{dir_size_bytes, time_to_first_search};
 use wayfinder_bench::freshness;
 use wayfinder_bench::load::{self, LEVELS, run_levels};
-use wayfinder_bench::memory::{self, MemStat, parse_memory_stat};
+use wayfinder_bench::memory::{self, MemStat, Sampler, parse_memory_stat};
 use wayfinder_bench::machine::{self, EnvInfo};
 use wayfinder_bench::terms::{self, Pools};
 use wayfinder_bench::wiki::{self, WikiDoc};
@@ -83,6 +85,8 @@ const LOAD_SECS: u64 = 10;
 const TERM_SEED: u64 = 42;
 // Add-then-find cycles per engine for the add-to-searchable time (#450).
 const FRESHNESS_RUNS: usize = 20;
+// How often `memory.stat` is read for the anon peak (#448).
+const MEM_SAMPLE: Duration = Duration::from_millis(100);
 // Pinned so a re-run measures the same Solr and the same Wayfinder runtime.
 const SOLR_IMAGE: &str =
     "solr@sha256:9ab3185bfc8e18e1a0c0d20083f783ec3ef2833b8add196bd0ebddc929525970";
@@ -307,9 +311,8 @@ fn cgroup_u64(engine: &Engine, file: &str, key: Option<&str>) -> u64 {
 
 /// Anonymous memory and disk cache from `memory.stat`; `memory.current` would
 /// lump the two together.
-fn mem_stat(engine: &Engine) -> MemStat {
-    let text =
-        std::fs::read_to_string(engine.cgroup.join("memory.stat")).expect("read memory.stat");
+fn mem_stat(cgroup: &Path) -> MemStat {
+    let text = std::fs::read_to_string(cgroup.join("memory.stat")).expect("read memory.stat");
     parse_memory_stat(&text).expect("memory.stat anon and file")
 }
 
@@ -446,17 +449,19 @@ fn run_engine(
     iters: usize,
     cold_runs: usize,
 ) -> (Value, Vec<Vec<Value>>) {
-    let idle_mem = mem_stat(&engine);
+    let cgroup = engine.cgroup.clone();
+    let sampler = Sampler::start(move || mem_stat(&cgroup), MEM_SAMPLE);
+    let idle_mem = mem_stat(&engine.cgroup);
     let docs_per_s = index(&engine, docs);
-    let post_index_mem = mem_stat(&engine);
+    let post_index_mem = mem_stat(&engine.cgroup);
     let (queries, answers) = measure(&engine, qs, pools, iters);
     // After the queries, so the extra docs never show up in compared answers.
     let add_to_searchable = freshness::measure(&engine.base, FRESHNESS_RUNS, commit_settings);
-    // Peak memory is read before the cold runs: a restart resets it.
-    let mem_peak = cgroup_u64(&engine, "memory.peak", None);
-    // After the peak read, so many users at once don't skew the memory score,
-    // and before the cold runs, while the engine is still warm.
+    // Before the cold runs, while the engine is still warm.
     let load = measure_load(&engine, qs, pools);
+    // Peak memory is read before the cold runs: a restart resets the cgroup.
+    let mem_peak = sampler.stop().max(idle_mem.anon).max(post_index_mem.anon);
+    let mem_peak_total = cgroup_u64(&engine, "memory.peak", None);
     let cold = measure_cold(&engine, qs, pools, cold_runs);
     // Read last, well after the final commit, so any merge the engine runs by
     // default after it has landed.
@@ -473,7 +478,7 @@ fn run_engine(
         "cold": cold,
         "add_to_searchable": add_to_searchable,
     });
-    let mem = memory::to_json(&idle_mem, &post_index_mem, mem_peak);
+    let mem = memory::to_json_with_total(&idle_mem, &post_index_mem, mem_peak, mem_peak_total);
     stats.as_object_mut().unwrap().extend(mem.as_object().unwrap().clone());
     (stats, answers)
 }

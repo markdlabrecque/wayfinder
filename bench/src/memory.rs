@@ -1,7 +1,14 @@
 //! Memory for `wf-bench` (issue #448): what each engine really holds, without
 //! the operating system's disk cache. A cgroup's `memory.current` counts page
 //! cache, so the main number is `anon` from `memory.stat`, with `file` (the
-//! cache) reported on its own.
+//! cache) reported on its own. `memory.peak` has the same problem, so the peak
+//! is the highest `anon` a `Sampler` sees, and `memory.peak` is reported apart
+//! as the total.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -40,4 +47,51 @@ pub fn to_json(idle: &MemStat, post_index: &MemStat, peak_bytes: u64) -> Value {
         "mem_post_index_file_mb": post_index.file as f64 / MB,
         "mem_peak_mb": peak_bytes as f64 / MB,
     })
+}
+
+/// `to_json` plus `mem_peak_total_mb`: `memory.peak`, the cgroup's high-water
+/// mark with disk cache, kept apart from the anon peak in `mem_peak_mb`.
+pub fn to_json_with_total(
+    idle: &MemStat,
+    post_index: &MemStat,
+    peak_anon: u64,
+    peak_total: u64,
+) -> Value {
+    let mut v = to_json(idle, post_index, peak_anon);
+    v["mem_peak_total_mb"] = json!(peak_total as f64 / MB);
+    v
+}
+
+/// Reads `memory.stat` on a background thread every `every` until stopped,
+/// keeping the highest `anon` seen.
+pub struct Sampler {
+    stop: Arc<AtomicBool>,
+    handle: JoinHandle<u64>,
+}
+
+impl Sampler {
+    /// Starts sampling with one read straight away. A panic in `read` comes
+    /// back out of `stop`.
+    pub fn start(mut read: impl FnMut() -> MemStat + Send + 'static, every: Duration) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            let mut peak = 0;
+            // Reads once more after the stop, so the peak covers up to it.
+            loop {
+                peak = peak.max(read().anon);
+                if flag.load(Ordering::Relaxed) {
+                    return peak;
+                }
+                thread::sleep(every);
+            }
+        });
+        Sampler { stop, handle }
+    }
+
+    /// Stops sampling and returns the highest `anon` seen, in bytes.
+    pub fn stop(self) -> u64 {
+        self.stop.store(true, Ordering::Relaxed);
+        self.handle.join().expect("memory sampler")
+    }
 }
