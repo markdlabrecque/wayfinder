@@ -625,7 +625,14 @@ fn main() {
     let iters = arg(&args, "--iters", 200);
     let cold_runs = arg(&args, "--cold", 5);
     let force = args.iter().any(|a| a == "--force");
+    // Sample load before the test gate: its compile would inflate the average.
     let load = machine::parse_loadavg(&read("/proc/loadavg")).expect("1-min load average");
+    let bench_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = bench_dir.parent().expect("repo root").to_path_buf();
+    if !tests_pass(&root) {
+        println!("FAIL tests");
+        std::process::exit(1);
+    }
     let busy_warning = match machine::check_busy(load, MAX_LOAD, force) {
         Ok(w) => w,
         Err(e) => {
@@ -642,12 +649,6 @@ fn main() {
     let driver_cpus = machine::parse_cpu_list(DRIVER_CPUSET).expect("driver cores");
     machine::pin_to(&driver_cpus).expect("pin driver");
 
-    let bench_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let root = bench_dir.parent().expect("repo root").to_path_buf();
-    if !tests_pass(&root) {
-        println!("FAIL tests");
-        std::process::exit(1);
-    }
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock")
