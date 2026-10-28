@@ -237,4 +237,4 @@ Next steps:
 - 2026-10-28: Phases 2 and 3 mostly done. 16-query suite, `src/check.rs` gate (tests in
   `tests/check.rs`, all 10 mutations caught), `allowed-diffs.tsv` (empty).
 - 2026-10-28: Chose varied warm queries (option 1). Implementation started, handed off
-  (see "Handoff" above). Committed, not pushed.
+  (see "Handoff" above). Committed and pushed.
