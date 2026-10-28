@@ -5,6 +5,7 @@
 pub mod baseline;
 pub mod check;
 pub mod cold;
+pub mod fingerprint;
 pub mod footprint;
 pub mod freshness;
 pub mod index_stats;

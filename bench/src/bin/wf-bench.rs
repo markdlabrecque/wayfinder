@@ -44,10 +44,16 @@
 //! Solr image, or limits change. `--accept` saves a passing run's score to
 //! `bench/out/wf-baseline.json`, and every run shows its change from it.
 //!
+//! Answer fingerprints (issue #445): each run saves a digest of Wayfinder's
+//! answers per query shape, `QTime` stripped, under `answer_digests` in the
+//! JSON. `--accept` saves them to `bench/out/wf-answers.json`, and a run whose
+//! digests differ prints `answers changed: <shapes>`, even when it passes.
+//!
 //! Usage: `wf-bench [--docs N] [--iters N] [--cold N] [--force] [--accept]`
 //! Requires: docker, a release build at `target/release/wayfinder`, and the
 //! corpus from `bench/fetch-wiki.sh`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -56,6 +62,7 @@ use serde_json::{Value, json};
 use wayfinder_bench::baseline::{self, SolrKey};
 use wayfinder_bench::check::check;
 use wayfinder_bench::cold::{evict_page_cache, summarize};
+use wayfinder_bench::fingerprint;
 use wayfinder_bench::footprint::{dir_size_bytes, time_to_first_search};
 use wayfinder_bench::freshness;
 use wayfinder_bench::index_stats::index_stats;
@@ -871,6 +878,18 @@ fn main() {
         .map(|(m, r)| (m.clone(), json!(r)))
         .collect();
     let n = qs.len();
+    let digests: BTreeMap<String, String> = qs
+        .iter()
+        .zip(&wf_answers)
+        .map(|(q, a)| (q.name.clone(), fingerprint::digest(a)))
+        .collect();
+    let answers_path = bench_dir.join("out/wf-answers.json");
+    let accepted_digests =
+        fingerprint::load_accepted(&answers_path).unwrap_or_else(|e| panic!("{e}"));
+    let answers_changed = accepted_digests
+        .as_ref()
+        .map(|a| fingerprint::changed_shapes(a, &digests))
+        .unwrap_or_default();
 
     let env = machine::env_json(&EnvInfo {
         kernel: read("/proc/sys/kernel/osrelease").trim().to_string(),
@@ -889,6 +908,7 @@ fn main() {
         "env": env, "load_1m": load, "busy_warning": busy_warning,
         "score": score, "score_error": scored.as_ref().err(), "ratios": ratios_json,
         "failures": failures, "waived": waived, "solr": solr, "wayfinder": wf,
+        "answer_digests": digests, "answers_changed": answers_changed,
     });
     std::fs::write(&out, serde_json::to_string_pretty(&report).unwrap()).expect("write report");
     let shown = out.strip_prefix(&root).unwrap_or(&out).display();
@@ -910,6 +930,9 @@ fn main() {
         n - failures.len(),
         if failures.is_empty() { "PASS" } else { "FAIL" },
     );
+    if let Some(line) = fingerprint::answers_changed_line(&answers_changed) {
+        println!("  {line}");
+    }
     for w in &waived {
         println!("  waived {w}");
     }
@@ -922,6 +945,7 @@ fn main() {
     // Only a passing run can become the baseline the next one compares to.
     if accept {
         baseline::save_wf(&wf_path, score).expect("save Wayfinder baseline");
+        fingerprint::save_accepted(&answers_path, &digests).expect("save answer fingerprints");
         eprintln!("wf-bench: accepted score {score:.3} as the new baseline");
     }
 }
