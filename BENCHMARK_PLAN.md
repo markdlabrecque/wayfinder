@@ -76,8 +76,8 @@ Known gaps for this goal:
   - [x] grouping
   - [x] stats
   - [x] `*:*` match-all with rows
-- [ ] Query terms sampled from the corpus with a fixed seed. **Committed, not yet run end to end**
-      (see "Handoff" below).
+- [x] Query terms sampled from the corpus with a fixed seed. Run end to end at 20k docs (#442,
+      see "Varied-query run" below).
 
 ### Phase 3: Correctness gate
 
@@ -96,11 +96,13 @@ Known gaps for this goal:
 
 ### Phase 4: Metrics
 
-- [ ] Latency p50 / p95 / p99, warm (after warm-up batch).
+- [x] Latency p50 / p95 / p99, warm (after warm-up batch). Over the `--iters` timed requests,
+      each with a different seed (#442). The first run's numbers are noisy (busy machine).
 - [ ] Latency p50 / p95 / p99, cold: fresh container start plus OS page cache evicted for the
       index files (`posix_fadvise(DONTNEED)`, no root needed), first query of each shape.
 - [ ] Throughput: requests per second at fixed concurrency (e.g. 1, 8, 32).
-- [ ] CPU seconds per 1,000 queries (from cgroup `cpu.stat`). This is the main efficiency number.
+- [x] CPU seconds per 1,000 queries (from cgroup `cpu.stat`). This is the main efficiency number.
+      `cpu_ms_per_1k` covers only the timed varied requests, not warm-up or repeats (#442).
 - [ ] Memory: idle RSS, post-index RSS, peak RSS under load (cgroup `memory.current` / `memory.peak`).
 - [ ] Indexing throughput (docs per second, full corpus, same batch size for both).
       Code done (#449): `wf-bench` records `index_docs_per_s` and `index_bytes_per_s` for both
@@ -187,10 +189,9 @@ Detail lands in `bench/out/<ts>.json` (gitignored).
   warm-up (time- or count-based, per query).
 - One query only, so the score is not meaningful until Phase 2 lands.
 
-- **Count mismatches to investigate** (20k docs): `bool_or` wf=2988 solr=2987, `edismax`
-  wf=2696 solr=2693. Likely analyzer differences (`text_en` stemming/tokenizing). Find the
-  extra doc ids, then either fix Wayfinder or list them in `allowed-diffs.tsv` with the
-  `docs/COMPATIBILITY.md` section that covers it.
+- **Count mismatches to investigate** (20k docs): now 13 of 15 shapes, see "Varied-query run"
+  below. Find the extra doc ids, then either fix Wayfinder or list them in `allowed-diffs.tsv`
+  with the `docs/COMPATIBILITY.md` section that covers it.
 ## Open questions
 
 - (none right now)
@@ -206,7 +207,7 @@ and uses ~7x less memory.
 
 ## Handoff: varied warm queries (committed on `440-perf-bench`)
 
-Committed and passing fmt/clippy/tests, but **not run end to end yet**:
+Committed and passing fmt/clippy/tests. Run end to end in #442 (see "Varied-query run" below):
 
 - `bench/src/terms.rs` (new): scans the first 20k docs and builds two pools with a fixed seed:
   2,000 terms and 2,000 adjacent word pairs. Each has doc frequency between 3 and 20% of the
@@ -235,6 +236,84 @@ Next steps:
    now compared.
 2. Go on to the count mismatches under "Known issues" and Phase 4.
 
+## Varied-query run (20k docs, 2026-10-28, #442)
+
+`bench/target/release/wf-bench --docs 20000 --iters 200 --cold 1 --force` on develop `84d7a34`,
+finished in 4.5 min. Detail: `bench/out/1793228152.json` (gitignored).
+
+`score 0.973 | p50 1.08 p99 2.79 cpu 0.48 mem 0.12 | correct 2/15 | FAIL`
+
+The machine was busy (1-min load 47.87, run with `--force`), so ignore the speed numbers; #441
+measures again on a quiet machine. The correctness results still count because the load
+doesn't affect the answers.
+
+The warm numbers do come from varied queries. Solr's warm p50 is now well above its
+`repeat_p50` (the same URL every time, so it can come from cache): `term` 0.87 vs 0.45 ms,
+`bool_or` 0.69 vs 0.30 ms, `phrase` 0.67 vs 0.25 ms. So the queryResultCache is no longer
+answering the timed requests.
+
+Wrong answers (out of 200, with the first failing request):
+
+| Shape | Wrong | First failure | Query |
+|---|---|---|---|
+| `term` | 29 | numFound wf=1816 solr=1814 | `q=indicative` |
+| `bool_and` | 9 | numFound wf=483 solr=453 | `q=theming AND additional` |
+| `bool_or` | 77 | numFound wf=248 solr=247 | `q=intercepted OR malayalam` |
+| `phrase` | 11 | numFound wf=3 solr=4 | `q="conventional way"` |
+| `edismax` | 66 | numFound wf=1064 solr=1087 | `q=argue maritz`, `qf=title^3 body` |
+| `filter` | 23 | numFound wf=4 solr=3 | `q=perce`, `fq=len_bucket:long` |
+| `sort_field` | 39 | numFound wf=5 solr=4 | `q=aurea` |
+| `deep_page` | 34 | numFound wf=56 solr=63 | `q=institutionalized`, `start=1000` |
+| `facet_field` | 32 | numFound wf=18 solr=6 | `q=hakone` |
+| `facet_range` | 41 | numFound wf=20 solr=18 | `q=procreate` |
+| `stats` | 39 | numFound wf=70 solr=34 | `q=offseasons` |
+| `group` | 43 | `len_bucket` matches wf=31 solr=27 | `q=concomitant` |
+| `highlight` | 40 | numFound wf=289 solr=287 | `q=airline` |
+
+Every first failure is a hit count (numFound, or group `matches`) for the sampled term. The
+check stops at the first difference, so the facet, stats, group, sort and highlight checks never
+ran on these requests. Nothing here shows those features are wrong. Check them again once the
+counts agree.
+
+### Explained from the analyzer code
+
+Wayfinder's `text_en` (`wayfinder_text_en_v7` in `src/schema.rs` `build_tokenizers`) runs:
+UAX #29 tokens, accent folding, lowercase, English stopwords, a word delimiter (it keeps the
+original token and adds its parts and their joined form), the Porter terminal-`y` rule, and then
+Tantivy's Snowball English stemmer. Solr's stock `_default` `text_en` runs: StandardTokenizer,
+stopwords, lowercase, English possessive, keyword marker, and the classic Porter stemmer, with
+synonyms on the query side only. It has no accent folding and no word delimiter. Folding and the
+word delimiter can only add matches, so they explain the cases where Wayfinder finds more. The
+mechanism is in the code. The example source words are the likeliest Wikipedia ones and have not
+been confirmed by replaying the request.
+
+- `filter`, `q=perce` (wf 4, solr 3): accent folding. Only Wayfinder indexes "Percé" (Nez Percé,
+  Percé Rock) as `perce`.
+- `facet_field`, `q=hakone` (wf 18, solr 6): accent folding plus stemming. Both stemmers turn
+  `hakone` into `hakon`. Wayfinder folds "Håkon" to the same term; Solr keeps `håkon`.
+- `stats`, `q=offseasons` (wf 70, solr 34): the word delimiter. "off-season" also indexes the
+  joined form `offseason`, which is the query's stem. Solr indexes only `off` and `season`.
+
+`docs/COMPATIBILITY.md` doesn't list accent folding or the word delimiter as deliberate
+differences, so none of these goes in `allowed-diffs.tsv` yet. A person has to decide whether
+`text_en` keeps them (and the docs say so) or matches Solr's chain. The engine-side analysis is
+#443.
+
+### Not explained without a live engine (follow-up tickets to file)
+
+1. **Wayfinder finds fewer:** `phrase` `"conventional way"` (3 vs 4), `edismax` `argue maritz`
+   (1064 vs 1087), `deep_page` `institutionalized` (56 vs 63). Folding and the word delimiter
+   can't remove matches. The remaining suspects are the stemmer (Snowball vs classic Porter),
+   tokenizing (UAX #29 vs Lucene's StandardTokenizer), phrase positions around word-delimiter
+   compounds, and edismax parsing. To find out: replay each URL, diff the two engines' id sets,
+   and run the missing docs' text through Solr's `/analysis/field`.
+2. **Wayfinder finds more, cause not pinned:** `term` `indicative` (+2), `bool_and`
+   `theming AND additional` (+30), `bool_or` `intercepted OR malayalam` (+1), `sort_field`
+   `aurea` (+1), `facet_range` `procreate` (+2), `group` `concomitant` (+4), `highlight`
+   `airline` (+2). These go the same way as folding and the word delimiter, but we don't know
+   which tokens cause them. To find out: collect the extra doc ids and analyze their text in
+   both engines.
+
 ## Session log
 
 - 2026-10-28: plan written. Issues #440 / #441 filed. Phase 0 done: `bench/src/bin/wf-bench.rs`
@@ -246,3 +325,8 @@ Next steps:
   `tests/check.rs`, all 10 mutations caught), `allowed-diffs.tsv` (empty).
 - 2026-10-28: Chose varied warm queries (option 1). Implementation started, handed off
   (see "Handoff" above). Committed and pushed.
+- 2026-10-28: Varied-query run at 20k docs (#442) finished end to end: `correct 2/15 | FAIL`.
+  All 13 failures are hit-count differences. Three are explained by `text_en` analyzer
+  differences, and the rest are listed as follow-ups (see "Varied-query run"). The Phase 2
+  terms box and the Phase 4 warm latency and CPU boxes are ticked. The correctness gate still
+  fails and nothing was added to `allowed-diffs.tsv`.
