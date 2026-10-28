@@ -8,6 +8,7 @@ pub mod cold;
 pub mod corpus;
 pub mod footprint;
 pub mod freshness;
+pub mod load;
 pub mod machine;
 pub mod results;
 pub mod terms;

@@ -20,6 +20,10 @@
 //! Footprint (issue #451): `startup_ms` runs from container start to the first
 //! 200 from `/select`, and `index_size_mb` sums the index dir on disk.
 //!
+//! Load (issue #447): searches per second with 1, 8 and 32 searches at once,
+//! each level run for `LOAD_SECS` on the warm engine. Every user walks the same
+//! varied URL sequence, which repeats no warm or cold seed.
+//!
 //! Usage: `wf-bench [--docs N] [--iters N] [--cold N] [--force]`
 //! Requires: docker, a release build at `target/release/wayfinder`, and the
 //! corpus from `bench/fetch-wiki.sh`.
@@ -33,6 +37,7 @@ use wayfinder_bench::check::check;
 use wayfinder_bench::cold::{evict_page_cache, summarize};
 use wayfinder_bench::footprint::{dir_size_bytes, time_to_first_search};
 use wayfinder_bench::freshness;
+use wayfinder_bench::load::{self, LEVELS, run_levels};
 use wayfinder_bench::machine::{self, EnvInfo};
 use wayfinder_bench::terms::{self, Pools};
 use wayfinder_bench::wiki::{self, WikiDoc};
@@ -60,6 +65,12 @@ const WARMUP: u64 = 300;
 const REPEAT: usize = 100;
 // Seed offset for cold requests, past any warm seed (`WARMUP + 1 + iters`).
 const COLD_SEED: u64 = 500_000;
+// Seed offset for load requests, past any cold seed (`COLD_SEED + runs`).
+const LOAD_SEED: u64 = 600_000;
+// Rounds of every query shape in the load sequence each user walks.
+const LOAD_ROUNDS: u64 = 200;
+// Seconds each concurrency level runs for.
+const LOAD_SECS: u64 = 10;
 const TERM_SEED: u64 = 42;
 // Add-then-find cycles per engine for the add-to-searchable time (#450).
 const FRESHNESS_RUNS: usize = 20;
@@ -395,6 +406,19 @@ fn measure_cold(engine: &Engine, qs: &[Query], pools: &Pools, runs: usize) -> Va
     summarize(&samples)
 }
 
+/// Searches per second at each of `LEVELS` users at once. The sequence takes
+/// shapes in turn, round by round, so every user mixes all shapes.
+fn measure_load(engine: &Engine, qs: &[Query], pools: &Pools) -> Value {
+    let urls: Vec<String> = (0..LOAD_ROUNDS)
+        .flat_map(|i| {
+            qs.iter().enumerate().map(move |(n, q)| {
+                q.url(&engine.base, pools, n as u64 * 1_000_000 + LOAD_SEED + i)
+            })
+        })
+        .collect();
+    load::to_json(&run_levels(&urls, &LEVELS, Duration::from_secs(LOAD_SECS)))
+}
+
 fn run_engine(
     engine: Engine,
     startup_ms: f64,
@@ -413,6 +437,9 @@ fn run_engine(
     let add_to_searchable = freshness::measure(&engine.base, FRESHNESS_RUNS, commit_settings);
     // Peak memory is read before the cold runs: a restart resets it.
     let mem_peak = cgroup_u64(&engine, "memory.peak", None);
+    // After the peak read, so many users at once don't skew the memory score,
+    // and before the cold runs, while the engine is still warm.
+    let load = measure_load(&engine, qs, pools);
     let cold = measure_cold(&engine, qs, pools, cold_runs);
     // Read last, well after the final commit, so any merge the engine runs by
     // default after it has landed.
@@ -427,6 +454,7 @@ fn run_engine(
         "mem_post_index_mb": post_index_rss as f64 / 1048576.0,
         "mem_peak_mb": mem_peak as f64 / 1048576.0,
         "queries": queries,
+        "load": load,
         "cold_runs": cold_runs,
         "cold": cold,
         "add_to_searchable": add_to_searchable,
