@@ -123,14 +123,31 @@ Wayfinder intentionally differs from captured Solr behavior in these areas:
 12. Search API language dictionaries without Tantivy stemmers use their configured unstemmed
     analysis chain rather than being rejected or substituted.
 13. `text_en` differs from Solr 9's `_default` `text_en` (StandardTokenizer, stop, lowercase,
-    possessive, Porter). Next to the original token, Wayfinder's chain also indexes accent-folded
-    forms (`café` also gives `cafe`), catenated forms (`SKU-42` also gives `sku42`; both engines
-    already split it into `sku` and `42`), and letter-digit parts (`wifi2000` also gives `wifi`
-    and `2000`). It also stems with
-    Snowball English instead of Porter and applies query-time synonyms. On the 20,000-doc
-    benchmark, the `bool_or` query found 1 more document and the `edismax` query found 3 more.
-    Both are waived in `bench/allowed-diffs.tsv`. Unconfirmed: the extra documents have not been
-    identified yet, so it is not known which of these differences makes them match.
+    possessive, keyword marker, Porter; captured in `solr-ref/responses/dr341_fieldtypes.json`).
+    In a 20,000-doc `wf-bench` run on develop 84d7a34, 13 of 15 query shapes disagree on
+    `numFound` in both directions, `bool_or` and `edismax` included; both are waived in
+    `bench/allowed-diffs.tsv`. Three differences in the chain account for the sample failures:
+    - Stemming. Wayfinder runs Snowball English after a pre-stem Porter terminal-`y` rule; Solr
+      runs Porter. Snowball re-strips `-tional` after turning `-ally`/`-alism` into `-al`, uses
+      different region rules for `-ly` and `-ive`, and keeps the final `s` of `-us` words that
+      Porter strips. So `additionally` joins `additional` only in Wayfinder (`bool_and` `theming AND
+      additional`: 483 vs 453), as do `concomitantly` (`group` `concomitant`: 31 vs 27) and
+      `procreative` (`facet_range` `procreate`: 20 vs 18). `institutionally` joins
+      `institutionalized` (`deep_page`: 56 vs 63) and `Argus` joins `argue` (`edismax` `argue
+      maritz`: 1064 vs 1087) only in Solr.
+    - Accent folding. `Håkon` and `Percé` index as `hakon` and `perce` only in Wayfinder
+      (`facet_field` `hakone`: 18 vs 6; `filter` `perce`: 4 vs 3).
+    - Word delimiter. Wayfinder also indexes the catenation of punctuation-linked words
+      (`off-season` also gives `offseason`; `stats` `offseasons`: 70 vs 34) and splits single
+      UAX tokens such as `x.y` or `x's` that Solr keeps whole. It also adds letter-digit parts
+      (`wifi2000` gives `wifi` and `2000`).
+
+    Folding and the word delimiter only add matches; stemming moves counts either way.
+    Known bug, not a deliberate difference: the terminal-`y` rule sees only the surface token,
+    so `day` indexes as `dai` but `days` and `played` as `day` and `play` (Porter gives `dai` and
+    `plai`). Searching `day` misses `days`, and `phrase` `"conventional way"` (3 vs 4) fits this.
+    Unconfirmed: these attributions come from the analyzer code and the stemmer rules. The
+    extra and missing doc ids have not been pulled from a live run.
 
 ## Permanent unsupported boundaries
 
