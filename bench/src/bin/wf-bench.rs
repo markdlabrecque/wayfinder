@@ -6,8 +6,12 @@
 //! and compares the answers. CPU and memory come from each container's cgroup,
 //! so both engines are measured the same way.
 //!
+//! The driver itself is pinned to cores the engines never get, and a run
+//! refuses to start on a busy machine unless `--force` is given (issue #455).
+//!
 //! Stdout is one line, built for a hill-climb loop to read cheaply. Full detail
-//! is written to `bench/out/<unix-ts>.json`.
+//! is written to `bench/out/<unix-ts>.json`, including the machine, the core
+//! split, and both engine versions.
 //!
 //! Cold latency (issue #446) is measured `--cold` times per engine: stop the
 //! container, evict its data dir from the page cache with `posix_fadvise`
@@ -16,7 +20,7 @@
 //! Footprint (issue #451): `startup_ms` runs from container start to the first
 //! 200 from `/select`, and `index_size_mb` sums the index dir on disk.
 //!
-//! Usage: `wf-bench [--docs N] [--iters N] [--cold N]`
+//! Usage: `wf-bench [--docs N] [--iters N] [--cold N] [--force]`
 //! Requires: docker, a release build at `target/release/wayfinder`, and the
 //! corpus from `bench/fetch-wiki.sh`.
 
@@ -28,12 +32,17 @@ use serde_json::{Value, json};
 use wayfinder_bench::check::check;
 use wayfinder_bench::cold::{evict_page_cache, summarize};
 use wayfinder_bench::footprint::{dir_size_bytes, time_to_first_search};
+use wayfinder_bench::machine::{self, EnvInfo};
 use wayfinder_bench::terms::{self, Pools};
 use wayfinder_bench::wiki::{self, WikiDoc};
 
-// ponytail: fixed core set and memory cap for both engines. Phase 6 of
-// BENCHMARK_PLAN.md makes these configurable and pins the load generator.
+// ponytail: fixed core sets and memory cap, sized for the 16-core bench
+// desktop. Engines share CPUSET (one runs at a time); the driver gets its own
+// cores so its work never lands on an engine's.
 const CPUSET: &str = "2-5";
+const DRIVER_CPUSET: &str = "6-7";
+// 1-minute load average above which the machine counts as busy.
+const MAX_LOAD: f64 = 2.0;
 const MEMORY: &str = "4g";
 const SOLR_HEAP: &str = "2g";
 const SOLR_PORT: u16 = 18983;
@@ -418,6 +427,7 @@ fn run_engine(
     (stats, answers)
 }
 
+/// Returns the stats, the answers, and the Solr version that answered them.
 fn run_solr(
     work: &Path,
     docs: &[WikiDoc],
@@ -425,7 +435,7 @@ fn run_solr(
     pools: &Pools,
     iters: usize,
     cold_runs: usize,
-) -> (Value, Vec<Vec<Value>>) {
+) -> (Value, Vec<Vec<Value>>, String) {
     let port_env = format!("SOLR_PORT={SOLR_PORT}");
     let heap_env = format!("SOLR_HEAP={SOLR_HEAP}");
     // Solr's home on the host, owned by the host user like Wayfinder's data
@@ -468,7 +478,15 @@ fn run_solr(
              "docValues": true},
         ]}),
     );
-    run_engine(engine, startup_ms, docs, qs, pools, iters, cold_runs)
+    let info_url = format!("http://127.0.0.1:{SOLR_PORT}/solr/admin/info/system?wt=json");
+    let info = ureq::get(&info_url)
+        .call()
+        .unwrap_or_else(|e| panic!("GET {info_url}: {e}"))
+        .into_string()
+        .expect("response body");
+    let version = machine::parse_solr_version(&info).expect("solr-spec-version in system info");
+    let (stats, answers) = run_engine(engine, startup_ms, docs, qs, pools, iters, cold_runs);
+    (stats, answers, version)
 }
 
 fn run_wayfinder(
@@ -521,6 +539,20 @@ fn docker_id(flag: &str) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+fn git_sha(root: &Path) -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(root)
+        .output()
+        .expect("git");
+    assert!(out.status.success(), "git rev-parse failed");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn read(path: &str) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"))
+}
+
 fn arg(args: &[String], flag: &str, default: usize) -> usize {
     args.iter()
         .position(|a| a == flag)
@@ -533,6 +565,24 @@ fn main() {
     let n_docs = arg(&args, "--docs", 10_000);
     let iters = arg(&args, "--iters", 200);
     let cold_runs = arg(&args, "--cold", 5);
+    let force = args.iter().any(|a| a == "--force");
+    let load = machine::parse_loadavg(&read("/proc/loadavg")).expect("1-min load average");
+    let busy_warning = match machine::check_busy(load, MAX_LOAD, force) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("wf-bench: {e}");
+            std::process::exit(2);
+        }
+    };
+    if let Some(w) = &busy_warning {
+        eprintln!("wf-bench: warning: {w}");
+    }
+    // Pin before anything else runs: docker CLI children inherit the mask,
+    // the engine containers get CPUSET from dockerd.
+    machine::validate_cores(CPUSET, DRIVER_CPUSET).expect("core split");
+    let driver_cpus = machine::parse_cpu_list(DRIVER_CPUSET).expect("driver cores");
+    machine::pin_to(&driver_cpus).expect("pin driver");
+
     let bench_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = bench_dir.parent().expect("repo root").to_path_buf();
     let ts = SystemTime::now()
@@ -549,7 +599,8 @@ fn main() {
         .collect();
     let docs = wiki::load(&bench_dir.join("data"), n_docs);
     let pools = terms::pools(&docs, TERM_SEED);
-    let (solr, solr_answers) = run_solr(&work, &docs, &qs, &pools, iters, cold_runs);
+    let (solr, solr_answers, solr_version) =
+        run_solr(&work, &docs, &qs, &pools, iters, cold_runs);
     let (wf, wf_answers) = run_wayfinder(&root, &work, &docs, &qs, &pools, iters, cold_runs);
     let _ = std::fs::remove_dir_all(&work);
 
@@ -594,9 +645,21 @@ fn main() {
     let score = geo(&[geo(&p50), geo(&p99), geo(&cpu), mem]);
     let n = qs.len();
 
+    let env = machine::env_json(&EnvInfo {
+        kernel: read("/proc/sys/kernel/osrelease").trim().to_string(),
+        cpu_model: machine::parse_cpu_model(&read("/proc/cpuinfo")).unwrap_or_default(),
+        engine_cpuset: CPUSET.into(),
+        driver_cpuset: DRIVER_CPUSET.into(),
+        wayfinder_git_sha: git_sha(&root),
+        solr_version,
+        solr_image: SOLR_IMAGE.into(),
+        solr_heap: SOLR_HEAP.into(),
+    });
+
     let out = bench_dir.join(format!("out/{ts}.json"));
     let report = json!({
         "ts": ts, "docs": n_docs, "iters": iters, "cpuset": CPUSET, "memory": MEMORY,
+        "env": env, "load_1m": load, "busy_warning": busy_warning,
         "score": score, "failures": failures, "waived": waived, "solr": solr, "wayfinder": wf,
     });
     std::fs::write(&out, serde_json::to_string_pretty(&report).unwrap()).expect("write report");

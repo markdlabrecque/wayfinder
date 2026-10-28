@@ -118,10 +118,13 @@ Known gaps for this goal:
 
 ### Phase 6: Stable environment
 
-- [ ] Pin CPUs for each container, and pin the load generator to separate cores.
+- [x] Pin CPUs for each container, and pin the load generator to separate cores. Engines on
+      `2-5`, `wf-bench` itself on `6-7` (`sched_setaffinity`).
 - [ ] Fixed Solr config: stock `solr:9`, default caches on, fixed heap.
-- [ ] Record machine info and both versions in the JSON.
-- [ ] Refuse to run (or warn) when the machine is busy (load average check).
+- [x] Record machine info and both versions in the JSON (`env`: kernel, CPU model, core split,
+      Wayfinder git sha, Solr version, image digest, heap).
+- [x] Refuse to run (or warn) when the machine is busy: 1-min load average over 2.0 exits 2;
+      `--force` runs anyway and records the warning.
 
 ### Phase 7: The hill-climb loop
 
