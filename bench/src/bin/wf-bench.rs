@@ -32,6 +32,7 @@ use serde_json::{Value, json};
 use wayfinder_bench::check::check;
 use wayfinder_bench::cold::{evict_page_cache, summarize};
 use wayfinder_bench::footprint::{dir_size_bytes, time_to_first_search};
+use wayfinder_bench::freshness;
 use wayfinder_bench::machine::{self, EnvInfo};
 use wayfinder_bench::terms::{self, Pools};
 use wayfinder_bench::wiki::{self, WikiDoc};
@@ -60,6 +61,8 @@ const REPEAT: usize = 100;
 // Seed offset for cold requests, past any warm seed (`WARMUP + 1 + iters`).
 const COLD_SEED: u64 = 500_000;
 const TERM_SEED: u64 = 42;
+// Add-then-find cycles per engine for the add-to-searchable time (#450).
+const FRESHNESS_RUNS: usize = 20;
 // Pinned so a re-run measures the same Solr and the same Wayfinder runtime.
 const SOLR_IMAGE: &str =
     "solr@sha256:9ab3185bfc8e18e1a0c0d20083f783ec3ef2833b8add196bd0ebddc929525970";
@@ -395,6 +398,7 @@ fn measure_cold(engine: &Engine, qs: &[Query], pools: &Pools, runs: usize) -> Va
 fn run_engine(
     engine: Engine,
     startup_ms: f64,
+    commit_settings: &str,
     docs: &[WikiDoc],
     qs: &[Query],
     pools: &Pools,
@@ -405,6 +409,8 @@ fn run_engine(
     let docs_per_s = index(&engine, docs);
     let post_index_rss = cgroup_u64(&engine, "memory.current", None);
     let (queries, answers) = measure(&engine, qs, pools, iters);
+    // After the queries, so the extra docs never show up in compared answers.
+    let add_to_searchable = freshness::measure(&engine.base, FRESHNESS_RUNS, commit_settings);
     // Peak memory is read before the cold runs: a restart resets it.
     let mem_peak = cgroup_u64(&engine, "memory.peak", None);
     let cold = measure_cold(&engine, qs, pools, cold_runs);
@@ -423,6 +429,7 @@ fn run_engine(
         "queries": queries,
         "cold_runs": cold_runs,
         "cold": cold,
+        "add_to_searchable": add_to_searchable,
     });
     (stats, answers)
 }
@@ -485,7 +492,12 @@ fn run_solr(
         .into_string()
         .expect("response body");
     let version = machine::parse_solr_version(&info).expect("solr-spec-version in system info");
-    let (stats, answers) = run_engine(engine, startup_ms, docs, qs, pools, iters, cold_runs);
+    let commit = format!(
+        "commitWithin={}ms on each add; stock _default configset autoCommit/autoSoftCommit",
+        freshness::COMMIT_WITHIN_MS
+    );
+    let (stats, answers) =
+        run_engine(engine, startup_ms, &commit, docs, qs, pools, iters, cold_runs);
     (stats, answers, version)
 }
 
@@ -525,7 +537,11 @@ fn run_wayfinder(
         work.join("data"),
         work.join("data"),
     );
-    run_engine(engine, startup_ms, docs, qs, pools, iters, cold_runs)
+    let commit = format!(
+        "commitWithin={}ms on each add; default config, no autocommit",
+        freshness::COMMIT_WITHIN_MS
+    );
+    run_engine(engine, startup_ms, &commit, docs, qs, pools, iters, cold_runs)
 }
 
 /// `uid:gid` of the host user. Containers run as it so their data dirs stay
