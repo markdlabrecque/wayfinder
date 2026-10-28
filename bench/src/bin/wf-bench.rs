@@ -49,7 +49,12 @@
 //! JSON. `--accept` saves them to `bench/out/wf-answers.json`, and a run whose
 //! digests differ prints `answers changed: <shapes>`, even when it passes.
 //!
-//! Usage: `wf-bench [--docs N] [--iters N] [--cold N] [--force] [--accept]`
+//! Noise (issue #453): `--noise K` measures the same Wayfinder build K times
+//! and saves each metric's min/max to `bench/out/noise.json`. A normal run then
+//! labels its change from the accepted score `win`, `loss`, or `noise`, and
+//! only a change bigger than the score's spread is a win or a loss.
+//!
+//! Usage: `wf-bench [--docs N] [--iters N] [--cold N] [--force] [--accept] [--noise K]`
 //! Requires: docker, a release build at `target/release/wayfinder`, and the
 //! corpus from `bench/fetch-wiki.sh`.
 
@@ -69,6 +74,7 @@ use wayfinder_bench::index_stats::index_stats;
 use wayfinder_bench::load::{self, LEVELS, run_levels};
 use wayfinder_bench::machine::{self, EnvInfo};
 use wayfinder_bench::memory::{self, MemStat, Sampler, parse_memory_stat};
+use wayfinder_bench::noise;
 use wayfinder_bench::score;
 use wayfinder_bench::terms::{self, Pools};
 use wayfinder_bench::wiki::{self, WikiDoc};
@@ -755,6 +761,35 @@ fn ratios(wf: &Value, solr: &Value) -> Result<Vec<(&'static str, f64)>, String> 
     Ok(out)
 }
 
+/// Each metric's ratio and the weighted score for one Wayfinder run.
+fn score_run(
+    wf: &Value,
+    solr: &Value,
+    weights: &score::Weights,
+) -> Result<(Vec<(String, f64)>, f64), String> {
+    let r = ratios(wf, solr)?;
+    Ok((
+        score::metric_ratios(&r)?,
+        score::weighted_geomean(&r, weights)?,
+    ))
+}
+
+/// The change from the accepted score, judged against the measured noise:
+/// only a change bigger than the score's spread is a win or a loss.
+fn verdict(accepted: Option<f64>, score: f64, noise_path: &Path) -> &'static str {
+    let Some(base) = accepted else {
+        return "";
+    };
+    let spread = noise::load_noise(noise_path).unwrap_or_else(|e| panic!("{e}"));
+    match spread
+        .as_deref()
+        .and_then(|s| s.iter().find(|(n, _)| n == "score"))
+    {
+        Some((_, s)) => noise::classify(base, score, s).as_str(),
+        None => "noise not measured",
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n_docs = arg(&args, "--docs", 10_000);
@@ -762,6 +797,8 @@ fn main() {
     let cold_runs = arg(&args, "--cold", 5);
     let force = args.iter().any(|a| a == "--force");
     let accept = args.iter().any(|a| a == "--accept");
+    let noise_runs = arg(&args, "--noise", 0);
+    assert!(noise_runs != 1, "--noise needs at least 2 runs");
     // Sample load before the test gate: its compile would inflate the average.
     let load = machine::parse_loadavg(&read("/proc/loadavg")).expect("1-min load average");
     let bench_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -836,6 +873,36 @@ fn main() {
             (stats, answers, version)
         }
     };
+    let noise_path = bench_dir.join("out/noise.json");
+    if noise_runs > 0 {
+        // The same build K times, each in a fresh dir so no run sees the
+        // last one's index (#453).
+        let runs: Vec<Vec<(String, f64)>> = (0..noise_runs)
+            .map(|i| {
+                let dir = work.join(format!("noise-{i}"));
+                std::fs::create_dir_all(&dir).expect("create noise run dir");
+                let (wf, _) = run_wayfinder(&root, &dir, &docs, &qs, &pools, iters, cold_runs);
+                let (per_metric, score) =
+                    score_run(&wf, &solr, &weights).unwrap_or_else(|e| panic!("score: {e}"));
+                eprintln!("wf-bench: noise run {}/{noise_runs}: score {score:.3}", i + 1);
+                std::iter::once(("score".to_string(), score))
+                    .chain(per_metric)
+                    .collect()
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&work);
+        let spread = noise::measure_noise(&runs).unwrap_or_else(|e| panic!("noise: {e}"));
+        noise::save_noise(&noise_path, &spread).expect("save noise");
+        let s = spread[0].1;
+        let shown = noise_path.strip_prefix(&root).unwrap_or(&noise_path).display();
+        println!(
+            "noise over {noise_runs} runs: score {:.3}-{:.3} (width {:.3}) | {shown}",
+            s.min,
+            s.max,
+            s.width()
+        );
+        return;
+    }
     let (wf, wf_answers) = run_wayfinder(&root, &work, &docs, &qs, &pools, iters, cold_runs);
     let _ = std::fs::remove_dir_all(&work);
 
@@ -863,12 +930,7 @@ fn main() {
             }
         }
     }
-    let scored = ratios(&wf, &solr).and_then(|r| {
-        Ok((
-            score::metric_ratios(&r)?,
-            score::weighted_geomean(&r, &weights)?,
-        ))
-    });
+    let scored = score_run(&wf, &solr, &weights);
     let (per_metric, score) = match &scored {
         Ok((m, s)) => (m.clone(), Some(*s)),
         Err(_) => (Vec::new(), None),
@@ -919,7 +981,10 @@ fn main() {
     };
     let wf_path = bench_dir.join("out/wf-baseline.json");
     let accepted = baseline::load_wf(&wf_path).unwrap_or_else(|e| panic!("{e}"));
-    let delta = baseline::delta_line(accepted, score);
+    let delta = match verdict(accepted, score, &noise_path) {
+        "" => baseline::delta_line(accepted, score),
+        v => format!("{} {v}", baseline::delta_line(accepted, score)),
+    };
     let r = |m: &str| ratios_json[m].as_f64().unwrap();
     println!(
         "score {score:.3} (wf/solr, <1 = wf wins) | {delta} | p50 {:.2} p99 {:.2} cpu {:.2} mem {:.2} | correct {}/{n} | {} | {shown}",
