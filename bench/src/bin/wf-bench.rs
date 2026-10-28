@@ -39,7 +39,12 @@
 //! weights from `bench/weights.tsv`. Below 1.0 means Wayfinder wins. Each
 //! metric's ratio is in the JSON under `ratios`.
 //!
-//! Usage: `wf-bench [--docs N] [--iters N] [--cold N] [--force]`
+//! Baselines (issue #454): Solr's results are saved to
+//! `bench/out/solr-baseline.json` and reused until the doc count, query file,
+//! Solr image, or limits change. `--accept` saves a passing run's score to
+//! `bench/out/wf-baseline.json`, and every run shows its change from it.
+//!
+//! Usage: `wf-bench [--docs N] [--iters N] [--cold N] [--force] [--accept]`
 //! Requires: docker, a release build at `target/release/wayfinder`, and the
 //! corpus from `bench/fetch-wiki.sh`.
 
@@ -48,6 +53,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use wayfinder_bench::baseline::{self, SolrKey};
 use wayfinder_bench::check::check;
 use wayfinder_bench::cold::{evict_page_cache, summarize};
 use wayfinder_bench::footprint::{dir_size_bytes, time_to_first_search};
@@ -714,6 +720,7 @@ fn main() {
     let iters = arg(&args, "--iters", 200);
     let cold_runs = arg(&args, "--cold", 5);
     let force = args.iter().any(|a| a == "--force");
+    let accept = args.iter().any(|a| a == "--accept");
     // Sample load before the test gate: its compile would inflate the average.
     let load = machine::parse_loadavg(&read("/proc/loadavg")).expect("1-min load average");
     let bench_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -749,15 +756,43 @@ fn main() {
     let weights_path = bench_dir.join("weights.tsv");
     let weights = score::parse_weights(&read(&weights_path.to_string_lossy()))
         .unwrap_or_else(|e| panic!("{}: {e}", weights_path.display()));
-    let qs = queries(&bench_dir.join("queries.tsv"));
+    let queries_path = bench_dir.join("queries.tsv");
+    let qs = queries(&queries_path);
     let allowed: Vec<String> = tsv(&bench_dir.join("allowed-diffs.tsv"))
         .into_iter()
         .map(|cols| cols[0].clone())
         .collect();
     let docs = wiki::load(&bench_dir.join("data"), n_docs);
     let pools = terms::pools(&docs, TERM_SEED);
-    let (solr, solr_answers, solr_version) =
-        run_solr(&work, &docs, &qs, &pools, iters, cold_runs);
+    // Solr is measured once per dataset and settings, then reused (#454).
+    let solr_path = bench_dir.join("out/solr-baseline.json");
+    let solr_key = SolrKey {
+        corpus_docs: n_docs,
+        queries_hash: baseline::hash_hex(read(&queries_path.to_string_lossy()).as_bytes()),
+        solr_image_digest: SOLR_IMAGE.into(),
+        limits: format!(
+            "cpus={CPUSET} mem={MEMORY} heap={SOLR_HEAP} iters={iters} cold={cold_runs}"
+        ),
+    };
+    let cached = baseline::load_solr_json(&solr_path, &solr_key)
+        .unwrap_or_else(|e| panic!("{e} (delete it to re-measure Solr)"));
+    let (solr, solr_answers, solr_version) = match cached {
+        Some(c) => {
+            eprintln!("wf-bench: reusing Solr from {}", solr_path.display());
+            (
+                c["stats"].clone(),
+                serde_json::from_value(c["answers"].clone()).expect("saved Solr answers"),
+                c["version"].as_str().expect("saved Solr version").to_string(),
+            )
+        }
+        None => {
+            let (stats, answers, version) =
+                run_solr(&work, &docs, &qs, &pools, iters, cold_runs);
+            let saved = json!({"stats": stats, "answers": answers, "version": version});
+            baseline::save_solr_json(&solr_path, &solr_key, &saved).expect("save Solr baseline");
+            (stats, answers, version)
+        }
+    };
     let (wf, wf_answers) = run_wayfinder(&root, &work, &docs, &qs, &pools, iters, cold_runs);
     let _ = std::fs::remove_dir_all(&work);
 
@@ -821,9 +856,12 @@ fn main() {
         println!("FAIL score: {} | {shown}", scored.unwrap_err());
         std::process::exit(1);
     };
+    let wf_path = bench_dir.join("out/wf-baseline.json");
+    let accepted = baseline::load_wf(&wf_path).unwrap_or_else(|e| panic!("{e}"));
+    let delta = baseline::delta_line(accepted, score);
     let r = |m: &str| ratios_json[m].as_f64().unwrap();
     println!(
-        "score {score:.3} (wf/solr, <1 = wf wins) | p50 {:.2} p99 {:.2} cpu {:.2} mem {:.2} | correct {}/{n} | {} | {shown}",
+        "score {score:.3} (wf/solr, <1 = wf wins) | {delta} | p50 {:.2} p99 {:.2} cpu {:.2} mem {:.2} | correct {}/{n} | {} | {shown}",
         r("p50"),
         r("p99"),
         r("cpu_ms_per_1k"),
@@ -839,5 +877,10 @@ fn main() {
     }
     if !failures.is_empty() {
         std::process::exit(1);
+    }
+    // Only a passing run can become the baseline the next one compares to.
+    if accept {
+        baseline::save_wf(&wf_path, score).expect("save Wayfinder baseline");
+        eprintln!("wf-bench: accepted score {score:.3} as the new baseline");
     }
 }
