@@ -1,8 +1,7 @@
 //! Issue #444: `wf-bench` refuses to measure a build that fails `cargo test`.
 //!
-//! The bench crate is standalone (not a workspace member), so the root
-//! `cargo test` does not run its tests. This file builds the `wf-bench` driver
-//! and runs it as a real process with fake `cargo` and `docker` first on PATH.
+//! Runs the built `wf-bench` driver as a real process with fake `cargo` and
+//! `docker` first on PATH.
 //! The fake `cargo` reports a pass or a failure; both fakes log their calls, so
 //! the tests can tell whether the run stopped before starting any container.
 
@@ -10,28 +9,6 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::OnceLock;
-
-fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-/// Builds the driver once, with the real toolchain, and returns its path.
-fn driver() -> &'static Path {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let target = root().join("target/wf-bench-gate");
-        let status = Command::new(env!("CARGO"))
-            .args(["build", "--bin", "wf-bench", "--manifest-path"])
-            .arg(root().join("bench/Cargo.toml"))
-            .arg("--target-dir")
-            .arg(&target)
-            .status()
-            .expect("build wf-bench");
-        assert!(status.success(), "wf-bench did not build");
-        target.join("debug/wf-bench")
-    })
-}
 
 fn fake(dir: &Path, name: &str, script: &str) {
     let path = dir.join(name);
@@ -57,7 +34,7 @@ impl Drop for Run {
 }
 
 fn run(tag: &str, cargo_exit: i32) -> Run {
-    let bin = driver();
+    let bin = env!("CARGO_BIN_EXE_wf-bench");
     let dir = std::env::temp_dir().join(format!("wf-bench-gate-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
