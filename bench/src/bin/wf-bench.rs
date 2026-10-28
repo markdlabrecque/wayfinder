@@ -34,6 +34,11 @@
 //! the cold runs reset the cgroup; `memory.peak`, which counts the cache, is
 //! reported apart as the total.
 //!
+//! Score (issue #452): every metric becomes a Wayfinder/Solr ratio, inverted
+//! for throughput, and the score is their weighted geometric mean with the
+//! weights from `bench/weights.tsv`. Below 1.0 means Wayfinder wins. Each
+//! metric's ratio is in the JSON under `ratios`.
+//!
 //! Usage: `wf-bench [--docs N] [--iters N] [--cold N] [--force]`
 //! Requires: docker, a release build at `target/release/wayfinder`, and the
 //! corpus from `bench/fetch-wiki.sh`.
@@ -51,6 +56,7 @@ use wayfinder_bench::index_stats::index_stats;
 use wayfinder_bench::load::{self, LEVELS, run_levels};
 use wayfinder_bench::memory::{self, MemStat, Sampler, parse_memory_stat};
 use wayfinder_bench::machine::{self, EnvInfo};
+use wayfinder_bench::score;
 use wayfinder_bench::terms::{self, Pools};
 use wayfinder_bench::wiki::{self, WikiDoc};
 
@@ -642,6 +648,66 @@ fn tests_pass(root: &Path) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// Every scored metric as a Wayfinder/Solr ratio (#452), named as in
+/// `bench/weights.tsv`. Metrics measured per query shape or load level give
+/// one ratio each; the score folds them into one per metric.
+fn ratios(wf: &Value, solr: &Value) -> Result<Vec<(&'static str, f64)>, String> {
+    fn push(
+        out: &mut Vec<(&'static str, f64)>,
+        name: &'static str,
+        w: &Value,
+        s: &Value,
+        higher_is_better: bool,
+    ) -> Result<(), String> {
+        let num = |v: &Value, engine: &str| {
+            v.as_f64().ok_or_else(|| format!("{name}: {engine} has no number"))
+        };
+        let r = score::ratio(num(w, "wayfinder")?, num(s, "solr")?, higher_is_better)
+            .map_err(|e| format!("{name}: {e}"))?;
+        out.push((name, r));
+        Ok(())
+    }
+    let rows = |v: &Value, k: &str| v[k].as_array().cloned().unwrap_or_default();
+    let mut out = Vec::new();
+    for (qw, qs) in rows(wf, "queries").iter().zip(&rows(solr, "queries")) {
+        for (name, key) in [
+            ("p50", "p50"),
+            ("p95", "p95"),
+            ("p99", "p99"),
+            ("cpu_ms_per_1k", "cpu_ms_per_1k"),
+            ("repeat_p50", "repeat_p50"),
+            ("first_ms", "cold_ms"),
+        ] {
+            push(&mut out, name, &qw[key], &qs[key], false)?;
+        }
+    }
+    for (cw, cs) in rows(wf, "cold").iter().zip(&rows(solr, "cold")) {
+        for (name, key) in [("cold_p50", "p50"), ("cold_p95", "p95"), ("cold_p99", "p99")] {
+            push(&mut out, name, &cw[key], &cs[key], false)?;
+        }
+    }
+    for (lw, ls) in rows(wf, "load").iter().zip(&rows(solr, "load")) {
+        push(&mut out, "load_rps", &lw["rps"], &ls["rps"], true)?;
+        for (name, key) in [("load_p50", "p50"), ("load_p95", "p95"), ("load_p99", "p99")] {
+            push(&mut out, name, &lw[key], &ls[key], false)?;
+        }
+    }
+    for name in [
+        "startup_ms",
+        "index_size_mb",
+        "mem_idle_mb",
+        "mem_post_index_mb",
+        "mem_peak_mb",
+    ] {
+        push(&mut out, name, &wf[name], &solr[name], false)?;
+    }
+    push(&mut out, "index_docs_per_s", &wf["index_docs_per_s"], &solr["index_docs_per_s"], true)?;
+    let (fw, fs) = (&wf["add_to_searchable"], &solr["add_to_searchable"]);
+    push(&mut out, "add_to_searchable_p50_ms", &fw["p50_ms"], &fs["p50_ms"], false)?;
+    push(&mut out, "add_to_searchable_p95_ms", &fw["p95_ms"], &fs["p95_ms"], false)?;
+    Ok(out)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n_docs = arg(&args, "--docs", 10_000);
@@ -679,6 +745,10 @@ fn main() {
     let work = bench_dir.join(format!("out/work-{ts}"));
     std::fs::create_dir_all(&work).expect("create work dir");
 
+    // Before the long run, so a bad weights file fails fast.
+    let weights_path = bench_dir.join("weights.tsv");
+    let weights = score::parse_weights(&read(&weights_path.to_string_lossy()))
+        .unwrap_or_else(|e| panic!("{}: {e}", weights_path.display()));
     let qs = queries(&bench_dir.join("queries.tsv"));
     let allowed: Vec<String> = tsv(&bench_dir.join("allowed-diffs.tsv"))
         .into_iter()
@@ -693,15 +763,7 @@ fn main() {
 
     let mut failures = Vec::new();
     let mut waived = Vec::new();
-    let mut p50 = Vec::new();
-    let mut p99 = Vec::new();
-    let mut cpu = Vec::new();
-    let pairs = wf["queries"].as_array().unwrap().iter();
-    for (n, ((qw, qsolr), q)) in pairs
-        .zip(solr["queries"].as_array().unwrap())
-        .zip(&qs)
-        .enumerate()
-    {
+    for (n, q) in qs.iter().enumerate() {
         let bad: Vec<(usize, String)> = wf_answers[n]
             .iter()
             .zip(&solr_answers[n])
@@ -722,14 +784,16 @@ fn main() {
                 failures.push(line);
             }
         }
-        let ratio = |k: &str| qw[k].as_f64().unwrap() / qsolr[k].as_f64().unwrap();
-        p50.push(ratio("p50"));
-        p99.push(ratio("p99"));
-        cpu.push(ratio("cpu_ms_per_1k"));
     }
-    let geo = |v: &[f64]| (v.iter().map(|x| x.ln()).sum::<f64>() / v.len() as f64).exp();
-    let mem = wf["mem_peak_mb"].as_f64().unwrap() / solr["mem_peak_mb"].as_f64().unwrap();
-    let score = geo(&[geo(&p50), geo(&p99), geo(&cpu), mem]);
+    let scored = ratios(&wf, &solr).and_then(|r| {
+        Ok((score::metric_ratios(&r)?, score::weighted_geomean(&r, &weights)?))
+    });
+    let (per_metric, score) = match &scored {
+        Ok((m, s)) => (m.clone(), Some(*s)),
+        Err(_) => (Vec::new(), None),
+    };
+    let ratios_json: serde_json::Map<String, Value> =
+        per_metric.iter().map(|(m, r)| (m.clone(), json!(r))).collect();
     let n = qs.len();
 
     let env = machine::env_json(&EnvInfo {
@@ -747,18 +811,25 @@ fn main() {
     let report = json!({
         "ts": ts, "docs": n_docs, "iters": iters, "cpuset": CPUSET, "memory": MEMORY,
         "env": env, "load_1m": load, "busy_warning": busy_warning,
-        "score": score, "failures": failures, "waived": waived, "solr": solr, "wayfinder": wf,
+        "score": score, "score_error": scored.as_ref().err(), "ratios": ratios_json,
+        "failures": failures, "waived": waived, "solr": solr, "wayfinder": wf,
     });
     std::fs::write(&out, serde_json::to_string_pretty(&report).unwrap()).expect("write report");
+    let shown = out.strip_prefix(&root).unwrap_or(&out).display();
 
+    let Some(score) = score else {
+        println!("FAIL score: {} | {shown}", scored.unwrap_err());
+        std::process::exit(1);
+    };
+    let r = |m: &str| ratios_json[m].as_f64().unwrap();
     println!(
-        "score {score:.3} (wf/solr, <1 = wf wins) | p50 {:.2} p99 {:.2} cpu {:.2} mem {mem:.2} | correct {}/{n} | {} | {}",
-        geo(&p50),
-        geo(&p99),
-        geo(&cpu),
+        "score {score:.3} (wf/solr, <1 = wf wins) | p50 {:.2} p99 {:.2} cpu {:.2} mem {:.2} | correct {}/{n} | {} | {shown}",
+        r("p50"),
+        r("p99"),
+        r("cpu_ms_per_1k"),
+        r("mem_peak_mb"),
         n - failures.len(),
         if failures.is_empty() { "PASS" } else { "FAIL" },
-        out.strip_prefix(&root).unwrap_or(&out).display(),
     );
     for w in &waived {
         println!("  waived {w}");
