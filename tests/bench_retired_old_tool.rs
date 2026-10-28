@@ -5,7 +5,9 @@
 use std::path::{Path, PathBuf};
 
 fn bench(file: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("bench").join(file)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("bench")
+        .join(file)
 }
 
 fn readme() -> String {
@@ -19,7 +21,10 @@ fn old_script_is_removed() {
 
 #[test]
 fn old_results_page_is_removed() {
-    assert!(!bench("RESULTS.md").exists(), "bench/RESULTS.md should be removed");
+    assert!(
+        !bench("RESULTS.md").exists(),
+        "bench/RESULTS.md should be removed"
+    );
 }
 
 #[test]

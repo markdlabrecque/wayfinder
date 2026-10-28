@@ -28,13 +28,17 @@ pub struct MemStat {
 /// `None`, so a bad read can't pass for zero.
 pub fn parse_memory_stat(text: &str) -> Option<MemStat> {
     let get = |key: &str| {
-        text.lines().find_map(|l| {
-            let (k, v) = l.split_once(' ')?;
-            (k == key).then(|| v.trim().parse::<u64>())
-        })?
-        .ok()
+        text.lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(' ')?;
+                (k == key).then(|| v.trim().parse::<u64>())
+            })?
+            .ok()
     };
-    Some(MemStat { anon: get("anon")?, file: get("file")? })
+    Some(MemStat {
+        anon: get("anon")?,
+        file: get("file")?,
+    })
 }
 
 /// The memory fields of an engine's stats, in MB. `mem_*_mb` is anonymous

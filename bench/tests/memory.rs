@@ -50,8 +50,14 @@ fn stat_with_a_non_numeric_value_is_an_error() {
 
 #[test]
 fn json_reports_anon_as_the_memory_number_and_file_cache_separately() {
-    let idle = MemStat { anon: 100 * MB, file: 2400 * MB };
-    let post = MemStat { anon: 300 * MB, file: 2500 * MB };
+    let idle = MemStat {
+        anon: 100 * MB,
+        file: 2400 * MB,
+    };
+    let post = MemStat {
+        anon: 300 * MB,
+        file: 2500 * MB,
+    };
     let v = to_json(&idle, &post, 900 * MB);
     assert_eq!(v["mem_idle_mb"].as_f64(), Some(100.0));
     assert_eq!(v["mem_idle_file_mb"].as_f64(), Some(2400.0));
@@ -64,11 +70,20 @@ fn json_reports_anon_as_the_memory_number_and_file_cache_separately() {
 fn wf_bench_reads_memory_stat_and_peak_and_not_memory_current() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let src = fs::read_to_string(root.join("src/bin/wf-bench.rs")).expect("read wf-bench.rs");
-    assert!(src.contains("\"memory.stat\""), "wf-bench must read memory.stat");
-    assert!(src.contains("\"memory.peak\""), "wf-bench must read memory.peak");
+    assert!(
+        src.contains("\"memory.stat\""),
+        "wf-bench must read memory.stat"
+    );
+    assert!(
+        src.contains("\"memory.peak\""),
+        "wf-bench must read memory.peak"
+    );
     assert!(
         !src.contains("\"memory.current\""),
         "memory.current counts disk cache; wf-bench must not use it"
     );
-    assert!(src.contains("parse_memory_stat"), "wf-bench must use memory::parse_memory_stat");
+    assert!(
+        src.contains("parse_memory_stat"),
+        "wf-bench must use memory::parse_memory_stat"
+    );
 }

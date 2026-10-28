@@ -72,10 +72,20 @@ fn run(tag: &str, cargo_exit: i32) -> Run {
     fake(
         &dir,
         "docker",
-        &format!("echo \"$@\" >> \"{d}/docker.log\"\nexit 1", d = dir.display()),
+        &format!(
+            "echo \"$@\" >> \"{d}/docker.log\"\nexit 1",
+            d = dir.display()
+        ),
     );
-    let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap_or_default());
-    let out = Command::new(bin).env("PATH", path).output().expect("run wf-bench");
+    let path = format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new(bin)
+        .env("PATH", path)
+        .output()
+        .expect("run wf-bench");
     Run { out, dir }
 }
 
@@ -85,8 +95,15 @@ fn failing_tests_stop_the_run_before_measuring_and_say_why() {
     let stdout = String::from_utf8_lossy(&r.out.stdout);
     assert!(!r.out.status.success(), "expected non-zero exit");
     assert!(stdout.contains("FAIL tests"), "stdout was: {stdout}");
-    assert!(r.log("cargo.log").contains("test"), "cargo test was not run");
-    assert_eq!(r.log("docker.log"), "", "docker was used despite failing tests");
+    assert!(
+        r.log("cargo.log").contains("test"),
+        "cargo test was not run"
+    );
+    assert_eq!(
+        r.log("docker.log"),
+        "",
+        "docker was used despite failing tests"
+    );
     assert!(!stdout.contains("score"), "a score was printed: {stdout}");
 }
 
@@ -94,6 +111,9 @@ fn failing_tests_stop_the_run_before_measuring_and_say_why() {
 fn passing_tests_let_the_run_continue() {
     let r = run("pass", 0);
     let stdout = String::from_utf8_lossy(&r.out.stdout);
-    assert!(r.log("cargo.log").contains("test"), "cargo test was not run");
+    assert!(
+        r.log("cargo.log").contains("test"),
+        "cargo test was not run"
+    );
     assert!(!stdout.contains("FAIL tests"), "stdout was: {stdout}");
 }

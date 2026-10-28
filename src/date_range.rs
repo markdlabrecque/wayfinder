@@ -438,7 +438,7 @@ fn parse_num<T: std::str::FromStr>(
 fn date_math(expr: &str) -> DrResult<i64> {
     let err = || DateRangeError::Parse(format!("Invalid Date Math String:'{expr}'"));
     let mut now = OffsetDateTime::now_utc().to_offset(UtcOffset::UTC);
-    let mut rest = expr.strip_prefix("NOW").ok_or_else(&err)?;
+    let mut rest = expr.strip_prefix("NOW").ok_or_else(err)?;
     while !rest.is_empty() {
         // By `char`, not by byte: `rest` is raw user text, and `split_at(1)` on
         // a multi-byte first character panics ("byte index 1 is not a char
@@ -447,25 +447,25 @@ fn date_math(expr: &str) -> DrResult<i64> {
         // core, so this must be a plain finding-184 400 instead. Every other
         // byte-index split in this function is guarded by a `find` on an ASCII
         // needle, which always lands on a boundary.
-        let op = rest.chars().next().ok_or_else(&err)?;
+        let op = rest.chars().next().ok_or_else(err)?;
         let tail = &rest[op.len_utf8()..];
         // The operand runs to the next operator.
         let end = tail.find(['/', '+', '-']).unwrap_or(tail.len());
         let (operand, next) = tail.split_at(end);
         match op {
-            '/' => now = round_down(now, parse_unit(operand).ok_or_else(&err)?).ok_or_else(&err)?,
+            '/' => now = round_down(now, parse_unit(operand).ok_or_else(err)?).ok_or_else(err)?,
             '+' | '-' => {
                 let digits_end = operand
                     .find(|c: char| !c.is_ascii_digit())
-                    .ok_or_else(&err)?;
+                    .ok_or_else(err)?;
                 if digits_end == 0 {
                     return Err(err());
                 }
                 let (count, unit) = operand.split_at(digits_end);
                 let count: i64 = count.parse().map_err(|_| err())?;
-                let unit = parse_unit(unit).ok_or_else(&err)?;
+                let unit = parse_unit(unit).ok_or_else(err)?;
                 let signed = if op == '-' { -count } else { count };
-                now = shift(now, unit, signed).ok_or_else(&err)?;
+                now = shift(now, unit, signed).ok_or_else(err)?;
             }
             _ => return Err(err()),
         }

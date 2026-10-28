@@ -53,7 +53,10 @@ pub fn measure(base: &str, runs: usize, commit_settings: &str) -> Value {
                 panic!("POST {update}: {e}");
             }
             while num_found(&select) < 1 {
-                assert!(t0.elapsed() < GIVE_UP, "{token} not searchable after {GIVE_UP:?}");
+                assert!(
+                    t0.elapsed() < GIVE_UP,
+                    "{token} not searchable after {GIVE_UP:?}"
+                );
                 std::thread::sleep(POLL);
             }
             t0.elapsed().as_secs_f64() * 1000.0

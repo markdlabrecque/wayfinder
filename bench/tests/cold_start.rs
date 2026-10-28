@@ -39,7 +39,9 @@ fn summary_records_p50_p95_p99_for_every_search_type() {
         ("phrase".to_string(), vec![5.0, 6.0]),
     ];
     let v = summarize(&runs);
-    let rows = v.as_array().expect("summary is an array, one row per search type");
+    let rows = v
+        .as_array()
+        .expect("summary is an array, one row per search type");
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["query"], "term");
     assert_eq!(rows[0]["n"], 4);

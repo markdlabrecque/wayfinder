@@ -60,8 +60,8 @@ use wayfinder_bench::footprint::{dir_size_bytes, time_to_first_search};
 use wayfinder_bench::freshness;
 use wayfinder_bench::index_stats::index_stats;
 use wayfinder_bench::load::{self, LEVELS, run_levels};
-use wayfinder_bench::memory::{self, MemStat, Sampler, parse_memory_stat};
 use wayfinder_bench::machine::{self, EnvInfo};
+use wayfinder_bench::memory::{self, MemStat, Sampler, parse_memory_stat};
 use wayfinder_bench::score;
 use wayfinder_bench::terms::{self, Pools};
 use wayfinder_bench::wiki::{self, WikiDoc};
@@ -447,14 +447,15 @@ fn measure_cold(engine: &Engine, qs: &[Query], pools: &Pools, runs: usize) -> Va
 fn measure_load(engine: &Engine, qs: &[Query], pools: &Pools) -> Value {
     let urls: Vec<String> = (0..LOAD_ROUNDS)
         .flat_map(|i| {
-            qs.iter().enumerate().map(move |(n, q)| {
-                q.url(&engine.base, pools, n as u64 * 1_000_000 + LOAD_SEED + i)
-            })
+            qs.iter()
+                .enumerate()
+                .map(move |(n, q)| q.url(&engine.base, pools, n as u64 * 1_000_000 + LOAD_SEED + i))
         })
         .collect();
     load::to_json(&run_levels(&urls, &LEVELS, Duration::from_secs(LOAD_SECS)))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_engine(
     engine: Engine,
     startup_ms: f64,
@@ -494,7 +495,10 @@ fn run_engine(
         "add_to_searchable": add_to_searchable,
     });
     let mem = memory::to_json_with_total(&idle_mem, &post_index_mem, mem_peak, mem_peak_total);
-    stats.as_object_mut().unwrap().extend(mem.as_object().unwrap().clone());
+    stats
+        .as_object_mut()
+        .unwrap()
+        .extend(mem.as_object().unwrap().clone());
     if let (Some(s), Value::Object(i)) = (stats.as_object_mut(), indexing) {
         s.extend(i);
     }
@@ -563,8 +567,9 @@ fn run_solr(
         "commitWithin={}ms on each add; stock _default configset autoCommit/autoSoftCommit",
         freshness::COMMIT_WITHIN_MS
     );
-    let (stats, answers) =
-        run_engine(engine, startup_ms, &commit, docs, qs, pools, iters, cold_runs);
+    let (stats, answers) = run_engine(
+        engine, startup_ms, &commit, docs, qs, pools, iters, cold_runs,
+    );
     (stats, answers, version)
 }
 
@@ -608,7 +613,9 @@ fn run_wayfinder(
         "commitWithin={}ms on each add; default config, no autocommit",
         freshness::COMMIT_WITHIN_MS
     );
-    run_engine(engine, startup_ms, &commit, docs, qs, pools, iters, cold_runs)
+    run_engine(
+        engine, startup_ms, &commit, docs, qs, pools, iters, cold_runs,
+    )
 }
 
 /// `uid:gid` of the host user. Containers run as it so their data dirs stay
@@ -666,7 +673,8 @@ fn ratios(wf: &Value, solr: &Value) -> Result<Vec<(&'static str, f64)>, String> 
         higher_is_better: bool,
     ) -> Result<(), String> {
         let num = |v: &Value, engine: &str| {
-            v.as_f64().ok_or_else(|| format!("{name}: {engine} has no number"))
+            v.as_f64()
+                .ok_or_else(|| format!("{name}: {engine} has no number"))
         };
         let r = score::ratio(num(w, "wayfinder")?, num(s, "solr")?, higher_is_better)
             .map_err(|e| format!("{name}: {e}"))?;
@@ -688,13 +696,21 @@ fn ratios(wf: &Value, solr: &Value) -> Result<Vec<(&'static str, f64)>, String> 
         }
     }
     for (cw, cs) in rows(wf, "cold").iter().zip(&rows(solr, "cold")) {
-        for (name, key) in [("cold_p50", "p50"), ("cold_p95", "p95"), ("cold_p99", "p99")] {
+        for (name, key) in [
+            ("cold_p50", "p50"),
+            ("cold_p95", "p95"),
+            ("cold_p99", "p99"),
+        ] {
             push(&mut out, name, &cw[key], &cs[key], false)?;
         }
     }
     for (lw, ls) in rows(wf, "load").iter().zip(&rows(solr, "load")) {
         push(&mut out, "load_rps", &lw["rps"], &ls["rps"], true)?;
-        for (name, key) in [("load_p50", "p50"), ("load_p95", "p95"), ("load_p99", "p99")] {
+        for (name, key) in [
+            ("load_p50", "p50"),
+            ("load_p95", "p95"),
+            ("load_p99", "p99"),
+        ] {
             push(&mut out, name, &lw[key], &ls[key], false)?;
         }
     }
@@ -707,10 +723,28 @@ fn ratios(wf: &Value, solr: &Value) -> Result<Vec<(&'static str, f64)>, String> 
     ] {
         push(&mut out, name, &wf[name], &solr[name], false)?;
     }
-    push(&mut out, "index_docs_per_s", &wf["index_docs_per_s"], &solr["index_docs_per_s"], true)?;
+    push(
+        &mut out,
+        "index_docs_per_s",
+        &wf["index_docs_per_s"],
+        &solr["index_docs_per_s"],
+        true,
+    )?;
     let (fw, fs) = (&wf["add_to_searchable"], &solr["add_to_searchable"]);
-    push(&mut out, "add_to_searchable_p50_ms", &fw["p50_ms"], &fs["p50_ms"], false)?;
-    push(&mut out, "add_to_searchable_p95_ms", &fw["p95_ms"], &fs["p95_ms"], false)?;
+    push(
+        &mut out,
+        "add_to_searchable_p50_ms",
+        &fw["p50_ms"],
+        &fs["p50_ms"],
+        false,
+    )?;
+    push(
+        &mut out,
+        "add_to_searchable_p95_ms",
+        &fw["p95_ms"],
+        &fs["p95_ms"],
+        false,
+    )?;
     Ok(out)
 }
 
@@ -782,12 +816,14 @@ fn main() {
             (
                 c["stats"].clone(),
                 serde_json::from_value(c["answers"].clone()).expect("saved Solr answers"),
-                c["version"].as_str().expect("saved Solr version").to_string(),
+                c["version"]
+                    .as_str()
+                    .expect("saved Solr version")
+                    .to_string(),
             )
         }
         None => {
-            let (stats, answers, version) =
-                run_solr(&work, &docs, &qs, &pools, iters, cold_runs);
+            let (stats, answers, version) = run_solr(&work, &docs, &qs, &pools, iters, cold_runs);
             let saved = json!({"stats": stats, "answers": answers, "version": version});
             baseline::save_solr_json(&solr_path, &solr_key, &saved).expect("save Solr baseline");
             (stats, answers, version)
@@ -821,14 +857,19 @@ fn main() {
         }
     }
     let scored = ratios(&wf, &solr).and_then(|r| {
-        Ok((score::metric_ratios(&r)?, score::weighted_geomean(&r, &weights)?))
+        Ok((
+            score::metric_ratios(&r)?,
+            score::weighted_geomean(&r, &weights)?,
+        ))
     });
     let (per_metric, score) = match &scored {
         Ok((m, s)) => (m.clone(), Some(*s)),
         Err(_) => (Vec::new(), None),
     };
-    let ratios_json: serde_json::Map<String, Value> =
-        per_metric.iter().map(|(m, r)| (m.clone(), json!(r))).collect();
+    let ratios_json: serde_json::Map<String, Value> = per_metric
+        .iter()
+        .map(|(m, r)| (m.clone(), json!(r)))
+        .collect();
     let n = qs.len();
 
     let env = machine::env_json(&EnvInfo {

@@ -8,7 +8,13 @@ use std::process::Command;
 fn bench_add_to_searchable_tests_pass() {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let out = Command::new(cargo)
-        .args(["test", "--manifest-path", "bench/Cargo.toml", "--test", "freshness"])
+        .args([
+            "test",
+            "--manifest-path",
+            "bench/Cargo.toml",
+            "--test",
+            "freshness",
+        ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("run cargo");
