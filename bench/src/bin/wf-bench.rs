@@ -10,14 +10,15 @@
 //! is written to `bench/out/<unix-ts>.json`.
 //!
 //! Usage: `wf-bench [--docs N] [--iters N]`
-//! Requires: docker, and a release build at `target/release/wayfinder`.
+//! Requires: docker, a release build at `target/release/wayfinder`, and the
+//! corpus from `bench/fetch-wiki.sh`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use wayfinder_bench::corpus::{Doc, generate};
+use wayfinder_bench::wiki::{self, WikiDoc};
 
 // ponytail: fixed core set and memory cap for both engines. Phase 6 of
 // BENCHMARK_PLAN.md makes these configurable and pins the load generator.
@@ -27,8 +28,9 @@ const SOLR_HEAP: &str = "2g";
 const SOLR_PORT: u16 = 18983;
 const WF_PORT: u16 = 18984;
 const CORE: &str = "content";
-const SEED: u64 = 42;
-const BATCH: usize = 1000;
+// Per-request byte cap for indexing. Article sizes vary a lot, so batches
+// are cut by size, not count. Under Wayfinder's 10 MB default body limit.
+const BATCH_BYTES: usize = 4_000_000;
 const WARMUP: usize = 20;
 // Pinned so a re-run measures the same Solr and the same Wayfinder runtime.
 const SOLR_IMAGE: &str =
@@ -58,10 +60,21 @@ type = "text_en"
 stored = true
 
 [[fields]]
-name = "category"
+name = "len"
+type = "int"
+stored = true
+fast = true
+
+[[fields]]
+name = "len_bucket"
 type = "string"
 stored = true
-multi_valued = true
+fast = true
+
+[[fields]]
+name = "initial"
+type = "string"
+stored = true
 fast = true
 "#;
 
@@ -72,7 +85,7 @@ struct Query {
 
 const QUERIES: &[Query] = &[Query {
     name: "edismax_term",
-    params: "q=rocket&defType=edismax&qf=title+body&rows=10&fl=id",
+    params: "q=history&defType=edismax&qf=title+body&rows=10&fl=id",
 }];
 
 /// A running engine container. Removed on drop, so a panic mid-run never
@@ -156,8 +169,11 @@ fn cgroup_u64(engine: &Engine, file: &str, key: Option<&str>) -> u64 {
     }
 }
 
-fn doc_json(d: &Doc) -> Value {
-    json!({"id": d.id, "title": d.title, "body": d.body, "category": d.category})
+fn doc_json(d: &WikiDoc) -> Value {
+    json!({
+        "id": d.id, "title": d.title, "body": d.body,
+        "len": d.len, "len_bucket": d.len_bucket, "initial": d.initial,
+    })
 }
 
 fn post(url: &str, body: &Value) {
@@ -169,11 +185,22 @@ fn post(url: &str, body: &Value) {
     }
 }
 
-fn index(engine: &Engine, docs: &[Doc]) -> f64 {
+fn index(engine: &Engine, docs: &[WikiDoc]) -> f64 {
+    let url = format!("{}/update?commit=false", engine.base);
     let t0 = Instant::now();
-    for chunk in docs.chunks(BATCH) {
-        let batch = Value::Array(chunk.iter().map(doc_json).collect());
-        post(&format!("{}/update?commit=false", engine.base), &batch);
+    let (mut batch, mut bytes) = (Vec::new(), 0);
+    for d in docs {
+        let doc = doc_json(d);
+        let size = doc.to_string().len();
+        if bytes + size > BATCH_BYTES && !batch.is_empty() {
+            post(&url, &Value::Array(std::mem::take(&mut batch)));
+            bytes = 0;
+        }
+        batch.push(doc);
+        bytes += size;
+    }
+    if !batch.is_empty() {
+        post(&url, &Value::Array(batch));
     }
     post(&format!("{}/update?commit=true", engine.base), &json!([]));
     docs.len() as f64 / t0.elapsed().as_secs_f64()
@@ -222,7 +249,7 @@ fn measure(engine: &Engine, iters: usize) -> Vec<Value> {
         .collect()
 }
 
-fn run_engine(engine: Engine, startup_ms: f64, docs: &[Doc], iters: usize) -> Value {
+fn run_engine(engine: Engine, startup_ms: f64, docs: &[WikiDoc], iters: usize) -> Value {
     let idle_rss = cgroup_u64(&engine, "memory.current", None);
     let docs_per_s = index(&engine, docs);
     let post_index_rss = cgroup_u64(&engine, "memory.current", None);
@@ -238,7 +265,7 @@ fn run_engine(engine: Engine, startup_ms: f64, docs: &[Doc], iters: usize) -> Va
     })
 }
 
-fn run_solr(docs: &[Doc], iters: usize) -> Value {
+fn run_solr(docs: &[WikiDoc], iters: usize) -> Value {
     let port_env = format!("SOLR_PORT={SOLR_PORT}");
     let heap_env = format!("SOLR_HEAP={SOLR_HEAP}");
     let (engine, startup_ms) = start(
@@ -260,14 +287,17 @@ fn run_solr(docs: &[Doc], iters: usize) -> Value {
         &json!({"add-field": [
             {"name": "title", "type": "text_en", "indexed": true, "stored": true},
             {"name": "body", "type": "text_en", "indexed": true, "stored": true},
-            {"name": "category", "type": "string", "indexed": true, "stored": true,
-             "docValues": true, "multiValued": true},
+            {"name": "len", "type": "pint", "indexed": true, "stored": true, "docValues": true},
+            {"name": "len_bucket", "type": "string", "indexed": true, "stored": true,
+             "docValues": true},
+            {"name": "initial", "type": "string", "indexed": true, "stored": true,
+             "docValues": true},
         ]}),
     );
     run_engine(engine, startup_ms, docs, iters)
 }
 
-fn run_wayfinder(root: &Path, work: &Path, docs: &[Doc], iters: usize) -> Value {
+fn run_wayfinder(root: &Path, work: &Path, docs: &[WikiDoc], iters: usize) -> Value {
     let bin = root.join("target/release/wayfinder");
     assert!(bin.exists(), "build first: cargo build --release");
     std::fs::write(work.join("schema.toml"), WF_SCHEMA).expect("write schema");
@@ -345,7 +375,7 @@ fn main() {
     let work = bench_dir.join(format!("out/work-{ts}"));
     std::fs::create_dir_all(&work).expect("create work dir");
 
-    let docs = generate(SEED, n_docs);
+    let docs = wiki::load(&bench_dir.join("data"), n_docs);
     let solr = run_solr(&docs, iters);
     let wf = run_wayfinder(&root, &work, &docs, iters);
     let _ = std::fs::remove_dir_all(&work);

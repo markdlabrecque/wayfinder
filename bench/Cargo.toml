@@ -15,5 +15,6 @@ name = "wayfinder_bench"
 path = "src/lib.rs"
 
 [dependencies]
+parquet = { version = "60.1.0", default-features = false, features = ["snap", "zstd"] }
 serde_json = "1.0.154"
 ureq = { version = "2.12", default-features = false }

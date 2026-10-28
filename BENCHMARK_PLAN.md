@@ -50,13 +50,14 @@ Known gaps for this goal:
 
 ### Phase 1: Real corpus
 
-- [ ] Pick the source: a fixed English Wikipedia slice (around 500k articles). Pin the exact
-      dump or dataset revision.
-- [ ] Download script: fetch once into `bench/data/` (gitignored) and verify by SHA-256.
-- [ ] Converter: dump to JSON docs with `id`, `title`, `body`, plus derived facet-friendly
-      fields (e.g. `category`, `length_bucket`, a date field, a numeric field).
-- [ ] Shared schema for both engines: Wayfinder config plus Solr managed-schema fields.
-- [ ] Size presets: `small` (~10k, smoke test) and `full` (~500k).
+- [x] Pick the source: `wikimedia/wikipedia` on Hugging Face, config `20231101.en`, revision
+      `b04c8d1c`. First 4 parquet shards (~1.4 GB).
+- [x] Download script: `bench/fetch-wiki.sh` fetches into `bench/data/` (gitignored), SHA-256 checked.
+- [x] Converter: `bench/src/wiki.rs` reads parquet directly (no JSON copy on disk). Fields:
+      `id`, `title`, `body`, plus derived `len` (int), `len_bucket` (string), `initial` (string).
+      No date field: the dataset has none.
+- [x] Shared schema for both engines: in `wf-bench.rs` (`WF_SCHEMA` and Solr `add-field`).
+- [x] Size presets: `--docs 10000` for smoke runs, `--docs 500000` for full runs.
 
 ### Phase 2: Query suite (shared features only)
 
@@ -159,7 +160,8 @@ Known gaps for this goal:
 export PATH=$HOME/.cargo/bin:$PATH
 cargo build --release                       # Wayfinder, from repo root
 cargo build --release --manifest-path bench/Cargo.toml --bin wf-bench
-bench/target/release/wf-bench --docs 2000 --iters 100
+bench/fetch-wiki.sh                         # once, ~1.4 GB
+bench/target/release/wf-bench --docs 10000 --iters 200
 ```
 
 Detail lands in `bench/out/<ts>.json` (gitignored).
@@ -170,8 +172,7 @@ Detail lands in `bench/out/<ts>.json` (gitignored).
   should split anon memory from file cache (`memory.stat`).
 - Solr gets only 20 warm-up requests, so its JIT is not fully warm. Phase 4 needs a real
   warm-up (time- or count-based, per query).
-- Tiny synthetic corpus: first run (2k docs) shows Wayfinder far ahead on everything. Not
-  meaningful until Phase 1 and 2 land.
+- One query only, so the score is not meaningful until Phase 2 lands.
 - `check()` in `wf-bench.rs` has no unit test yet. Add one (and mutation-test it) in Phase 3.
 
 ## Open questions
@@ -183,3 +184,5 @@ Detail lands in `bench/out/<ts>.json` (gitignored).
 - 2026-10-28: plan written. Issues #440 / #441 filed. Phase 0 done: `bench/src/bin/wf-bench.rs`
   runs both engines in Docker, one edismax query, answer check, one-line output. First run
   (2k docs, 100 iters): `score 0.029 ... correct 1/1 | PASS`.
+- 2026-10-28: Phase 1 done. First real-data run (20k Wikipedia docs, 200 iters):
+  `score 0.194 | p50 0.45 p99 0.18 cpu 0.12 mem 0.15 | correct 1/1 | PASS`.
