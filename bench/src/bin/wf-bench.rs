@@ -9,7 +9,11 @@
 //! Stdout is one line, built for a hill-climb loop to read cheaply. Full detail
 //! is written to `bench/out/<unix-ts>.json`.
 //!
-//! Usage: `wf-bench [--docs N] [--iters N]`
+//! Cold latency (issue #446) is measured `--cold` times per engine: stop the
+//! container, evict its data dir from the page cache with `posix_fadvise`
+//! (no root needed), start it again, and time the first request of each shape.
+//!
+//! Usage: `wf-bench [--docs N] [--iters N] [--cold N]`
 //! Requires: docker, a release build at `target/release/wayfinder`, and the
 //! corpus from `bench/fetch-wiki.sh`.
 
@@ -19,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use wayfinder_bench::check::check;
+use wayfinder_bench::cold::{evict_page_cache, summarize};
 use wayfinder_bench::terms::{self, Pools};
 use wayfinder_bench::wiki::{self, WikiDoc};
 
@@ -39,6 +44,8 @@ const BATCH_BYTES: usize = 4_000_000;
 const WARMUP: u64 = 300;
 // Same-URL repeats per shape for the separate cache-hit metric.
 const REPEAT: usize = 100;
+// Seed offset for cold requests, past any warm seed (`WARMUP + 1 + iters`).
+const COLD_SEED: u64 = 500_000;
 const TERM_SEED: u64 = 42;
 // Pinned so a re-run measures the same Solr and the same Wayfinder runtime.
 const SOLR_IMAGE: &str =
@@ -149,6 +156,10 @@ struct Engine {
     container: String,
     cgroup: PathBuf,
     base: String,
+    ping: String,
+    /// Host dir holding the engine's index, bind-mounted and owned by the
+    /// host user, so cold runs can evict it from the page cache without root.
+    data: PathBuf,
 }
 
 impl Drop for Engine {
@@ -173,7 +184,13 @@ fn docker(args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-fn start(name: &'static str, run_args: &[&str], base: String, ping: &str) -> (Engine, f64) {
+fn start(
+    name: &'static str,
+    run_args: &[&str],
+    base: String,
+    ping: &str,
+    data: PathBuf,
+) -> (Engine, f64) {
     let container = format!("wf-bench-{name}");
     let _ = Command::new("docker")
         .args(["rm", "-f", &container])
@@ -200,16 +217,37 @@ fn start(name: &'static str, run_args: &[&str], base: String, ping: &str) -> (En
         container,
         cgroup: PathBuf::from(format!("/sys/fs/cgroup/system.slice/docker-{id}.scope")),
         base,
+        ping: ping.to_string(),
+        data,
     };
-    let url = format!("{}/{ping}", engine.base);
+    wait_ready(&engine, t0);
+    (engine, t0.elapsed().as_secs_f64() * 1000.0)
+}
+
+fn wait_ready(engine: &Engine, t0: Instant) {
+    let url = format!("{}/{}", engine.base, engine.ping);
     while ureq::get(&url).call().is_err() {
         assert!(
             t0.elapsed() < Duration::from_secs(120),
-            "{name} never answered {url}"
+            "{} never answered {url}",
+            engine.name
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    (engine, t0.elapsed().as_secs_f64() * 1000.0)
+}
+
+/// Stops the container, drops its index files from the page cache, and starts
+/// it again: a fresh process with nothing cached. Stopping first matters, as
+/// pages still mapped by the engine cannot be evicted. Solr's JVM comes back
+/// cold too; that is part of a real cold start, so it stays in.
+fn restart_cold(engine: &Engine) {
+    docker(&["stop", &engine.container]);
+    let files = evict_page_cache(&engine.data)
+        .unwrap_or_else(|e| panic!("evict {}: {e}", engine.data.display()));
+    assert!(files > 0, "{}: no index files to evict", engine.name);
+    let t0 = Instant::now();
+    docker(&["start", &engine.container]);
+    wait_ready(engine, t0);
 }
 
 fn cgroup_u64(engine: &Engine, file: &str, key: Option<&str>) -> u64 {
@@ -317,6 +355,22 @@ fn measure(
     (stats, answers)
 }
 
+/// Cold latency per query shape: `runs` times, restart the engine with an
+/// empty page cache, then time the first request of each shape. Seeds start
+/// at `COLD_SEED` so no cold request repeats a warm one.
+fn measure_cold(engine: &Engine, qs: &[Query], pools: &Pools, runs: usize) -> Value {
+    let mut samples: Vec<(String, Vec<f64>)> =
+        qs.iter().map(|q| (q.name.clone(), Vec::new())).collect();
+    for r in 0..runs as u64 {
+        restart_cold(engine);
+        for (n, q) in qs.iter().enumerate() {
+            let url = q.url(&engine.base, pools, n as u64 * 1_000_000 + COLD_SEED + r);
+            samples[n].1.push(get(&url).0);
+        }
+    }
+    summarize(&samples)
+}
+
 fn run_engine(
     engine: Engine,
     startup_ms: f64,
@@ -324,34 +378,52 @@ fn run_engine(
     qs: &[Query],
     pools: &Pools,
     iters: usize,
+    cold_runs: usize,
 ) -> (Value, Vec<Vec<Value>>) {
     let idle_rss = cgroup_u64(&engine, "memory.current", None);
     let docs_per_s = index(&engine, docs);
     let post_index_rss = cgroup_u64(&engine, "memory.current", None);
     let (queries, answers) = measure(&engine, qs, pools, iters);
+    // Peak memory is read before the cold runs: a restart resets it.
+    let mem_peak = cgroup_u64(&engine, "memory.peak", None);
+    let cold = measure_cold(&engine, qs, pools, cold_runs);
     let stats = json!({
         "engine": engine.name,
         "startup_ms": startup_ms,
         "index_docs_per_s": docs_per_s,
         "mem_idle_mb": idle_rss as f64 / 1048576.0,
         "mem_post_index_mb": post_index_rss as f64 / 1048576.0,
-        "mem_peak_mb": cgroup_u64(&engine, "memory.peak", None) as f64 / 1048576.0,
+        "mem_peak_mb": mem_peak as f64 / 1048576.0,
         "queries": queries,
+        "cold_runs": cold_runs,
+        "cold": cold,
     });
     (stats, answers)
 }
 
 fn run_solr(
+    work: &Path,
     docs: &[WikiDoc],
     qs: &[Query],
     pools: &Pools,
     iters: usize,
+    cold_runs: usize,
 ) -> (Value, Vec<Vec<Value>>) {
     let port_env = format!("SOLR_PORT={SOLR_PORT}");
     let heap_env = format!("SOLR_HEAP={SOLR_HEAP}");
+    // Solr's home on the host, owned by the host user like Wayfinder's data
+    // dir, so cold runs can evict it and cleanup can remove it.
+    let data = work.join("solr");
+    std::fs::create_dir_all(&data).expect("create Solr home");
+    let solr_mount = format!("{}:/var/solr", data.display());
+    let user = host_user();
     let (engine, startup_ms) = start(
         "solr",
         &[
+            "-u",
+            &user,
+            "-v",
+            &solr_mount,
             "-e",
             &port_env,
             "-e",
@@ -362,6 +434,7 @@ fn run_solr(
         ],
         format!("http://127.0.0.1:{SOLR_PORT}/solr/{CORE}"),
         "admin/ping?wt=json",
+        data,
     );
     post(
         &format!("{}/schema", engine.base),
@@ -375,7 +448,7 @@ fn run_solr(
              "docValues": true},
         ]}),
     );
-    run_engine(engine, startup_ms, docs, qs, pools, iters)
+    run_engine(engine, startup_ms, docs, qs, pools, iters, cold_runs)
 }
 
 fn run_wayfinder(
@@ -385,17 +458,14 @@ fn run_wayfinder(
     qs: &[Query],
     pools: &Pools,
     iters: usize,
+    cold_runs: usize,
 ) -> (Value, Vec<Vec<Value>>) {
     let bin = root.join("target/release/wayfinder");
     assert!(bin.exists(), "build first: cargo build --release");
     std::fs::write(work.join("schema.toml"), WF_SCHEMA).expect("write schema");
     let bin_mount = format!("{}:/wayfinder:ro", bin.display());
     let work_mount = format!("{}:/work", work.display());
-    let user = format!(
-        "{}:{}",
-        docker_id("-u"),
-        docker_id("-g") // run as the host user so the data dir stays removable
-    );
+    let user = host_user();
     let bind = format!("127.0.0.1:{WF_PORT}");
     let (engine, startup_ms) = start(
         "wayfinder",
@@ -414,8 +484,15 @@ fn run_wayfinder(
         ],
         format!("http://{bind}/wayfinder/{CORE}"),
         "admin/ping?wt=json",
+        work.join("data"),
     );
-    run_engine(engine, startup_ms, docs, qs, pools, iters)
+    run_engine(engine, startup_ms, docs, qs, pools, iters, cold_runs)
+}
+
+/// `uid:gid` of the host user. Containers run as it so their data dirs stay
+/// readable for page-cache eviction and removable afterwards.
+fn host_user() -> String {
+    format!("{}:{}", docker_id("-u"), docker_id("-g"))
 }
 
 fn docker_id(flag: &str) -> String {
@@ -434,6 +511,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n_docs = arg(&args, "--docs", 10_000);
     let iters = arg(&args, "--iters", 200);
+    let cold_runs = arg(&args, "--cold", 5);
     let bench_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = bench_dir.parent().expect("repo root").to_path_buf();
     let ts = SystemTime::now()
@@ -450,8 +528,8 @@ fn main() {
         .collect();
     let docs = wiki::load(&bench_dir.join("data"), n_docs);
     let pools = terms::pools(&docs, TERM_SEED);
-    let (solr, solr_answers) = run_solr(&docs, &qs, &pools, iters);
-    let (wf, wf_answers) = run_wayfinder(&root, &work, &docs, &qs, &pools, iters);
+    let (solr, solr_answers) = run_solr(&work, &docs, &qs, &pools, iters, cold_runs);
+    let (wf, wf_answers) = run_wayfinder(&root, &work, &docs, &qs, &pools, iters, cold_runs);
     let _ = std::fs::remove_dir_all(&work);
 
     let mut failures = Vec::new();
