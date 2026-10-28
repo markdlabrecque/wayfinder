@@ -97,7 +97,7 @@ Known gaps for this goal:
 ### Phase 4: Metrics
 
 - [x] Latency p50 / p95 / p99, warm (after warm-up batch). Over the `--iters` timed requests,
-      every one a different varied query (#442). The first run's numbers are noisy (busy machine).
+      each with a different seed (#442). The first run's numbers are noisy (busy machine).
 - [ ] Latency p50 / p95 / p99, cold: fresh container start plus OS page cache evicted for the
       index files (`posix_fadvise(DONTNEED)`, no root needed), first query of each shape.
 - [ ] Throughput: requests per second at fixed concurrency (e.g. 1, 8, 32).
@@ -293,9 +293,6 @@ been confirmed by replaying the request.
   `hakone` into `hakon`. Wayfinder folds "Håkon" to the same term; Solr keeps `håkon`.
 - `stats`, `q=offseasons` (wf 70, solr 34): the word delimiter. "off-season" also indexes the
   joined form `offseason`, which is the query's stem. Solr indexes only `off` and `season`.
-- `highlight`, `q=airline` (wf 289, solr 287): probably the word delimiter's split at case
-  changes. For example, "AirlineRatings.com" yields the part `airline` in Wayfinder, while Solr
-  keeps it as one token.
 
 `docs/COMPATIBILITY.md` doesn't list accent folding or the word delimiter as deliberate
 differences, so none of these goes in `allowed-diffs.tsv` yet. A person has to decide whether
@@ -312,9 +309,10 @@ differences, so none of these goes in `allowed-diffs.tsv` yet. A person has to d
    and run the missing docs' text through Solr's `/analysis/field`.
 2. **Wayfinder finds more, cause not pinned:** `term` `indicative` (+2), `bool_and`
    `theming AND additional` (+30), `bool_or` `intercepted OR malayalam` (+1), `sort_field`
-   `aurea` (+1), `facet_range` `procreate` (+2), `group` `concomitant` (+4). These go the same
-   way as folding and the word delimiter, but we don't know which tokens cause them. To find out:
-   collect the extra doc ids and analyze their text in both engines.
+   `aurea` (+1), `facet_range` `procreate` (+2), `group` `concomitant` (+4), `highlight`
+   `airline` (+2). These go the same way as folding and the word delimiter, but we don't know
+   which tokens cause them. To find out: collect the extra doc ids and analyze their text in
+   both engines.
 
 ## Session log
 
@@ -328,7 +326,7 @@ differences, so none of these goes in `allowed-diffs.tsv` yet. A person has to d
 - 2026-10-28: Chose varied warm queries (option 1). Implementation started, handed off
   (see "Handoff" above). Committed and pushed.
 - 2026-10-28: Varied-query run at 20k docs (#442) finished end to end: `correct 2/15 | FAIL`.
-  All 13 failures are hit-count differences. Four are explained by `text_en` analyzer
+  All 13 failures are hit-count differences. Three are explained by `text_en` analyzer
   differences, and the rest are listed as follow-ups (see "Varied-query run"). The Phase 2
   terms box and the Phase 4 warm latency and CPU boxes are ticked. The correctness gate still
   fails and nothing was added to `allowed-diffs.tsv`.
