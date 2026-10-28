@@ -61,7 +61,10 @@ fn every_waiver_names_a_real_query_and_a_section_that_explains_it() {
     let listed = waivers();
     assert!(!listed.is_empty(), "no waivers listed");
     for (name, section) in listed {
-        assert!(known.contains(&name.as_str()), "{name} is not in queries.tsv");
+        assert!(
+            known.contains(&name.as_str()),
+            "{name} is not in queries.tsv"
+        );
         let body = section_body(&section)
             .unwrap_or_else(|| panic!("{name}: no section {section:?} in docs/COMPATIBILITY.md"));
         assert!(
