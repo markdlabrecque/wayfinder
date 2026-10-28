@@ -61,34 +61,35 @@ Known gaps for this goal:
 
 ### Phase 2: Query suite (shared features only)
 
-- [ ] Query file `bench/queries.tsv`: name, params, comparison mode.
-- [ ] Pick about 10 to 15 shapes from the Solr-compatible surface both engines support:
-  - [ ] single term
-  - [ ] multi-term OR / AND
-  - [ ] phrase
-  - [ ] edismax with `qf` boosts
-  - [ ] filter query (`fq`)
-  - [ ] sort by field
-  - [ ] deep paging (`start` large)
-  - [ ] field facet
-  - [ ] range facet
-  - [ ] highlighting
-  - [ ] grouping
-  - [ ] stats
-  - [ ] `*:*` match-all with rows
+- [x] Query file `bench/queries.tsv`: name, params, comparison mode.
+- [x] Pick about 10 to 15 shapes from the Solr-compatible surface both engines support:
+  - [x] single term
+  - [x] multi-term OR / AND
+  - [x] phrase
+  - [x] edismax with `qf` boosts
+  - [x] filter query (`fq`)
+  - [x] sort by field
+  - [x] deep paging (`start` large)
+  - [x] field facet
+  - [x] range facet
+  - [x] highlighting
+  - [x] grouping
+  - [x] stats
+  - [x] `*:*` match-all with rows
 - [ ] Query terms sampled from the corpus with a fixed seed: common, mid, and rare terms.
+      (Today: fixed hand-picked terms in `queries.tsv`.)
 
 ### Phase 3: Correctness gate
 
 - [ ] `cargo test` must pass (frozen fixtures in `solr-ref/responses/`).
-- [ ] Per-query comparison against Solr's answer:
-  - [ ] `numFound` equal
-  - [ ] fixed sort: same ids in the same order
-  - [ ] relevance sort: top-10 overlap at or above a threshold (start at 0.8)
-  - [ ] facet buckets and counts equal
-  - [ ] stats values equal (float tolerance)
-  - [ ] highlight: a snippet exists for each doc that should have one
-- [ ] Allowed-differences file `bench/allowed-diffs.tsv`, each line pointing at a section of
+- [x] Per-query comparison against Solr's answer:
+  - [x] `numFound` equal
+  - [x] fixed sort: same ids in the same order
+  - [x] relevance sort: top-10 overlap at or above a threshold (start at 0.8)
+  - [x] facet buckets and counts equal
+  - [x] stats values equal (float tolerance)
+  - [x] highlight: a snippet exists for each doc that should have one
+- [x] Allowed-differences file `bench/allowed-diffs.tsv`, each line pointing at a section of
       `docs/COMPATIBILITY.md`. Anything else that differs fails the run.
 - [ ] Wayfinder answers are hashed per query. A hash change is flagged even when Solr
       comparison still passes, so the loop can't drift quietly.
@@ -173,11 +174,29 @@ Detail lands in `bench/out/<ts>.json` (gitignored).
 - Solr gets only 20 warm-up requests, so its JIT is not fully warm. Phase 4 needs a real
   warm-up (time- or count-based, per query).
 - One query only, so the score is not meaningful until Phase 2 lands.
-- `check()` in `wf-bench.rs` has no unit test yet. Add one (and mutation-test it) in Phase 3.
+
+- **Count mismatches to investigate** (20k docs): `bool_or` wf=2988 solr=2987, `edismax`
+  wf=2696 solr=2693. Likely analyzer differences (`text_en` stemming/tokenizing). Find the
+  extra doc ids, then either fix Wayfinder or list them in `allowed-diffs.tsv` with the
+  `docs/COMPATIBILITY.md` section that covers it.
+- **Warm runs repeat one identical URL**, so Solr answers from its queryResultCache
+  (~0.08 ms) while Wayfinder has no result cache. See open questions.
 
 ## Open questions
 
-- (fill in as they come up)
+- **What does "warm" mean for scoring?** Today it is the same URL repeated, which is the best
+  case for Solr's result cache. Real traffic varies. Option: warm = rotate through many
+  different terms per query shape (caches warm, results not reused), and keep the repeated
+  URL as a separate "cache hit" metric.
+
+## First full-suite findings (20k docs, 2026-10-28)
+
+`score 2.666 | p50 8.08 p99 6.41 cpu 6.74 mem 0.14 | correct 14/16 | FAIL`
+
+Biggest gaps (Wayfinder / Solr, warm p50): `match_all` sorted by `id` 1972x (140 ms),
+`sort_field` 598x (50 ms), `range_query` 95x, `deep_page` 78x, `group` 10x. These all sort or
+scan by field values, so they share a likely root cause. Wayfinder wins every cold first query
+and uses ~7x less memory.
 
 ## Session log
 
@@ -186,3 +205,5 @@ Detail lands in `bench/out/<ts>.json` (gitignored).
   (2k docs, 100 iters): `score 0.029 ... correct 1/1 | PASS`.
 - 2026-10-28: Phase 1 done. First real-data run (20k Wikipedia docs, 200 iters):
   `score 0.194 | p50 0.45 p99 0.18 cpu 0.12 mem 0.15 | correct 1/1 | PASS`.
+- 2026-10-28: Phases 2 and 3 mostly done. 16-query suite, `src/check.rs` gate (tests in
+  `tests/check.rs`, all 10 mutations caught), `allowed-diffs.tsv` (empty).

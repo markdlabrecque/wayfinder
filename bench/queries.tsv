@@ -1,0 +1,27 @@
+# wf-bench query suite (issue #440). One query per line:
+#   name <TAB> check <TAB> params
+# check = how Wayfinder's answer is compared with Solr's (see src/check.rs):
+#   ranked  numFound equal, top results mostly overlap (scoring may differ)
+#   exact   numFound equal, same ids in the same order
+#   facet   numFound equal, facet field/range counts equal
+#   stats   numFound equal, stats values equal
+#   group   group values and per-group counts equal
+#   hl      numFound equal, top ids overlap, every returned doc has a snippet
+# params are written unencoded; wf-bench percent-encodes each value.
+# Changing this file changes the benchmark: never edit it from the hill-climb loop.
+term_common	ranked	q=history&df=body&rows=10&fl=id
+term_rare	ranked	q=harpsichord&df=body&rows=10&fl=id
+bool_and	ranked	q=river AND bridge&df=body&rows=10&fl=id
+bool_or	ranked	q=river OR bridge&df=body&rows=10&fl=id
+phrase	ranked	q="world war"&df=body&rows=10&fl=id
+edismax	ranked	q=french revolution&defType=edismax&qf=title^3 body&rows=10&fl=id
+filter	ranked	q=history&df=body&fq=len_bucket:long&rows=10&fl=id
+sort_field	exact	q=history&df=body&sort=len desc,id asc&rows=10&fl=id
+match_all	exact	q=*:*&sort=id asc&rows=10&fl=id
+deep_page	exact	q=*:*&sort=id asc&start=5000&rows=10&fl=id
+range_query	exact	q=len:[5000 TO 6000]&sort=id asc&rows=10&fl=id
+facet_field	facet	q=history&df=body&rows=0&facet=true&facet.field=initial&facet.limit=10
+facet_range	facet	q=*:*&rows=0&facet=true&facet.range=len&facet.range.start=0&facet.range.end=100000&facet.range.gap=10000
+stats	stats	q=history&df=body&rows=0&stats=true&stats.field=len
+group	group	q=history&df=body&group=true&group.field=len_bucket&rows=4&fl=id
+highlight	hl	q=volcano&df=body&hl=true&hl.fl=body&rows=5&fl=id

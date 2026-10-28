@@ -18,6 +18,7 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use wayfinder_bench::check::check;
 use wayfinder_bench::wiki::{self, WikiDoc};
 
 // ponytail: fixed core set and memory cap for both engines. Phase 6 of
@@ -31,7 +32,10 @@ const CORE: &str = "content";
 // Per-request byte cap for indexing. Article sizes vary a lot, so batches
 // are cut by size, not count. Under Wayfinder's 10 MB default body limit.
 const BATCH_BYTES: usize = 4_000_000;
-const WARMUP: usize = 20;
+// Warm-up per query: at least this many requests and this long, so Solr's
+// JIT has compiled the hot path before anything is timed.
+const WARMUP_MIN: usize = 200;
+const WARMUP_TIME: Duration = Duration::from_secs(2);
 // Pinned so a re-run measures the same Solr and the same Wayfinder runtime.
 const SOLR_IMAGE: &str =
     "solr@sha256:9ab3185bfc8e18e1a0c0d20083f783ec3ef2833b8add196bd0ebddc929525970";
@@ -79,14 +83,50 @@ fast = true
 "#;
 
 struct Query {
-    name: &'static str,
-    params: &'static str,
+    name: String,
+    mode: String,
+    /// Already percent-encoded, ready to append to `/select?`.
+    params: String,
 }
 
-const QUERIES: &[Query] = &[Query {
-    name: "edismax_term",
-    params: "q=history&defType=edismax&qf=title+body&rows=10&fl=id",
-}];
+fn encode(v: &str) -> String {
+    v.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// Reads `name<TAB>mode<TAB>params` lines, skipping blanks and `#` comments.
+fn tsv(path: &Path) -> Vec<Vec<String>> {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+        .map(|l| l.split('\t').map(str::to_string).collect())
+        .collect()
+}
+
+fn queries(path: &Path) -> Vec<Query> {
+    tsv(path)
+        .into_iter()
+        .map(|cols| {
+            let [name, mode, params] = <[String; 3]>::try_from(cols).expect("3 columns");
+            let params = params
+                .split('&')
+                .map(|kv| {
+                    let (k, v) = kv.split_once('=').expect("key=value");
+                    format!("{k}={}", encode(v))
+                })
+                .collect::<Vec<_>>()
+                .join("&");
+            Query { name, mode, params }
+        })
+        .collect()
+}
 
 /// A running engine container. Removed on drop, so a panic mid-run never
 /// leaves a container holding the port.
@@ -223,14 +263,17 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
 
 /// Measures every query on one engine. Returns per-query stats plus the
 /// answer from the first (cold) request, for the correctness check.
-fn measure(engine: &Engine, iters: usize) -> Vec<Value> {
-    QUERIES
+fn measure(engine: &Engine, queries: &[Query], iters: usize) -> Vec<Value> {
+    queries
         .iter()
         .map(|q| {
             let url = format!("{}/select?{}&wt=json", engine.base, q.params);
             let (cold_ms, answer) = get(&url);
-            for _ in 0..WARMUP {
+            let t0 = Instant::now();
+            let mut n = 0;
+            while n < WARMUP_MIN || t0.elapsed() < WARMUP_TIME {
                 get(&url);
+                n += 1;
             }
             let cpu0 = cgroup_u64(engine, "cpu.stat", Some("usage_usec"));
             let mut lat: Vec<f64> = (0..iters).map(|_| get(&url).0).collect();
@@ -249,11 +292,17 @@ fn measure(engine: &Engine, iters: usize) -> Vec<Value> {
         .collect()
 }
 
-fn run_engine(engine: Engine, startup_ms: f64, docs: &[WikiDoc], iters: usize) -> Value {
+fn run_engine(
+    engine: Engine,
+    startup_ms: f64,
+    docs: &[WikiDoc],
+    qs: &[Query],
+    iters: usize,
+) -> Value {
     let idle_rss = cgroup_u64(&engine, "memory.current", None);
     let docs_per_s = index(&engine, docs);
     let post_index_rss = cgroup_u64(&engine, "memory.current", None);
-    let queries = measure(&engine, iters);
+    let queries = measure(&engine, qs, iters);
     json!({
         "engine": engine.name,
         "startup_ms": startup_ms,
@@ -265,7 +314,7 @@ fn run_engine(engine: Engine, startup_ms: f64, docs: &[WikiDoc], iters: usize) -
     })
 }
 
-fn run_solr(docs: &[WikiDoc], iters: usize) -> Value {
+fn run_solr(docs: &[WikiDoc], qs: &[Query], iters: usize) -> Value {
     let port_env = format!("SOLR_PORT={SOLR_PORT}");
     let heap_env = format!("SOLR_HEAP={SOLR_HEAP}");
     let (engine, startup_ms) = start(
@@ -294,10 +343,10 @@ fn run_solr(docs: &[WikiDoc], iters: usize) -> Value {
              "docValues": true},
         ]}),
     );
-    run_engine(engine, startup_ms, docs, iters)
+    run_engine(engine, startup_ms, docs, qs, iters)
 }
 
-fn run_wayfinder(root: &Path, work: &Path, docs: &[WikiDoc], iters: usize) -> Value {
+fn run_wayfinder(root: &Path, work: &Path, docs: &[WikiDoc], qs: &[Query], iters: usize) -> Value {
     let bin = root.join("target/release/wayfinder");
     assert!(bin.exists(), "build first: cargo build --release");
     std::fs::write(work.join("schema.toml"), WF_SCHEMA).expect("write schema");
@@ -327,32 +376,12 @@ fn run_wayfinder(root: &Path, work: &Path, docs: &[WikiDoc], iters: usize) -> Va
         format!("http://{bind}/wayfinder/{CORE}"),
         "admin/ping?wt=json",
     );
-    run_engine(engine, startup_ms, docs, iters)
+    run_engine(engine, startup_ms, docs, qs, iters)
 }
 
 fn docker_id(flag: &str) -> String {
     let out = Command::new("id").arg(flag).output().expect("id");
     String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
-fn ids(answer: &Value) -> Vec<String> {
-    answer["response"]["docs"]
-        .as_array()
-        .map(|docs| docs.iter().map(|d| d["id"].to_string()).collect())
-        .unwrap_or_default()
-}
-
-/// Answers "make sense" when the hit count matches and the relevance-ranked
-/// top results mostly agree. Exact order is not required: scoring differs.
-fn check(wf: &Value, solr: &Value) -> Option<String> {
-    let (nw, ns) = (&wf["response"]["numFound"], &solr["response"]["numFound"]);
-    if nw != ns {
-        return Some(format!("numFound wf={nw} solr={ns}"));
-    }
-    let (iw, is) = (ids(wf), ids(solr));
-    let overlap = iw.iter().filter(|id| is.contains(id)).count();
-    let need = (is.len() as f64 * 0.8).ceil() as usize;
-    (overlap < need).then(|| format!("top-{} overlap {overlap}", is.len()))
 }
 
 fn arg(args: &[String], flag: &str, default: usize) -> usize {
@@ -375,25 +404,32 @@ fn main() {
     let work = bench_dir.join(format!("out/work-{ts}"));
     std::fs::create_dir_all(&work).expect("create work dir");
 
+    let qs = queries(&bench_dir.join("queries.tsv"));
+    let allowed: Vec<String> = tsv(&bench_dir.join("allowed-diffs.tsv"))
+        .into_iter()
+        .map(|cols| cols[0].clone())
+        .collect();
     let docs = wiki::load(&bench_dir.join("data"), n_docs);
-    let solr = run_solr(&docs, iters);
-    let wf = run_wayfinder(&root, &work, &docs, iters);
+    let solr = run_solr(&docs, &qs, iters);
+    let wf = run_wayfinder(&root, &work, &docs, &qs, iters);
     let _ = std::fs::remove_dir_all(&work);
 
     let mut failures = Vec::new();
+    let mut waived = Vec::new();
     let mut p50 = Vec::new();
     let mut p99 = Vec::new();
     let mut cpu = Vec::new();
-    for (qw, qs) in wf["queries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .zip(solr["queries"].as_array().unwrap())
-    {
-        if let Some(why) = check(&qw["answer"], &qs["answer"]) {
-            failures.push(format!("{}: {why}", qw["query"].as_str().unwrap()));
+    let pairs = wf["queries"].as_array().unwrap().iter();
+    for ((qw, qsolr), q) in pairs.zip(solr["queries"].as_array().unwrap()).zip(&qs) {
+        if let Err(why) = check(&q.mode, &qw["answer"], &qsolr["answer"]) {
+            let line = format!("{}: {why}", q.name);
+            if allowed.contains(&q.name) {
+                waived.push(line);
+            } else {
+                failures.push(line);
+            }
         }
-        let ratio = |k: &str| qw[k].as_f64().unwrap() / qs[k].as_f64().unwrap();
+        let ratio = |k: &str| qw[k].as_f64().unwrap() / qsolr[k].as_f64().unwrap();
         p50.push(ratio("p50"));
         p99.push(ratio("p99"));
         cpu.push(ratio("cpu_ms_per_1k"));
@@ -401,12 +437,12 @@ fn main() {
     let geo = |v: &[f64]| (v.iter().map(|x| x.ln()).sum::<f64>() / v.len() as f64).exp();
     let mem = wf["mem_peak_mb"].as_f64().unwrap() / solr["mem_peak_mb"].as_f64().unwrap();
     let score = geo(&[geo(&p50), geo(&p99), geo(&cpu), mem]);
-    let n = QUERIES.len();
+    let n = qs.len();
 
     let out = bench_dir.join(format!("out/{ts}.json"));
     let report = json!({
         "ts": ts, "docs": n_docs, "iters": iters, "cpuset": CPUSET, "memory": MEMORY,
-        "score": score, "failures": failures, "solr": solr, "wayfinder": wf,
+        "score": score, "failures": failures, "waived": waived, "solr": solr, "wayfinder": wf,
     });
     std::fs::write(&out, serde_json::to_string_pretty(&report).unwrap()).expect("write report");
 
@@ -419,6 +455,9 @@ fn main() {
         if failures.is_empty() { "PASS" } else { "FAIL" },
         out.strip_prefix(&root).unwrap_or(&out).display(),
     );
+    for w in &waived {
+        println!("  waived {w}");
+    }
     for f in &failures {
         println!("  FAIL {f}");
     }
