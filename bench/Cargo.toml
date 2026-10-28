@@ -4,13 +4,16 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# Benchmark tooling (issue #13): corpus generator + results aggregator that
-# produce bench/RESULTS.md. Deliberately a standalone crate, not a
-# workspace member of the root `wayfinder` package -- this tooling is not
-# part of the served product and has no business linking against it.
+# Benchmark tooling. Standalone crate, not a workspace member of the root
+# `wayfinder` package: this tooling is not part of the served product and has
+# no business linking against it. The corpus generator and results renderer
+# (issue #13) stay std-only; the `wf-bench` driver (issue #440) needs an HTTP
+# client and a JSON parser to compare answers, hence the two dependencies.
 
 [lib]
 name = "wayfinder_bench"
 path = "src/lib.rs"
 
 [dependencies]
+serde_json = "1.0.154"
+ureq = { version = "2.12", default-features = false }
