@@ -855,9 +855,7 @@ fn is_ascii_vowel(byte: u8) -> bool {
 }
 
 fn porter_terminal_y(text: &mut String) {
-    if text.is_ascii()
-        && text.ends_with('y')
-        && text[..text.len() - 1].bytes().any(is_ascii_vowel)
+    if text.is_ascii() && text.ends_with('y') && text[..text.len() - 1].bytes().any(is_ascii_vowel)
     {
         text.pop();
         text.push('i');
