@@ -2,3 +2,5 @@
 #   query-name <TAB> docs/COMPATIBILITY.md section that explains why
 # A listed query's check failure is reported as "waived", not a failure.
 # Never edit this from the hill-climb loop: a human decides what may differ.
+bool_or	Deliberate differences
+edismax	Deliberate differences
