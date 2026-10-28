@@ -47,6 +47,7 @@ use wayfinder_bench::check::check;
 use wayfinder_bench::cold::{evict_page_cache, summarize};
 use wayfinder_bench::footprint::{dir_size_bytes, time_to_first_search};
 use wayfinder_bench::freshness;
+use wayfinder_bench::index_stats::index_stats;
 use wayfinder_bench::load::{self, LEVELS, run_levels};
 use wayfinder_bench::memory::{self, MemStat, Sampler, parse_memory_stat};
 use wayfinder_bench::machine::{self, EnvInfo};
@@ -332,10 +333,12 @@ fn post(url: &str, body: &Value) {
     }
 }
 
-fn index(engine: &Engine, docs: &[WikiDoc]) -> f64 {
+/// Indexes `docs` in `BATCH_BYTES` batches and returns the `index_*` stats,
+/// timed from the first batch to the final commit.
+fn index(engine: &Engine, docs: &[WikiDoc]) -> Value {
     let url = format!("{}/update?commit=false", engine.base);
     let t0 = Instant::now();
-    let (mut batch, mut bytes) = (Vec::new(), 0);
+    let (mut batch, mut bytes, mut total) = (Vec::new(), 0, 0);
     for d in docs {
         let doc = doc_json(d);
         let size = doc.to_string().len();
@@ -345,12 +348,13 @@ fn index(engine: &Engine, docs: &[WikiDoc]) -> f64 {
         }
         batch.push(doc);
         bytes += size;
+        total += size;
     }
     if !batch.is_empty() {
         post(&url, &Value::Array(batch));
     }
     post(&format!("{}/update?commit=true", engine.base), &json!([]));
-    docs.len() as f64 / t0.elapsed().as_secs_f64()
+    index_stats(docs.len() as u64, total as u64, t0.elapsed().as_secs_f64())
 }
 
 fn get(url: &str) -> (f64, Value) {
@@ -452,7 +456,7 @@ fn run_engine(
     let cgroup = engine.cgroup.clone();
     let sampler = Sampler::start(move || mem_stat(&cgroup), MEM_SAMPLE);
     let idle_mem = mem_stat(&engine.cgroup);
-    let docs_per_s = index(&engine, docs);
+    let indexing = index(&engine, docs);
     let post_index_mem = mem_stat(&engine.cgroup);
     let (queries, answers) = measure(&engine, qs, pools, iters);
     // After the queries, so the extra docs never show up in compared answers.
@@ -471,7 +475,6 @@ fn run_engine(
         "engine": engine.name,
         "startup_ms": startup_ms,
         "index_size_mb": index_bytes as f64 / 1048576.0,
-        "index_docs_per_s": docs_per_s,
         "queries": queries,
         "load": load,
         "cold_runs": cold_runs,
@@ -480,6 +483,9 @@ fn run_engine(
     });
     let mem = memory::to_json_with_total(&idle_mem, &post_index_mem, mem_peak, mem_peak_total);
     stats.as_object_mut().unwrap().extend(mem.as_object().unwrap().clone());
+    if let (Some(s), Value::Object(i)) = (stats.as_object_mut(), indexing) {
+        s.extend(i);
+    }
     (stats, answers)
 }
 

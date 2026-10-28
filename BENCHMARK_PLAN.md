@@ -103,6 +103,8 @@ Known gaps for this goal:
 - [ ] CPU seconds per 1,000 queries (from cgroup `cpu.stat`). This is the main efficiency number.
 - [ ] Memory: idle RSS, post-index RSS, peak RSS under load (cgroup `memory.current` / `memory.peak`).
 - [ ] Indexing throughput (docs per second, full corpus, same batch size for both).
+      Code done (#449): `wf-bench` records `index_docs_per_s` and `index_bytes_per_s` for both
+      engines. The live full-corpus run is deferred to #441, per the owner's decision.
 - [ ] Commit-to-visible latency (add a doc, poll until searchable).
 - [ ] Index size on disk.
 - [ ] Startup time to first successful query.
