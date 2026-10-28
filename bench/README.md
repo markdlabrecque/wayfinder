@@ -43,6 +43,15 @@ after every change you want measured.
 | `--iters N` | 200 | Timed requests per query shape, after warm-up. |
 | `--cold N` | 5 | Cold restarts per engine. Each one times the first request of every shape. |
 | `--force` | off | Run even when the machine is busy. The warning is saved in the JSON. |
+| `--noise K` | off | Measure the same Wayfinder build K times (at least 2) and save each metric's min and max to `bench/out/noise.json`. Prints the score's spread and exits. |
+
+### Noise
+
+The same build scores a little differently each run. Run `--noise 5` on the
+accepted build to measure how much. After that, every run labels its change
+from the accepted score: `win` or `loss` only when the change is bigger than
+the score's spread (max minus min) over the noise runs, `noise` otherwise.
+Before `noise.json` exists the label reads `noise not measured`.
 
 ### What a run does
 
