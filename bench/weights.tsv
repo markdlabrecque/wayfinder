@@ -1,0 +1,35 @@
+# How much each metric counts in the wf-bench score (issue #452).
+# metric<TAB>weight. The score is the weighted geometric mean of each metric's
+# Wayfinder/Solr ratio (inverted for throughput), so below 1.0 = Wayfinder wins.
+# A metric measured per query shape or load level is first averaged (geomean)
+# across them, so it counts once. Every metric wf-bench scores must be listed
+# here, and nothing else. Left out on purpose: the disk-cache memory figures
+# (#448) and index_secs/index_bytes_per_s, which repeat index_docs_per_s.
+#
+# Per query shape, warm, timed requests.
+p50	2
+p95	1
+p99	4
+cpu_ms_per_1k	4
+# The same URL repeated, so caches are hot.
+repeat_p50	1
+# First request of each shape right after indexing.
+first_ms	1
+# First request of each shape after a restart with an empty page cache.
+cold_p50	1
+cold_p95	1
+cold_p99	1
+# Searches at once, per concurrency level.
+load_rps	2
+load_p50	1
+load_p95	1
+load_p99	2
+# Per engine.
+startup_ms	1
+index_size_mb	1
+index_docs_per_s	1
+add_to_searchable_p50_ms	1
+add_to_searchable_p95_ms	1
+mem_idle_mb	1
+mem_post_index_mb	1
+mem_peak_mb	2
