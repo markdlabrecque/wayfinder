@@ -82,10 +82,12 @@ pub fn load_noise(path: &Path) -> Result<Option<Vec<(String, Spread)>>, String> 
     v.as_array()
         .ok_or_else(bad)?
         .iter()
-        .map(|r| match (r["metric"].as_str(), r["min"].as_f64(), r["max"].as_f64()) {
-            (Some(n), Some(min), Some(max)) => Ok((n.to_string(), Spread { min, max })),
-            _ => Err(bad()),
-        })
+        .map(
+            |r| match (r["metric"].as_str(), r["min"].as_f64(), r["max"].as_f64()) {
+                (Some(n), Some(min), Some(max)) => Ok((n.to_string(), Spread { min, max })),
+                _ => Err(bad()),
+            },
+        )
         .collect::<Result<_, _>>()
         .map(Some)
 }

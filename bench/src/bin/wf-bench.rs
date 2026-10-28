@@ -884,7 +884,10 @@ fn main() {
                 let (wf, _) = run_wayfinder(&root, &dir, &docs, &qs, &pools, iters, cold_runs);
                 let (per_metric, score) =
                     score_run(&wf, &solr, &weights).unwrap_or_else(|e| panic!("score: {e}"));
-                eprintln!("wf-bench: noise run {}/{noise_runs}: score {score:.3}", i + 1);
+                eprintln!(
+                    "wf-bench: noise run {}/{noise_runs}: score {score:.3}",
+                    i + 1
+                );
                 std::iter::once(("score".to_string(), score))
                     .chain(per_metric)
                     .collect()
@@ -894,7 +897,10 @@ fn main() {
         let spread = noise::measure_noise(&runs).unwrap_or_else(|e| panic!("noise: {e}"));
         noise::save_noise(&noise_path, &spread).expect("save noise");
         let s = spread[0].1;
-        let shown = noise_path.strip_prefix(&root).unwrap_or(&noise_path).display();
+        let shown = noise_path
+            .strip_prefix(&root)
+            .unwrap_or(&noise_path)
+            .display();
         println!(
             "noise over {noise_runs} runs: score {:.3}-{:.3} (width {:.3}) | {shown}",
             s.min,
