@@ -40,7 +40,7 @@ pub fn hash_hex(bytes: &[u8]) -> String {
     format!("{h:016x}")
 }
 
-fn read_json(path: &Path) -> Result<Option<Value>, String> {
+pub(crate) fn read_json(path: &Path) -> Result<Option<Value>, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -51,7 +51,7 @@ fn read_json(path: &Path) -> Result<Option<Value>, String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn write_json(path: &Path, v: &Value) -> Result<(), String> {
+pub(crate) fn write_json(path: &Path, v: &Value) -> Result<(), String> {
     std::fs::write(path, serde_json::to_string_pretty(v).unwrap())
         .map_err(|e| format!("{}: {e}", path.display()))
 }
