@@ -87,9 +87,11 @@ fn instructions_use_the_noise_verdict_to_decide_keep_or_revert() {
 #[test]
 fn instructions_give_a_commit_message_format_carrying_the_score_change() {
     let doc = tuning();
-    let in_fence = doc.split("```").skip(1).step_by(2).any(|block| {
-        block.contains("->") && block.to_ascii_lowercase().contains("score")
-    });
+    let in_fence = doc
+        .split("```")
+        .skip(1)
+        .step_by(2)
+        .any(|block| block.contains("->") && block.to_ascii_lowercase().contains("score"));
     assert!(
         in_fence,
         "TUNING.md should show a commit message in a fenced block with the score change as `old -> new`"
