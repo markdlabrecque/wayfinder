@@ -41,8 +41,8 @@ after every change you want measured.
 |---|---|---|
 | `--docs N` | 10000 | Articles indexed into each engine. Use 10000 for a quick check and 500000 for a full run. |
 | `--iters N` | 200 | Timed requests per query shape, after warm-up. |
-| `--cold N` | 5 | Cold restarts per engine. Each one times the first request of every shape. |
-| `--force` | off | Run even when the machine is busy. The warning is saved in the JSON. |
+| `--cold N` | 5 | Cold restarts per engine, at least 1. Each one times the first request of every shape. |
+| `--force` | off | Run even when the machine is busy. The warning is saved in the JSON, and Solr's numbers are not saved as the baseline. |
 | `--noise K` | off | Measure the same Wayfinder build K times (at least 2) and save each metric's min and max to `bench/out/noise.json`. Prints the score's spread and exits. |
 | `--accept` | off | Save a passing run's score, answer fingerprints and protected-file hashes as the baseline. |
 | `--accept-protected` | off | For a person only: save the protected files' hashes as they stand, after reviewing a change to them. Measures nothing. |
@@ -62,7 +62,10 @@ The same build scores a little differently each run. Run `--noise 5` on the
 accepted build to measure how much. After that, every run labels its change
 from the accepted score: `win` or `loss` only when the change is bigger than
 the score's spread (max minus min) over the noise runs, `noise` otherwise.
-Before `noise.json` exists the label reads `noise not measured`.
+`noise.json` records the `--docs`, `--iters` and `--cold` values and the Solr
+baseline key it was measured under, and only a run with the same ones uses
+it. Before `noise.json` exists, or when the settings differ, the label reads
+`noise not measured`.
 
 ### Tuning loop
 
@@ -100,8 +103,8 @@ if any query fails the correctness check.
 
 The full detail goes to `bench/out/<unix-ts>.json` (gitignored): every metric
 for both engines, each metric's Wayfinder/Solr ratio under `ratios`, the
-failures, and the environment (kernel, CPU, core split, Wayfinder git sha,
-Solr version and image).
+failures, and the environment (kernel, CPU, core split, Wayfinder commit from
+`git describe --always --dirty`, Solr version and image).
 
 ## Score
 
@@ -118,7 +121,7 @@ means Wayfinder wins.
 | Warm latency p50/p95/p99 | Per query shape, after 300 warm-up requests. Each request uses new terms, so Solr's result cache cannot answer it. |
 | Repeat latency | The same URL 100 times, so caches are hot. |
 | First query | The first request of each shape right after indexing. |
-| Cold latency p50/p95/p99 | Stop the container, evict its index from the page cache (`posix_fadvise`, no root needed), start it again, and time the first request of each shape. |
+| Cold latency p50/p95/p99 | Stop the container, evict its index from the page cache (`posix_fadvise`, no root needed), start it again, and time the first request of each shape. Only the first shape is fully cold; the rest run after it on the same restart. The JSON says so under `cold_note`. |
 | CPU per 1,000 queries | `usage_usec` from the container's `cpu.stat`. |
 | Load | Searches per second and latency with 1, 8 and 32 users at once. |
 | Startup | Container start to the first answered search. |

@@ -8,9 +8,10 @@ Tick boxes as pieces land. Each phase ends in something that runs end to end.
 
 ## Starting point
 
-`bench/` already exists (issue #13): a standalone pure-std crate with a deterministic synthetic
-corpus, plus `bench/run.sh` (bash + curl). It measures startup RSS, post-index RSS, RSS under
-load, cold start, warm and cold p95, image size, and index size. Last run: `bench/RESULTS.md`.
+When this plan started, `bench/` (issue #13) was a standalone pure-std crate with a
+deterministic synthetic corpus, plus a bash + curl script. It measured startup RSS, post-index
+RSS, RSS under load, cold start, warm and cold p95, image size, and index size. The script and
+its results page are gone (#459, see Phase 8); `wf-bench` replaces them.
 
 Known gaps for this goal:
 
@@ -103,7 +104,8 @@ Known gaps for this goal:
 - [ ] Throughput: requests per second at fixed concurrency (e.g. 1, 8, 32).
 - [x] CPU seconds per 1,000 queries (from cgroup `cpu.stat`). This is the main efficiency number.
       `cpu_ms_per_1k` covers only the timed varied requests, not warm-up or repeats (#442).
-- [ ] Memory: idle RSS, post-index RSS, peak RSS under load (cgroup `memory.current` / `memory.peak`).
+- [ ] Memory: idle, post-index, and peak under load, as `anon` from the cgroup's `memory.stat`
+      so disk cache does not count (#448). `file` and `memory.peak` are reported apart.
 - [ ] Indexing throughput (docs per second, full corpus, same batch size for both).
       Code done (#449): `wf-bench` records `index_docs_per_s` and `index_bytes_per_s` for both
       engines. The live full-corpus run is deferred to #441, per the owner's decision.
@@ -183,8 +185,8 @@ Detail lands in `bench/out/<ts>.json` (gitignored).
 
 ## Known issues to fix in later phases
 
-- Memory uses cgroup `memory.current`, which counts page cache (Solr idles at ~2.4 GB). Phase 4
-  should split anon memory from file cache (`memory.stat`).
+- Fixed (#448): memory used cgroup `memory.current`, which counts page cache (Solr idled at
+  ~2.4 GB). It now reads `anon` from `memory.stat`.
 - Solr gets only 20 warm-up requests, so its JIT is not fully warm. Phase 4 needs a real
   warm-up (time- or count-based, per query).
 - One query only, so the score is not meaningful until Phase 2 lands.
