@@ -79,7 +79,9 @@ use wayfinder_bench::baseline::{self, SolrKey};
 use wayfinder_bench::check::check;
 use wayfinder_bench::cold::{evict_page_cache, summarize, validate_cold_runs};
 use wayfinder_bench::fingerprint;
-use wayfinder_bench::footprint::{dir_size_bytes, time_to_first_search};
+use wayfinder_bench::footprint::{
+    dir_size_bytes, solr_index_dir, time_to_first_search, wayfinder_index_dir,
+};
 use wayfinder_bench::freshness;
 use wayfinder_bench::index_stats::index_stats;
 use wayfinder_bench::load::{self, LEVELS, run_levels};
@@ -557,8 +559,7 @@ fn run_solr(
     let data = work.join("solr");
     std::fs::create_dir_all(&data).expect("create Solr home");
     let solr_mount = format!("{}:/var/solr", data.display());
-    // Lucene's index only, not the tlog (#253).
-    let index = data.join(format!("data/{CORE}/data/index"));
+    let index = solr_index_dir(work, CORE);
     let user = host_user();
     let (engine, startup_ms) = start(
         "solr",
@@ -648,7 +649,7 @@ fn run_wayfinder(
         format!("http://{bind}/wayfinder/{CORE}"),
         "admin/ping?wt=json",
         work.join("data"),
-        work.join("data"),
+        wayfinder_index_dir(work),
     );
     let commit = format!(
         "commitWithin={}ms on each add; default config, no autocommit",
@@ -705,100 +706,13 @@ fn tests_pass(root: &Path) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// Every scored metric as a Wayfinder/Solr ratio (#452), named as in
-/// `bench/weights.tsv`. Metrics measured per query shape or load level give
-/// one ratio each; the score folds them into one per metric.
-fn ratios(wf: &Value, solr: &Value) -> Result<Vec<(&'static str, f64)>, String> {
-    fn push(
-        out: &mut Vec<(&'static str, f64)>,
-        name: &'static str,
-        w: &Value,
-        s: &Value,
-        higher_is_better: bool,
-    ) -> Result<(), String> {
-        let num = |v: &Value, engine: &str| {
-            v.as_f64()
-                .ok_or_else(|| format!("{name}: {engine} has no number"))
-        };
-        let r = score::ratio(num(w, "wayfinder")?, num(s, "solr")?, higher_is_better)
-            .map_err(|e| format!("{name}: {e}"))?;
-        out.push((name, r));
-        Ok(())
-    }
-    let rows = |v: &Value, k: &str| v[k].as_array().cloned().unwrap_or_default();
-    let mut out = Vec::new();
-    for (qw, qs) in rows(wf, "queries").iter().zip(&rows(solr, "queries")) {
-        for (name, key) in [
-            ("p50", "p50"),
-            ("p95", "p95"),
-            ("p99", "p99"),
-            ("cpu_ms_per_1k", "cpu_ms_per_1k"),
-            ("repeat_p50", "repeat_p50"),
-            ("first_ms", "cold_ms"),
-        ] {
-            push(&mut out, name, &qw[key], &qs[key], false)?;
-        }
-    }
-    for (cw, cs) in rows(wf, "cold").iter().zip(&rows(solr, "cold")) {
-        for (name, key) in [
-            ("cold_p50", "p50"),
-            ("cold_p95", "p95"),
-            ("cold_p99", "p99"),
-        ] {
-            push(&mut out, name, &cw[key], &cs[key], false)?;
-        }
-    }
-    for (lw, ls) in rows(wf, "load").iter().zip(&rows(solr, "load")) {
-        push(&mut out, "load_rps", &lw["rps"], &ls["rps"], true)?;
-        for (name, key) in [
-            ("load_p50", "p50"),
-            ("load_p95", "p95"),
-            ("load_p99", "p99"),
-        ] {
-            push(&mut out, name, &lw[key], &ls[key], false)?;
-        }
-    }
-    for name in [
-        "startup_ms",
-        "index_size_mb",
-        "mem_idle_mb",
-        "mem_post_index_mb",
-        "mem_peak_mb",
-    ] {
-        push(&mut out, name, &wf[name], &solr[name], false)?;
-    }
-    push(
-        &mut out,
-        "index_docs_per_s",
-        &wf["index_docs_per_s"],
-        &solr["index_docs_per_s"],
-        true,
-    )?;
-    let (fw, fs) = (&wf["add_to_searchable"], &solr["add_to_searchable"]);
-    push(
-        &mut out,
-        "add_to_searchable_p50_ms",
-        &fw["p50_ms"],
-        &fs["p50_ms"],
-        false,
-    )?;
-    push(
-        &mut out,
-        "add_to_searchable_p95_ms",
-        &fw["p95_ms"],
-        &fs["p95_ms"],
-        false,
-    )?;
-    Ok(out)
-}
-
 /// Each metric's ratio and the weighted score for one Wayfinder run.
 fn score_run(
     wf: &Value,
     solr: &Value,
     weights: &score::Weights,
 ) -> Result<(Vec<(String, f64)>, f64), String> {
-    let r = ratios(wf, solr)?;
+    let r = score::ratios(wf, solr)?;
     Ok((
         score::metric_ratios(&r)?,
         score::weighted_geomean(&r, weights)?,
@@ -912,37 +826,21 @@ fn main() {
                 .flat_map(|d| [d.id.as_bytes(), d.title.as_bytes(), d.body.as_bytes()]),
         ),
     };
-    let cached = baseline::load_solr_json(&solr_path, &solr_key)
-        .unwrap_or_else(|e| panic!("{e} (delete it to re-measure Solr)"));
-    let (solr, solr_answers, solr_version) = match cached {
-        Some(c) => {
-            eprintln!("wf-bench: reusing Solr from {}", solr_path.display());
-            (
-                c["stats"].clone(),
-                serde_json::from_value(c["answers"].clone()).expect("saved Solr answers"),
-                c["version"]
-                    .as_str()
-                    .expect("saved Solr version")
-                    .to_string(),
-            )
-        }
-        None => {
-            let (stats, answers, version) = run_solr(&work, &docs, &qs, &pools, iters, cold_runs);
-            let saved = json!({"stats": stats, "answers": answers, "version": version});
-            // A busy machine's Solr numbers are used for this run only (#481).
-            let kept = baseline::save_solr_json_if_quiet(
-                &solr_path,
-                &solr_key,
-                &saved,
-                busy_warning.as_deref(),
-            )
-            .expect("save Solr baseline");
-            if !kept {
-                eprintln!("wf-bench: machine busy, Solr baseline not saved");
-            }
-            (stats, answers, version)
-        }
-    };
+    let (saved, reused) = baseline::solr_or_measure(&solr_path, &solr_key, || {
+        let (stats, answers, version) = run_solr(&work, &docs, &qs, &pools, iters, cold_runs);
+        json!({"stats": stats, "answers": answers, "version": version})
+    })
+    .unwrap_or_else(|e| panic!("{e} (delete it to re-measure Solr)"));
+    if reused {
+        eprintln!("wf-bench: reusing Solr from {}", solr_path.display());
+    }
+    let solr = saved["stats"].clone();
+    let solr_answers: Vec<Vec<Value>> =
+        serde_json::from_value(saved["answers"].clone()).expect("saved Solr answers");
+    let solr_version = saved["version"]
+        .as_str()
+        .expect("saved Solr version")
+        .to_string();
     let noise_path = bench_dir.join("out/noise.json");
     // A spread is only reused under the settings it was measured with (#481).
     let noise_settings = noise::NoiseSettings {
