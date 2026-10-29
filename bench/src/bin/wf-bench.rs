@@ -16,6 +16,7 @@
 //! Cold latency (issue #446) is measured `--cold` times per engine: stop the
 //! container, evict its data dir from the page cache with `posix_fadvise`
 //! (no root needed), start it again, and time the first request of each shape.
+//! Only the first shape is fully cold; the JSON says so under `cold_note`.
 //!
 //! Footprint (issue #451): `startup_ms` runs from container start to the first
 //! 200 from `/select`, and `index_size_mb` sums the index dir on disk.
@@ -40,8 +41,9 @@
 //! metric's ratio is in the JSON under `ratios`.
 //!
 //! Baselines (issue #454): Solr's results are saved to
-//! `bench/out/solr-baseline.json` and reused until the doc count, query file,
-//! Solr image, or limits change. `--accept` saves a passing run's score to
+//! `bench/out/solr-baseline.json` and reused until the doc count, corpus
+//! content, query file, Solr image, or limits change. A run on a busy machine
+//! (`--force`) does not save it. `--accept` saves a passing run's score to
 //! `bench/out/wf-baseline.json`, and every run shows its change from it.
 //!
 //! Answer fingerprints (issue #445): each run saves a digest of Wayfinder's
@@ -50,7 +52,9 @@
 //! digests differ prints `answers changed: <shapes>`, even when it passes.
 //!
 //! Noise (issue #453): `--noise K` measures the same Wayfinder build K times
-//! and saves each metric's min/max to `bench/out/noise.json`. A normal run then
+//! and saves each metric's min/max to `bench/out/noise.json`, with the docs,
+//! iters, cold runs, and Solr baseline key it was measured under. A normal run
+//! with the same settings then
 //! labels its change from the accepted score `win`, `loss`, or `noise`, and
 //! only a change bigger than the score's spread is a win or a loss.
 //!
@@ -73,7 +77,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use wayfinder_bench::baseline::{self, SolrKey};
 use wayfinder_bench::check::check;
-use wayfinder_bench::cold::{evict_page_cache, summarize};
+use wayfinder_bench::cold::{evict_page_cache, summarize, validate_cold_runs};
 use wayfinder_bench::fingerprint;
 use wayfinder_bench::footprint::{dir_size_bytes, time_to_first_search};
 use wayfinder_bench::freshness;
@@ -463,6 +467,16 @@ fn measure_cold(engine: &Engine, qs: &[Query], pools: &Pools, runs: usize) -> Va
     summarize(&samples)
 }
 
+/// Each cold run times the shapes in order on one restart, so only the first
+/// shape meets a fully cold engine; the rest follow it on pages and code it
+/// already warmed (#481).
+fn cold_note(qs: &[Query]) -> String {
+    let first = qs.first().map_or("", |q| q.name.as_str());
+    format!(
+        "only the first shape ({first}) is fully cold; later shapes run after it on the same restart"
+    )
+}
+
 /// Searches per second at each of `LEVELS` users at once. The sequence takes
 /// shapes in turn, round by round, so every user mixes all shapes.
 fn measure_load(engine: &Engine, qs: &[Query], pools: &Pools) -> Value {
@@ -513,6 +527,7 @@ fn run_engine(
         "load": load,
         "cold_runs": cold_runs,
         "cold": cold,
+        "cold_note": cold_note(qs),
         "add_to_searchable": add_to_searchable,
     });
     let mem = memory::to_json_with_total(&idle_mem, &post_index_mem, mem_peak, mem_peak_total);
@@ -584,9 +599,14 @@ fn run_solr(
         .into_string()
         .expect("response body");
     let version = machine::parse_solr_version(&info).expect("solr-spec-version in system info");
+    // The pinned image's own timings, read back rather than assumed (#481).
+    let (_, config) = get(&format!("{}/config/updateHandler?wt=json", engine.base));
+    let handler = &config["config"]["updateHandler"];
     let commit = format!(
-        "commitWithin={}ms on each add; stock _default configset autoCommit/autoSoftCommit",
-        freshness::COMMIT_WITHIN_MS
+        "commitWithin={}ms on each add; autoCommit {}; autoSoftCommit {}",
+        freshness::COMMIT_WITHIN_MS,
+        handler["autoCommit"],
+        handler["autoSoftCommit"]
     );
     let (stats, answers) = run_engine(
         engine, startup_ms, &commit, docs, qs, pools, iters, cold_runs,
@@ -650,13 +670,16 @@ fn docker_id(flag: &str) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// The commit of the tree the release binary was built from, with `-dirty`
+/// when it has uncommitted changes, so a run of edited code is never filed
+/// under the clean commit (#481).
 fn git_sha(root: &Path) -> String {
     let out = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
+        .args(["describe", "--always", "--dirty"])
         .current_dir(root)
         .output()
         .expect("git");
-    assert!(out.status.success(), "git rev-parse failed");
+    assert!(out.status.success(), "git describe failed");
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
@@ -784,11 +807,16 @@ fn score_run(
 
 /// The change from the accepted score, judged against the measured noise:
 /// only a change bigger than the score's spread is a win or a loss.
-fn verdict(accepted: Option<f64>, score: f64, noise_path: &Path) -> &'static str {
+fn verdict(
+    accepted: Option<f64>,
+    score: f64,
+    noise_path: &Path,
+    settings: &noise::NoiseSettings,
+) -> &'static str {
     let Some(base) = accepted else {
         return "";
     };
-    let spread = noise::load_noise(noise_path).unwrap_or_else(|e| panic!("{e}"));
+    let spread = noise::load_noise_for(noise_path, settings).unwrap_or_else(|e| panic!("{e}"));
     match spread
         .as_deref()
         .and_then(|s| s.iter().find(|(n, _)| n == "score"))
@@ -803,6 +831,10 @@ fn main() {
     let n_docs = arg(&args, "--docs", 10_000);
     let iters = arg(&args, "--iters", 200);
     let cold_runs = arg(&args, "--cold", 5);
+    if let Err(e) = validate_cold_runs(cold_runs) {
+        eprintln!("wf-bench: {e}");
+        std::process::exit(2);
+    }
     let force = args.iter().any(|a| a == "--force");
     let accept = args.iter().any(|a| a == "--accept");
     let noise_runs = arg(&args, "--noise", 0);
@@ -875,6 +907,10 @@ fn main() {
         limits: format!(
             "cpus={CPUSET} mem={MEMORY} heap={SOLR_HEAP} iters={iters} cold={cold_runs}"
         ),
+        corpus_hash: baseline::hash_parts(
+            docs.iter()
+                .flat_map(|d| [d.id.as_bytes(), d.title.as_bytes(), d.body.as_bytes()]),
+        ),
     };
     let cached = baseline::load_solr_json(&solr_path, &solr_key)
         .unwrap_or_else(|e| panic!("{e} (delete it to re-measure Solr)"));
@@ -893,11 +929,28 @@ fn main() {
         None => {
             let (stats, answers, version) = run_solr(&work, &docs, &qs, &pools, iters, cold_runs);
             let saved = json!({"stats": stats, "answers": answers, "version": version});
-            baseline::save_solr_json(&solr_path, &solr_key, &saved).expect("save Solr baseline");
+            // A busy machine's Solr numbers are used for this run only (#481).
+            let kept = baseline::save_solr_json_if_quiet(
+                &solr_path,
+                &solr_key,
+                &saved,
+                busy_warning.as_deref(),
+            )
+            .expect("save Solr baseline");
+            if !kept {
+                eprintln!("wf-bench: machine busy, Solr baseline not saved");
+            }
             (stats, answers, version)
         }
     };
     let noise_path = bench_dir.join("out/noise.json");
+    // A spread is only reused under the settings it was measured with (#481).
+    let noise_settings = noise::NoiseSettings {
+        docs: n_docs,
+        iters,
+        cold: cold_runs,
+        solr_key,
+    };
     if noise_runs > 0 {
         // The same build K times, each in a fresh dir so no run sees the
         // last one's index (#453).
@@ -919,7 +972,7 @@ fn main() {
             .collect();
         let _ = std::fs::remove_dir_all(&work);
         let spread = noise::measure_noise(&runs).unwrap_or_else(|e| panic!("noise: {e}"));
-        noise::save_noise(&noise_path, &spread).expect("save noise");
+        noise::save_noise_for(&noise_path, &noise_settings, &spread).expect("save noise");
         let s = spread[0].1;
         let shown = noise_path
             .strip_prefix(&root)
@@ -1011,7 +1064,7 @@ fn main() {
     };
     let wf_path = bench_dir.join("out/wf-baseline.json");
     let accepted = baseline::load_wf(&wf_path).unwrap_or_else(|e| panic!("{e}"));
-    let delta = match verdict(accepted, score, &noise_path) {
+    let delta = match verdict(accepted, score, &noise_path, &noise_settings) {
         "" => baseline::delta_line(accepted, score),
         v => format!("{} {v}", baseline::delta_line(accepted, score)),
     };
