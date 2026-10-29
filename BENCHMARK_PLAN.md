@@ -322,12 +322,32 @@ differences, so none of these goes in `allowed-diffs.tsv` yet. A person has to d
    `deep_page` 30 (was 34), first failure wf=41 solr=34 `q=raby`. In every first failure
    Wayfinder now finds more, not fewer. Those cases belong to #478 (extra pages) and #479
    (folding and word delimiter). wf-bench reports only the first failing request per shape.
-2. **Wayfinder finds more, cause not pinned:** `term` `indicative` (+2), `bool_and`
+2. **Wayfinder finds more (#478, closed by v9 and v10):** `term` `indicative` (+2), `bool_and`
    `theming AND additional` (+30), `bool_or` `intercepted OR malayalam` (+1), `sort_field`
    `aurea` (+1), `facet_range` `procreate` (+2), `group` `concomitant` (+4), `highlight`
-   `airline` (+2). These go the same way as folding and the word delimiter, but we don't know
-   which tokens cause them. To find out: collect the extra doc ids and analyze their text in
-   both engines.
+   `airline` (+2). Replay on v10 (develop `2770c4a`, same 20k corpus, both engines, the seven
+   requests with `fl=id&rows=5000`):
+
+   | Shape | Request | Solr | Wayfinder | Solr-only | Wayfinder-only |
+   |---|---|---:|---:|---:|---:|
+   | `term` | `q=indicative` | 1814 | 1814 | 0 | 0 |
+   | `bool_and` | `q=theming AND additional` | 453 | 453 | 0 | 0 |
+   | `bool_or` | `q=intercepted OR malayalam` | 247 | 247 | 0 | 0 |
+   | `sort_field` | `q=aurea` | 4 | 4 | 0 | 0 |
+   | `facet_range` | `q=procreate` | 18 | 18 | 0 | 0 |
+   | `group` | `q=concomitant` | 27 | 27 | 0 | 0 |
+   | `highlight` | `q=airline` | 287 | 286 | 1 (`864`) | 0 |
+
+   No extra pages are left. Classic Porter (#477) removed the stemming extras (`additionally`,
+   `concomitantly`, `procreative`), and #479 removed folding and the word delimiter. None is a
+   deliberate difference, so `allowed-diffs.tsv` gets no rows. The replay found one gap the
+   other way: doc `864` says only "the luxury airline's". Solr's `EnglishPossessiveFilter`
+   strips `'s`; the v9 word delimiter used to split it off, and v10 dropped that. The full 20k
+   run on `2770c4a` (`correct 4/15`) agrees: every first failure has Wayfinder finding fewer
+   (`filter` `parkinson` 15 vs 24, likely "Parkinson's"; `term` `pistol` 113 vs 114; `stats`
+   `pancras` 25 vs 27; `group` `rapper` 193 vs 196). Analyzer contract v11 adds the possessive
+   step to `text_en` after the stop filter and lowercase and before Porter, as Solr orders it.
+   A 20k re-run on v11 is still to do.
 
 ## Session log
 
@@ -349,3 +369,7 @@ differences, so none of these goes in `allowed-diffs.tsv` yet. A person has to d
   requests now gives identical id sets in both engines. The 20k run went to `correct 4/15`, and
   the remaining `phrase`, `edismax` and `deep_page` first failures all have Wayfinder finding
   more (see item 1 under "Not explained without a live engine").
+- 2026-10-28: #478 replay on v10 (`2770c4a`): the seven "finds more" requests now match Solr
+  except `highlight` `airline`, where Solr alone finds a possessive (`airline's`). v11 adds
+  Solr's English possessive step to `text_en` (see item 2 under "Not explained without a live
+  engine"). The 20k run on v11 has not been done yet.

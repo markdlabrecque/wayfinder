@@ -164,8 +164,8 @@ Wayfinder intentionally differs from captured Solr behavior in these areas:
     `edismax` 58/200 (waived) and `deep_page` 30/200, and in each first failure Wayfinder finds
     more pages than Solr (`"continuously used"` 50 vs 49, `terror reconfirmed` 356 vs 354, `raby`
     41 vs 34). For these three searches no known case remains where Wayfinder finds fewer.
-    The other attributions above, for extra pages, still come from the analyzer code and the
-    stemmer rules. Their extra doc ids have not been pulled from a live run (#478).
+    The other attributions above, for extra pages, came from the analyzer code and the stemmer
+    rules; the v10 replay below confirms them.
     Matched to Solr in analyzer contract v10 (`wayfinder_text_en_v10`, marker
     `text_presets_porter_stem_v10`; #479): `text_en` no longer folds accents and no longer runs
     the word delimiter, as Solr's `_default` `text_en` does neither. `perce` no longer finds
@@ -178,6 +178,23 @@ Wayfinder intentionally differs from captured Solr behavior in these areas:
     Other text presets and the suggest chains still fold.
     **An index with a static `text_en` field or an analyzed dynamic rule built under v9 or
     earlier refuses to start; reindex into a fresh data directory.**
+    Confirmed on v10 by a live replay on the same 20k corpus (#478, develop `2770c4a`,
+    `fl=id&rows=5000`): the seven searches where Wayfinder found extra pages (`term`
+    `indicative`, `bool_and` `theming AND additional`, `bool_or` `intercepted OR malayalam`,
+    `sort_field` `aurea`, `facet_range` `procreate`, `group` `concomitant`, `highlight`
+    `airline`) return identical id sets in both engines, except that only Solr finds doc `864`
+    for `airline`. Classic Porter (v9) and dropping folding and the word delimiter (v10) removed
+    every extra page, so none is a deliberate difference and none has an `allowed-diffs.tsv` row.
+    Matched to Solr in analyzer contract v11 (`wayfinder_text_en_v11`, marker
+    `text_presets_english_possessive_v11`; #478): `text_en` strips a trailing `'s`, `’s` or `＇s`
+    after the stop filter and lowercase and before Porter, as Solr's `EnglishPossessiveFilter`
+    does. The v9 word delimiter had split `airline's` into `airline` and `s`; once v10 removed
+    it, possessives stopped matching. Doc `864` says only "the luxury airline's" (`highlight`
+    `airline`: 286 vs 287), and `filter` `parkinson` (15 vs 24) likely misses "Parkinson's" the
+    same way. `airline` now finds `airline's` and `parkinson` finds `Parkinson's`. The
+    `_dynamic_text` catch-all and the suggest chains are unchanged. **An index with a static
+    `text_en` field built under v10 or earlier refuses to start; reindex into a fresh data
+    directory.**
 
 ## Permanent unsupported boundaries
 
