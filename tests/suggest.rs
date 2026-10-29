@@ -1228,6 +1228,43 @@ async fn suggest_q_repeated_dictionaries_reject_unknown_without_partial_results(
     );
 }
 
+/// #480: the `en` suggester uses the same word-root rule as `text_en` search
+/// (#443), so a query for "day" or "play" suggests a phrase that only says
+/// "days" or "played".
+#[tokio::test]
+async fn suggest_q_en_treats_inflected_y_words_as_the_same_word() {
+    let (app, _dir) = suggest_lookup_app().await;
+    common::post_docs(
+        &app,
+        &json!([
+            {"id":"su6","twm_suggest":["sunny days ahead","children played outside"],"sm_context_tags":["site_alpha","lang_en"]}
+        ]),
+    )
+    .await;
+
+    for (query, phrase) in [
+        ("day", "sunny days ahead"),
+        ("play", "children played outside"),
+    ] {
+        let (status, body) = get(
+            &app,
+            &format!("suggest?suggest.dictionary=en&suggest.q={query}&suggest.highlight=false&wt=json"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "lookup must answer 200: {body}");
+        let suggestions = body
+            .pointer(&format!("/suggest/en/{query}/suggestions"))
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("missing suggestions for `{query}`: {body}"));
+        assert!(
+            suggestions
+                .iter()
+                .any(|s| s["term"].as_str().is_some_and(|t| t.contains(phrase))),
+            "suggesting `{query}` must cover the phrase \"{phrase}\": {body}"
+        );
+    }
+}
+
 /// A multilingual client can repeat `suggest.dictionary`; each requested
 /// dictionary receives its own query result. This is a Wayfinder/client
 /// contract, independent of the frozen single-dictionary Solr fixtures.
