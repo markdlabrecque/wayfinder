@@ -154,7 +154,11 @@ const TEXT_GENERAL_TOKENIZER_LEGACY: &str = "default";
 /// and stemming.
 /// It intentionally does not override Tantivy's `en_stem`, which remains
 /// available for custom analyzer chains and upstream defaults.
-const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v8";
+const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v9";
+/// The v8 predecessor, which stemmed with Snowball English instead of classic
+/// Porter (#477), remains registered only so a legacy Tantivy schema can be
+/// diagnosed safely.
+const TEXT_EN_TOKENIZER_V8: &str = "wayfinder_text_en_v8";
 /// The v7 predecessor, whose Porter `y` rule saw only a terminal `y` (#443),
 /// remains registered only so a legacy Tantivy schema can be diagnosed safely.
 const TEXT_EN_TOKENIZER_V7: &str = "wayfinder_text_en_v7";
@@ -524,7 +528,8 @@ impl WayfinderSchema {
     }
 
     /// Whether this schema can contain static `text_en` terms from the v7
-    /// chain, whose Porter `y` rule v8 extends to `-ys`, `-yed` and `-ying`.
+    /// chain, whose Porter `y` rule v8 extends to `-ys`, `-yed` and `-ying`,
+    /// or from the v8 chain, whose Snowball stems v9 replaces with Porter's.
     pub(crate) fn uses_static_text_en(&self) -> bool {
         self.fields.iter().any(|field| field.type_ == "text_en")
     }
@@ -846,6 +851,23 @@ impl TokenFilter for PorterInflectedYFilter {
         PorterTerminalYTokenizer {
             inner: tokenizer,
             rewrite: porter_inflected_y,
+        }
+    }
+}
+
+/// Solr `_default` `text_en`'s `PorterStemFilterFactory`: classic Porter in
+/// place of Tantivy's Snowball English, whose different `-us` and `-ally`
+/// stems missed pages Solr finds (#477).
+#[derive(Clone)]
+struct PorterStemFilter;
+
+impl TokenFilter for PorterStemFilter {
+    type Tokenizer<T: Tokenizer> = PorterTerminalYTokenizer<T>;
+
+    fn transform<T: Tokenizer>(self, tokenizer: T) -> Self::Tokenizer<T> {
+        PorterTerminalYTokenizer {
+            inner: tokenizer,
+            rewrite: crate::porter_stemmer::stem,
         }
     }
 }
@@ -1930,6 +1952,7 @@ pub fn is_current_builtin_graph_tokenizer(tokenizer: &str) -> bool {
         TEXT_GENERAL_TOKENIZER
             | TEXT_GENERAL_TOKENIZER_V6
             | TEXT_EN_TOKENIZER
+            | TEXT_EN_TOKENIZER_V8
             | TEXT_EN_TOKENIZER_V7
             | TEXT_EN_TOKENIZER_V6
             | DYNAMIC_TEXT_TOKENIZER
@@ -2211,7 +2234,7 @@ fn build_tokenizers(
             .build(),
     );
     // Kept for opening and diagnosing legacy schemas; new text_en fields use
-    // the v8 identity below.
+    // the v9 identity below.
     register_both(
         TEXT_EN_TOKENIZER_V2,
         TextAnalyzer::builder(SimpleTokenizer::default())
@@ -2309,7 +2332,7 @@ fn build_tokenizers(
             .build(),
     );
     register_split(
-        TEXT_EN_TOKENIZER,
+        TEXT_EN_TOKENIZER_V8,
         TextAnalyzer::builder(Uax29Tokenizer)
             .filter_dynamic(AccentFoldingFilter)
             .filter_dynamic(LengthFilter {
@@ -2336,6 +2359,34 @@ fn build_tokenizers(
             })
             .filter(PorterInflectedYFilter)
             .filter(Stemmer::new(Language::English))
+            .build(),
+    );
+    register_split(
+        TEXT_EN_TOKENIZER,
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter_dynamic(LengthFilter {
+                min: 1,
+                max: STATIC_TEXT_MAX_TOKEN_LEN,
+            })
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter_dynamic(WordDelimiterFilter::search())
+            .filter(PorterStemFilter)
+            .build(),
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(AccentFoldingFilter)
+            .filter_dynamic(LengthFilter {
+                min: 1,
+                max: STATIC_TEXT_MAX_TOKEN_LEN,
+            })
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter_dynamic(WordDelimiterFilter::search())
+            .filter_dynamic(SynonymFilter {
+                resource: synonyms.clone(),
+            })
+            .filter(PorterStemFilter)
             .build(),
     );
     for (code, lang) in LANGUAGES {
@@ -2652,6 +2703,7 @@ fn parse_with_synonyms(raw: &str, synonyms: SynonymResource) -> Result<Wayfinder
             TEXT_GENERAL_TOKENIZER_V4.to_string(),
             TEXT_GENERAL_TOKENIZER_V3.to_string(),
             TEXT_EN_TOKENIZER.to_string(),
+            TEXT_EN_TOKENIZER_V8.to_string(),
             TEXT_EN_TOKENIZER_V7.to_string(),
             TEXT_EN_TOKENIZER_V6.to_string(),
             TEXT_EN_TOKENIZER_V5.to_string(),
