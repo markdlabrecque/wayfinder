@@ -120,11 +120,22 @@ pub fn solr_or_measure(
     key: &SolrKey,
     measure: impl FnOnce() -> Value,
 ) -> Result<(Value, bool), String> {
+    solr_or_measure_if_quiet(path, key, None, measure)
+}
+
+/// [`solr_or_measure`], except newly measured results are only saved when
+/// `busy_warning` is `None`, see [`save_solr_json_if_quiet`].
+pub fn solr_or_measure_if_quiet(
+    path: &Path,
+    key: &SolrKey,
+    busy_warning: Option<&str>,
+    measure: impl FnOnce() -> Value,
+) -> Result<(Value, bool), String> {
     if let Some(saved) = load_solr_json(path, key)? {
         return Ok((saved, true));
     }
     let solr = measure();
-    save_solr_json(path, key, &solr)?;
+    save_solr_json_if_quiet(path, key, &solr, busy_warning)?;
     Ok((solr, false))
 }
 

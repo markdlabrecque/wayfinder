@@ -826,13 +826,22 @@ fn main() {
                 .flat_map(|d| [d.id.as_bytes(), d.title.as_bytes(), d.body.as_bytes()]),
         ),
     };
-    let (saved, reused) = baseline::solr_or_measure(&solr_path, &solr_key, || {
-        let (stats, answers, version) = run_solr(&work, &docs, &qs, &pools, iters, cold_runs);
-        json!({"stats": stats, "answers": answers, "version": version})
-    })
+    // A busy machine's Solr numbers are used for this run only (#481).
+    let (saved, reused) = baseline::solr_or_measure_if_quiet(
+        &solr_path,
+        &solr_key,
+        busy_warning.as_deref(),
+        || {
+            let (stats, answers, version) =
+                run_solr(&work, &docs, &qs, &pools, iters, cold_runs);
+            json!({"stats": stats, "answers": answers, "version": version})
+        },
+    )
     .unwrap_or_else(|e| panic!("{e} (delete it to re-measure Solr)"));
     if reused {
         eprintln!("wf-bench: reusing Solr from {}", solr_path.display());
+    } else if busy_warning.is_some() {
+        eprintln!("wf-bench: machine busy, Solr baseline not saved");
     }
     let solr = saved["stats"].clone();
     let solr_answers: Vec<Vec<Value>> =
