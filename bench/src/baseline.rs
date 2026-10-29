@@ -112,6 +112,33 @@ pub fn load_solr_json(path: &Path, key: &SolrKey) -> Result<Option<Value>, Strin
     }
 }
 
+/// The Solr results saved under `key` and `true`, or else the results of
+/// `measure`, saved under `key`, and `false`. A saved file that can't be read
+/// is an error before anything is measured.
+pub fn solr_or_measure(
+    path: &Path,
+    key: &SolrKey,
+    measure: impl FnOnce() -> Value,
+) -> Result<(Value, bool), String> {
+    solr_or_measure_if_quiet(path, key, None, measure)
+}
+
+/// [`solr_or_measure`], except newly measured results are only saved when
+/// `busy_warning` is `None`, see [`save_solr_json_if_quiet`].
+pub fn solr_or_measure_if_quiet(
+    path: &Path,
+    key: &SolrKey,
+    busy_warning: Option<&str>,
+    measure: impl FnOnce() -> Value,
+) -> Result<(Value, bool), String> {
+    if let Some(saved) = load_solr_json(path, key)? {
+        return Ok((saved, true));
+    }
+    let solr = measure();
+    save_solr_json_if_quiet(path, key, &solr, busy_warning)?;
+    Ok((solr, false))
+}
+
 /// Saves named Solr metrics under `key`, in order.
 pub fn save_solr(path: &Path, key: &SolrKey, metrics: &[(String, f64)]) -> Result<(), String> {
     let pairs: Vec<Value> = metrics.iter().map(|(n, v)| json!([n, v])).collect();

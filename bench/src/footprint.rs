@@ -3,9 +3,20 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Solr's Lucene index for `core` under a run's `work` dir, where Solr's home
+/// is `work/solr`. The index alone, not the tlog (#253).
+pub fn solr_index_dir(work: &Path, core: &str) -> PathBuf {
+    work.join("solr/data").join(core).join("data/index")
+}
+
+/// Wayfinder's data dir under a run's `work` dir, all of it index.
+pub fn wayfinder_index_dir(work: &Path) -> PathBuf {
+    work.join("data")
+}
 
 /// Total bytes of every regular file under `dir`, recursively. A missing `dir`
 /// is an error, so a wrong path can't pass for an empty index.

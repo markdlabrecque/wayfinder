@@ -4,8 +4,11 @@
 
 mod support;
 
+use serde_json::json;
 use support::fresh_scratch_dir;
-use wayfinder_bench::baseline::{SolrKey, delta_line, load_solr, load_wf, save_solr, save_wf};
+use wayfinder_bench::baseline::{
+    SolrKey, delta_line, load_solr, load_solr_json, load_wf, save_solr, save_wf, solr_or_measure,
+};
 
 fn key() -> SolrKey {
     SolrKey {
@@ -26,6 +29,58 @@ fn solr_numbers_saved_for_a_key_are_reused_for_the_same_key() {
     let path = fresh_scratch_dir("solr-same").join("solr-baseline.json");
     save_solr(&path, &key(), &metrics()).unwrap();
     assert_eq!(load_solr(&path, &key()).unwrap(), Some(metrics()));
+}
+
+// `wf-bench` gets its Solr numbers through `solr_or_measure`, so these pin the
+// reuse the binary relies on (#482): the measuring closure is the Solr run.
+
+#[test]
+fn solr_is_measured_once_then_reused_for_the_same_key() {
+    let path = fresh_scratch_dir("solr-once").join("solr-baseline.json");
+    let mut runs = 0;
+    let first = solr_or_measure(&path, &key(), || {
+        runs += 1;
+        json!({"p50": 12.5})
+    })
+    .unwrap();
+    assert_eq!(first, (json!({"p50": 12.5}), false), "measured, not reused");
+
+    let second = solr_or_measure(&path, &key(), || {
+        runs += 1;
+        json!({"p50": 99.0})
+    })
+    .unwrap();
+    assert_eq!(second, (json!({"p50": 12.5}), true), "saved numbers reused");
+    assert_eq!(runs, 1, "Solr must not be measured again");
+}
+
+#[test]
+fn solr_is_measured_again_and_resaved_when_the_key_changed() {
+    let path = fresh_scratch_dir("solr-rekey").join("solr-baseline.json");
+    solr_or_measure(&path, &key(), || json!({"p50": 12.5})).unwrap();
+
+    let mut k = key();
+    k.corpus_docs = 200_000;
+    let (v, reused) = solr_or_measure(&path, &k, || json!({"p50": 30.0})).unwrap();
+    assert_eq!((v, reused), (json!({"p50": 30.0}), false));
+    assert_eq!(
+        load_solr_json(&path, &k).unwrap(),
+        Some(json!({"p50": 30.0})),
+        "the new measurement is what gets saved"
+    );
+}
+
+#[test]
+fn a_corrupt_solr_baseline_stops_the_run_without_measuring() {
+    let path = fresh_scratch_dir("solr-or-corrupt").join("solr-baseline.json");
+    std::fs::write(&path, "not json").unwrap();
+    let mut measured = false;
+    let r = solr_or_measure(&path, &key(), || {
+        measured = true;
+        json!({})
+    });
+    assert!(r.is_err());
+    assert!(!measured);
 }
 
 #[test]

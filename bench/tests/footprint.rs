@@ -14,7 +14,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use support::fresh_scratch_dir;
-use wayfinder_bench::footprint::{dir_size_bytes, time_to_first_search};
+use wayfinder_bench::footprint::{
+    dir_size_bytes, solr_index_dir, time_to_first_search, wayfinder_index_dir,
+};
 
 fn write(path: &Path, bytes: usize) {
     fs::create_dir_all(path.parent().unwrap()).expect("create parent");
@@ -114,17 +116,40 @@ fn first_search_that_never_succeeds_times_out_with_an_error() {
     assert!(r.is_err(), "a server that never returns 200 is an error");
 }
 
+// `wf-bench` sizes whatever `*_index_dir` returns, so a wrong path here is a
+// wrong index size in every result (#482).
+
 #[test]
-fn wf_bench_records_index_size_and_search_startup_for_each_engine() {
-    // run_engine is shared by Solr and Wayfinder, so one record covers both.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let src = fs::read_to_string(root.join("src/bin/wf-bench.rs")).expect("read wf-bench.rs");
-    for key in [
-        "\"index_size_mb\"",
-        "\"startup_ms\"",
-        "dir_size_bytes",
-        "time_to_first_search",
-    ] {
-        assert!(src.contains(key), "wf-bench must record/use {key}");
-    }
+fn solr_index_size_counts_the_lucene_index_and_not_the_transaction_log() {
+    let work = fresh_scratch_dir("solr-layout");
+    let core = work.join("solr/data/content/data");
+    write(&core.join("index/_0.cfs"), 4_000);
+    write(&core.join("index/segments_1"), 100);
+    write(&core.join("tlog/tlog.0000000000000000001"), 900_000);
+    write(&work.join("solr/data/content/core.properties"), 50);
+
+    let dir = solr_index_dir(&work, "content");
+    assert_eq!(dir_size_bytes(&dir).expect("size"), 4_100);
+}
+
+#[test]
+fn solr_index_dir_follows_the_core_name() {
+    let work = fresh_scratch_dir("solr-core-name");
+    write(&work.join("solr/data/other/data/index/_0.cfs"), 7);
+    assert_eq!(
+        dir_size_bytes(&solr_index_dir(&work, "other")).expect("size"),
+        7
+    );
+    assert!(dir_size_bytes(&solr_index_dir(&work, "content")).is_err());
+}
+
+#[test]
+fn wayfinder_index_size_counts_everything_in_its_data_dir() {
+    let work = fresh_scratch_dir("wf-layout");
+    write(&work.join("data/meta.json"), 100);
+    write(&work.join("data/seg/a.term"), 2_000);
+    write(&work.join("schema.toml"), 999);
+
+    let dir = wayfinder_index_dir(&work);
+    assert_eq!(dir_size_bytes(&dir).expect("size"), 2_100);
 }

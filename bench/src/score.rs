@@ -3,6 +3,8 @@
 //! always means Wayfinder wins. The score is the weighted geometric mean of
 //! those ratios, with the weights read from `bench/weights.tsv`.
 
+use serde_json::Value;
+
 /// Metric names and their weights, in file order.
 pub type Weights = Vec<(String, f64)>;
 
@@ -50,6 +52,113 @@ pub fn ratio(wf: f64, solr: f64, higher_is_better: bool) -> Result<f64, String> 
     } else {
         wf / solr
     })
+}
+
+/// Every scored metric as a Wayfinder/Solr ratio, named as in
+/// `bench/weights.tsv`, from the two engines' result JSON. Metrics measured
+/// per query shape or load level give one ratio each, paired by position; the
+/// score folds them into one per metric. A section missing from either engine
+/// or a row count that differs is an error, so no row is silently dropped.
+pub fn ratios(wf: &Value, solr: &Value) -> Result<Vec<(&'static str, f64)>, String> {
+    fn push(
+        out: &mut Vec<(&'static str, f64)>,
+        name: &'static str,
+        w: &Value,
+        s: &Value,
+        higher_is_better: bool,
+    ) -> Result<(), String> {
+        let num = |v: &Value, engine: &str| {
+            v.as_f64()
+                .ok_or_else(|| format!("{name}: {engine} has no number"))
+        };
+        let r = ratio(num(w, "wayfinder")?, num(s, "solr")?, higher_is_better)
+            .map_err(|e| format!("{name}: {e}"))?;
+        out.push((name, r));
+        Ok(())
+    }
+    fn rows<'a>(
+        wf: &'a Value,
+        solr: &'a Value,
+        k: &str,
+    ) -> Result<Vec<(&'a Value, &'a Value)>, String> {
+        let get = |v: &'a Value, engine: &str| {
+            v[k].as_array()
+                .ok_or_else(|| format!("{k}: {engine} has no rows"))
+        };
+        let (rw, rs) = (get(wf, "wayfinder")?, get(solr, "solr")?);
+        if rw.len() != rs.len() {
+            return Err(format!(
+                "{k}: wayfinder has {} rows, solr has {}",
+                rw.len(),
+                rs.len()
+            ));
+        }
+        Ok(rw.iter().zip(rs).collect())
+    }
+    let mut out = Vec::new();
+    for (qw, qs) in rows(wf, solr, "queries")? {
+        for (name, key) in [
+            ("p50", "p50"),
+            ("p95", "p95"),
+            ("p99", "p99"),
+            ("cpu_ms_per_1k", "cpu_ms_per_1k"),
+            ("repeat_p50", "repeat_p50"),
+            ("first_ms", "cold_ms"),
+        ] {
+            push(&mut out, name, &qw[key], &qs[key], false)?;
+        }
+    }
+    for (cw, cs) in rows(wf, solr, "cold")? {
+        for (name, key) in [
+            ("cold_p50", "p50"),
+            ("cold_p95", "p95"),
+            ("cold_p99", "p99"),
+        ] {
+            push(&mut out, name, &cw[key], &cs[key], false)?;
+        }
+    }
+    for (lw, ls) in rows(wf, solr, "load")? {
+        push(&mut out, "load_rps", &lw["rps"], &ls["rps"], true)?;
+        for (name, key) in [
+            ("load_p50", "p50"),
+            ("load_p95", "p95"),
+            ("load_p99", "p99"),
+        ] {
+            push(&mut out, name, &lw[key], &ls[key], false)?;
+        }
+    }
+    for name in [
+        "startup_ms",
+        "index_size_mb",
+        "mem_idle_mb",
+        "mem_post_index_mb",
+        "mem_peak_mb",
+    ] {
+        push(&mut out, name, &wf[name], &solr[name], false)?;
+    }
+    push(
+        &mut out,
+        "index_docs_per_s",
+        &wf["index_docs_per_s"],
+        &solr["index_docs_per_s"],
+        true,
+    )?;
+    let (fw, fs) = (&wf["add_to_searchable"], &solr["add_to_searchable"]);
+    push(
+        &mut out,
+        "add_to_searchable_p50_ms",
+        &fw["p50_ms"],
+        &fs["p50_ms"],
+        false,
+    )?;
+    push(
+        &mut out,
+        "add_to_searchable_p95_ms",
+        &fw["p95_ms"],
+        &fs["p95_ms"],
+        false,
+    )?;
+    Ok(out)
 }
 
 /// One ratio per metric, in order of first appearance: the plain geometric
