@@ -130,6 +130,8 @@ WAYFINDER_BENCH_DOCKER=1 cargo test --manifest-path bench/Cargo.toml --test dock
 - `allowed-diffs.tsv`: queries whose differences from Solr are known and
   accepted, each pointing at a section of `docs/COMPATIBILITY.md`.
 - `weights.tsv`: how much each metric counts in the score.
+- `ideas.tsv`: append-only log of every idea the tuning loop tried, with its
+  score change and whether it was kept or dropped. See `TUNING.md`.
 - `src/bin/wf-bench.rs`: the driver. The library modules under `src/` hold the
   measurement and scoring logic, each covered by a test in `tests/`.
 - `out/`: run results (gitignored).

@@ -1,0 +1,7 @@
+# Tuning ideas tried by the loop in TUNING.md (issue #458). Append-only: add
+# one row per try, kept or dropped, and never edit or delete a row.
+# date: YYYY-MM-DD. idea: one line, no tabs. metric: the targeted metric.
+# delta: score change vs accepted, e.g. -4.7%, or - when a gate failed.
+# outcome: kept, or dropped: <loss|noise|gate name>.
+# commit: short sha of the kept commit, or of the base the idea was tried on.
+date	idea	metric	delta	outcome	commit

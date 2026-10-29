@@ -21,6 +21,32 @@ The operator sets these before the loop starts:
 `DOCS` must not change mid-loop. The saved Solr results, the noise spread and
 the accepted score are only comparable at the same doc count.
 
+## The ideas log
+
+`bench/ideas.tsv` records every idea tried, kept or dropped, across all loop
+runs (issue #458), so a later run does not retry an idea that already failed.
+It is append-only: add one row at the end of each try, and never edit or
+delete an earlier row. The columns, tab-separated:
+
+| Column | What it holds |
+|---|---|
+| `date` | The day of the try, `YYYY-MM-DD`. |
+| `idea` | The change, in one line with no tabs. |
+| `metric` | The metric the try targeted (step 2). |
+| `delta` | The score change from `vs accepted <score>: <change>%`, e.g. `-4.7%`. `-` when a gate failed before the benchmark ran. |
+| `outcome` | `kept`, or `dropped: <reason>` where the reason is `loss`, `noise`, `noise not measured`, or the failed gate (`fmt`, `clippy`, `test`, `build`, `correct`, `answers changed`). |
+| `commit` | For `kept`, the short sha of the win's commit. For `dropped`, the short sha of `HEAD` the idea was tried on. |
+
+Append a row with the values filled in, then commit it on its own:
+
+```sh
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "<idea>" "<metric>" "<delta>" "<outcome>" "$(git rev-parse --short HEAD)" >> bench/ideas.tsv
+git add bench/ideas.tsv
+git commit -m "ideas: <idea> (<outcome>)"
+```
+
+The file is tracked, so an uncommitted row would be lost by the next revert.
+
 ## Set up once
 
 1. Start on a clean tree: `git status` shows nothing to commit.
@@ -67,6 +93,10 @@ better at that metric.
 
 ### 2. Pick a target
 
+Read `bench/ideas.tsv` first. Do not retry an idea already logged as
+`dropped` unless you have a concrete reason it will work now, such as a kept
+change since that it depended on.
+
 Each metric's pull on the score is its weight in `bench/weights.tsv` times the
 log of its ratio. Pick the metric with the largest `weight * ln(ratio)`. That
 is where a speed-up moves the score most. Skip a metric you already failed on
@@ -79,11 +109,13 @@ One idea per try, so the result says whether that idea worked.
 
 Do not edit anything under `bench/`: not the driver, `weights.tsv`,
 `queries.tsv`, nor `allowed-diffs.tsv`. Changing the measurement is not a
-speed-up.
+speed-up. The one exception is appending to `bench/ideas.tsv` in steps 5
+and 6.
 
 ### 4. Run the gates
 
 Run these in order. Stop at the first one that fails; the try has failed.
+Revert and log it as in step 5.
 
 ```sh
 cargo fmt --check
@@ -123,8 +155,12 @@ git reset --hard HEAD
 git clean -fd
 ```
 
-`bench/out/` is gitignored, so this keeps the results. Add 1 to the failure
-count and go to step 7.
+`bench/out/` is gitignored, so this keeps the results.
+
+Then log the dropped idea in `bench/ideas.tsv` and commit the row (see
+[The ideas log](#the-ideas-log)). Do this after the revert, never before:
+`git reset --hard` would throw away the new row. Add 1 to the failure count
+and go to step 7.
 
 ### 6. Commit a win
 
@@ -152,7 +188,11 @@ p99 0.77 -> 0.70; bench/out/1761700123.json
 - Commit messages are ASCII only: write `->`, never an arrow character.
 
 Commit before running with `--accept`, so the accepted run records the
-commit's git sha. Set the failure count back to 0.
+commit's git sha.
+
+Then log the kept idea in `bench/ideas.tsv`, with the win's commit as the
+`commit` column, and commit the row (see [The ideas log](#the-ideas-log)).
+Set the failure count back to 0.
 
 ### 7. Decide whether to go on
 
@@ -173,4 +213,7 @@ Report:
 - each kept commit, with its score change;
 - the ideas that were tried and reverted, one line each.
 
-Leave the tree clean. The last commit is the last kept win.
+Take the kept and dropped ideas from the rows this run appended to
+`bench/ideas.tsv`.
+
+Leave the tree clean. The last commit is the log row for the last try.
