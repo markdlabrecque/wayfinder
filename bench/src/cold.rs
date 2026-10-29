@@ -16,6 +16,15 @@ pub struct Percentiles {
     pub p99: f64,
 }
 
+/// Checks `--cold N` before the long run: with no cold runs there are no
+/// samples to take percentiles of (#481).
+pub fn validate_cold_runs(n: usize) -> Result<(), String> {
+    match n {
+        0 => Err("--cold needs at least 1 run".to_string()),
+        _ => Ok(()),
+    }
+}
+
 /// Nearest-rank p50/p95/p99 of `samples`, in any order. Every value returned
 /// is a real sample: with only a few cold runs, p95 and p99 are the slowest.
 pub fn percentiles(samples: &[f64]) -> Percentiles {
