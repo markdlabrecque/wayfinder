@@ -35,7 +35,10 @@ fn a_solr_baseline_measured_on_a_busy_machine_is_not_saved() {
     let path = fresh_scratch_dir("busy").join("solr-baseline.json");
     let saved = save_solr_if_quiet(&path, &key(), &metrics(), Some("load average 6.2")).unwrap();
     assert!(!saved);
-    assert!(!path.exists(), "busy run must not leave a baseline to reuse");
+    assert!(
+        !path.exists(),
+        "busy run must not leave a baseline to reuse"
+    );
     assert_eq!(load_solr(&path, &key()).unwrap(), None);
 }
 
@@ -91,5 +94,9 @@ fn noise_measured_under_other_settings_is_not_reused() {
 
     let mut s = settings();
     s.solr_key.corpus_hash = "decaf0".to_string();
-    assert_eq!(load_noise_for(&path, &s).unwrap(), None, "solr baseline key");
+    assert_eq!(
+        load_noise_for(&path, &s).unwrap(),
+        None,
+        "solr baseline key"
+    );
 }
