@@ -1,5 +1,7 @@
 //! Search-quality contract for issue #389's UAX #29 tokenizer and Phase 4
-//! word-delimiter expansion.
+//! word-delimiter expansion. Since #479 the word delimiter applies only to
+//! `text_general`; `text_en` and the dynamic text catch-all keep UAX #29
+//! tokens whole, as Solr's StandardTokenizer does.
 //!
 //! These assertions deliberately do not use the `an389_*` responses: the
 //! premise change makes their Solr token stream reference material, not the
@@ -181,11 +183,12 @@ async fn text_presets_use_uax29_word_boundaries_without_discarding_meaningful_si
     }
     assert_field_term(&app, "english", "a", 0).await;
 
-    // Phase 4 deliberately makes delimiter parts independently searchable.
-    for field in ["general", "english"] {
-        for fragment in ["don", "example", "14", "foo", "com"] {
-            assert_field_term(&app, field, fragment, 1).await;
-        }
+    // Phase 4 makes delimiter parts independently searchable, but since #479
+    // only for text_general. text_en matches Solr and keeps UAX #29 tokens
+    // whole, so their parts find nothing.
+    for fragment in ["don", "example", "14", "foo", "com"] {
+        assert_field_term(&app, "general", fragment, 1).await;
+        assert_field_term(&app, "english", fragment, 0).await;
     }
 }
 
@@ -223,8 +226,10 @@ async fn search_api_dynamic_text_and_suggest_use_the_uax29_chain() {
         assert_field_term(&app, "tm_X3b_en_body", term, 1).await;
     }
     assert_field_term(&app, "tm_X3b_en_body", "a", 0).await;
+    // Since #479 the dynamic text catch-all has no word delimiter, matching
+    // Solr: delimiter parts of a whole UAX #29 token are not searchable.
     for fragment in ["don", "example", "14", "foo"] {
-        assert_field_term(&app, "tm_X3b_en_body", fragment, 1).await;
+        assert_field_term(&app, "tm_X3b_en_body", fragment, 0).await;
     }
 
     let (status, body) = get(
