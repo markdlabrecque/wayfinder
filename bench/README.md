@@ -44,6 +44,17 @@ after every change you want measured.
 | `--cold N` | 5 | Cold restarts per engine. Each one times the first request of every shape. |
 | `--force` | off | Run even when the machine is busy. The warning is saved in the JSON. |
 | `--noise K` | off | Measure the same Wayfinder build K times (at least 2) and save each metric's min and max to `bench/out/noise.json`. Prints the score's spread and exits. |
+| `--accept` | off | Save a passing run's score, answer fingerprints and protected-file hashes as the baseline. |
+| `--accept-protected` | off | For a person only: save the protected files' hashes as they stand, after reviewing a change to them. Measures nothing. |
+
+### Protected files
+
+`solr-ref/responses/`, `allowed-diffs.tsv`, `queries.tsv`, `weights.tsv` and
+the scoring code decide the score, so the tuning loop may not change them
+(`PROTECTED` in `src/protected.rs`). `--accept` saves their hashes to
+`bench/out/wf-protected.json`. A run whose protected files differ prints
+`FAIL protected: <files>` and exits 1 before measuring anything, until a
+person runs `--accept-protected`.
 
 ### Noise
 
@@ -60,8 +71,9 @@ over and over, tries a speed-up each time, and keeps only the wins.
 
 ### What a run does
 
-1. Runs the repo's `cargo test`. If it fails, `wf-bench` prints `FAIL tests`
-   and exits 1. A build that breaks the tests is never scored.
+1. Checks the protected files against the accepted hashes, then runs the
+   repo's `cargo test`. If either fails, `wf-bench` prints `FAIL protected`
+   or `FAIL tests` and exits 1. A build that breaks the tests is never scored.
 2. Checks the 1-minute load average. Above 2.0 it exits 2, unless `--force`
    is given.
 3. Starts Solr (`solr:9`, pinned by digest, 2 GB heap) in Docker. Then it

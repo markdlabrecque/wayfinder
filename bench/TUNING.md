@@ -112,6 +112,23 @@ Do not edit anything under `bench/`: not the driver, `weights.tsv`,
 speed-up. The one exception is appending to `bench/ideas.tsv` in steps 5
 and 6.
 
+These files are protected: the loop is judged by them, so it may never
+change them.
+
+- `solr-ref/responses/`: Solr's saved answers
+- `bench/allowed-diffs.tsv`
+- `bench/queries.tsv`
+- `bench/weights.tsv`
+- `bench/src/score.rs`, `bench/src/check.rs`, `bench/src/protected.rs` and
+  `bench/src/bin/wf-bench.rs`: the scoring and checking code
+
+`--accept` saves a hash of each to `bench/out/wf-protected.json`. If any of
+them differs, the benchmark refuses to score: it prints
+`FAIL protected: <files>` and exits 1. When that happens, stop the loop and
+report the files it named. Do not revert them to get past it, do not delete
+`bench/out/wf-protected.json`, and never pass `--accept-protected`. Only a
+person who has reviewed the change runs `--accept-protected`.
+
 ### 4. Run the gates
 
 Run these in order. Stop at the first one that fails; the try has failed.
@@ -127,7 +144,8 @@ cargo build --release
 Then run the benchmark. It runs `cargo test` again before measuring and
 prints `FAIL tests` if it fails. The try fails if:
 
-- the run exits non-zero, or the line says `FAIL` anywhere;
+- the run exits non-zero, or the line says `FAIL` anywhere. `FAIL protected`
+  is different: it does not count as a try. Stop the loop (step 3);
 - the correctness check is not full: `correct 15/15` must have both numbers
   equal, and no `FAIL` line follows it. That check proves Wayfinder's answers
   still match Solr's;
@@ -196,11 +214,12 @@ Set the failure count back to 0.
 
 ### 7. Decide whether to go on
 
-Stop when either is true:
+Stop when any is true:
 
 - The failure count reaches `N`: `N` failed tries in a row. A failed try is a
   failed gate, a `loss`, or `noise`.
 - The accepted score is at or below `TARGET`.
+- A run printed `FAIL protected`.
 
 Otherwise go back to step 1.
 
@@ -208,7 +227,8 @@ Otherwise go back to step 1.
 
 Report:
 
-- why it stopped: `N` failures in a row, or the target was hit;
+- why it stopped: `N` failures in a row, the target was hit, or a protected
+  file changed (name each file the run listed);
 - the score at the start and the accepted score at the end;
 - each kept commit, with its score change;
 - the ideas that were tried and reverted, one line each.
