@@ -75,8 +75,8 @@ dest = "body"
 | `date_range` | Interval-valued date with verbatim value plus synthetic start/end columns; not a scalar date |
 | `boost_term_payload` | Payload-bearing text for the bounded `{!payload_score}` evaluator; tokens use a final `\|<float>` payload |
 
-Static `text_en` fields apply the captured Porter terminal-`y` behavior (`day` becomes `dai`, while
-`sky` remains `sky`). The shared `_dynamic_text` catch-all retains the v1 Snowball behavior because
+Static `text_en` fields stem with classic Porter, as Solr's `_default` `text_en` does (`day` becomes
+`dai`, while `sky` remains `sky`). The shared `_dynamic_text` catch-all retains the v1 Snowball behavior because
 Tantivy gives analyzed dynamic rules one catch-all analyzer regardless of their declared text type.
 
 ### Custom analyzers

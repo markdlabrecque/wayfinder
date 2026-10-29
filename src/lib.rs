@@ -48,6 +48,7 @@ mod highlight;
 mod json_facet;
 mod local_params;
 mod params;
+mod porter_stemmer;
 mod query;
 pub mod schema;
 mod schema_contract;
