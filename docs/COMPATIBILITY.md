@@ -153,9 +153,9 @@ Wayfinder intentionally differs from captured Solr behavior in these areas:
     Fixed in analyzer contract v9 (`wayfinder_text_en_v9`, marker `text_presets_porter_stem_v9`):
     `text_en` now stems with classic Porter, ported from Lucene's `PorterStemmer`, in place of
     the `y` rule and Snowball. `argue` and `Argus` both index as `argu`; `institutionally` and
-    `institutionalized` both as `institution`. Stemming no longer moves counts in either
-    direction, so folding and the word delimiter are the remaining known differences, and both
-    only add matches. **An index with a static `text_en` field built under v8 refuses to start;
+    `institutionalized` both as `institution`. Stemming is expected to stop moving counts in
+    either direction, leaving folding and the word delimiter, which only add matches, as the
+    remaining known differences; no 20k run on v9 has confirmed this yet. **An index with a static `text_en` field built under v8 refuses to start;
     reindex into a fresh data directory.** The Search API `_dynamic_text` catch-all and suggest
     chains keep Snowball, as the captured Search API configset does.
     Unconfirmed: these attributions come from the analyzer code and the stemmer rules. The
