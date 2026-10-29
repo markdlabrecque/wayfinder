@@ -19,12 +19,33 @@ fn answer(qtime: u64, id: &str) -> serde_json::Value {
     })
 }
 
+/// The same answer as `answer`, as an engine that reports no timing would send it.
+fn answer_without_timing(id: &str) -> serde_json::Value {
+    json!({
+        "responseHeader": {"status": 0},
+        "response": {"numFound": 1, "docs": [{"id": id}]},
+    })
+}
+
 #[test]
 fn the_digest_ignores_query_time() {
-    assert_eq!(
-        digest(&[answer(3, "a"), answer(4, "b")]),
-        digest(&[answer(90, "a"), answer(1, "b")])
-    );
+    let timed = digest(&[answer(3, "a"), answer(4, "b")]);
+    // Both sides of the old comparison could be the empty digest; pin a real one.
+    assert_ne!(timed, digest(&[]), "answers must contribute to the digest");
+    assert_eq!(timed, digest(&[answer_without_timing("a"), answer_without_timing("b")]));
+    assert_eq!(timed, digest(&[answer(90, "a"), answer(1, "b")]));
+}
+
+#[test]
+fn the_digest_ignores_query_time_nested_in_the_answer() {
+    let with = json!({"debug": {"timing": {"QTime": 7}}, "response": {"docs": [{"id": "a"}]}});
+    let without = json!({"debug": {"timing": {}}, "response": {"docs": [{"id": "a"}]}});
+    assert_eq!(digest(&[with]), digest(&[without]));
+}
+
+#[test]
+fn the_digest_of_no_answers_differs_from_the_digest_of_one() {
+    assert_ne!(digest(&[]), digest(&[answer(3, "a")]));
 }
 
 #[test]
