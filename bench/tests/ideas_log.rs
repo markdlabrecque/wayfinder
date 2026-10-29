@@ -35,7 +35,10 @@ fn section(doc: &str, heading: &str) -> String {
             out.push('\n');
         }
     }
-    assert!(!out.is_empty(), "TUNING.md should have a `{heading}` section");
+    assert!(
+        !out.is_empty(),
+        "TUNING.md should have a `{heading}` section"
+    );
     out
 }
 
@@ -48,7 +51,10 @@ fn the_ideas_file_exists_with_a_header_naming_each_column() {
         .lines()
         .find(|l| !l.trim().is_empty() && !l.starts_with('#'))
         .expect("ideas.tsv should have a header row");
-    let cols: Vec<String> = header.split('\t').map(|c| c.trim().to_lowercase()).collect();
+    let cols: Vec<String> = header
+        .split('\t')
+        .map(|c| c.trim().to_lowercase())
+        .collect();
     for want in ["date", "idea", "metric", "delta", "outcome", "commit"] {
         assert!(
             cols.iter().any(|c| c == want),
