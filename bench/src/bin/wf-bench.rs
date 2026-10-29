@@ -827,17 +827,12 @@ fn main() {
         ),
     };
     // A busy machine's Solr numbers are used for this run only (#481).
-    let (saved, reused) = baseline::solr_or_measure_if_quiet(
-        &solr_path,
-        &solr_key,
-        busy_warning.as_deref(),
-        || {
-            let (stats, answers, version) =
-                run_solr(&work, &docs, &qs, &pools, iters, cold_runs);
+    let (saved, reused) =
+        baseline::solr_or_measure_if_quiet(&solr_path, &solr_key, busy_warning.as_deref(), || {
+            let (stats, answers, version) = run_solr(&work, &docs, &qs, &pools, iters, cold_runs);
             json!({"stats": stats, "answers": answers, "version": version})
-        },
-    )
-    .unwrap_or_else(|e| panic!("{e} (delete it to re-measure Solr)"));
+        })
+        .unwrap_or_else(|e| panic!("{e} (delete it to re-measure Solr)"));
     if reused {
         eprintln!("wf-bench: reusing Solr from {}", solr_path.display());
     } else if busy_warning.is_some() {
