@@ -67,10 +67,7 @@ fn an_untouched_tree_is_allowed_to_score() {
 fn hashes_round_trip_through_the_saved_file() {
     let root = fake_repo("prot-roundtrip");
     let saved = accept(&root);
-    assert_eq!(
-        load_hashes(&saved).unwrap(),
-        Some(snapshot(&root).unwrap())
-    );
+    assert_eq!(load_hashes(&saved).unwrap(), Some(snapshot(&root).unwrap()));
     assert_eq!(load_hashes(&root.join("missing.json")).unwrap(), None);
 }
 
@@ -141,7 +138,10 @@ fn the_report_names_each_changed_file_and_says_a_person_must_sign_off() {
         assert!(err.contains(f), "{f} missing from: {err}");
     }
     assert!(!err.contains("bench/allowed-diffs.tsv"), "{err}");
-    assert!(err.contains("--accept"), "should say how a person re-accepts: {err}");
+    assert!(
+        err.contains("--accept"),
+        "should say how a person re-accepts: {err}"
+    );
 
     let line = report(&["bench/weights.tsv".to_string()]);
     assert!(line.contains("bench/weights.tsv"), "{line}");
