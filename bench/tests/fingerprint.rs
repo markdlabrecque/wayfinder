@@ -32,7 +32,10 @@ fn the_digest_ignores_query_time() {
     let timed = digest(&[answer(3, "a"), answer(4, "b")]);
     // Both sides of the old comparison could be the empty digest; pin a real one.
     assert_ne!(timed, digest(&[]), "answers must contribute to the digest");
-    assert_eq!(timed, digest(&[answer_without_timing("a"), answer_without_timing("b")]));
+    assert_eq!(
+        timed,
+        digest(&[answer_without_timing("a"), answer_without_timing("b")])
+    );
     assert_eq!(timed, digest(&[answer(90, "a"), answer(1, "b")]));
 }
 

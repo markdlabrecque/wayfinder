@@ -56,10 +56,18 @@ fn values(r: &[(&str, f64)], name: &str) -> Vec<f64> {
 fn each_metric_is_wayfinder_over_solr_and_throughput_is_inverted() {
     let r = ratios(&sample_wf(), &sample_solr()).expect("ratios");
     assert_eq!(values(&r, "p50"), vec![0.5, 0.5], "one per query shape");
-    assert_eq!(values(&r, "first_ms"), vec![1.0, 1.0], "cold_ms feeds first_ms");
+    assert_eq!(
+        values(&r, "first_ms"),
+        vec![1.0, 1.0],
+        "cold_ms feeds first_ms"
+    );
     assert_eq!(values(&r, "cold_p50"), vec![0.5, 0.5]);
     assert_eq!(values(&r, "load_p50"), vec![0.5, 0.5], "one per load level");
-    assert_eq!(values(&r, "load_rps"), vec![0.5, 0.5], "solr/wf: 200 vs 100");
+    assert_eq!(
+        values(&r, "load_rps"),
+        vec![0.5, 0.5],
+        "solr/wf: 200 vs 100"
+    );
     assert_eq!(values(&r, "index_size_mb"), vec![0.5]);
     assert_eq!(values(&r, "index_docs_per_s"), vec![1.0]);
     assert_eq!(values(&r, "add_to_searchable_p50_ms"), vec![1.0]);
