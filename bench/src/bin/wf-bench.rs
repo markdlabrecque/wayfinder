@@ -54,7 +54,14 @@
 //! labels its change from the accepted score `win`, `loss`, or `noise`, and
 //! only a change bigger than the score's spread is a win or a loss.
 //!
+//! Protected files (issue #457): `--accept` also saves a hash of every file the
+//! run is judged by (`protected::PROTECTED`) to `bench/out/wf-protected.json`.
+//! A run whose protected files differ prints `FAIL protected: <files>` and
+//! exits 1 before measuring anything. Only `--accept-protected`, run by a
+//! person after reviewing the change, saves the new hashes.
+//!
 //! Usage: `wf-bench [--docs N] [--iters N] [--cold N] [--force] [--accept] [--noise K]`
+//! or `wf-bench --accept-protected`
 //! Requires: docker, a release build at `target/release/wayfinder`, and the
 //! corpus from `bench/fetch-wiki.sh`.
 
@@ -75,6 +82,7 @@ use wayfinder_bench::load::{self, LEVELS, run_levels};
 use wayfinder_bench::machine::{self, EnvInfo};
 use wayfinder_bench::memory::{self, MemStat, Sampler, parse_memory_stat};
 use wayfinder_bench::noise;
+use wayfinder_bench::protected;
 use wayfinder_bench::score;
 use wayfinder_bench::terms::{self, Pools};
 use wayfinder_bench::wiki::{self, WikiDoc};
@@ -803,6 +811,19 @@ fn main() {
     let load = machine::parse_loadavg(&read("/proc/loadavg")).expect("1-min load average");
     let bench_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = bench_dir.parent().expect("repo root").to_path_buf();
+    // Checked first, so a run on changed rules never measures anything (#457).
+    let protected_path = bench_dir.join("out/wf-protected.json");
+    let protected_hashes = protected::snapshot(&root).unwrap_or_else(|e| panic!("{e}"));
+    if args.iter().any(|a| a == "--accept-protected") {
+        std::fs::create_dir_all(bench_dir.join("out")).expect("create bench/out");
+        protected::save_hashes(&protected_path, &protected_hashes).expect("save protected hashes");
+        println!("accepted {} protected files as they stand", protected_hashes.len());
+        return;
+    }
+    if let Err(e) = protected::check_run(&root, &protected_path) {
+        println!("FAIL protected: {e}");
+        std::process::exit(1);
+    }
     if !tests_pass(&root) {
         println!("FAIL tests");
         std::process::exit(1);
@@ -1017,6 +1038,8 @@ fn main() {
     if accept {
         baseline::save_wf(&wf_path, score).expect("save Wayfinder baseline");
         fingerprint::save_accepted(&answers_path, &digests).expect("save answer fingerprints");
+        // The files as checked at the start: unchanged from any earlier accept.
+        protected::save_hashes(&protected_path, &protected_hashes).expect("save protected hashes");
         eprintln!("wf-bench: accepted score {score:.3} as the new baseline");
     }
 }

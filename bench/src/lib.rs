@@ -13,6 +13,7 @@ pub mod load;
 pub mod machine;
 pub mod memory;
 pub mod noise;
+pub mod protected;
 pub mod score;
 pub mod terms;
 pub mod wiki;
