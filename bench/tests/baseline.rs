@@ -13,6 +13,7 @@ fn key() -> SolrKey {
         queries_hash: "abc123".to_string(),
         solr_image_digest: "sha256:aaaa".to_string(),
         limits: "cpus=2 mem=4g".to_string(),
+        corpus_hash: "c0ffee".to_string(),
     }
 }
 
@@ -53,6 +54,10 @@ fn a_changed_dataset_or_setting_makes_the_saved_solr_numbers_stale() {
     let mut k = key();
     k.limits = "cpus=4 mem=4g".to_string();
     assert_eq!(load_solr(&path, &k).unwrap(), None, "limits");
+
+    let mut k = key();
+    k.corpus_hash = "decaf0".to_string();
+    assert_eq!(load_solr(&path, &k).unwrap(), None, "corpus content");
 }
 
 #[test]
