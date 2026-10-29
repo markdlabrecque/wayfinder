@@ -153,13 +153,19 @@ Wayfinder intentionally differs from captured Solr behavior in these areas:
     Fixed in analyzer contract v9 (`wayfinder_text_en_v9`, marker `text_presets_porter_stem_v9`):
     `text_en` now stems with classic Porter, ported from Lucene's `PorterStemmer`, in place of
     the `y` rule and Snowball. `argue` and `Argus` both index as `argu`; `institutionally` and
-    `institutionalized` both as `institution`. Stemming is expected to stop moving counts in
-    either direction, leaving folding and the word delimiter, which only add matches, as the
-    remaining known differences; no 20k run on v9 has confirmed this yet. **An index with a static `text_en` field built under v8 refuses to start;
-    reindex into a fresh data directory.** The Search API `_dynamic_text` catch-all and suggest
-    chains keep Snowball, as the captured Search API configset does.
-    Unconfirmed: these attributions come from the analyzer code and the stemmer rules. The
-    extra and missing doc ids have not been pulled from a live run.
+    `institutionalized` both as `institution`. **An index with a static `text_en` field built
+    under v8 refuses to start; reindex into a fresh data directory.** The Search API
+    `_dynamic_text` catch-all and suggest chains keep Snowball, as the captured Search API
+    configset does.
+    Confirmed on v9 by a live replay on the same 20k corpus (#477, `fl=id&rows=5000`): `phrase`
+    `"conventional way"`, `edismax` `argue maritz` and `deep_page` `institutionalized` return
+    identical id sets in both engines (4, 1087 and 63 docs), with no Solr-only ids left. In a
+    fresh 20k run on v9 (`bench/out/1793237128.json`, `correct 4/15`), `phrase` is 7/200 wrong,
+    `edismax` 58/200 (waived) and `deep_page` 30/200, and in each first failure Wayfinder finds
+    more pages than Solr (`"continuously used"` 50 vs 49, `terror reconfirmed` 356 vs 354, `raby`
+    41 vs 34). For these three searches no known case remains where Wayfinder finds fewer.
+    The other attributions above, for extra pages, still come from the analyzer code and the
+    stemmer rules. Their extra doc ids have not been pulled from a live run (#478).
 
 ## Permanent unsupported boundaries
 

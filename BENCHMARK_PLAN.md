@@ -303,15 +303,25 @@ differences, so none of these goes in `allowed-diffs.tsv` yet. A person has to d
 
 ### Not explained without a live engine (follow-up tickets to file)
 
-1. **Wayfinder finds fewer:** `phrase` `"conventional way"` (3 vs 4), `edismax` `argue maritz`
-   (1064 vs 1087), `deep_page` `institutionalized` (56 vs 63). Folding and the word delimiter
-   can't remove matches. #477 traced all three to the stemmer, from the analyzer code: Snowball
-   keeps `Argus` apart from `argue` and `institutionally` apart from `institutionalized`, which
-   classic Porter joins; `"conventional way"` fits the inflected-`y` bug (`ways` vs `way`) that
-   v8 fixed after this run. Analyzer contract v9 replaces Snowball in `text_en` with classic
-   Porter (`src/porter_stemmer.rs`), so stemming should no longer move counts either way. Not yet
-   confirmed: the missing doc ids still need a live replay, and the 20k run has not been redone
-   on v9.
+1. **Wayfinder finds fewer (#477, closed by v9):** `phrase` `"conventional way"` (3 vs 4),
+   `edismax` `argue maritz` (1064 vs 1087), `deep_page` `institutionalized` (56 vs 63). Folding
+   and the word delimiter can't remove matches; the stemmer can. Snowball keeps `Argus` apart
+   from `argue` and `institutionally` apart from `institutionalized`, which classic Porter joins;
+   `"conventional way"` fits the inflected-`y` bug (`ways` vs `way`) that v8 fixed after this
+   run. Analyzer contract v9 replaces Snowball in `text_en` with classic Porter
+   (`src/porter_stemmer.rs`).
+   Replay on v9 (head `218b832`, same 20k corpus, both engines, the three requests with
+   `fl=id&rows=5000`; id sets in `bench/out/replay-477/`, gitignored): `phrase` solr 4 / wf 4,
+   `edismax` solr 1087 / wf 1087, `deep_page` solr 63 / wf 63. The id sets are identical: 0
+   Solr-only and 0 Wayfinder-only ids for all three. Classic Porter closes every miss, so no
+   miss is left for the tokenizer, phrase positions or edismax parsing to explain.
+   Fresh 20k run on v9 (`wf-bench --docs 20000 --iters 200 --cold 1 --force`, busy machine at
+   load 8.61, so ignore speed; `bench/out/1793237128.json`, gitignored): `correct 4/15` (was
+   2/15). Wrong of 200: `phrase` 7 (was 11), first failure wf=50 solr=49 `q="continuously
+   used"`; `edismax` 58 (was 66), waived, first failure wf=356 solr=354 `q=terror reconfirmed`;
+   `deep_page` 30 (was 34), first failure wf=41 solr=34 `q=raby`. In every first failure
+   Wayfinder now finds more, not fewer. Those cases belong to #478 (extra pages) and #479
+   (folding and word delimiter). wf-bench reports only the first failing request per shape.
 2. **Wayfinder finds more, cause not pinned:** `term` `indicative` (+2), `bool_and`
    `theming AND additional` (+30), `bool_or` `intercepted OR malayalam` (+1), `sort_field`
    `aurea` (+1), `facet_range` `procreate` (+2), `group` `concomitant` (+4), `highlight`
@@ -335,3 +345,7 @@ differences, so none of these goes in `allowed-diffs.tsv` yet. A person has to d
   differences, and the rest are listed as follow-ups (see "Varied-query run"). The Phase 2
   terms box and the Phase 4 warm latency and CPU boxes are ticked. The correctness gate still
   fails and nothing was added to `allowed-diffs.tsv`.
+- 2026-10-28: #477 v9 (classic Porter in `text_en`). Live replay of the three "finds fewer"
+  requests now gives identical id sets in both engines. The 20k run went to `correct 4/15`, and
+  the remaining `phrase`, `edismax` and `deep_page` first failures all have Wayfinder finding
+  more (see item 1 under "Not explained without a live engine").
