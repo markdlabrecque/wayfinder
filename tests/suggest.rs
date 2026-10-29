@@ -1248,7 +1248,9 @@ async fn suggest_q_en_treats_inflected_y_words_as_the_same_word() {
     ] {
         let (status, body) = get(
             &app,
-            &format!("suggest?suggest.dictionary=en&suggest.q={query}&suggest.highlight=false&wt=json"),
+            &format!(
+                "suggest?suggest.dictionary=en&suggest.q={query}&suggest.highlight=false&wt=json"
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "lookup must answer 200: {body}");
