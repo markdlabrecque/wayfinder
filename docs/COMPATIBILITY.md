@@ -127,14 +127,14 @@ Wayfinder intentionally differs from captured Solr behavior in these areas:
     In a 20,000-doc `wf-bench` run on develop 84d7a34, 13 of 15 query shapes disagree on
     `numFound` in both directions, `bool_or` and `edismax` included; both are waived in
     `bench/allowed-diffs.tsv`. Three differences in the chain account for the sample failures:
-    - Stemming. Wayfinder runs Snowball English after a pre-stem Porter `y` rule; Solr
-      runs Porter. Snowball re-strips `-tional` after turning `-ally`/`-alism` into `-al`, uses
-      different region rules for `-ly` and `-ive`, and keeps the final `s` of `-us` words that
-      Porter strips. So `additionally` joins `additional` only in Wayfinder (`bool_and` `theming AND
-      additional`: 483 vs 453), as do `concomitantly` (`group` `concomitant`: 31 vs 27) and
-      `procreative` (`facet_range` `procreate`: 20 vs 18). `institutionally` joins
-      `institutionalized` (`deep_page`: 56 vs 63) and `Argus` joins `argue` (`edismax` `argue
-      maritz`: 1064 vs 1087) only in Solr.
+    - Stemming, fixed in v9 (below). Wayfinder ran Snowball English after a pre-stem Porter `y`
+      rule; Solr runs classic Porter. Snowball re-strips `-tional` after turning `-ally`/`-alism`
+      into `-al`, uses different region rules for `-ly` and `-ive`, and keeps the final `s` of
+      `-us` words that Porter strips. So `additionally` joined `additional` only in Wayfinder
+      (`bool_and` `theming AND additional`: 483 vs 453), as did `concomitantly` (`group`
+      `concomitant`: 31 vs 27) and `procreative` (`facet_range` `procreate`: 20 vs 18).
+      `institutionally` joined `institutionalized` (`deep_page`: 56 vs 63) and `Argus` joined
+      `argue` (`edismax` `argue maritz`: 1064 vs 1087) only in Solr.
     - Accent folding. `Håkon` and `Percé` index as `hakon` and `perce` only in Wayfinder
       (`facet_field` `hakone`: 18 vs 6; `filter` `perce`: 4 vs 3).
     - Word delimiter. Wayfinder also indexes the catenation of punctuation-linked words
@@ -150,6 +150,14 @@ Wayfinder intentionally differs from captured Solr behavior in these areas:
     and `plai` as Porter gives. `phrase` `"conventional way"` (3 vs 4) fits this bug. **An index
     with a static `text_en` field built under v7 refuses to start; reindex into a fresh data
     directory.**
+    Fixed in analyzer contract v9 (`wayfinder_text_en_v9`, marker `text_presets_porter_stem_v9`):
+    `text_en` now stems with classic Porter, ported from Lucene's `PorterStemmer`, in place of
+    the `y` rule and Snowball. `argue` and `Argus` both index as `argu`; `institutionally` and
+    `institutionalized` both as `institution`. Stemming no longer moves counts in either
+    direction, so folding and the word delimiter are the remaining known differences, and both
+    only add matches. **An index with a static `text_en` field built under v8 refuses to start;
+    reindex into a fresh data directory.** The Search API `_dynamic_text` catch-all and suggest
+    chains keep Snowball, as the captured Search API configset does.
     Unconfirmed: these attributions come from the analyzer code and the stemmer rules. The
     extra and missing doc ids have not been pulled from a live run.
 

@@ -305,10 +305,13 @@ differences, so none of these goes in `allowed-diffs.tsv` yet. A person has to d
 
 1. **Wayfinder finds fewer:** `phrase` `"conventional way"` (3 vs 4), `edismax` `argue maritz`
    (1064 vs 1087), `deep_page` `institutionalized` (56 vs 63). Folding and the word delimiter
-   can't remove matches. The remaining suspects are the stemmer (Snowball vs classic Porter),
-   tokenizing (UAX #29 vs Lucene's StandardTokenizer), phrase positions around word-delimiter
-   compounds, and edismax parsing. To find out: replay each URL, diff the two engines' id sets,
-   and run the missing docs' text through Solr's `/analysis/field`.
+   can't remove matches. #477 traced all three to the stemmer, from the analyzer code: Snowball
+   keeps `Argus` apart from `argue` and `institutionally` apart from `institutionalized`, which
+   classic Porter joins; `"conventional way"` fits the inflected-`y` bug (`ways` vs `way`) that
+   v8 fixed after this run. Analyzer contract v9 replaces Snowball in `text_en` with classic
+   Porter (`src/porter_stemmer.rs`), so stemming should no longer move counts either way. Not yet
+   confirmed: the missing doc ids still need a live replay, and the 20k run has not been redone
+   on v9.
 2. **Wayfinder finds more, cause not pinned:** `term` `indicative` (+2), `bool_and`
    `theming AND additional` (+30), `bool_or` `intercepted OR malayalam` (+1), `sort_field`
    `aurea` (+1), `facet_range` `procreate` (+2), `group` `concomitant` (+4), `highlight`
