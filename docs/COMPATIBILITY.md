@@ -135,14 +135,14 @@ Wayfinder intentionally differs from captured Solr behavior in these areas:
       `concomitant`: 31 vs 27) and `procreative` (`facet_range` `procreate`: 20 vs 18).
       `institutionally` joined `institutionalized` (`deep_page`: 56 vs 63) and `Argus` joined
       `argue` (`edismax` `argue maritz`: 1064 vs 1087) only in Solr.
-    - Accent folding. `Håkon` and `Percé` index as `hakon` and `perce` only in Wayfinder
-      (`facet_field` `hakone`: 18 vs 6; `filter` `perce`: 4 vs 3).
-    - Word delimiter. Wayfinder also indexes the catenation of punctuation-linked words
-      (`off-season` also gives `offseason`; `stats` `offseasons`: 70 vs 34) and splits single
-      UAX tokens such as `x.y` or `x's` that Solr keeps whole. It also adds letter-digit parts
-      (`wifi2000` gives `wifi` and `2000`).
+    - Accent folding, removed in v10 (below). `Håkon` and `Percé` indexed as `hakon` and `perce`
+      only in Wayfinder (`facet_field` `hakone`: 18 vs 6; `filter` `perce`: 4 vs 3).
+    - Word delimiter, removed in v10 (below). Wayfinder also indexed the catenation of
+      punctuation-linked words (`off-season` also gave `offseason`; `stats` `offseasons`: 70 vs
+      34) and split single UAX tokens such as `x.y` or `x's` that Solr keeps whole. It also
+      added letter-digit parts (`wifi2000` gave `wifi` and `2000`).
 
-    Folding and the word delimiter only add matches; stemming moves counts either way.
+    Folding and the word delimiter only added matches; stemming moves counts either way.
     Fixed in analyzer contract v8 (`wayfinder_text_en_v8`, marker `text_presets_inflected_y_v8`):
     the pre-stem Porter `y` rule saw only a terminal `y`, so `day` indexed as `dai` but `days`
     and `played` as `day` and `play`, and searching `day` missed `days`. v8 also maps a vowel +
@@ -166,6 +166,18 @@ Wayfinder intentionally differs from captured Solr behavior in these areas:
     41 vs 34). For these three searches no known case remains where Wayfinder finds fewer.
     The other attributions above, for extra pages, still come from the analyzer code and the
     stemmer rules. Their extra doc ids have not been pulled from a live run (#478).
+    Matched to Solr in analyzer contract v10 (`wayfinder_text_en_v10`, marker
+    `text_presets_porter_stem_v10`; #479): `text_en` no longer folds accents and no longer runs
+    the word delimiter, as Solr's `_default` `text_en` does neither. `perce` no longer finds
+    `Percé`, and `offseason` no longer finds `off-season`; `off` and `season` still match as
+    separate words. The extra matches helped some users, but they made Wayfinder's answers
+    differ from Solr's with no decision behind it, so the owner chose to match Solr. These are
+    not deliberate differences: `bench/allowed-diffs.tsv` has no rows for `filter`,
+    `facet_field` or `stats`. The `_dynamic_text` catch-all, which every analyzed dynamic rule
+    shares (including Search API `tm_X3b_en_*`), drops folding and the word delimiter too.
+    Other text presets and the suggest chains still fold.
+    **An index with a static `text_en` field or an analyzed dynamic rule built under v9 or
+    earlier refuses to start; reindex into a fresh data directory.**
 
 ## Permanent unsupported boundaries
 
