@@ -817,7 +817,10 @@ fn main() {
     if args.iter().any(|a| a == "--accept-protected") {
         std::fs::create_dir_all(bench_dir.join("out")).expect("create bench/out");
         protected::save_hashes(&protected_path, &protected_hashes).expect("save protected hashes");
-        println!("accepted {} protected files as they stand", protected_hashes.len());
+        println!(
+            "accepted {} protected files as they stand",
+            protected_hashes.len()
+        );
         return;
     }
     if let Err(e) = protected::check_run(&root, &protected_path) {
