@@ -48,19 +48,31 @@ async fn hits(docs: Value, q: &str) -> u64 {
 #[tokio::test]
 async fn searching_airline_finds_a_doc_that_only_says_airlines_with_apostrophe_s() {
     let docs = json!([{"id": "d1", "body": "the luxury airline's campaign"}]);
-    assert_eq!(hits(docs, "airline").await, 1, "`airline` must match `airline's`");
+    assert_eq!(
+        hits(docs, "airline").await,
+        1,
+        "`airline` must match `airline's`"
+    );
 }
 
 #[tokio::test]
 async fn searching_parkinson_finds_a_capitalised_possessive() {
     let docs = json!([{"id": "d1", "body": "Parkinson's disease research"}]);
-    assert_eq!(hits(docs, "parkinson").await, 1, "`parkinson` must match `Parkinson's`");
+    assert_eq!(
+        hits(docs, "parkinson").await,
+        1,
+        "`parkinson` must match `Parkinson's`"
+    );
 }
 
 #[tokio::test]
 async fn searching_airline_finds_a_curly_apostrophe_possessive() {
     let docs = json!([{"id": "d1", "body": "the luxury airline\u{2019}s campaign"}]);
-    assert_eq!(hits(docs, "airline").await, 1, "`airline` must match `airline’s`");
+    assert_eq!(
+        hits(docs, "airline").await,
+        1,
+        "`airline` must match `airline’s`"
+    );
 }
 
 #[tokio::test]
