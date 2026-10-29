@@ -114,7 +114,7 @@ fn old_empty_dynamic_indexes_retain_a_legacy_marker_until_reindexed() {
     assert_eq!(
         std::fs::read_to_string(dir.path().join("data/wayfinder-analyzer-contract"))
             .expect("read adopted contract"),
-        "text_presets_porter_stem_v10_legacy_dynamic_text",
+        "text_presets_english_possessive_v11_legacy_dynamic_text",
         "an old physical catch-all identity must not be certified as v6"
     );
 

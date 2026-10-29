@@ -151,11 +151,15 @@ const TEXT_GENERAL_TOKENIZER_V3: &str = "wayfinder_text_general_v3";
 const TEXT_GENERAL_TOKENIZER_LEGACY: &str = "default";
 /// Wayfinder's versioned English analyzer uses UAX #29 word segmentation,
 /// an inclusive character-length bound, lowercase, English stopword removal,
-/// and stemming. Like Solr's `_default` `text_en`, it neither folds accents
-/// nor catenates delimiter-linked words (#479).
+/// English possessive removal, and stemming. Like Solr's `_default`
+/// `text_en`, it neither folds accents nor catenates delimiter-linked words
+/// (#479), and it strips a trailing `'s` before stemming (#478).
 /// It intentionally does not override Tantivy's `en_stem`, which remains
 /// available for custom analyzer chains and upstream defaults.
-const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v10";
+const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v11";
+/// The v10 predecessor, which kept a trailing `'s` (#478), remains registered
+/// only so a legacy Tantivy schema can be diagnosed safely.
+const TEXT_EN_TOKENIZER_V10: &str = "wayfinder_text_en_v10";
 /// The v9 predecessor, which folded accents and ran the word delimiter (#479),
 /// remains registered only so a legacy Tantivy schema can be diagnosed safely.
 const TEXT_EN_TOKENIZER_V9: &str = "wayfinder_text_en_v9";
@@ -536,8 +540,9 @@ impl WayfinderSchema {
 
     /// Whether this schema can contain static `text_en` terms from the v7
     /// chain, whose Porter `y` rule v8 extends to `-ys`, `-yed` and `-ying`,
-    /// from the v8 chain, whose Snowball stems v9 replaces with Porter's, or
-    /// from the v9 chain, whose folded and catenated terms v10 drops.
+    /// from the v8 chain, whose Snowball stems v9 replaces with Porter's,
+    /// from the v9 chain, whose folded and catenated terms v10 drops, or from
+    /// the v10 chain, whose possessive `'s` terms v11 strips.
     pub(crate) fn uses_static_text_en(&self) -> bool {
         self.fields.iter().any(|field| field.type_ == "text_en")
     }
@@ -877,6 +882,31 @@ impl TokenFilter for PorterStemFilter {
             inner: tokenizer,
             rewrite: crate::porter_stemmer::stem,
         }
+    }
+}
+
+/// Solr `_default` `text_en`'s `EnglishPossessiveFilterFactory`: a trailing
+/// `'s`, `’s` or `＇s` is stripped, so `airline's` matches `airline` (#478).
+#[derive(Clone)]
+struct EnglishPossessiveFilter;
+
+impl TokenFilter for EnglishPossessiveFilter {
+    type Tokenizer<T: Tokenizer> = PorterTerminalYTokenizer<T>;
+
+    fn transform<T: Tokenizer>(self, tokenizer: T) -> Self::Tokenizer<T> {
+        PorterTerminalYTokenizer {
+            inner: tokenizer,
+            rewrite: english_possessive,
+        }
+    }
+}
+
+fn english_possessive(text: &mut String) {
+    let Some(stem) = text.strip_suffix(['s', 'S']) else {
+        return;
+    };
+    if let Some(stem) = stem.strip_suffix(['\'', '\u{2019}', '\u{FF07}']) {
+        text.truncate(stem.len());
     }
 }
 
@@ -1960,6 +1990,7 @@ pub fn is_current_builtin_graph_tokenizer(tokenizer: &str) -> bool {
         TEXT_GENERAL_TOKENIZER
             | TEXT_GENERAL_TOKENIZER_V6
             | TEXT_EN_TOKENIZER
+            | TEXT_EN_TOKENIZER_V10
             | TEXT_EN_TOKENIZER_V9
             | TEXT_EN_TOKENIZER_V8
             | TEXT_EN_TOKENIZER_V7
@@ -2239,7 +2270,7 @@ fn build_tokenizers(
             .build(),
     );
     // Kept for opening and diagnosing legacy schemas; new text_en fields use
-    // the v10 identity below.
+    // the v11 identity below.
     register_both(
         TEXT_EN_TOKENIZER_V2,
         TextAnalyzer::builder(SimpleTokenizer::default())
@@ -2395,7 +2426,7 @@ fn build_tokenizers(
             .build(),
     );
     register_split(
-        TEXT_EN_TOKENIZER,
+        TEXT_EN_TOKENIZER_V10,
         TextAnalyzer::builder(Uax29Tokenizer)
             .filter_dynamic(LengthFilter {
                 min: 1,
@@ -2415,6 +2446,34 @@ fn build_tokenizers(
             .filter_dynamic(SynonymFilter {
                 resource: synonyms.clone(),
             })
+            .filter(PorterStemFilter)
+            .build(),
+    );
+    // Solr's order: the possessive is stripped after the stop filter and
+    // lowercase, immediately before the stemmer.
+    register_split(
+        TEXT_EN_TOKENIZER,
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(LengthFilter {
+                min: 1,
+                max: STATIC_TEXT_MAX_TOKEN_LEN,
+            })
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter(EnglishPossessiveFilter)
+            .filter(PorterStemFilter)
+            .build(),
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(LengthFilter {
+                min: 1,
+                max: STATIC_TEXT_MAX_TOKEN_LEN,
+            })
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter_dynamic(SynonymFilter {
+                resource: synonyms.clone(),
+            })
+            .filter(EnglishPossessiveFilter)
             .filter(PorterStemFilter)
             .build(),
     );
@@ -2732,6 +2791,7 @@ fn parse_with_synonyms(raw: &str, synonyms: SynonymResource) -> Result<Wayfinder
             TEXT_GENERAL_TOKENIZER_V4.to_string(),
             TEXT_GENERAL_TOKENIZER_V3.to_string(),
             TEXT_EN_TOKENIZER.to_string(),
+            TEXT_EN_TOKENIZER_V10.to_string(),
             TEXT_EN_TOKENIZER_V9.to_string(),
             TEXT_EN_TOKENIZER_V8.to_string(),
             TEXT_EN_TOKENIZER_V7.to_string(),
