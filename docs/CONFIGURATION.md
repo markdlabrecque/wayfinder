@@ -78,6 +78,7 @@ dest = "body"
 Static `text_en` fields stem with classic Porter, as Solr's `_default` `text_en` does (`day` becomes
 `dai`, while `sky` remains `sky`). The shared `_dynamic_text` catch-all retains the v1 Snowball behavior because
 Tantivy gives analyzed dynamic rules one catch-all analyzer regardless of their declared text type.
+Like Solr's `text_en`, neither folds accents nor catenates hyphenated words.
 
 ### Custom analyzers
 

@@ -151,10 +151,14 @@ const TEXT_GENERAL_TOKENIZER_V3: &str = "wayfinder_text_general_v3";
 const TEXT_GENERAL_TOKENIZER_LEGACY: &str = "default";
 /// Wayfinder's versioned English analyzer uses UAX #29 word segmentation,
 /// an inclusive character-length bound, lowercase, English stopword removal,
-/// and stemming.
+/// and stemming. Like Solr's `_default` `text_en`, it neither folds accents
+/// nor catenates delimiter-linked words (#479).
 /// It intentionally does not override Tantivy's `en_stem`, which remains
 /// available for custom analyzer chains and upstream defaults.
-const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v9";
+const TEXT_EN_TOKENIZER: &str = "wayfinder_text_en_v10";
+/// The v9 predecessor, which folded accents and ran the word delimiter (#479),
+/// remains registered only so a legacy Tantivy schema can be diagnosed safely.
+const TEXT_EN_TOKENIZER_V9: &str = "wayfinder_text_en_v9";
 /// The v8 predecessor, which stemmed with Snowball English instead of classic
 /// Porter (#477), remains registered only so a legacy Tantivy schema can be
 /// diagnosed safely.
@@ -175,8 +179,11 @@ const TEXT_EN_TOKENIZER_V4: &str = "wayfinder_text_en_v4";
 const TEXT_EN_TOKENIZER_V3: &str = "wayfinder_text_en_v3";
 const TEXT_EN_TOKENIZER_V2: &str = "wayfinder_text_en_v2";
 /// The versioned dynamic-text catch-all retains Search API's Snowball behavior
-/// while using UAX #29 segmentation. Earlier identities remain registered only
-/// for legacy-index diagnosis.
+/// while using UAX #29 segmentation. Like `text_en`, it neither folds accents
+/// nor catenates delimiter-linked words (#479); that change kept this identity
+/// and relies on analyzer contract v10 to refuse older analyzed dynamic
+/// postings. Earlier identities remain registered only for legacy-index
+/// diagnosis.
 const DYNAMIC_TEXT_TOKENIZER: &str = "wayfinder_dynamic_text_v6";
 const DYNAMIC_TEXT_TOKENIZER_V5: &str = "wayfinder_dynamic_text_v5";
 const DYNAMIC_TEXT_TOKENIZER_V4: &str = "wayfinder_dynamic_text_v4";
@@ -529,7 +536,8 @@ impl WayfinderSchema {
 
     /// Whether this schema can contain static `text_en` terms from the v7
     /// chain, whose Porter `y` rule v8 extends to `-ys`, `-yed` and `-ying`,
-    /// or from the v8 chain, whose Snowball stems v9 replaces with Porter's.
+    /// from the v8 chain, whose Snowball stems v9 replaces with Porter's, or
+    /// from the v9 chain, whose folded and catenated terms v10 drops.
     pub(crate) fn uses_static_text_en(&self) -> bool {
         self.fields.iter().any(|field| field.type_ == "text_en")
     }
@@ -1952,6 +1960,7 @@ pub fn is_current_builtin_graph_tokenizer(tokenizer: &str) -> bool {
         TEXT_GENERAL_TOKENIZER
             | TEXT_GENERAL_TOKENIZER_V6
             | TEXT_EN_TOKENIZER
+            | TEXT_EN_TOKENIZER_V9
             | TEXT_EN_TOKENIZER_V8
             | TEXT_EN_TOKENIZER_V7
             | TEXT_EN_TOKENIZER_V6
@@ -2214,19 +2223,15 @@ fn build_tokenizers(
     register_split(
         DYNAMIC_TEXT_TOKENIZER,
         TextAnalyzer::builder(Uax29Tokenizer)
-            .filter_dynamic(AccentFoldingFilter)
             .filter_dynamic(LengthFilter { min: 1, max: 100 })
             .filter_dynamic(SimpleLowerCaseFilter)
             .filter(english_stopwords())
-            .filter_dynamic(WordDelimiterFilter::search())
             .filter(Stemmer::new(Language::English))
             .build(),
         TextAnalyzer::builder(Uax29Tokenizer)
-            .filter_dynamic(AccentFoldingFilter)
             .filter_dynamic(LengthFilter { min: 1, max: 100 })
             .filter_dynamic(SimpleLowerCaseFilter)
             .filter(english_stopwords())
-            .filter_dynamic(WordDelimiterFilter::search())
             .filter_dynamic(SynonymFilter {
                 resource: synonyms.clone(),
             })
@@ -2234,7 +2239,7 @@ fn build_tokenizers(
             .build(),
     );
     // Kept for opening and diagnosing legacy schemas; new text_en fields use
-    // the v9 identity below.
+    // the v10 identity below.
     register_both(
         TEXT_EN_TOKENIZER_V2,
         TextAnalyzer::builder(SimpleTokenizer::default())
@@ -2362,7 +2367,7 @@ fn build_tokenizers(
             .build(),
     );
     register_split(
-        TEXT_EN_TOKENIZER,
+        TEXT_EN_TOKENIZER_V9,
         TextAnalyzer::builder(Uax29Tokenizer)
             .filter_dynamic(AccentFoldingFilter)
             .filter_dynamic(LengthFilter {
@@ -2383,6 +2388,30 @@ fn build_tokenizers(
             .filter_dynamic(SimpleLowerCaseFilter)
             .filter(english_stopwords())
             .filter_dynamic(WordDelimiterFilter::search())
+            .filter_dynamic(SynonymFilter {
+                resource: synonyms.clone(),
+            })
+            .filter(PorterStemFilter)
+            .build(),
+    );
+    register_split(
+        TEXT_EN_TOKENIZER,
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(LengthFilter {
+                min: 1,
+                max: STATIC_TEXT_MAX_TOKEN_LEN,
+            })
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
+            .filter(PorterStemFilter)
+            .build(),
+        TextAnalyzer::builder(Uax29Tokenizer)
+            .filter_dynamic(LengthFilter {
+                min: 1,
+                max: STATIC_TEXT_MAX_TOKEN_LEN,
+            })
+            .filter_dynamic(SimpleLowerCaseFilter)
+            .filter(english_stopwords())
             .filter_dynamic(SynonymFilter {
                 resource: synonyms.clone(),
             })
@@ -2703,6 +2732,7 @@ fn parse_with_synonyms(raw: &str, synonyms: SynonymResource) -> Result<Wayfinder
             TEXT_GENERAL_TOKENIZER_V4.to_string(),
             TEXT_GENERAL_TOKENIZER_V3.to_string(),
             TEXT_EN_TOKENIZER.to_string(),
+            TEXT_EN_TOKENIZER_V9.to_string(),
             TEXT_EN_TOKENIZER_V8.to_string(),
             TEXT_EN_TOKENIZER_V7.to_string(),
             TEXT_EN_TOKENIZER_V6.to_string(),

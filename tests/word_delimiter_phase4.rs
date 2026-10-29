@@ -1,8 +1,9 @@
 //! Phase 4 word-delimiter and autocomplete contract (issue #389).
 //!
-//! The assertions are deliberately search-quality contracts, not Solr fixture
-//! comparisons: both index and query analysis must produce useful parts and a
-//! catenated spelling, including for Search API dynamic text fields.
+//! Issue #479 removed the word delimiter from `text_en` and the dynamic text
+//! catch-all so they match Solr (see `tests/text_en_solr_parity.rs`).
+//! `text_general` and the suggest dictionary keep their delimiter handling,
+//! which these assertions cover.
 
 mod common;
 
@@ -35,11 +36,10 @@ type = "text_en"
 stored = true
 multi_valued = true
 
-[[dynamic_fields]]
-pattern = "tm_X3b_en_*"
-type = "text_en"
+[[fields]]
+name = "general"
+type = "text_general"
 stored = true
-multi_valued = true
 "#;
 
 async fn delimiter_app() -> (axum::Router, TempDir) {
@@ -48,14 +48,11 @@ async fn delimiter_app() -> (axum::Router, TempDir) {
     let (status, body) = post_docs(
         &app,
         &json!([
-            {"id": "static-compound", "body": "SKU-42 next WiFi2000"},
-            {"id": "static-independent", "body": "day boy"},
-            {"id": "stopword-gap", "body": "quick the fox"},
-            {"id": "dynamic-compound", "tm_X3b_en_code": ["SKU-42 wifi_router"]},
-            {"id": "dynamic-independent", "tm_X3b_en_code": ["happy sky"]},
+            {"id": "static-compound", "general": "SKU-42 next WiFi2000"},
+            {"id": "static-independent", "general": "day boy"},
             {"id": "suggest-delimiter", "twm_suggest": ["foo_bar"]},
-            {"id": "emoji-compound", "body": "😀-foo raven", "twm_suggest": ["😀-foo"]},
-            {"id": "combining-compound", "body": "\u{301}-bar zebra"}
+            {"id": "emoji-compound", "body": "😀-foo raven", "general": "😀-foo raven", "twm_suggest": ["😀-foo"]},
+            {"id": "combining-compound", "general": "\u{301}-bar zebra"}
         ]),
     )
     .await;
@@ -93,45 +90,34 @@ async fn field_terms(app: &axum::Router, field: &str) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn word_delimiter_parts_and_catenations_match_symmetrically_for_static_and_dynamic_text() {
+async fn word_delimiter_parts_and_catenations_match_symmetrically_on_text_general() {
     let (app, _dir) = delimiter_app().await;
 
-    // Both static and dynamic text must retain each compound's parts and its
-    // catenation. The explicit term-dictionary checks are mutation-sensitive:
-    // a query-only workaround can otherwise make these lookups pass while
-    // failing to index the symmetric forms.
-    for field in ["body", "tm_X3b_en_code"] {
-        let terms = field_terms(&app, field).await;
-        for expected in ["sku", "42", "sku42"] {
-            assert!(
-                terms.contains(&expected.to_owned()),
-                "{field} is missing {expected:?}: {terms:?}"
-            );
-        }
+    // The explicit term-dictionary checks are mutation-sensitive: a query-only
+    // workaround can otherwise make these lookups pass while failing to index
+    // the symmetric forms.
+    let terms = field_terms(&app, "general").await;
+    for expected in ["sku", "42", "sku42"] {
+        assert!(
+            terms.contains(&expected.to_owned()),
+            "general is missing {expected:?}: {terms:?}"
+        );
     }
-    let static_terms = field_terms(&app, "body").await;
-    let dynamic_terms = field_terms(&app, "tm_X3b_en_code").await;
     assert!(
-        !static_terms.contains(&"dayboy".to_owned())
-            && !dynamic_terms.contains(&"happyski".to_owned()),
-        "whitespace-separated words must never be catenated: static={static_terms:?}, dynamic={dynamic_terms:?}"
+        !terms.contains(&"dayboy".to_owned()),
+        "whitespace-separated words must never be catenated: {terms:?}"
     );
 
     // The same forms must be usable from the query side. `SKU-42` crosses two
-    // UAX tokens, whereas `WiFi2000`/`wifi_router` split inside one token.
-    assert_field_query_count(&app, "body", "sku", 1).await;
-    assert_field_query_count(&app, "body", "sku42", 1).await;
-    assert_field_query_count(&app, "body", "wifi", 1).await;
-    assert_field_query_count(&app, "body", "wifi2000", 1).await;
-    assert_field_query_count(&app, "tm_X3b_en_code", "sku42", 1).await;
-    assert_field_query_count(&app, "tm_X3b_en_code", "wifi", 1).await;
-    assert_field_query_count(&app, "tm_X3b_en_code", "wifirouter", 1).await;
+    // UAX tokens, whereas `WiFi2000` splits inside one token.
+    assert_field_query_count(&app, "general", "sku", 1).await;
+    assert_field_query_count(&app, "general", "sku42", 1).await;
+    assert_field_query_count(&app, "general", "wifi", 1).await;
+    assert_field_query_count(&app, "general", "wifi2000", 1).await;
 }
 
 /// A delimiter typed after a word is still an in-progress token, not a reason
-/// to turn autocomplete into an exact lookup. This is mutation-sensitive: the
-/// deliberately broken `last_is_prefix = false` rule makes this return zero,
-/// even if a pre-Phase-4 `foo_` happened to pass through a tokenizer unchanged.
+/// to turn autocomplete into an exact lookup.
 #[tokio::test]
 async fn suggest_keeps_mid_delimiter_input_as_a_prefix() {
     let (app, _dir) = delimiter_app().await;
@@ -148,35 +134,14 @@ async fn suggest_keeps_mid_delimiter_input_as_a_prefix() {
 #[tokio::test]
 async fn delimiter_compounds_are_real_position_graphs_for_sequential_and_catenated_phrases() {
     let (app, _dir) = delimiter_app().await;
-    let (status, body) = post_docs(
-        &app,
-        &json!([{"id": "split-stopword-gap", "body": "SKU42 the fox"}]),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "index split stopword corpus: {body}"
-    );
 
     // `SKU-42` crosses UAX tokens. Its parts must occupy positions 0 and 1,
     // while `sku42` spans both and leaves `next` at position 2. Flattening
     // every form at one position either loses the parts phrase or places the
     // following token one position too early.
-    assert_field_query_count(&app, "body", "%22day+boy%22", 1).await;
-    assert_field_query_count(&app, "body", "%22sku+42+next%22", 1).await;
-    assert_field_query_count(&app, "body", "%22sku42+next%22", 1).await;
-
-    // Stopword removal leaves a real incoming position gap. The delimiter
-    // graph must preserve it, so the analyzed phrase crosses that gap while a
-    // compact quoted phrase cannot bridge it.
-    assert_field_query_count(&app, "body", "%22quick+the+fox%22", 1).await;
-    assert_field_query_count(&app, "body", "%22quick+fox%22", 0).await;
-
-    // Splitting one upstream word into `sku`/`42` expands its graph width by
-    // one position. The following stopword gap must be mapped after that
-    // shift, rather than compacted by the expanded graph.
-    assert_field_query_count(&app, "body", "%22sku42+fox%22", 0).await;
+    assert_field_query_count(&app, "general", "%22day+boy%22", 1).await;
+    assert_field_query_count(&app, "general", "%22sku+42+next%22", 1).await;
+    assert_field_query_count(&app, "general", "%22sku42+next%22", 1).await;
 }
 
 #[tokio::test]
@@ -185,8 +150,8 @@ async fn punctuation_linked_symbols_and_combining_marks_keep_safe_graph_position
 
     // Emoji remains a meaningful Phase-3 UAX part when punctuation links it
     // to a word. It is sequential with `foo`, never catenated into `😀foo`.
-    assert_field_query_count(&app, "body", "%22%F0%9F%98%80+foo+raven%22", 1).await;
-    let terms = field_terms(&app, "body").await;
+    assert_field_query_count(&app, "general", "%22%F0%9F%98%80+foo+raven%22", 1).await;
+    let terms = field_terms(&app, "general").await;
     assert!(
         terms.contains(&"😀".to_owned()),
         "emoji term missing: {terms:?}"
@@ -199,8 +164,12 @@ async fn punctuation_linked_symbols_and_combining_marks_keep_safe_graph_position
     // A combining-only source disappears during accent folding, so its linked
     // lexical part has a narrower graph width than the upstream source span.
     // The following word must remain visible at the next graph position.
-    assert_field_query_count(&app, "body", "%22bar+zebra%22", 1).await;
+    assert_field_query_count(&app, "general", "%22bar+zebra%22", 1).await;
+}
 
+#[tokio::test]
+async fn emoji_linked_suggestion_input_keeps_its_graph_parts() {
+    let (app, _dir) = delimiter_app().await;
     let (status, body) = get(
         &app,
         "suggest?suggest.dictionary=en&suggest.q=%F0%9F%98%80-foo&wt=json",

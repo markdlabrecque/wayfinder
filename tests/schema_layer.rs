@@ -498,7 +498,7 @@ fn current_analyzer_contract_marker_opens_normally() {
     let data_dir = dir.path().join("data");
     std::fs::create_dir_all(&data_dir).expect("create data dir");
     let marker = data_dir.join("wayfinder-analyzer-contract");
-    std::fs::write(&marker, "text_presets_porter_stem_v9")
+    std::fs::write(&marker, "text_presets_porter_stem_v10")
         .expect("write current analyzer contract marker");
 
     let _app = common::app_with_schema(dir.path(), FULL_SCHEMA_TOML).expect(
@@ -506,7 +506,7 @@ fn current_analyzer_contract_marker_opens_normally() {
     );
     assert_eq!(
         std::fs::read_to_string(&marker).expect("read analyzer contract marker"),
-        "text_presets_porter_stem_v9",
+        "text_presets_porter_stem_v10",
         "a marker already at the current contract must be left untouched"
     );
 }
@@ -679,8 +679,8 @@ stored = true
         .expect("a v2 index with no changed analyzer path must remain adoptable");
     assert_eq!(
         std::fs::read_to_string(&marker).expect("read upgraded analyzer contract"),
-        "text_presets_porter_stem_v9",
-        "safe v2 adoption must persist the current (v9) analyzer contract"
+        "text_presets_porter_stem_v10",
+        "safe v2 adoption must persist the current (v10) analyzer contract"
     );
 
     // A raw-only schema still has `[[dynamic_fields]]`, so `catch_all_fields`
@@ -855,7 +855,7 @@ stored = true
         .expect("a v1 index with no changed analyzer path must remain adoptable");
     assert_eq!(
         std::fs::read_to_string(marker).expect("read upgraded analyzer contract"),
-        "text_presets_porter_stem_v9_legacy_dynamic_text",
+        "text_presets_porter_stem_v10_legacy_dynamic_text",
         "safe v1 adoption must retain the legacy dynamic analyzer contract"
     );
 
@@ -963,7 +963,7 @@ stored = true
             .expect("an unused legacy dynamic catch-all remains safe to open");
         assert_eq!(
             std::fs::read_to_string(&marker).expect("read upgraded legacy marker"),
-            "text_presets_porter_stem_v9_legacy_dynamic_text",
+            "text_presets_porter_stem_v10_legacy_dynamic_text",
             "v1 legacy-dynamic state must remain distinguished after upgrade"
         );
 
@@ -1067,7 +1067,7 @@ async fn v1_marker_on_all_raw_dynamic_schema_adopts_rewrites_and_writes() {
     // rules must fail closed instead of falsely claiming the current chain.
     assert_eq!(
         std::fs::read_to_string(&marker).expect("read upgraded analyzer contract"),
-        "text_presets_porter_stem_v9_legacy_dynamic_text",
+        "text_presets_porter_stem_v10_legacy_dynamic_text",
         "safe v1 adoption of an all-raw-dynamic-rule index must retain the legacy dynamic \
          analyzer contract"
     );
@@ -1127,7 +1127,7 @@ async fn v2_marker_on_all_raw_dynamic_schema_adopts_rewrites_and_writes() {
     // 2. the marker retains the persisted catch-all's legacy identity.
     assert_eq!(
         std::fs::read_to_string(&marker).expect("read upgraded analyzer contract"),
-        "text_presets_porter_stem_v9_legacy_dynamic_text",
+        "text_presets_porter_stem_v10_legacy_dynamic_text",
         "safe v2 adoption of an all-raw-dynamic-rule index must retain the legacy dynamic \
          analyzer contract"
     );

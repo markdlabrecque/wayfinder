@@ -2,6 +2,9 @@
 //!
 //! These assertions deliberately do not use the `an389_*` responses as expected
 //! values: Phase 2 is a search-quality divergence from the captured Solr chain.
+//! Issue #479 removed the folding from `text_en` so it matches Solr (see
+//! `tests/text_en_solr_parity.rs`); `text_general` and the suggest dictionary
+//! still fold, so the folding table is exercised through them.
 
 mod common;
 
@@ -14,7 +17,7 @@ const ACCENT_SCHEMA_TOML: &str = r#"
 [core]
 name = "content"
 unique_key = "id"
-default_field = "body"
+default_field = "general"
 
 [[fields]]
 name = "id"
@@ -22,6 +25,11 @@ type = "string"
 stored = true
 required = true
 fast = true
+
+[[fields]]
+name = "general"
+type = "text_general"
+stored = true
 
 [[fields]]
 name = "body"
@@ -41,15 +49,15 @@ async fn accent_app() -> (axum::Router, TempDir) {
     let (status, body) = post_docs(
         &app,
         &json!([
-            {"id": "cafe-precomposed", "body": "Café Central", "twm_suggest": ["Café Central"]},
-            {"id": "cafe-nfd", "body": "Cafe\u{301} Central"},
-            {"id": "cafe-ascii", "body": "Cafe Central"},
-            {"id": "sharp-s", "body": "Straße"},
-            {"id": "sharp-s-ascii", "body": "Strasse"},
-            {"id": "ae", "body": "æther"},
-            {"id": "ae-ascii", "body": "aether"},
-            {"id": "c-acute", "body": "Ćwik"},
-            {"id": "c-acute-ascii", "body": "Cwik"}
+            {"id": "cafe-precomposed", "general": "Café Central", "twm_suggest": ["Café Central"]},
+            {"id": "cafe-nfd", "general": "Cafe\u{301} Central"},
+            {"id": "cafe-ascii", "general": "Cafe Central"},
+            {"id": "sharp-s", "general": "Straße"},
+            {"id": "sharp-s-ascii", "general": "Strasse"},
+            {"id": "ae", "general": "æther"},
+            {"id": "ae-ascii", "general": "aether"},
+            {"id": "c-acute", "general": "Ćwik"},
+            {"id": "c-acute-ascii", "general": "Cwik"}
         ]),
     )
     .await;

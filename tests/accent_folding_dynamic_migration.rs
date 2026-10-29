@@ -2,31 +2,10 @@
 
 mod common;
 
-use axum::http::StatusCode;
-use common::{app_with_schema, get, post_docs};
-use serde_json::json;
+use common::app_with_schema;
 use tantivy::Index;
 use tempfile::TempDir;
 use wayfinder::schema;
-
-const DYNAMIC_TEXT_EN_SCHEMA: &str = r#"
-[core]
-name = "content"
-unique_key = "id"
-default_field = "id"
-
-[[fields]]
-name = "id"
-type = "string"
-stored = true
-required = true
-
-[[dynamic_fields]]
-pattern = "tm_X3b_en_*"
-type = "text_en"
-stored = true
-multi_valued = true
-"#;
 
 fn static_preset_schema(type_name: &str) -> String {
     format!(
@@ -48,33 +27,6 @@ type = "{type_name}"
 stored = true
 "#
     )
-}
-
-#[tokio::test]
-async fn dynamic_text_en_fields_fold_precomposed_nfd_and_ascii_terms() {
-    let dir = TempDir::new().expect("temp dir");
-    let app = app_with_schema(dir.path(), DYNAMIC_TEXT_EN_SCHEMA).expect("dynamic schema loads");
-    let (status, body) = post_docs(
-        &app,
-        &json!([
-            {"id": "precomposed", "tm_X3b_en_title": ["Café"]},
-            {"id": "nfd", "tm_X3b_en_title": ["Cafe\u{301}"]},
-            {"id": "ascii", "tm_X3b_en_title": ["Cafe"]}
-        ]),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "indexing dynamic corpus: {body}");
-
-    for query in ["cafe", "caf%C3%A9", "cafe%CC%81"] {
-        let (status, body) = get(&app, &format!("select?q=tm_X3b_en_title:{query}")).await;
-        assert_eq!(status, StatusCode::OK, "dynamic query /{query}: {body}");
-        assert_eq!(
-            body.pointer("/response/numFound")
-                .and_then(serde_json::Value::as_u64),
-            Some(3),
-            "dynamic query /{query} must fold both indexed and query terms: {body}"
-        );
-    }
 }
 
 #[test]
