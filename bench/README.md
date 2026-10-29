@@ -53,6 +53,11 @@ from the accepted score: `win` or `loss` only when the change is bigger than
 the score's spread (max minus min) over the noise runs, `noise` otherwise.
 Before `noise.json` exists the label reads `noise not measured`.
 
+### Tuning loop
+
+[TUNING.md](TUNING.md) has the steps for an agent that runs the benchmark
+over and over, tries a speed-up each time, and keeps only the wins.
+
 ### What a run does
 
 1. Runs the repo's `cargo test`. If it fails, `wf-bench` prints `FAIL tests`
