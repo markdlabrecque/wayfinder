@@ -2480,12 +2480,15 @@ fn build_tokenizers(
     }
     for (code, lang) in LANGUAGES {
         let index_chain = if *code == "en" {
-            // Only `text_en` ships a stopword list; the same Porter terminal-y
-            // compatibility rule `TEXT_EN_TOKENIZER` needs applies here too.
+            // Only `text_en` ships a stopword list; the same Porter inflected-y
+            // compatibility rule `TEXT_EN_TOKENIZER` needs applies here too, so
+            // suggestions and search agree on word roots (#480). Suggest terms
+            // are analyzed from the stored phrase at lookup time, so this
+            // needs no rebuild.
             suggest_front()
                 .filter_dynamic(english_stopwords())
                 .filter_dynamic(WordDelimiterFilter::suggest())
-                .filter_dynamic(PorterTerminalYFilter)
+                .filter_dynamic(PorterInflectedYFilter)
         } else {
             suggest_front().filter_dynamic(WordDelimiterFilter::suggest())
         };
@@ -2496,7 +2499,7 @@ fn build_tokenizers(
                 .filter_dynamic(SynonymFilter {
                     resource: synonyms.clone(),
                 })
-                .filter_dynamic(PorterTerminalYFilter)
+                .filter_dynamic(PorterInflectedYFilter)
         } else {
             suggest_front()
                 .filter_dynamic(WordDelimiterFilter::suggest())
